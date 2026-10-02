@@ -1,0 +1,11 @@
+{
+  "name": "manasearch",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build:semantic-index": "node scripts/build-semantic-index.mjs"
+  },
+  "dependencies": {
+    "@xenova/transformers": "2.16.0"
+  }
+}

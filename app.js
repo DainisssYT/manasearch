@@ -1672,11 +1672,15 @@ async function runBenchmarkSuite(searchFn) {
         // hundreds of MB in memory and loading it before Test #1 was the V20.17 startup hang.
         // Only use an index already resident in memory; otherwise the benchmark starts immediately
         // in bounded API-conservative mode. Normal searches may still build/load the full index.
-        if (fullSemanticIndexMemory) {
+        if (fullSemanticIndexMemory && fullSemanticIndexMemory.source !== 'static') {
             benchmarkUseLocalOracleCorpus = true;
             benchmarkLocalOracleCorpus = fullSemanticIndexMemory;
-            console.info('Benchmark retrieval mode: in-memory Scryfall Oracle semantic index.');
+            console.info('Benchmark retrieval mode: in-memory client Scryfall Oracle semantic index.');
         } else {
+            // The deployed static index intentionally stores only names + quantized vectors; normal
+            // users hydrate the small semantic hit set from Scryfall after retrieval. Keep benchmark
+            // local-corpus mode off for that compact asset rather than pretending its card payloads
+            // are present.
             benchmarkApiConservativeMode = true;
             console.info('Benchmark retrieval mode: API-conservative fallback; no in-memory semantic index is ready.');
         }
@@ -7500,18 +7504,27 @@ function normalizeOracleForEmbedding(text, cardName = '') {
 let semanticCosineBaseline = 0.30;
 let semanticCosineBaselineReady = false;
 
-// V20: a durable, full-corpus semantic index. The index stores one int8-quantized 384-D vector
-// per Scryfall Oracle card (oracle_cards bulk data), plus name/id metadata. This is intentionally
-// kept in IndexedDB rather than shipped inline in app.js: the quantized vector payload is roughly
-// 12 MB for ~30k cards, while the bulk source itself is much larger. Search G can therefore retrieve
-// by meaning BEFORE the cheap Scryfall lexical/tag lanes have had any chance to bias the candidate
-// set. The index is built once per bulk-data revision, survives benchmark/search cold resets, and
-// resumes from its last completed chunk if the page is interrupted during the build.
-const FULL_SEMANTIC_INDEX_DB = 'manamatch-semantic-index-v20';
-const FULL_SEMANTIC_INDEX_VERSION = 2;
+// V21: a full-corpus semantic index. The normal path is a precomputed int8-quantized 384-D vector
+// per Scryfall Oracle card, generated once by the GitHub Pages deployment and served as a static
+// asset. The IndexedDB implementation below remains only as a silent client-side fallback when the
+// deployed asset cannot be downloaded/validated.
+const FULL_SEMANTIC_INDEX_DB = 'manamatch-semantic-index-v21';
+const FULL_SEMANTIC_INDEX_VERSION = 3;
 const FULL_SEMANTIC_INDEX_CHUNK_SIZE = 256;
 const FULL_SEMANTIC_INDEX_SEARCH_LIMIT = 96;
 const FULL_SEMANTIC_INDEX_BUILD_BATCH = 32;
+
+// V21: the preferred full semantic index is precomputed once by the GitHub Pages deployment
+// workflow and served as a static binary asset. Visitors download the already-embedded vectors
+// instead of spending CPU/time rebuilding ~30k embeddings in their own browser. The old IndexedDB
+// builder remains as a completely silent fallback if the static asset cannot be downloaded or is
+// invalid (for example, an ad blocker, transient network error, or a deployment without the asset).
+const STATIC_SEMANTIC_INDEX_FILENAME = 'semantic-index.bin';
+const STATIC_SEMANTIC_INDEX_VERSION = 1;
+const STATIC_SEMANTIC_INDEX_MAGIC = 'MSIDX1';
+let staticSemanticIndexPromise = null;
+let staticSemanticIndexAttempted = false;
+let staticSemanticIndexLoadError = null;
 let fullSemanticIndexPromise = null;
 let fullSemanticIndexMemory = null;
 let semanticIndexBuildState = null;
@@ -7574,6 +7587,118 @@ function fullSemanticIndexReadAllChunks(db) {
 function extractBulkOracleCardText(card) {
     if (!card) return '';
     return String(card.oracle_text || (card.card_faces ? card.card_faces.map(f => f.oracle_text || '').join(' ') : '') || '').trim();
+}
+
+
+function getStaticSemanticIndexUrl() {
+    try {
+        return new URL(STATIC_SEMANTIC_INDEX_FILENAME, document.baseURI || window.location.href).href;
+    } catch (_) {
+        return STATIC_SEMANTIC_INDEX_FILENAME;
+    }
+}
+
+function parseStaticSemanticIndexBinary(buffer) {
+    if (!(buffer instanceof ArrayBuffer) || buffer.byteLength < 32) {
+        throw new Error('Static semantic index is too small or empty.');
+    }
+    const bytes = new Uint8Array(buffer);
+    const magic = String.fromCharCode(...bytes.subarray(0, 5));
+    if (magic !== STATIC_SEMANTIC_INDEX_MAGIC) {
+        throw new Error('Static semantic index has an unknown format.');
+    }
+    const view = new DataView(buffer);
+    const version = view.getUint32(8, true);
+    const dim = view.getUint32(12, true);
+    const count = view.getUint32(16, true);
+    const namesBytes = view.getUint32(20, true);
+    const vectorsBytes = view.getUint32(24, true);
+    if (version !== STATIC_SEMANTIC_INDEX_VERSION) {
+        throw new Error(`Static semantic index version ${version} is not supported.`);
+    }
+    if (!dim || dim > 2048 || !count || !namesBytes || vectorsBytes !== count * dim) {
+        throw new Error('Static semantic index metadata is invalid.');
+    }
+    const decoder = new TextDecoder();
+    const names = [];
+    let cursor = 32;
+    const namesEnd = cursor + namesBytes;
+    if (namesEnd > buffer.byteLength) throw new Error('Static semantic index name table is truncated.');
+    while (cursor < namesEnd && names.length < count) {
+        if (cursor + 2 > namesEnd) throw new Error('Static semantic index name length is truncated.');
+        const byteLength = view.getUint16(cursor, true);
+        cursor += 2;
+        if (cursor + byteLength > namesEnd) throw new Error('Static semantic index contains a truncated card name.');
+        names.push(decoder.decode(new Uint8Array(buffer, cursor, byteLength)));
+        cursor += byteLength;
+    }
+    if (names.length !== count || cursor !== namesEnd) {
+        throw new Error('Static semantic index name table count does not match its metadata.');
+    }
+    const vectorStart = namesEnd;
+    if (vectorStart + vectorsBytes > buffer.byteLength) throw new Error('Static semantic index vectors are truncated.');
+    const vectors = new Int8Array(buffer, vectorStart, vectorsBytes);
+    const index = {
+        dim,
+        total: count,
+        source: 'static',
+        chunks: [{
+            names,
+            ids: [],
+            cards: null,
+            vectors,
+            count
+        }]
+    };
+
+    // Calibrate against a small sample from the same precomputed corpus. This keeps the static
+    // path on the same cosine-to-similarity scale as the older IndexedDB fallback without doing
+    // any client-side embedding work.
+    const calibrationVectors = [];
+    const sampleCount = Math.min(96, count);
+    for (let i = 0; i < sampleCount; i++) {
+        const view = vectors.subarray(i * dim, (i + 1) * dim);
+        const f = new Float32Array(dim);
+        for (let j = 0; j < dim; j++) f[j] = view[j] / 127;
+        calibrationVectors.push(f);
+    }
+    if (calibrationVectors.length >= 12) calibrateSemanticCosineFromVectors(calibrationVectors);
+    return index;
+}
+
+async function loadStaticSemanticIndex() {
+    if (fullSemanticIndexMemory?.source === 'static') return fullSemanticIndexMemory;
+    if (staticSemanticIndexPromise) return staticSemanticIndexPromise;
+    staticSemanticIndexAttempted = true;
+    staticSemanticIndexPromise = (async () => {
+        const url = getStaticSemanticIndexUrl();
+        const response = await fetch(url, {
+            method: 'GET',
+            cache: 'force-cache',
+            headers: { 'Accept': 'application/octet-stream,*/*;q=0.8' }
+        });
+        if (!response.ok) {
+            throw new Error(`Static semantic index download failed (${response.status}).`);
+        }
+        const buffer = await response.arrayBuffer();
+        const index = parseStaticSemanticIndexBinary(buffer);
+        index.staticUrl = url;
+        index.byteLength = buffer.byteLength;
+        fullSemanticIndexMemory = index;
+        return index;
+    })().catch(error => {
+        staticSemanticIndexLoadError = error?.message || String(error);
+        console.info('Precomputed semantic index unavailable; normal search remains fully functional:', staticSemanticIndexLoadError);
+        return null;
+    });
+    return staticSemanticIndexPromise;
+}
+
+// Startup preloading only attempts the static asset. It never falls back to client-side building
+// on its own, because a visitor who has not searched yet should not suddenly spend CPU embedding
+// the whole card pool. The fallback is started only when a real search asks for semantic retrieval.
+function preloadStaticSemanticIndex() {
+    return loadStaticSemanticIndex();
 }
 
 function buildSemanticRetrievalText(card, parsedEffects = null) {
@@ -7646,6 +7771,7 @@ async function loadFullSemanticIndexMemory() {
     const memory = {
         dim: state.dim || 384,
         total: state.total || 0,
+        source: 'indexeddb-fallback',
         chunks: chunks.map(chunk => ({
             names: chunk.names || [],
             ids: chunk.ids || [],
@@ -7999,19 +8125,32 @@ async function buildFullSemanticIndex(extractor) {
 }
 
 async function ensureFullSemanticIndex(extractor) {
-    if (!extractor || extractor.type === 'fallback') return null;
     if (fullSemanticIndexMemory) return fullSemanticIndexMemory;
     // Do not hammer Scryfall's bulk-data endpoint once the browser has established that the
-    // optional durable index is unavailable. Normal Search A-F and live/session semantic search
-    // remain fully functional. A page reload is the explicit retry boundary, which also prevents a
-    // benchmark with 10+ cold tests from issuing the same failed metadata request repeatedly.
+    // optional fallback index is unavailable. Normal Search A-F and live/session semantic search
+    // remain fully functional. A page reload is the explicit retry boundary.
     if (fullSemanticIndexUnavailable) return null;
     if (fullSemanticIndexPromise) return fullSemanticIndexPromise;
     fullSemanticIndexPromise = (async () => {
         try {
+            // Preferred path: a precomputed index emitted by the GitHub Pages deployment. This is
+            // the normal path for real visitors and requires no client-side embedding of the corpus.
+            const staticIndex = await loadStaticSemanticIndex();
+            if (staticIndex) return staticIndex;
+
+            // Fallback path: only reached when the deployed static asset failed to download or
+            // failed validation. Reuse any previously persisted client-built index before doing new
+            // work, then silently build one in the background as the last resort.
+            if (!extractor || extractor.type === 'fallback') return null;
             const existing = await loadFullSemanticIndexMemory();
-            if (existing) return existing;
-            return await buildFullSemanticIndex(extractor);
+            if (existing) {
+                existing.source = 'indexeddb-fallback';
+                fullSemanticIndexMemory = existing;
+                return existing;
+            }
+            const built = await buildFullSemanticIndex(extractor);
+            if (built) built.source = 'client-built-fallback';
+            return built;
         } catch (err) {
             fullSemanticIndexUnavailable = true;
             fullSemanticIndexUnavailableReason = err?.message || String(err);
@@ -8845,9 +8984,15 @@ function initApp() {
     if (relatedSearchBtn) relatedSearchBtn.addEventListener('click', executeRelatedCardSearch);
 
     if ('requestIdleCallback' in window) {
-        requestIdleCallback(() => getNLPModel());
+        requestIdleCallback(() => {
+            void preloadStaticSemanticIndex();
+            void getNLPModel();
+        }, { timeout: 2500 });
     } else {
-        setTimeout(() => getNLPModel(), 2000);
+        setTimeout(() => {
+            void preloadStaticSemanticIndex();
+            void getNLPModel();
+        }, 2000);
     }
 
     ensureComparePresentationStyles();
@@ -8891,10 +9036,16 @@ function initApp() {
     }
 
     if (sourceCardOracle) {
-        // Mouse, touch, and keyboard selection all end up in the same handler.  This keeps the
-        // Oracle highlighting feature usable on desktop, touch devices, and keyboard-assisted
-        // text selection instead of relying only on the legacy mouseup path.
-        sourceCardOracle.addEventListener('mouseup', handleOracleTextSelection);
+        // Mouse, touch, and keyboard selection all end up in the same handler.  The mouse handler
+        // MUST only react to the primary (left) mouse button.  A generic `mouseup` listener also
+        // receives the middle-button release used by browser auto-scroll; re-rendering the Oracle
+        // from that event can interfere with the browser's native middle-click scroll state,
+        // especially while a search is replacing/rerendering the page.  Leaving button===1 alone
+        // lets the browser start/stop auto-scroll normally.
+        sourceCardOracle.addEventListener('mouseup', (event) => {
+            if (event.button !== 0) return;
+            handleOracleTextSelection();
+        });
         sourceCardOracle.addEventListener('touchend', () => setTimeout(handleOracleTextSelection, 0));
         sourceCardOracle.addEventListener('keyup', (event) => {
             if (event.shiftKey || event.key.startsWith('Arrow')) handleOracleTextSelection();
@@ -10877,16 +11028,31 @@ async function findSimilarCards() {
             if (retrievalText) sourceRetrievalVector = await getCachedEmbedding(retrievalText, extractor);
         }
 
+        // Full-corpus semantic retrieval is valuable, but building a ~12 MB quantized index
+        // in every new visitor's browser is NOT part of the critical search path. Kick it off in
+        // the background and use any already-memory-resident index immediately. If this is a fresh
+        // visitor, the normal lexical/functional lanes can finish and render first; once the index
+        // is ready, a background semantic expansion pass below scores/merges the new matches.
+        const shouldWarmFullSemanticIndex = Boolean(
+            !benchmarkUseLocalOracleCorpus &&
+            (!benchmarkColdMode || !benchmarkApiConservativeMode) &&
+            sourceRetrievalVector &&
+            extractor && extractor.type !== 'fallback'
+        );
+        const fullSemanticWarmupPromise = shouldWarmFullSemanticIndex
+            ? ensureFullSemanticIndex(extractor)
+            : null;
         const fullIndex = benchmarkUseLocalOracleCorpus
             ? benchmarkLocalOracleCorpus
-            : ((!benchmarkColdMode || !benchmarkApiConservativeMode) && sourceRetrievalVector
-                ? await ensureFullSemanticIndex(extractor)
-                : null);
+            : (fullSemanticIndexMemory || null);
         const semanticLimit = benchmarkUseLocalOracleCorpus
             ? (isBroadSearch ? 512 : 384)
             : (isBroadSearch ? 96 : 72);
-        const fullSemanticMatches = fullIndex && sourceRetrievalVector
-            ? findFullSemanticMatches(fullIndex, sourceRetrievalVector, currentSourceCard.name, semanticLimit, 0.42)
+        const semanticIndexQueryVector = fullIndex?.source === 'static'
+            ? (sourceOracleVector || sourceRetrievalVector)
+            : sourceRetrievalVector;
+        const fullSemanticMatches = fullIndex && semanticIndexQueryVector
+            ? findFullSemanticMatches(fullIndex, semanticIndexQueryVector, currentSourceCard.name, semanticLimit, 0.42)
             : [];
         const localExactMatches = benchmarkUseLocalOracleCorpus && hasHighlight
             ? findFullSemanticExactMatches(fullIndex, manualHighlights, currentSourceCard.name, 1024)
@@ -11432,6 +11598,130 @@ if (candidates.length > 0) {
         document.getElementById('provisional-results-banner')?.classList.add('hidden');
         const renderStartedAt = Date.now();
         renderResults(lastSearchResults);
+
+        // The first useful result set is now genuinely the end of the user-facing search. The
+        // full-corpus semantic index may still be downloading/embedding thousands of cards, so do
+        // NOT keep the loading spinner or search function open while that happens. Instead, let the
+        // completed search sit on screen and transparently upgrade it when Search G is available.
+        if (fullSemanticWarmupPromise && requestId === searchRequestId) {
+            const semanticBanner = document.getElementById('provisional-results-banner');
+            if (semanticBanner) {
+                semanticBanner.textContent = '🧠 Initial results are ready — semantic search is finishing in the background. Results may improve automatically.';
+                semanticBanner.classList.remove('hidden');
+            }
+
+            void (async () => {
+                const semanticStartedAt = Date.now();
+                try {
+                    const readyIndex = await fullSemanticWarmupPromise;
+                    if (!readyIndex || requestId !== searchRequestId) return;
+
+                    const semanticIndexQueryVector = readyIndex?.source === 'static'
+                        ? (sourceOracleVector || sourceRetrievalVector)
+                        : sourceRetrievalVector;
+                    const semanticMatches = semanticIndexQueryVector
+                        ? findFullSemanticMatches(readyIndex, semanticIndexQueryVector, currentSourceCard.name, semanticLimit, 0.42)
+                        : [];
+                    if (semanticMatches.length === 0) {
+                        if (semanticBanner && requestId === searchRequestId) {
+                            semanticBanner.textContent = '🧠 Full semantic search is ready — no additional matches were needed for this search.';
+                            setTimeout(() => {
+                                if (requestId === searchRequestId) semanticBanner.classList.add('hidden');
+                            }, 2400);
+                        }
+                        return;
+                    }
+
+                    const semanticByName = new Map();
+                    for (const item of semanticMatches) {
+                        semanticByName.set(normalizeCardNameForIdentity(item.name), item);
+                    }
+                    const fetched = await fetchScryfallCollection(Array.from(semanticByName.values()).map(x => ({ name: x.name })));
+                    if (requestId !== searchRequestId) return;
+
+                    const scoreByName = new Map(
+                        Array.from(semanticByName.values()).map(x => [normalizeCardNameForIdentity(x.name), x.similarity])
+                    );
+                    const existingNames = new Set((lastSearchResults || []).map(c => normalizeCardNameForIdentity(c.name)));
+                    let semanticCandidateCount = 0;
+                    let semanticAddedCount = 0;
+                    const semanticCandidates = (fetched || []).filter(card => {
+                        if (!card || !card.id || !card.name) return false;
+                        if (existingNames.has(normalizeCardNameForIdentity(card.name))) return false;
+                        if (card.id === currentSourceCard.id || isSameCardName(card.name, currentSourceCard.name)) return false;
+                        if (!matchesExactHighlightConstraints(card, manualHighlights)) return false;
+                        return matchesActiveFilters(card, filters, broadFallbackFilters);
+                    });
+
+                    semanticCandidateCount = semanticCandidates.length;
+                    if (semanticCandidates.length > 0) {
+                        semanticCandidates.forEach(card => {
+                            card._semanticRetrievalSimilarity = scoreByName.get(normalizeCardNameForIdentity(card.name)) || 0;
+                            card._semanticRetrievalSource = 'full-index-background';
+                            card.retrievalEvidence = [...(card.retrievalEvidence || []), 'Search G'];
+                        });
+
+                        await scoreCardBatch({
+                            cards: semanticCandidates,
+                            sourceCard: currentSourceCard,
+                            targetText: targetTextForScoring,
+                            exactnessText: exactnessTextForScoring,
+                            targetVector,
+                            extractor,
+                            weights: { mechanical: wM, synergy: wS, context: wC, exactness: wE, category: wCa },
+                            tags: activeTags,
+                            topNNames,
+                            sniperIds: sniperCardIds,
+                            activeFilters: filters
+                        });
+                        if (requestId !== searchRequestId) return;
+
+                        const semanticQualified = semanticCandidates.filter(card => {
+                            const score = Number(card[scoreKey]) || 0;
+                            const semanticHit = Number(card._semanticRetrievalSimilarity) || 0;
+                            const direct = Math.max(
+                                Number(card.mechanicalScore) || 0,
+                                Number(card.functionScore) || 0,
+                                Number(card.roleScore) || 0,
+                                Number(card.highlightIntentScore) || 0
+                            );
+                            return score >= 0.18 || semanticHit >= 0.70 || (direct >= 0.80 && score >= 0.14);
+                        });
+
+                        if (semanticQualified.length > 0) {
+                            semanticAddedCount = semanticQualified.length;
+                            lastSearchResults = [...lastSearchResults, ...semanticQualified]
+                                .sort((a, b) => (Number(b[scoreKey]) || 0) - (Number(a[scoreKey]) || 0));
+                            renderResults(lastSearchResults);
+                        }
+                    }
+
+                    if (lastSearchDiagnostics && requestId === searchRequestId) {
+                        lastSearchDiagnostics.timings.semanticBackgroundMs = Date.now() - semanticStartedAt;
+                        lastSearchDiagnostics.semanticBackgroundAdded = semanticAddedCount;
+                    }
+                    if (semanticBanner && requestId === searchRequestId) {
+                        semanticBanner.textContent = semanticCandidateCount > 0
+                            ? `🧠 Semantic search finished — ${semanticAddedCount} additional meaning-based match${semanticAddedCount === 1 ? '' : 'es'} added.`
+                            : '🧠 Full semantic search is ready.';
+                        setTimeout(() => {
+                            if (requestId === searchRequestId) semanticBanner.classList.add('hidden');
+                        }, 2600);
+                    }
+                } catch (error) {
+                    if (requestId === searchRequestId) {
+                        console.info('Background semantic expansion did not complete:', error?.message || error);
+                        if (semanticBanner) {
+                            semanticBanner.textContent = '🧠 Initial results are ready. Full semantic expansion was unavailable this time.';
+                            setTimeout(() => {
+                                if (requestId === searchRequestId) semanticBanner.classList.add('hidden');
+                            }, 3200);
+                        }
+                    }
+                }
+            })();
+        }
+
         // The diagnostics object is a plain object now (not a property hung off the results
         // array), so mutating it after the fact is safe and doesn't risk the loss bug that
         // motivated separating this state in the first place.
