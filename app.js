@@ -8170,6 +8170,194 @@ function resetFullSemanticIndexAvailability() {
     fullSemanticIndexUnavailableReason = null;
 }
 
+// V21 performance: full-corpus cosine search runs in a Web Worker so scanning the prebuilt
+// ~30k-card vector set never monopolizes the page's main thread. The static index's vector buffer is
+// transferred to the worker (not copied), keeping memory overhead low. The fallback index can use
+// the same worker once it exists.
+let semanticSearchWorker = null;
+let semanticSearchWorkerIndex = null;
+let semanticSearchWorkerInitPromise = null;
+let semanticSearchWorkerRequestId = 0;
+const semanticSearchWorkerPending = new Map();
+
+function createSemanticSearchWorker() {
+    const code = `
+        let indexChunks = [];
+        let indexDim = 384;
+        let ready = false;
+        function cosineAgainstQuantized(queryVector, vector, dim, queryNorm) {
+            let dot = 0, normV = 0;
+            for (let i = 0; i < dim; i++) {
+                const q = Number(queryVector[i]) || 0;
+                const v = vector[i] || 0;
+                dot += q * v;
+                normV += v * v;
+            }
+            if (queryNorm <= 0 || normV <= 0) return 0;
+            return dot / (Math.sqrt(queryNorm) * Math.sqrt(normV));
+        }
+        function heapSwap(heap, a, b) { const t = heap[a]; heap[a] = heap[b]; heap[b] = t; }
+        function heapUp(heap, index) {
+            while (index > 0) {
+                const parent = Math.floor((index - 1) / 2);
+                if (heap[parent].similarity <= heap[index].similarity) break;
+                heapSwap(heap, parent, index); index = parent;
+            }
+        }
+        function heapDown(heap, index) {
+            while (true) {
+                const left = index * 2 + 1, right = left + 1;
+                let smallest = index;
+                if (left < heap.length && heap[left].similarity < heap[smallest].similarity) smallest = left;
+                if (right < heap.length && heap[right].similarity < heap[smallest].similarity) smallest = right;
+                if (smallest === index) break;
+                heapSwap(heap, smallest, index); index = smallest;
+            }
+        }
+        function heapPushTop(heap, item, cap) {
+            if (heap.length < cap) { heap.push(item); heapUp(heap, heap.length - 1); return; }
+            if (item.similarity <= heap[0].similarity) return;
+            heap[0] = item; heapDown(heap, 0);
+        }
+        self.onmessage = function(event) {
+            const data = event.data || {};
+            if (data.type === 'init') {
+                try {
+                    indexDim = Number(data.dim) || 384;
+                    indexChunks = (data.chunks || []).map(chunk => ({
+                        names: chunk.names || [],
+                        ids: chunk.ids || [],
+                        vectors: new Int8Array(chunk.buffer, chunk.byteOffset || 0, chunk.byteLength),
+                        count: Number(chunk.count) || (chunk.names || []).length
+                    }));
+                    ready = true;
+                    self.postMessage({ type: 'ready', requestId: data.requestId });
+                } catch (error) {
+                    self.postMessage({ type: 'init-error', requestId: data.requestId, error: error?.message || String(error) });
+                }
+                return;
+            }
+            if (data.type !== 'query' || !ready) return;
+            try {
+                const query = new Float32Array(data.queryBuffer);
+                const dim = indexDim;
+                let queryNorm = 0;
+                for (let i = 0; i < dim; i++) {
+                    const q = Number(query[i]) || 0;
+                    queryNorm += q * q;
+                }
+                const excludeKey = String(data.excludeKey || '');
+                const limit = Math.max(1, Number(data.limit) || 72);
+                const minSimilarity = Number.isFinite(data.minSimilarity) ? data.minSimilarity : 0.42;
+                const baseline = Number.isFinite(data.baseline) ? data.baseline : 0.30;
+                const cap = Math.max(limit * 2, 32);
+                const heap = [];
+                for (const chunk of indexChunks) {
+                    for (let i = 0; i < chunk.count; i++) {
+                        const name = chunk.names[i] || '';
+                        if (!name) continue;
+                        if (name.toLowerCase().replace(/\\s+/g, ' ').trim() === excludeKey) continue;
+                        const vector = chunk.vectors.subarray(i * dim, (i + 1) * dim);
+                        const rawCos = cosineAgainstQuantized(query, vector, dim, queryNorm);
+                        const calibrated = Math.max(0, Math.min(1, (rawCos - baseline) / Math.max(0.05, 1 - baseline)));
+                        if (calibrated >= minSimilarity) heapPushTop(heap, { name, id: chunk.ids?.[i] || null, similarity: calibrated }, cap);
+                    }
+                }
+                heap.sort((a, b) => b.similarity - a.similarity);
+                const seen = new Set();
+                const results = [];
+                for (const item of heap) {
+                    const key = String(item.name || '').toLowerCase().replace(/\\s+/g, ' ').trim();
+                    if (!key || seen.has(key)) continue;
+                    seen.add(key); results.push(item);
+                    if (results.length >= limit) break;
+                }
+                self.postMessage({ type: 'result', requestId: data.requestId, results });
+            } catch (error) {
+                self.postMessage({ type: 'query-error', requestId: data.requestId, error: error?.message || String(error) });
+            }
+        };
+    `;
+    const blob = new Blob([code], { type: 'application/javascript' });
+    const url = URL.createObjectURL(blob);
+    const worker = new Worker(url);
+    URL.revokeObjectURL(url);
+    worker.onmessage = event => {
+        const data = event.data || {};
+        const pending = semanticSearchWorkerPending.get(data.requestId);
+        if (!pending) return;
+        if (data.type === 'ready' || data.type === 'init-error' || data.type === 'query-error' || data.type === 'result') {
+            semanticSearchWorkerPending.delete(data.requestId);
+            if (data.type === 'ready') pending.resolve(true);
+            else if (data.type === 'result') pending.resolve(data.results || []);
+            else pending.reject(new Error(data.error || 'Semantic worker failed.'));
+        }
+    };
+    worker.onerror = error => {
+        const message = error?.message || 'Semantic search worker failed.';
+        for (const pending of semanticSearchWorkerPending.values()) pending.reject(new Error(message));
+        semanticSearchWorkerPending.clear();
+        semanticSearchWorkerInitPromise = null;
+        semanticSearchWorkerIndex = null;
+        try { worker.terminate(); } catch (_) {}
+        semanticSearchWorker = null;
+    };
+    return worker;
+}
+
+function semanticWorkerRequest(type, payload, transfer = []) {
+    if (!semanticSearchWorker) return Promise.reject(new Error('Semantic search worker is unavailable.'));
+    const requestId = ++semanticSearchWorkerRequestId;
+    return new Promise((resolve, reject) => {
+        semanticSearchWorkerPending.set(requestId, { resolve, reject });
+        try { semanticSearchWorker.postMessage({ type, requestId, ...payload }, transfer); }
+        catch (error) { semanticSearchWorkerPending.delete(requestId); reject(error); }
+    });
+}
+
+async function ensureSemanticWorkerIndex(index) {
+    if (!index || !index.chunks?.length) throw new Error('Semantic index is empty.');
+    if (semanticSearchWorker && semanticSearchWorkerIndex === index) {
+        if (semanticSearchWorkerInitPromise) await semanticSearchWorkerInitPromise;
+        return;
+    }
+    if (semanticSearchWorker) {
+        try { semanticSearchWorker.terminate(); } catch (_) {}
+        semanticSearchWorker = null;
+        semanticSearchWorkerIndex = null;
+        semanticSearchWorkerInitPromise = null;
+    }
+    semanticSearchWorker = createSemanticSearchWorker();
+    semanticSearchWorkerIndex = index;
+    const chunks = [];
+    const transfers = [];
+    const seenBuffers = new Set();
+    for (const chunk of index.chunks) {
+        if (!chunk?.vectors?.buffer) continue;
+        const buffer = chunk.vectors.buffer;
+        if (seenBuffers.has(buffer)) continue;
+        seenBuffers.add(buffer);
+        chunks.push({
+            names: chunk.names || [],
+            ids: chunk.ids || [],
+            count: chunk.count || (chunk.names || []).length,
+            byteOffset: chunk.vectors.byteOffset || 0,
+            byteLength: chunk.vectors.byteLength,
+            buffer
+        });
+        transfers.push(buffer);
+    }
+    if (!chunks.length || !transfers.length) throw new Error('Semantic index has no transferable vectors.');
+    semanticSearchWorkerInitPromise = semanticWorkerRequest('init', { dim: index.dim || 384, chunks }, transfers);
+    await semanticSearchWorkerInitPromise;
+    for (const chunk of index.chunks) chunk.vectors = null;
+    semanticSearchWorkerInitPromise = null;
+}
+
+function getSemanticWorkerExcludeKey(excludeName) {
+    return String(excludeName || '').toLowerCase().replace(/\s+/g, ' ').trim();
+}
+
 function findFullSemanticMatches(index, sourceVector, excludeName, limit = FULL_SEMANTIC_INDEX_SEARCH_LIMIT, minSimilarity = 0.42) {
     if (!index || !sourceVector) return [];
     const excludeKey = normalizeCardNameForIdentity(excludeName || '');
@@ -8985,12 +9173,10 @@ function initApp() {
 
     if ('requestIdleCallback' in window) {
         requestIdleCallback(() => {
-            void preloadStaticSemanticIndex();
             void getNLPModel();
         }, { timeout: 2500 });
     } else {
         setTimeout(() => {
-            void preloadStaticSemanticIndex();
             void getNLPModel();
         }, 2000);
     }
@@ -11028,23 +11214,17 @@ async function findSimilarCards() {
             if (retrievalText) sourceRetrievalVector = await getCachedEmbedding(retrievalText, extractor);
         }
 
-        // Full-corpus semantic retrieval is valuable, but building a ~12 MB quantized index
-        // in every new visitor's browser is NOT part of the critical search path. Kick it off in
-        // the background and use any already-memory-resident index immediately. If this is a fresh
-        // visitor, the normal lexical/functional lanes can finish and render first; once the index
-        // is ready, a background semantic expansion pass below scores/merges the new matches.
-        const shouldWarmFullSemanticIndex = Boolean(
+        // Full-corpus semantic retrieval is deliberately NOT part of the critical search path.
+        // Even with the precomputed static asset, loading ~13 MB and scanning ~30k vectors can
+        // compete with the user's search/render work. Initial lexical/functional results finish
+        // first; semantic expansion starts only after those results are rendered.
+        const shouldRunBackgroundSemantic = Boolean(
             !benchmarkUseLocalOracleCorpus &&
             (!benchmarkColdMode || !benchmarkApiConservativeMode) &&
             sourceRetrievalVector &&
             extractor && extractor.type !== 'fallback'
         );
-        const fullSemanticWarmupPromise = shouldWarmFullSemanticIndex
-            ? ensureFullSemanticIndex(extractor)
-            : null;
-        const fullIndex = benchmarkUseLocalOracleCorpus
-            ? benchmarkLocalOracleCorpus
-            : (fullSemanticIndexMemory || null);
+        const fullIndex = benchmarkUseLocalOracleCorpus ? benchmarkLocalOracleCorpus : null;
         const semanticLimit = benchmarkUseLocalOracleCorpus
             ? (isBroadSearch ? 512 : 384)
             : (isBroadSearch ? 96 : 72);
@@ -11052,7 +11232,7 @@ async function findSimilarCards() {
             ? (sourceOracleVector || sourceRetrievalVector)
             : sourceRetrievalVector;
         const fullSemanticMatches = fullIndex && semanticIndexQueryVector
-            ? findFullSemanticMatches(fullIndex, semanticIndexQueryVector, currentSourceCard.name, semanticLimit, 0.42)
+            ? await findFullSemanticMatches(fullIndex, semanticIndexQueryVector, currentSourceCard.name, semanticLimit, 0.42)
             : [];
         const localExactMatches = benchmarkUseLocalOracleCorpus && hasHighlight
             ? findFullSemanticExactMatches(fullIndex, manualHighlights, currentSourceCard.name, 1024)
@@ -11603,7 +11783,7 @@ if (candidates.length > 0) {
         // full-corpus semantic index may still be downloading/embedding thousands of cards, so do
         // NOT keep the loading spinner or search function open while that happens. Instead, let the
         // completed search sit on screen and transparently upgrade it when Search G is available.
-        if (fullSemanticWarmupPromise && requestId === searchRequestId) {
+        if (shouldRunBackgroundSemantic && requestId === searchRequestId) {
             const semanticBanner = document.getElementById('provisional-results-banner');
             if (semanticBanner) {
                 semanticBanner.textContent = '🧠 Initial results are ready — semantic search is finishing in the background. Results may improve automatically.';
@@ -11613,14 +11793,16 @@ if (candidates.length > 0) {
             void (async () => {
                 const semanticStartedAt = Date.now();
                 try {
-                    const readyIndex = await fullSemanticWarmupPromise;
+                    // Start the static download (or the rare client-side fallback) only after the
+                    // user-facing search has finished. The full-corpus scan itself runs in a Web Worker.
+                    const readyIndex = await ensureFullSemanticIndex(extractor);
                     if (!readyIndex || requestId !== searchRequestId) return;
 
                     const semanticIndexQueryVector = readyIndex?.source === 'static'
                         ? (sourceOracleVector || sourceRetrievalVector)
                         : sourceRetrievalVector;
                     const semanticMatches = semanticIndexQueryVector
-                        ? findFullSemanticMatches(readyIndex, semanticIndexQueryVector, currentSourceCard.name, semanticLimit, 0.42)
+                        ? await findFullSemanticMatches(readyIndex, semanticIndexQueryVector, currentSourceCard.name, semanticLimit, 0.42)
                         : [];
                     if (semanticMatches.length === 0) {
                         if (semanticBanner && requestId === searchRequestId) {
