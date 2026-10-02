@@ -3536,3 +3536,78 @@ body:not(.light-theme) #theme-toggle { color: var(--text-main) !important; }
         gap: 10px;
     }
 }
+
+/* --------------------------------------------------------------------------
+   Result-card double-faced controls + perfectly stable card action alignment
+   -------------------------------------------------------------------------- */
+.card-item {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    min-height: 0;
+}
+
+.card-art-wrap {
+    position: relative;
+    width: 100%;
+    flex: 0 0 auto;
+}
+
+.card-art-wrap > img {
+    width: 100%;
+    height: auto;
+    display: block;
+}
+
+.card-flip-btn {
+    position: absolute;
+    top: 14%;
+    right: 5%;
+    z-index: 2;
+    min-width: 42px;
+    min-height: 24px;
+    padding: 3px 7px;
+    border: 1px solid rgba(255, 255, 255, 0.32);
+    border-radius: 5px;
+    background: rgba(0, 0, 0, 0.04) !important;
+    color: rgba(255, 255, 255, 0.88) !important;
+    font-size: 10px;
+    font-weight: 700;
+    line-height: 1;
+    cursor: pointer;
+    opacity: 0.82;
+    backdrop-filter: blur(1px);
+    box-shadow: none;
+}
+
+.card-flip-btn:hover,
+.card-flip-btn:focus-visible {
+    background: rgba(0, 0, 0, 0.18) !important;
+    border-color: rgba(255, 255, 255, 0.66);
+    color: #fff !important;
+    opacity: 1;
+}
+
+.card-item-info {
+    display: flex;
+    flex-direction: column;
+    flex: 1 1 auto;
+    min-height: 0;
+}
+
+.card-actions {
+    margin-top: auto !important;
+}
+
+/* Price gets exactly one text row/slot in the score grid so a long price can never push the
+   Compare button lower than neighboring result cards. */
+.result-score-breakdown .card-price-label {
+    height: 1.2em;
+    min-height: 1.2em;
+    line-height: 1.2;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    overflow-wrap: normal;
+    word-break: normal;
+}

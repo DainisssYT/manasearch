@@ -12649,6 +12649,14 @@ async function copyCardNameToClipboard(cardName, button = null) {
     }
 }
 
+// Result-card face state is kept separately from the Scryfall objects so re-ranking or
+// progressive re-renders do not reset a user's front/back selection on double-faced cards.
+const resultCardFaceState = new Map();
+
+function getResultCardStateKey(card) {
+    return String(card?.id || card?.oracle_id || card?.name || '').toLowerCase();
+}
+
 function renderResults(cards) {
     resultsSection.classList.remove('hidden');
 
@@ -12717,10 +12725,49 @@ function renderResults(cards) {
         const cardElement = document.createElement('div');
         cardElement.className = `card-item ${isSelected ? 'selected-card' : ''}${card._isNewlyAdded ? ' newly-added' : ''}`;
 
+        const faceImages = Array.isArray(card.card_faces)
+            ? card.card_faces.filter(face => face?.image_uris?.normal)
+            : [];
+        const hasMultipleFaces = faceImages.length > 1;
+        const stateKey = getResultCardStateKey(card);
+        let faceIndex = hasMultipleFaces
+            ? Math.max(0, Math.min(faceImages.length - 1, Number(resultCardFaceState.get(stateKey)) || 0))
+            : 0;
+
+        const artWrap = document.createElement('div');
+        artWrap.className = 'card-art-wrap';
+
         const img = document.createElement('img');
-        img.src = cardImg;
-        img.alt = card.name;
+        img.src = hasMultipleFaces
+            ? faceImages[faceIndex].image_uris.normal
+            : cardImg;
+        img.alt = hasMultipleFaces
+            ? (faceImages[faceIndex].name || card.name)
+            : card.name;
         img.loading = 'lazy';
+        artWrap.appendChild(img);
+
+        if (hasMultipleFaces) {
+            // Keep the flip control transparent and position it beneath the mana-cost area of
+            // the card image, rather than covering the card name/art. It intentionally lives in
+            // the art wrapper so it stays attached to the image at every responsive width.
+            const flipBtn = document.createElement('button');
+            flipBtn.type = 'button';
+            flipBtn.className = 'card-flip-btn';
+            flipBtn.textContent = 'Flip';
+            flipBtn.title = 'Flip card face';
+            flipBtn.setAttribute('aria-label', `Flip ${card.name}`);
+            flipBtn.addEventListener('click', event => {
+                event.preventDefault();
+                event.stopPropagation();
+                faceIndex = (faceIndex + 1) % faceImages.length;
+                resultCardFaceState.set(stateKey, faceIndex);
+                const face = faceImages[faceIndex];
+                img.src = face.image_uris.normal;
+                img.alt = face.name || card.name;
+            });
+            artWrap.appendChild(flipBtn);
+        }
 
         const info = document.createElement('div');
         info.className = 'card-item-info';
@@ -12808,7 +12855,7 @@ function renderResults(cards) {
         info.appendChild(scoreBreakdown);
         info.appendChild(actions);
 
-        cardElement.appendChild(img);
+        cardElement.appendChild(artWrap);
         cardElement.appendChild(info);
         resultsFragment.appendChild(cardElement);
     });
