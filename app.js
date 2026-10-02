@@ -7590,6 +7590,28 @@ function extractBulkOracleCardText(card) {
 }
 
 
+function runWhenIdle(callback, { timeout = 5000, delay = 0 } = {}) {
+    return new Promise((resolve, reject) => {
+        const invoke = () => {
+            const finish = () => {
+                try { Promise.resolve(callback()).then(resolve, reject); }
+                catch (error) { reject(error); }
+            };
+            if (typeof window !== 'undefined' && 'requestIdleCallback' in window) {
+                window.requestIdleCallback(finish, { timeout });
+            } else {
+                setTimeout(finish, 32);
+            }
+        };
+        if (delay > 0) setTimeout(invoke, delay);
+        else invoke();
+    });
+}
+
+async function pauseForUserIdle(delay = 0, timeout = 5000) {
+    return runWhenIdle(() => undefined, { timeout, delay });
+}
+
 function getStaticSemanticIndexUrl() {
     try {
         return new URL(STATIC_SEMANTIC_INDEX_FILENAME, document.baseURI || window.location.href).href;
@@ -7681,7 +7703,7 @@ async function loadStaticSemanticIndex() {
             throw new Error(`Static semantic index download failed (${response.status}).`);
         }
         const buffer = await response.arrayBuffer();
-        const index = parseStaticSemanticIndexBinary(buffer);
+        const index = await runWhenIdle(() => parseStaticSemanticIndexBinary(buffer), { timeout: 3500 });
         index.staticUrl = url;
         index.byteLength = buffer.byteLength;
         fullSemanticIndexMemory = index;
@@ -8358,42 +8380,59 @@ function getSemanticWorkerExcludeKey(excludeName) {
     return String(excludeName || '').toLowerCase().replace(/\s+/g, ' ').trim();
 }
 
-function findFullSemanticMatches(index, sourceVector, excludeName, limit = FULL_SEMANTIC_INDEX_SEARCH_LIMIT, minSimilarity = 0.42) {
+async function findFullSemanticMatches(index, sourceVector, excludeName, limit = FULL_SEMANTIC_INDEX_SEARCH_LIMIT, minSimilarity = 0.42) {
     if (!index || !sourceVector) return [];
-    const excludeKey = normalizeCardNameForIdentity(excludeName || '');
-    const best = [];
-    const pushBest = (item) => {
-        best.push(item);
-        best.sort((a, b) => b.similarity - a.similarity);
-        if (best.length > Math.max(limit * 2, 32)) best.length = Math.max(limit * 2, 32);
-    };
 
-    for (const chunk of index.chunks) {
-        for (let i = 0; i < chunk.count; i++) {
-            const name = chunk.names[i] || '';
-            if (!name || normalizeCardNameForIdentity(name) === excludeKey) continue;
-            const vector = chunk.vectors.subarray(i * index.dim, (i + 1) * index.dim);
-            const rawCos = approximateQuantizedCosine(sourceVector, vector, index.dim);
-            const calibrated = Math.max(0, Math.min(1, (rawCos - semanticCosineBaseline) / Math.max(0.05, 1 - semanticCosineBaseline)));
-            if (calibrated >= minSimilarity) pushBest({
-                name,
-                id: chunk.ids[i] || null,
-                card: chunk.cards?.[i] || null,
-                similarity: calibrated
-            });
+    // Benchmark-local corpora contain the full card payload in each chunk; the worker intentionally
+    // transfers only names/ids/vectors, so keep benchmark queries on the main-thread fallback to
+    // preserve the card payloads used by the benchmark harness. Live static/IndexedDB indexes use the
+    // worker-first path below.
+    const benchmarkLocal = index === benchmarkLocalOracleCorpus;
+    try {
+        if (benchmarkLocal) throw new Error('Benchmark-local corpus uses payload-preserving scan.');
+        await runWhenIdle(() => ensureSemanticWorkerIndex(index), { timeout: 2500 });
+        const queryVector = sourceVector instanceof Float32Array ? new Float32Array(sourceVector) : Float32Array.from(sourceVector);
+        const results = await semanticWorkerRequest('query', {
+            queryBuffer: queryVector.buffer,
+            excludeKey: getSemanticWorkerExcludeKey(excludeName),
+            limit,
+            minSimilarity,
+            baseline: semanticCosineBaseline
+        }, [queryVector.buffer]);
+        return results || [];
+    } catch (workerError) {
+        if (!benchmarkLocal) console.info('Semantic worker unavailable; using yielding main-thread semantic scan where possible:', workerError?.message || workerError);
+        const excludeKey = normalizeCardNameForIdentity(excludeName || '');
+        const best = [];
+        const keepCap = Math.max(limit * 2, 32);
+        const pushBest = item => {
+            best.push(item);
+            best.sort((a, b) => b.similarity - a.similarity);
+            if (best.length > keepCap) best.length = keepCap;
+        };
+        for (const chunk of index.chunks || []) {
+            if (!chunk?.vectors) continue;
+            for (let i = 0; i < chunk.count; i++) {
+                const name = chunk.names?.[i] || '';
+                if (!name || normalizeCardNameForIdentity(name) === excludeKey) continue;
+                const vector = chunk.vectors.subarray(i * index.dim, (i + 1) * index.dim);
+                const rawCos = approximateQuantizedCosine(sourceVector, vector, index.dim);
+                const calibrated = Math.max(0, Math.min(1, (rawCos - semanticCosineBaseline) / Math.max(0.05, 1 - semanticCosineBaseline)));
+                if (calibrated >= minSimilarity) pushBest({ name, id: chunk.ids?.[i] || null, card: chunk.cards?.[i] || null, similarity: calibrated });
+            }
+            await backgroundAwareDelay(0);
         }
+        const seen = new Set();
+        return best
+            .sort((a, b) => b.similarity - a.similarity)
+            .filter(x => {
+                const k = normalizeCardNameForIdentity(x.name);
+                if (seen.has(k)) return false;
+                seen.add(k);
+                return true;
+            })
+            .slice(0, limit);
     }
-
-    const seen = new Set();
-    return best
-        .sort((a, b) => b.similarity - a.similarity)
-        .filter(x => {
-            const k = normalizeCardNameForIdentity(x.name);
-            if (seen.has(k)) return false;
-            seen.add(k);
-            return true;
-        })
-        .slice(0, limit);
 }
 
 function findFullSemanticExactMatches(index, highlights, excludeName, limit = 1024) {
@@ -11062,6 +11101,12 @@ async function findSimilarCards() {
         const previewPool = new Map();
         const previouslyRenderedNames = new Set();
         const MIN_PREVIEW_RESULTS = 3;
+        const PREVIEW_RENDER_CAP = 20;
+        const PREVIEW_RENDER_MIN_INTERVAL_MS = 300;
+        let previewRenderTimer = null;
+        let previewRenderDirty = false;
+        let previewRenderLabel = '';
+        let previewLastRenderedAt = 0;
 
         function computePreviewScore(card) {
             const cText = card.oracle_text || (card.card_faces ? card.card_faces.map(f => f.oracle_text).join(' ') : '');
@@ -11072,6 +11117,33 @@ async function findSimilarCards() {
             // Weighted toward mechanical since it's the most direct "does this do the same
             // thing" signal available without the embedding model.
             return (mech * 0.55) + (cat * 0.25) + (syn * 0.20);
+        }
+
+        function flushPreviewRender() {
+            if (requestId !== searchRequestId || !previewRenderDirty || previewPool.size < MIN_PREVIEW_RESULTS) return;
+            previewRenderDirty = false;
+            previewLastRenderedAt = Date.now();
+            const sorted = Array.from(previewPool.values())
+                .sort((a, b) => (b._previewScore || 0) - (a._previewScore || 0))
+                .slice(0, PREVIEW_RENDER_CAP);
+            sorted.forEach(c => { c._isNewlyAdded = !previouslyRenderedNames.has(c.name.toLowerCase()); });
+            sorted.forEach(c => previouslyRenderedNames.add(c.name.toLowerCase()));
+            if (requestId !== searchRequestId) return;
+            updateProgress(1, totalSteps, `First look: ${sorted.length} match${sorted.length === 1 ? '' : 'es'} found so far (just updated by ${previewRenderLabel || 'another search stage'}) - still searching further sources...`);
+            document.getElementById('provisional-results-banner')?.classList.remove('hidden');
+            renderResults(sorted);
+        }
+
+        function schedulePreviewRender(label) {
+            previewRenderLabel = label;
+            previewRenderDirty = true;
+            if (previewRenderTimer || requestId !== searchRequestId) return;
+            const elapsed = Date.now() - previewLastRenderedAt;
+            const delay = Math.max(0, PREVIEW_RENDER_MIN_INTERVAL_MS - elapsed);
+            previewRenderTimer = setTimeout(() => {
+                previewRenderTimer = null;
+                flushPreviewRender();
+            }, delay);
         }
 
         function mergeIntoPreview(newResults, label) {
@@ -11085,23 +11157,13 @@ async function findSimilarCards() {
             let addedAny = false;
             filtered.forEach(c => {
                 const key = c.name.toLowerCase();
-                if (previewPool.has(key)) return; // already have this one from an earlier stream
+                if (previewPool.has(key)) return;
                 c._previewScore = computePreviewScore(c);
                 previewPool.set(key, c);
                 addedAny = true;
             });
-            // Nothing new, or still not enough combined results to be worth showing yet (avoids
-            // flashing a near-empty grid before a second stream has had a chance to land too).
             if (!addedAny || previewPool.size < MIN_PREVIEW_RESULTS) return;
-
-            const sorted = Array.from(previewPool.values()).sort((a, b) => (b._previewScore || 0) - (a._previewScore || 0));
-            sorted.forEach(c => { c._isNewlyAdded = !previouslyRenderedNames.has(c.name.toLowerCase()); });
-
-            if (requestId !== searchRequestId) return; // stale by the time scoring/sorting finished
-            sorted.forEach(c => previouslyRenderedNames.add(c.name.toLowerCase()));
-            updateProgress(1, totalSteps, `First look: ${sorted.length} match${sorted.length === 1 ? '' : 'es'} found so far (just updated by ${label}) - still searching further sources...`);
-            document.getElementById('provisional-results-banner')?.classList.remove('hidden');
-            renderResults(sorted);
+            schedulePreviewRender(label);
         }
         streamAPromise.then(r => mergeIntoPreview(r, "exact phrase")).catch(() => {});
 
@@ -11775,6 +11837,8 @@ if (candidates.length > 0) {
 
         pipelineCompleted = true;
         clearTimeout(searchTimeoutId);
+        if (previewRenderTimer) { clearTimeout(previewRenderTimer); previewRenderTimer = null; }
+        previewRenderDirty = false;
         document.getElementById('provisional-results-banner')?.classList.add('hidden');
         const renderStartedAt = Date.now();
         renderResults(lastSearchResults);
@@ -11793,16 +11857,20 @@ if (candidates.length > 0) {
             void (async () => {
                 const semanticStartedAt = Date.now();
                 try {
-                    // Start the static download (or the rare client-side fallback) only after the
-                    // user-facing search has finished. The full-corpus scan itself runs in a Web Worker.
+                    // Stay out of the user's immediate post-search interaction window. Loading the
+                    // 13.6 MB index and initializing its worker are useful background work, but should
+                    // not compete with the first moments after results appear.
+                    await pauseForUserIdle(1800, 5000);
+                    if (requestId !== searchRequestId) return;
                     const readyIndex = await ensureFullSemanticIndex(extractor);
                     if (!readyIndex || requestId !== searchRequestId) return;
 
                     const semanticIndexQueryVector = readyIndex?.source === 'static'
                         ? (sourceOracleVector || sourceRetrievalVector)
                         : sourceRetrievalVector;
+                    const backgroundSemanticLimit = Math.min(32, semanticLimit);
                     const semanticMatches = semanticIndexQueryVector
-                        ? await findFullSemanticMatches(readyIndex, semanticIndexQueryVector, currentSourceCard.name, semanticLimit, 0.42)
+                        ? await findFullSemanticMatches(readyIndex, semanticIndexQueryVector, currentSourceCard.name, backgroundSemanticLimit, 0.42)
                         : [];
                     if (semanticMatches.length === 0) {
                         if (semanticBanner && requestId === searchRequestId) {
@@ -11818,7 +11886,10 @@ if (candidates.length > 0) {
                     for (const item of semanticMatches) {
                         semanticByName.set(normalizeCardNameForIdentity(item.name), item);
                     }
-                    const fetched = await fetchScryfallCollection(Array.from(semanticByName.values()).map(x => ({ name: x.name })));
+                    const semanticHydrationTargets = Array.from(semanticByName.values())
+                        .sort((a, b) => (b.similarity || 0) - (a.similarity || 0))
+                        .slice(0, 12);
+                    const fetched = await fetchScryfallCollection(semanticHydrationTargets.map(x => ({ name: x.name })));
                     if (requestId !== searchRequestId) return;
 
                     const scoreByName = new Map(
@@ -11843,19 +11914,25 @@ if (candidates.length > 0) {
                             card.retrievalEvidence = [...(card.retrievalEvidence || []), 'Search G'];
                         });
 
-                        await scoreCardBatch({
-                            cards: semanticCandidates,
-                            sourceCard: currentSourceCard,
-                            targetText: targetTextForScoring,
-                            exactnessText: exactnessTextForScoring,
-                            targetVector,
-                            extractor,
-                            weights: { mechanical: wM, synergy: wS, context: wC, exactness: wE, category: wCa },
-                            tags: activeTags,
-                            topNNames,
-                            sniperIds: sniperCardIds,
-                            activeFilters: filters
-                        });
+                        const semanticScoreBatchSize = 6;
+                        for (let i = 0; i < semanticCandidates.length; i += semanticScoreBatchSize) {
+                            const batch = semanticCandidates.slice(i, i + semanticScoreBatchSize);
+                            await pauseForUserIdle(0, 2500);
+                            if (requestId !== searchRequestId) return;
+                            await scoreCardBatch({
+                                cards: batch,
+                                sourceCard: currentSourceCard,
+                                targetText: targetTextForScoring,
+                                exactnessText: exactnessTextForScoring,
+                                targetVector,
+                                extractor,
+                                weights: { mechanical: wM, synergy: wS, context: wC, exactness: wE, category: wCa },
+                                tags: activeTags,
+                                topNNames,
+                                sniperIds: sniperCardIds,
+                                activeFilters: filters
+                            });
+                        }
                         if (requestId !== searchRequestId) return;
 
                         const semanticQualified = semanticCandidates.filter(card => {
