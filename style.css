@@ -2477,7 +2477,7 @@ section {
 .results-header { align-items: flex-end; gap: 14px; }
 .results-header .section-description { margin-bottom: 1px; }
 
-#export-btn { min-height: 38px; padding: 8px 13px; border-radius: 8px; }
+#export-btn { min-height: 38px; padding: 8px 13px; border-radius: 8px; position: relative; top: -6px; }
 
 .results-grid {
     grid-template-columns: repeat(auto-fill, minmax(225px, 1fr));
@@ -3297,4 +3297,242 @@ body:not(.light-theme) #theme-toggle { color: var(--text-main) !important; }
 /* Benchmark highlights are represented directly in Oracle text; hide any stale debug panel. */
 #benchmark-highlight-preview {
     display: none !important;
+}
+
+
+/* --------------------------------------------------------------------------
+   Selected Related Cards overflow + stable result-score slots
+   -------------------------------------------------------------------------- */
+.floating-bar .selected-cards-info {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    min-width: 0;
+    flex: 1 1 auto;
+}
+
+.floating-bar .chips-list {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    flex-wrap: nowrap;
+}
+
+.floating-bar .card-chip {
+    flex: 0 0 auto;
+}
+
+.floating-bar .card-chip-remove {
+    border: 0;
+    padding: 0;
+    margin: 0;
+    background: transparent;
+    line-height: 1;
+    font-size: 15px;
+    min-width: 15px;
+    min-height: 15px;
+}
+
+.selected-cards-more-btn {
+    flex: 0 0 auto;
+    min-width: 34px;
+    height: 28px;
+    padding: 0 7px;
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    background: var(--bg-accent);
+    color: var(--text-main);
+    font-weight: 800;
+    letter-spacing: 1px;
+    cursor: pointer;
+}
+
+.selected-cards-more-btn:hover {
+    border-color: var(--accent-color);
+    color: var(--accent-color);
+}
+
+.selected-related-modal {
+    position: fixed;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 22px;
+    background: rgba(0, 0, 0, 0.62);
+    z-index: 1500;
+}
+
+.selected-related-modal.hidden {
+    display: none;
+}
+
+.selected-related-modal-content {
+    width: min(1000px, 100%);
+    max-height: min(86vh, 820px);
+    overflow: auto;
+    box-sizing: border-box;
+    padding: 20px;
+    background: var(--bg-secondary);
+    border: 1px solid var(--accent-color);
+    border-radius: 14px;
+    box-shadow: var(--ui-shadow);
+}
+
+.selected-related-modal-header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 18px;
+    margin-bottom: 18px;
+}
+
+.selected-related-modal-kicker {
+    margin: 0 0 3px;
+    color: var(--accent-color);
+    font-size: 10px;
+    font-weight: 800;
+    letter-spacing: 0.14em;
+}
+
+.selected-related-modal-header h2 {
+    margin: 0;
+    font-size: 22px;
+}
+
+.selected-related-modal-close {
+    flex: 0 0 auto;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 36px;
+    height: 36px;
+    padding: 0;
+    border: 1px solid var(--border-color);
+    border-radius: 9px;
+    background: var(--bg-primary);
+    color: var(--text-muted);
+    font-size: 25px;
+    line-height: 1;
+    cursor: pointer;
+}
+
+.selected-related-modal-close:hover {
+    color: var(--text-main);
+    border-color: var(--accent-color);
+}
+
+.selected-related-modal-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+    gap: 16px;
+    align-items: start;
+}
+
+.selected-related-card-tile {
+    position: relative;
+    min-width: 0;
+    box-sizing: border-box;
+    padding: 34px 8px 9px;
+    border: 1px solid var(--border-color);
+    border-radius: 11px;
+    background: var(--bg-primary);
+}
+
+.selected-related-card-remove {
+    position: absolute;
+    top: 7px;
+    right: 7px;
+    z-index: 2;
+    width: 25px;
+    height: 25px;
+    padding: 0;
+    border: 1px solid var(--border-color);
+    border-radius: 7px;
+    background: var(--bg-secondary);
+    color: var(--text-muted);
+    font-size: 18px;
+    line-height: 1;
+    cursor: pointer;
+}
+
+.selected-related-card-remove:hover {
+    color: #ef4444;
+    border-color: #ef4444;
+}
+
+.selected-related-card-art-wrap {
+    width: 100%;
+}
+
+.selected-related-card-art-wrap img {
+    display: block;
+    width: 100%;
+    height: auto;
+    aspect-ratio: 63 / 88;
+    object-fit: cover;
+    border-radius: 7px;
+}
+
+.selected-related-card-name {
+    margin-top: 8px;
+    color: var(--text-main);
+    font-size: 12px;
+    font-weight: 700;
+    line-height: 1.25;
+    overflow-wrap: anywhere;
+}
+
+/* The score breakdown is a 2-column grid: the price occupies exactly one slot, so the
+   Mechanical/Context, Synergy/Exactness, Category/Price rows stay visually aligned even when
+   one price string is longer than another. */
+.result-score-breakdown {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    align-items: start;
+}
+
+.result-score-breakdown .score-line,
+.result-score-breakdown .card-price-label {
+    min-width: 0;
+    width: 100%;
+    box-sizing: border-box;
+}
+
+.result-score-breakdown .card-price-label {
+    display: block;
+    margin: 0;
+    min-height: 1.2em;
+    overflow-wrap: anywhere;
+}
+
+@media (max-width: 700px) {
+    .floating-bar .selected-cards-info {
+        width: 100%;
+        max-width: none;
+    }
+
+    .floating-bar .floating-bar-actions {
+        width: 100%;
+    }
+
+    .floating-bar .floating-bar-actions > button {
+        flex: 1 1 0;
+    }
+
+    .selected-related-modal {
+        padding: 10px;
+    }
+
+    .selected-related-modal-content {
+        max-height: 92vh;
+        padding: 15px;
+    }
+
+    .selected-related-modal-grid {
+        grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+        gap: 10px;
+    }
 }

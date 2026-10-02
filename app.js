@@ -79,7 +79,7 @@ let favoritesList, favoriteBtn, exportBtn, compareModal, compareContainer, compa
 let sourceCardEmpty, sourceCardLoaded, sourceCardAddBtn, sourceCardPickerModal, sourceCardPickerInput, sourceCardPickerResults, sourceCardPickerStatus, closeSourceCardPickerBtn;
 let sourceCardPickerRequestId = 0;
 let sourceCardPickerDebounce = null;
-let relatedCardsBar, selectedCardsChips, relatedSearchBtn, clearSelectedBtn;
+let relatedCardsBar, selectedCardsChips, selectedRelatedMoreBtn, selectedRelatedModal, selectedRelatedModalGrid, selectedRelatedModalClose, relatedSearchBtn, clearSelectedBtn;
 let compareQueue = [];
 
 /* V20.10 benchmark highlight preview: makes simulated human selections visible while the suite runs.
@@ -9153,6 +9153,10 @@ function initApp() {
 
     relatedCardsBar = document.getElementById('related-cards-bar');
     selectedCardsChips = document.getElementById('selected-cards-chips');
+    selectedRelatedMoreBtn = document.getElementById('selected-cards-more-btn');
+    selectedRelatedModal = document.getElementById('selected-related-modal');
+    selectedRelatedModalGrid = document.getElementById('selected-related-modal-grid');
+    selectedRelatedModalClose = document.getElementById('selected-related-modal-close');
     relatedSearchBtn = document.getElementById('related-search-btn');
     clearSelectedBtn = document.getElementById('clear-selected-btn');
     
@@ -9209,6 +9213,13 @@ function initApp() {
     
     if (clearSelectedBtn) clearSelectedBtn.addEventListener('click', clearSelectedRelatedCards);
     if (relatedSearchBtn) relatedSearchBtn.addEventListener('click', executeRelatedCardSearch);
+    if (selectedRelatedMoreBtn) selectedRelatedMoreBtn.addEventListener('click', openSelectedRelatedCardsModal);
+    if (selectedRelatedModalClose) selectedRelatedModalClose.addEventListener('click', closeSelectedRelatedCardsModal);
+    if (selectedRelatedModal) {
+        selectedRelatedModal.addEventListener('click', (event) => {
+            if (event.target === selectedRelatedModal) closeSelectedRelatedCardsModal();
+        });
+    }
 
     if ('requestIdleCallback' in window) {
         requestIdleCallback(() => {
@@ -9645,6 +9656,8 @@ function clearSelectedRelatedCards() {
 function updateRelatedBar() {
     if (selectedRelatedCards.size === 0) {
         relatedCardsBar.classList.add('hidden');
+        selectedRelatedMoreBtn?.classList.add('hidden');
+        closeSelectedRelatedCardsModal();
         return;
     }
 
@@ -9658,19 +9671,97 @@ function updateRelatedBar() {
         const label = document.createElement('span');
         label.textContent = card.name;
 
-        const removeBtn = document.createElement('span');
+        const removeBtn = document.createElement('button');
+        removeBtn.type = 'button';
         removeBtn.className = 'card-chip-remove';
         removeBtn.textContent = '\u00D7';
-        removeBtn.addEventListener('click', () => {
+        removeBtn.title = `Remove ${card.name}`;
+        removeBtn.setAttribute('aria-label', `Remove ${card.name} from selected related cards`);
+        removeBtn.addEventListener('click', (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            invalidateInFlightRelatedSearch();
             selectedRelatedCards.delete(card.id);
             updateRelatedBar();
             renderResults(lastSearchResults);
+            if (selectedRelatedModal && !selectedRelatedModal.classList.contains('hidden')) {
+                renderSelectedRelatedCardsModal();
+            }
         });
 
         chip.appendChild(label);
         chip.appendChild(removeBtn);
         selectedCardsChips.appendChild(chip);
     });
+
+    requestAnimationFrame(syncSelectedRelatedCardsOverflow);
+}
+
+function syncSelectedRelatedCardsOverflow() {
+    if (!selectedCardsChips || !selectedRelatedMoreBtn) return;
+    if (selectedRelatedCards.size === 0) {
+        selectedRelatedMoreBtn.classList.add('hidden');
+        return;
+    }
+
+    selectedRelatedMoreBtn.classList.add('hidden');
+    const overflowing = selectedCardsChips.scrollWidth > selectedCardsChips.clientWidth + 1;
+    if (overflowing) selectedRelatedMoreBtn.classList.remove('hidden');
+}
+
+function renderSelectedRelatedCardsModal() {
+    if (!selectedRelatedModalGrid) return;
+    selectedRelatedModalGrid.innerHTML = '';
+
+    selectedRelatedCards.forEach(card => {
+        const tile = document.createElement('article');
+        tile.className = 'selected-related-card-tile';
+
+        const removeBtn = document.createElement('button');
+        removeBtn.type = 'button';
+        removeBtn.className = 'selected-related-card-remove';
+        removeBtn.textContent = '\u00D7';
+        removeBtn.title = `Remove ${card.name}`;
+        removeBtn.setAttribute('aria-label', `Remove ${card.name} from selected related cards`);
+        removeBtn.addEventListener('click', (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            invalidateInFlightRelatedSearch();
+            selectedRelatedCards.delete(card.id);
+            updateRelatedBar();
+            renderResults(lastSearchResults);
+            if (selectedRelatedCards.size === 0) {
+                closeSelectedRelatedCardsModal();
+            } else {
+                renderSelectedRelatedCardsModal();
+            }
+        });
+
+        const artWrap = document.createElement('div');
+        artWrap.className = 'selected-related-card-art-wrap';
+        const img = document.createElement('img');
+        img.src = card.image_uris?.normal || card.card_faces?.[0]?.image_uris?.normal || 'https://placeholder.pics/svg/220x310/EAEAEA/999999/No%20Image';
+        img.alt = card.name;
+        img.loading = 'lazy';
+        artWrap.appendChild(img);
+
+        const name = document.createElement('div');
+        name.className = 'selected-related-card-name';
+        name.textContent = card.name;
+
+        tile.append(removeBtn, artWrap, name);
+        selectedRelatedModalGrid.appendChild(tile);
+    });
+}
+
+function openSelectedRelatedCardsModal() {
+    if (!selectedRelatedModal || selectedRelatedCards.size === 0) return;
+    renderSelectedRelatedCardsModal();
+    selectedRelatedModal.classList.remove('hidden');
+}
+
+function closeSelectedRelatedCardsModal() {
+    selectedRelatedModal?.classList.add('hidden');
 }
 
 // --- SOURCE CARD PICKER ---
@@ -10008,6 +10099,14 @@ async function scoreCardBatch({
     cards,
     sourceCard,
     targetText,
+    // Optional parsed-effect override/reference set used by multi-card related search. The
+    // normal similarity search leaves these empty and therefore keeps its existing source-card
+    // parsing path unchanged. Related search, however, is asking "what matches these selected
+    // cards?" rather than only "what matches the original source card?"; giving the scorer the
+    // selected cards' parsed effects prevents a shared-pattern search from producing a false
+    // 0% mechanical score simply because the original source has additional unrelated effects.
+    sourceParsedEffectsOverride = null,
+    sourceReferenceParsedEffects = [],
     // Text to check for literal presence on a candidate (the exactness/fuzzy channel), as
     // opposed to targetText which also drives mechanical/semantic parsing. Defaults to targetText
     // for callers that don't distinguish (related-card search, searchDeeper) - only the main
@@ -10053,7 +10152,11 @@ async function scoreCardBatch({
 
     const sourceText = sourceCard.oracle_text || (sourceCard.card_faces ? sourceCard.card_faces.map(f => f.oracle_text).join(' ') : '');
     const sourceTextToParse = (hasHighlight && targetText) ? targetText : sourceText;
-    const parsedSourceCard = parseMTGEffect(sourceTextToParse);
+    const parsedSourceCard = Array.isArray(sourceParsedEffectsOverride) && sourceParsedEffectsOverride.length > 0
+        ? sourceParsedEffectsOverride
+        : parseMTGEffect(sourceTextToParse);
+    const referenceEffectSets = [parsedSourceCard, ...(Array.isArray(sourceReferenceParsedEffects) ? sourceReferenceParsedEffects : [])]
+        .filter(effects => Array.isArray(effects) && effects.length > 0);
     // How much of the source card's text did the rule-based parser actually turn into a
     // recognized action (vs. falling back to "generic")? A card whose text mostly comes back
     // generic gives an unreliable mechanicalScore, so that score shouldn't get full authority
@@ -10097,13 +10200,42 @@ async function scoreCardBatch({
         // Exactness Score & Mechanical Similarity calculations remain independent
         card.exactnessScore = calculateCombinedFuzzyScore(sourceCard, card, exactnessText);
         const parsedCandidateCard = parseMTGEffect(cardText);
-        card.mechanicalScore = calculateMechanicalSimilarity(parsedSourceCard, parsedCandidateCard);
-        card.effectCoverageProfile = calculateEffectCoverageProfile(parsedSourceCard, parsedCandidateCard);
+
+        // Related-card search can have several legitimate mechanical reference cards. Score the
+        // candidate against each reference and keep the strongest coherent mechanical match. This
+        // is intentionally a MAX across references, not an average: a related-card result only
+        // needs to share a meaningful mechanic with one of the selected cards, and averaging in
+        // unrelated abilities from the other selections would recreate the false-low/0% problem
+        // this path is meant to avoid. The ordinary one-card search has a single reference and is
+        // therefore numerically unchanged.
+        let bestMechanical = null;
+        for (const referenceEffects of referenceEffectSets) {
+            const mechanical = calculateMechanicalSimilarity(referenceEffects, parsedCandidateCard);
+            const coverage = calculateEffectCoverageProfile(referenceEffects, parsedCandidateCard);
+            const functional = calculateFunctionalSimilarity(referenceEffects, parsedCandidateCard);
+            const quantity = calculateAggregateQuantitySimilarity(referenceEffects, parsedCandidateCard, coverage);
+            if (!bestMechanical || mechanical > bestMechanical.mechanical ||
+                (mechanical === bestMechanical.mechanical && functional > bestMechanical.functional)) {
+                bestMechanical = { mechanical, coverage, functional, quantity, referenceEffects };
+            }
+        }
+
+        bestMechanical = bestMechanical || {
+            mechanical: 0,
+            coverage: { sourceCoverage: 0, balancedCoverage: 0, primaryMatch: 0, matches: [] },
+            functional: 0,
+            quantity: 0,
+            referenceEffects: parsedSourceCard
+        };
+
+        card.mechanicalScore = bestMechanical.mechanical;
+        card.effectCoverageProfile = bestMechanical.coverage;
         card.effectCoverageScore = card.effectCoverageProfile.sourceCoverage;
         card.balancedEffectCoverage = card.effectCoverageProfile.balancedCoverage;
         card.primaryEffectMatchScore = card.effectCoverageProfile.primaryMatch;
-        card.functionalSimilarityScore = calculateFunctionalSimilarity(parsedSourceCard, parsedCandidateCard);
-        card.quantitySimilarityScore = calculateAggregateQuantitySimilarity(parsedSourceCard, parsedCandidateCard, card.effectCoverageProfile);
+        card.functionalSimilarityScore = bestMechanical.functional;
+        card.quantitySimilarityScore = bestMechanical.quantity;
+        card._mechanicalReferenceEffects = bestMechanical.referenceEffects;
         card.roleProfile = inferStrategicRoleProfile(card, parsedCandidateCard, targetText);
         card._strategicRoleFingerprint = buildStrategicRoleFingerprint(card, parsedCandidateCard, card.roleProfile);
         card.roleScore = calculateStrategicRoleScore(sourceRoleProfile, card.roleProfile, sourceRoleFingerprint, card._strategicRoleFingerprint);
@@ -10490,7 +10622,21 @@ async function executeRelatedCardSearch() {
         updateProgress(2, 3, "Scoring candidates against target patterns...");
         const extractor = await getNLPModel();
         if (requestId !== searchRequestId || currentSourceCard !== sourceCardAtStart) return;
-        const combinedTargetText = repeatingPatterns.length > 0 ? repeatingPatterns.join(' ') : sourceCardOracle.textContent;
+        const combinedTargetText = repeatingPatterns.length > 0 ? repeatingPatterns.join('. ') : getCurrentSourceOracleText(sourceCardAtStart);
+
+        // Related search is an ensemble query: a candidate is mechanically related when it
+        // matches a meaningful effect from ANY selected card, not only the original source card.
+        // Keep both the shared-pattern parse (preferred primary reference) and the full parsed
+        // effects of every selected/source card as reference lanes. If the shared phrases are too
+        // fragmentary for the parser, the full-card references still provide reliable mechanical
+        // structure without requiring literal wording to match.
+        const parsedPatternEffects = parseMTGEffect(combinedTargetText);
+        const relatedReferenceParsedEffects = allCardsInSet
+            .map(card => parseMTGEffect(getCurrentSourceOracleText(card)))
+            .filter(effects => Array.isArray(effects) && effects.length > 0);
+        const relatedPrimaryParsedEffects = parsedPatternEffects.length > 0
+            ? parsedPatternEffects
+            : (relatedReferenceParsedEffects[0] || []);
         
         let targetVector = null;
         if (extractor.type !== 'fallback') {
@@ -10511,6 +10657,8 @@ async function executeRelatedCardSearch() {
             cards: finalCardPool,
             sourceCard: sourceCardAtStart,
             targetText: combinedTargetText,
+            sourceParsedEffectsOverride: relatedPrimaryParsedEffects,
+            sourceReferenceParsedEffects: relatedReferenceParsedEffects,
             targetVector,
             extractor,
             weights: { mechanical: wM, synergy: wS, context: wC, exactness: wE, category: wCa },
@@ -11850,7 +11998,7 @@ if (candidates.length > 0) {
         if (shouldRunBackgroundSemantic && requestId === searchRequestId) {
             const semanticBanner = document.getElementById('provisional-results-banner');
             if (semanticBanner) {
-                semanticBanner.textContent = '🧠 Initial results are ready — semantic search is finishing in the background. Results may improve automatically.';
+                semanticBanner.textContent = 'Initial results are ready — semantic search is finishing in the background. Results may improve automatically.';
                 semanticBanner.classList.remove('hidden');
             }
 
@@ -11874,7 +12022,7 @@ if (candidates.length > 0) {
                         : [];
                     if (semanticMatches.length === 0) {
                         if (semanticBanner && requestId === searchRequestId) {
-                            semanticBanner.textContent = '🧠 Full semantic search is ready — no additional matches were needed for this search.';
+                            semanticBanner.textContent = 'Full semantic search is ready — no additional matches were needed for this search.';
                             setTimeout(() => {
                                 if (requestId === searchRequestId) semanticBanner.classList.add('hidden');
                             }, 2400);
@@ -11961,8 +12109,8 @@ if (candidates.length > 0) {
                     }
                     if (semanticBanner && requestId === searchRequestId) {
                         semanticBanner.textContent = semanticCandidateCount > 0
-                            ? `🧠 Semantic search finished — ${semanticAddedCount} additional meaning-based match${semanticAddedCount === 1 ? '' : 'es'} added.`
-                            : '🧠 Full semantic search is ready.';
+                            ? `Semantic search finished — ${semanticAddedCount} additional meaning-based match${semanticAddedCount === 1 ? '' : 'es'} added.`
+                            : 'Full semantic search is ready.';
                         setTimeout(() => {
                             if (requestId === searchRequestId) semanticBanner.classList.add('hidden');
                         }, 2600);
@@ -11971,7 +12119,7 @@ if (candidates.length > 0) {
                     if (requestId === searchRequestId) {
                         console.info('Background semantic expansion did not complete:', error?.message || error);
                         if (semanticBanner) {
-                            semanticBanner.textContent = '🧠 Initial results are ready. Full semantic expansion was unavailable this time.';
+                            semanticBanner.textContent = 'Initial results are ready. Full semantic expansion was unavailable this time.';
                             setTimeout(() => {
                                 if (requestId === searchRequestId) semanticBanner.classList.add('hidden');
                             }, 3200);
@@ -12283,7 +12431,7 @@ function renderResults(cards) {
         if (card._weakBackfillMatch) {
             weakMatchBadge = document.createElement('p');
             weakMatchBadge.className = 'weak-match-badge';
-            weakMatchBadge.textContent = '⚠ Weak match - shown to fill out the list';
+            weakMatchBadge.textContent = 'Weak match - shown to fill out the list';
             weakMatchBadge.title = 'This result didn\'t clear the usual relevance bar. It\'s shown because too few stronger matches were found, not because it\'s a confident recommendation.';
         }
 
@@ -12296,7 +12444,7 @@ function renderResults(cards) {
             scoreBreakdown.appendChild(line);
         };
 
-        addScoreLine('Mechanical', mechScore, true);
+        addScoreLine('Mechanical', mechScore);
         addScoreLine('Context', conScore);
         addScoreLine('Synergy', synScore);
         addScoreLine('Exactness', exaScore);
