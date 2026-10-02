@@ -6154,17 +6154,314 @@ function calculateAggregateQuantitySimilarity(parsedSource, parsedCandidate, cov
     return weight ? Math.max(0, Math.min(1, total / weight)) : 0;
 }
 
-function calculateMechanicalSimilarity(parsedA, parsedB) {
-    const sourceCoverage = directionalMechanicalSimilarity(parsedA, parsedB);
-    if (sourceCoverage <= 0) return 0;
 
-    const candidateExcess = calculateCandidateMechanicalExcess(parsedA, parsedB);
+// ---------------------------------------------------------------------------
+// UNIVERSAL MECHANIC SIGNATURE
+// ---------------------------------------------------------------------------
+// The finite effect parser remains useful for detailed rules structure, but Magic's mechanic
+// vocabulary is much larger than any sensible hand-written parser table. Scryfall card objects carry
+// the card's structured `keywords` array, so use that as the universal mechanic layer. This means
+// obscure, historic, and newly introduced keyword abilities/actions can participate in mechanical
+// matching without adding a new branch to the parser each time Wizards adds a mechanic.
+//
+// The current 2026 Comprehensive Rules/releases demonstrate why this matters: new mechanics such as
+// sneak, storied, heal, blight, increment, paradigm, preparation, power-up, and teamwork have been
+// added during 2026. The keyword metadata path catches those automatically. The text-derived action
+// and rules-context signature then handles keyword actions and mechanically meaningful text that is
+// not represented as a single keyword field.
+const UNIVERSAL_RULE_ACTION_TERMS = [
+    'activate','adapt','amass','assemble','attach','bolster','bury','cast','clash','cloak','connive',
+    'counter','create','crew','cycle','dash','discover','discard','disguise','double','draw','embalm',
+    'enlist','escape','exert','explore','fight','foretell','goad','investigate','learn','manifest',
+    'meld','mill','monstrous','mutate','phase out','populate','proliferate','plot','regenerate',
+    'reveal','sacrifice','scry','search','shuffle','skirmish','solve','sneak','spree','support',
+    'surveil','suspect','tap','transform','turn face up','untap','venture','vote','ward','roll',
+    'choose','exchange','exile','heal','blight','recruit','increment','prepare','preparation',
+    'power-up','teamwork','storied','refine','offspring','saddle','craft','collect evidence',
+    'incubate','incite','train','open an attraction','take the initiative','become the monarch',
+    'initiative','dungeon','daybound','nightbound','convert','stash','impending','bargain',
+    'corrupted','for mirrodin','living weapon','reconfigure','equip','fortify','level up','level-up',
+    'transfigure','transmute','cycling','kicker','flashback','madness','suspend','cascade','storm',
+    'prowess','convoke','delve','affinity','improvise','offering','evoke','ninjutsu','jutsu','channel',
+    'splice','buyback','retrace','recover','scavenge','unearth','encore','disturb','decayed','aftermath',
+    'adventure','partner','battle cry','bloodthirst','bushido','flanking','fading','vanishing','undying',
+    'persist','infect','wither','deathtouch','defender','double strike','first strike','flying','haste',
+    'hexproof','indestructible','lifelink','menace','protection','reach','shroud','trample','vigilance',
+    'fear','intimidate','shadow','skulk','horsemanship','landwalk','extort','cipher','evolve','bestow',
+    'tribute','surge','delirium','revolt','ascend','enrage','riot','mentor','spectacle','afterlife',
+    'saga','constellation','landfall','metalcraft','spell mastery','ferocious','raid','formidable','morbid',
+    'threshold','hellbent','magecraft','paradigm','preparation'
+];
 
-    // Candidate excess is deliberately capped at a modest 12% influence. The source's functional
-    // coverage remains the dominant evidence, but a card whose *primary* purpose is unrelated does
-    // not get treated as equivalent merely because it contains one matching rider.
-    const excessPenalty = 0.18 * Math.pow(candidateExcess, 1.25);
-    return Math.max(0, Math.min(1, sourceCoverage * (1 - excessPenalty)));
+function escapeMechanicRegexTerm(term) {
+    return String(term || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+const UNIVERSAL_RULE_ACTION_REGEX = new RegExp(
+    '\\b(?:' + UNIVERSAL_RULE_ACTION_TERMS
+        .slice()
+        .sort((a, b) => b.length - a.length)
+        .map(term => escapeMechanicRegexTerm(term).replace(/\s+/g, '\\s+'))
+        .join('|') + ')\\b',
+    'gi'
+);
+
+const UNIVERSAL_ZONE_TERMS = [
+    'battlefield','graveyard','hand','library','stack','exile','command zone','outside the game',
+    'ante','sideboard','dungeon','attraction','sticker sheet'
+];
+const UNIVERSAL_CONTEXT_PATTERNS = {
+    target: /\b(?:target|each|all|any|another|one or more|up to|a|an)\s+(?:creature|permanent|artifact|enchantment|land|planeswalker|battle|player|opponent|spell|ability|card|kindred|token|permanents?|creatures?|cards?)\b/gi,
+    scope: /\b(?:you control|your opponents? control|each player|each opponent|all players|nonland|nontoken|legendary|nonlegendary|nonbasic|basic|multicolored|monocolored|historic|modified|attacking|blocking|tapped|untapped|dying|damaged|discarded|sacrificed|cast|crewed|equipped|enchanted|opponents?|you|your)\b/gi,
+    trigger: /\b(?:when|whenever|at the beginning of|at the end of|if|unless|as long as|while|after|before|until|the next time|each upkeep|each end step|your upkeep|your end step)\b/gi,
+    cost: /\b(?:pay|sacrifice|discard|exile|tap|untap|remove|spend|return|reveal|mill|cast)\b|\{[^}]+\}/gi,
+    choice: /\b(?:choose|chosen|may|modal|one or more|any number|up to|for each|x|random|vote|secretly)\b/gi
+};
+const UNIVERSAL_RESOURCE_REGEX = /\b(?:life|mana|cards?|counters?|tokens?|treasure|clue|food|blood|map|powerstone|incubator|energy|poison|experience|rad|stun|finality|shield|ticket|evidence|junk|role|ring-bearer|attraction|dungeon|initiative|monarch|city's blessing)\b/gi;
+const UNIVERSAL_STAT_REGEX = /(?:[+\-−]\d+\/[+\-−]\d+|[+\-−]\d+|\bdouble\b|\bhalf\b|\btriple\b|\bgets?\b|\bbecomes?\b)/gi;
+const UNIVERSAL_COUNTER_REGEX = /(?:[+\-−]\d+\/[+\-−]\d+\s*)?\b[a-z][a-z0-9-]*\s+counters?\b/gi;
+const UNIVERSAL_TOKEN_REGEX = /\b([a-z][a-z0-9' -]{1,32})\s+tokens?\b/gi;
+const UNIVERSAL_MANA_SYMBOL_REGEX = /\{[^}]+\}/g;
+
+function normalizeMechanicToken(value) {
+    return String(value || '')
+        .toLowerCase()
+        .replace(/[’']/g, "'")
+        .replace(/[‐‑‒–—]/g, '-')
+        .replace(/\s+/g, ' ')
+        .trim();
+}
+
+function setCoverage(sourceSet, candidateSet) {
+    const a = sourceSet instanceof Set ? sourceSet : new Set(sourceSet || []);
+    const b = candidateSet instanceof Set ? candidateSet : new Set(candidateSet || []);
+    if (!a.size || !b.size) return 0;
+    let overlap = 0;
+    a.forEach(v => { if (b.has(v)) overlap++; });
+    return overlap / a.size;
+}
+
+function extractMechanicKeywords(card, text) {
+    const fromCard = Array.isArray(card?.keywords) ? card.keywords : [];
+    const fullOracle = String(card?.oracle_text || (card?.card_faces ? card.card_faces.map(f => f.oracle_text || '').join(' ') : '') || '');
+    const normalizedText = normalizeMechanicToken(text);
+    const normalizedFull = normalizeMechanicToken(fullOracle);
+    const isTextSubset = Boolean(normalizedText && normalizedFull && normalizedText !== normalizedFull);
+
+    // Scryfall's `keywords` field is authoritative. When the scorer is working from a highlighted
+    // subset of Oracle text, keep only the keyword mechanics actually present in that highlighted
+    // span so an unrelated keyword elsewhere on the source card cannot inflate the mechanical score.
+    const keywords = new Set(fromCard.map(normalizeMechanicToken).filter(Boolean));
+    if (isTextSubset) {
+        for (const keyword of [...keywords]) {
+            const escaped = escapeMechanicRegexTerm(keyword).replace(/\s+/g, '\\s+');
+            if (!(new RegExp('\\b' + escaped + '\\b', 'i')).test(String(text))) keywords.delete(keyword);
+        }
+    }
+    return keywords;
+}
+
+function extractMechanicKeywordParameters(keywords, text) {
+    const params = new Set();
+    const lowerText = String(text || '').toLowerCase();
+    for (const keyword of keywords || []) {
+        const escaped = escapeMechanicRegexTerm(keyword).replace(/\s+/g, '\\s+');
+        const match = lowerText.match(new RegExp('\\b' + escaped + '\\b(?:\\s+|[-—:]\\s+)([0-9]+|x|any|all|\\{[^}]+\\})', 'i'));
+        if (match) params.add(`${keyword}:${match[1] || ''}`);
+    }
+    return params;
+}
+
+function collectRegexTokens(text, regex) {
+    const out = new Set();
+    const input = String(text || '');
+    regex.lastIndex = 0;
+    let match;
+    while ((match = regex.exec(input))) {
+        const token = normalizeMechanicToken(match[0]);
+        if (token) out.add(token);
+        if (regex.lastIndex === match.index) regex.lastIndex++;
+    }
+    return out;
+}
+
+function collectRegexGroupTokens(text, regex) {
+    const out = new Set();
+    const input = String(text || '');
+    regex.lastIndex = 0;
+    let match;
+    while ((match = regex.exec(input))) {
+        const token = normalizeMechanicToken(match[1] || match[0]);
+        if (token) out.add(token);
+        if (regex.lastIndex === match.index) regex.lastIndex++;
+    }
+    return out;
+}
+
+function buildUniversalMechanicProfile(card = null, text = '', parsedEffects = null) {
+    const oracle = String(text || card?.oracle_text || (card?.card_faces ? card.card_faces.map(f => f.oracle_text || '').join(' ') : '') || '');
+    const keywords = extractMechanicKeywords(card, oracle);
+    const keywordParameters = extractMechanicKeywordParameters(keywords, oracle);
+
+    const actions = new Set();
+    UNIVERSAL_RULE_ACTION_REGEX.lastIndex = 0;
+    let actionMatch;
+    while ((actionMatch = UNIVERSAL_RULE_ACTION_REGEX.exec(oracle))) {
+        const action = normalizeMechanicToken(actionMatch[0]);
+        if (action) actions.add(action);
+        if (UNIVERSAL_RULE_ACTION_REGEX.lastIndex === actionMatch.index) UNIVERSAL_RULE_ACTION_REGEX.lastIndex++;
+    }
+
+    const canonicalFunctions = new Set();
+    const canonicalOutcomes = new Set();
+    const parsedActions = new Set();
+    for (const effect of (parsedEffects || [])) {
+        if (!effect) continue;
+        if (effect.action && effect.action !== 'generic') parsedActions.add(normalizeMechanicToken(effect.action));
+        if (effect.canonical?.function) canonicalFunctions.add(normalizeMechanicToken(effect.canonical.function));
+        if (effect.canonical?.outcome) canonicalOutcomes.add(normalizeMechanicToken(effect.canonical.outcome));
+    }
+
+    const zoneRegex = new RegExp(
+        '(?:' + UNIVERSAL_ZONE_TERMS.map(escapeMechanicRegexTerm).map(v => v.replace(/\s+/g, '\\s+')).join('|') + ')',
+        'gi'
+    );
+    const zones = collectRegexTokens(oracle, zoneRegex);
+    const context = {};
+    for (const [name, regex] of Object.entries(UNIVERSAL_CONTEXT_PATTERNS)) context[name] = collectRegexTokens(oracle, regex);
+    const resources = collectRegexTokens(oracle, UNIVERSAL_RESOURCE_REGEX);
+    const stats = collectRegexTokens(oracle, UNIVERSAL_STAT_REGEX);
+    const counters = collectRegexTokens(oracle, UNIVERSAL_COUNTER_REGEX);
+    const tokens = collectRegexGroupTokens(oracle, UNIVERSAL_TOKEN_REGEX);
+    const manaSymbols = collectRegexTokens(oracle, UNIVERSAL_MANA_SYMBOL_REGEX);
+
+    const atoms = new Set();
+    keywords.forEach(v => atoms.add(`keyword:${v}`));
+    keywordParameters.forEach(v => atoms.add(`keyword_param:${v}`));
+    actions.forEach(v => atoms.add(`action:${v}`));
+    parsedActions.forEach(v => atoms.add(`parsed_action:${v}`));
+    canonicalFunctions.forEach(v => atoms.add(`function:${v}`));
+    canonicalOutcomes.forEach(v => atoms.add(`outcome:${v}`));
+    zones.forEach(v => atoms.add(`zone:${v}`));
+    resources.forEach(v => atoms.add(`resource:${v}`));
+    counters.forEach(v => atoms.add(`counter:${v}`));
+    tokens.forEach(v => atoms.add(`token:${v}`));
+    Object.entries(context).forEach(([kind, set]) => set.forEach(v => atoms.add(`${kind}:${v}`)));
+
+    return {
+        keywords,
+        keywordParameters,
+        actions,
+        parsedActions,
+        canonicalFunctions,
+        canonicalOutcomes,
+        zones,
+        context,
+        resources,
+        stats,
+        counters,
+        tokens,
+        manaSymbols,
+        atoms,
+        keywordCount: keywords.size,
+        actionCount: actions.size,
+        hasStructuredKeywordData: Array.isArray(card?.keywords) && card.keywords.length > 0
+    };
+}
+
+function calculateUniversalMechanicSimilarity(profileA, profileB) {
+    if (!profileA || !profileB) return {
+        score: 0, keywordCoverage: 0, keywordParameterCoverage: 0,
+        actionCoverage: 0, parsedActionCoverage: 0, functionCoverage: 0,
+        outcomeCoverage: 0, zoneCoverage: 0, targetCoverage: 0,
+        scopeCoverage: 0, triggerCoverage: 0, costCoverage: 0,
+        choiceCoverage: 0, resourceCoverage: 0, atomCoverage: 0,
+        sharedKeywords: []
+    };
+
+    const keywordCoverage = setCoverage(profileA.keywords, profileB.keywords);
+    const keywordParameterCoverage = setCoverage(profileA.keywordParameters, profileB.keywordParameters);
+    const actionCoverage = setCoverage(profileA.actions, profileB.actions);
+    const parsedActionCoverage = setCoverage(profileA.parsedActions, profileB.parsedActions);
+    const functionCoverage = setCoverage(profileA.canonicalFunctions, profileB.canonicalFunctions);
+    const outcomeCoverage = setCoverage(profileA.canonicalOutcomes, profileB.canonicalOutcomes);
+    const zoneCoverage = setCoverage(profileA.zones, profileB.zones);
+    const targetCoverage = setCoverage(profileA.context?.target, profileB.context?.target);
+    const scopeCoverage = setCoverage(profileA.context?.scope, profileB.context?.scope);
+    const triggerCoverage = setCoverage(profileA.context?.trigger, profileB.context?.trigger);
+    const costCoverage = setCoverage(profileA.context?.cost, profileB.context?.cost);
+    const choiceCoverage = setCoverage(profileA.context?.choice, profileB.context?.choice);
+    const resourceCoverage = setCoverage(profileA.resources, profileB.resources);
+    const atomCoverage = setCoverage(profileA.atoms, profileB.atoms);
+    const sharedKeywords = [...profileA.keywords].filter(k => profileB.keywords.has(k));
+
+    // Exact keyword agreement is direct mechanic evidence. It receives a strong floor even when
+    // the rest of the card is worded differently; this makes obscure/future keyword mechanics
+    // mechanically visible without having to hand-code their rules text.
+    const exactKeywordEvidence = keywordCoverage > 0
+        ? Math.min(1, 0.52 + (keywordCoverage * 0.33) + (keywordParameterCoverage * 0.10))
+        : 0;
+
+    const textMechanicEvidence = Math.max(0, Math.min(1,
+        (actionCoverage * 0.25) +
+        (parsedActionCoverage * 0.12) +
+        (functionCoverage * 0.18) +
+        (outcomeCoverage * 0.10) +
+        (zoneCoverage * 0.06) +
+        (targetCoverage * 0.08) +
+        (scopeCoverage * 0.05) +
+        (triggerCoverage * 0.05) +
+        (costCoverage * 0.03) +
+        (choiceCoverage * 0.02) +
+        (resourceCoverage * 0.06)
+    ));
+
+    const score = Math.max(exactKeywordEvidence, textMechanicEvidence, atomCoverage * 0.62);
+    return {
+        score: Math.max(0, Math.min(1, score)),
+        keywordCoverage, keywordParameterCoverage, actionCoverage,
+        parsedActionCoverage, functionCoverage, outcomeCoverage,
+        zoneCoverage, targetCoverage, scopeCoverage, triggerCoverage,
+        costCoverage, choiceCoverage, resourceCoverage, atomCoverage,
+        sharedKeywords
+    };
+}
+
+function calculateMechanicalSimilarityDetailed(parsedA, parsedB, profileA = null, profileB = null) {
+    const structural = (() => {
+        const sourceCoverage = directionalMechanicalSimilarity(parsedA, parsedB);
+        if (sourceCoverage <= 0) return 0;
+        const candidateExcess = calculateCandidateMechanicalExcess(parsedA, parsedB);
+        const excessPenalty = 0.18 * Math.pow(candidateExcess, 1.25);
+        return Math.max(0, Math.min(1, sourceCoverage * (1 - excessPenalty)));
+    })();
+
+    const universal = calculateUniversalMechanicSimilarity(
+        profileA || buildUniversalMechanicProfile(null, '', parsedA),
+        profileB || buildUniversalMechanicProfile(null, '', parsedB)
+    );
+
+    // Structural parsing remains the core signal when we understand the effect shape. The
+    // universal mechanic layer fills gaps for keywords and keyword actions the finite parser does
+    // not explicitly model. An exact shared keyword can rescue a structural zero because it is
+    // direct mechanic evidence, not a speculative semantic inference.
+    let score = Math.max(structural, structural * 0.72 + universal.score * 0.28);
+    if (universal.keywordCoverage > 0) {
+        score = Math.max(score, universal.score * 0.96);
+    } else if (structural <= 0.02 && universal.score >= 0.34) {
+        score = Math.max(score, universal.score * 0.78);
+    }
+
+    return {
+        score: Math.max(0, Math.min(1, score)),
+        structuralScore: structural,
+        universalScore: universal.score,
+        universal
+    };
+}
+
+function calculateMechanicalSimilarity(parsedA, parsedB, profileA = null, profileB = null) {
+    return calculateMechanicalSimilarityDetailed(parsedA, parsedB, profileA, profileB).score;
 }
 
 // Cache tag extraction to prevent running ~70 regex operations repeatedly per card
@@ -10155,8 +10452,13 @@ async function scoreCardBatch({
     const parsedSourceCard = Array.isArray(sourceParsedEffectsOverride) && sourceParsedEffectsOverride.length > 0
         ? sourceParsedEffectsOverride
         : parseMTGEffect(sourceTextToParse);
+    const sourceMechanicProfile = buildUniversalMechanicProfile(sourceCard, sourceTextToParse, parsedSourceCard);
+    parsedSourceCard._mechanicProfile = sourceMechanicProfile;
     const referenceEffectSets = [parsedSourceCard, ...(Array.isArray(sourceReferenceParsedEffects) ? sourceReferenceParsedEffects : [])]
         .filter(effects => Array.isArray(effects) && effects.length > 0);
+    const referenceMechanicProfiles = referenceEffectSets.map((effects, idx) =>
+        effects?._mechanicProfile || (idx === 0 ? sourceMechanicProfile : buildUniversalMechanicProfile(null, '', effects))
+    );
     // How much of the source card's text did the rule-based parser actually turn into a
     // recognized action (vs. falling back to "generic")? A card whose text mostly comes back
     // generic gives an unreliable mechanicalScore, so that score shouldn't get full authority
@@ -10200,6 +10502,8 @@ async function scoreCardBatch({
         // Exactness Score & Mechanical Similarity calculations remain independent
         card.exactnessScore = calculateCombinedFuzzyScore(sourceCard, card, exactnessText);
         const parsedCandidateCard = parseMTGEffect(cardText);
+        const candidateMechanicProfile = buildUniversalMechanicProfile(card, cardText, parsedCandidateCard);
+        parsedCandidateCard._mechanicProfile = candidateMechanicProfile;
 
         // Related-card search can have several legitimate mechanical reference cards. Score the
         // candidate against each reference and keep the strongest coherent mechanical match. This
@@ -10209,14 +10513,21 @@ async function scoreCardBatch({
         // this path is meant to avoid. The ordinary one-card search has a single reference and is
         // therefore numerically unchanged.
         let bestMechanical = null;
-        for (const referenceEffects of referenceEffectSets) {
-            const mechanical = calculateMechanicalSimilarity(referenceEffects, parsedCandidateCard);
+        for (let referenceIndex = 0; referenceIndex < referenceEffectSets.length; referenceIndex++) {
+            const referenceEffects = referenceEffectSets[referenceIndex];
+            const mechanicalDetail = calculateMechanicalSimilarityDetailed(
+                referenceEffects,
+                parsedCandidateCard,
+                referenceMechanicProfiles[referenceIndex],
+                candidateMechanicProfile
+            );
+            const mechanical = mechanicalDetail.score;
             const coverage = calculateEffectCoverageProfile(referenceEffects, parsedCandidateCard);
             const functional = calculateFunctionalSimilarity(referenceEffects, parsedCandidateCard);
             const quantity = calculateAggregateQuantitySimilarity(referenceEffects, parsedCandidateCard, coverage);
             if (!bestMechanical || mechanical > bestMechanical.mechanical ||
                 (mechanical === bestMechanical.mechanical && functional > bestMechanical.functional)) {
-                bestMechanical = { mechanical, coverage, functional, quantity, referenceEffects };
+                bestMechanical = { mechanical, coverage, functional, quantity, referenceEffects, mechanicalDetail };
             }
         }
 
@@ -10225,10 +10536,12 @@ async function scoreCardBatch({
             coverage: { sourceCoverage: 0, balancedCoverage: 0, primaryMatch: 0, matches: [] },
             functional: 0,
             quantity: 0,
-            referenceEffects: parsedSourceCard
+            referenceEffects: parsedSourceCard,
+            mechanicalDetail: calculateMechanicalSimilarityDetailed(parsedSourceCard, parsedCandidateCard, sourceMechanicProfile, candidateMechanicProfile)
         };
 
         card.mechanicalScore = bestMechanical.mechanical;
+        card.mechanicalEvidence = bestMechanical.mechanicalDetail?.universal || null;
         card.effectCoverageProfile = bestMechanical.coverage;
         card.effectCoverageScore = card.effectCoverageProfile.sourceCoverage;
         card.balancedEffectCoverage = card.effectCoverageProfile.balancedCoverage;
@@ -10630,9 +10943,17 @@ async function executeRelatedCardSearch() {
         // effects of every selected/source card as reference lanes. If the shared phrases are too
         // fragmentary for the parser, the full-card references still provide reliable mechanical
         // structure without requiring literal wording to match.
+        const relatedKeywordSeedCard = {
+            keywords: [...new Set(allCardsInSet.flatMap(card => Array.isArray(card?.keywords) ? card.keywords : []))]
+        };
         const parsedPatternEffects = parseMTGEffect(combinedTargetText);
+        parsedPatternEffects._mechanicProfile = buildUniversalMechanicProfile(relatedKeywordSeedCard, combinedTargetText, parsedPatternEffects);
         const relatedReferenceParsedEffects = allCardsInSet
-            .map(card => parseMTGEffect(getCurrentSourceOracleText(card)))
+            .map(card => {
+                const effects = parseMTGEffect(getCurrentSourceOracleText(card));
+                effects._mechanicProfile = buildUniversalMechanicProfile(card, getCurrentSourceOracleText(card), effects);
+                return effects;
+            })
             .filter(effects => Array.isArray(effects) && effects.length > 0);
         const relatedPrimaryParsedEffects = parsedPatternEffects.length > 0
             ? parsedPatternEffects
@@ -11256,10 +11577,13 @@ async function findSimilarCards() {
         let previewRenderLabel = '';
         let previewLastRenderedAt = 0;
 
+        const previewSourceMechanicProfile = buildUniversalMechanicProfile(currentSourceCard, targetTextForScoring, sourceParsedEffects);
+
         function computePreviewScore(card) {
             const cText = card.oracle_text || (card.card_faces ? card.card_faces.map(f => f.oracle_text).join(' ') : '');
             const cParsed = parseMTGEffect(cText);
-            const mech = calculateMechanicalSimilarity(sourceParsedEffects, cParsed);
+            const cProfile = buildUniversalMechanicProfile(card, cText, cParsed);
+            const mech = calculateMechanicalSimilarity(sourceParsedEffects, cParsed, previewSourceMechanicProfile, cProfile);
             const cat = calculateCategoryScore(card, activeTags);
             const syn = calculateSynergyScore(currentSourceCard, card, filters);
             // Weighted toward mechanical since it's the most direct "does this do the same
