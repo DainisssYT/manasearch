@@ -1,0 +1,3300 @@
+:root {
+    --bg-primary: #121214;
+    --bg-secondary: #1a1a1e;
+    --bg-accent: #2a2a30;
+    --text-main: #e1e1e6;
+    --text-muted: #a8a8b3;
+    --accent-color: #6200ee;
+    --accent-hover: #7f39fb;
+    --border-color: #323238;
+}
+
+body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    background-color: var(--bg-primary);
+    color: var(--text-main);
+    margin: 0;
+    padding: 0;
+    line-height: 1.6;
+}
+
+header {
+    background-color: var(--bg-secondary);
+    padding: 20px;
+    text-align: center;
+    border-bottom: 1px solid var(--border-color);
+}
+
+.search-container {
+    margin-top: 15px;
+    display: flex;
+    justify-content: center;
+    gap: 10px;
+}
+
+input[type="text"], select {
+    background-color: var(--bg-accent);
+    color: var(--text-main);
+    border: 1px solid var(--border-color);
+    padding: 10px 15px;
+    border-radius: 6px;
+    font-size: 16px;
+}
+
+input[type="text"] {
+    width: 350px;
+}
+
+button {
+    background-color: var(--accent-color);
+    color: white;
+    border: none;
+    padding: 10px 20px;
+    border-radius: 6px;
+    font-size: 16px;
+    cursor: pointer;
+    transition: background-color 0.2s;
+}
+
+button:hover:not(:disabled) {
+    background-color: var(--accent-hover);
+}
+
+button:disabled {
+    background-color: var(--border-color);
+    color: var(--text-muted);
+    cursor: not-allowed;
+}
+
+main {
+    max-width: 1200px;
+    margin: 0 auto;
+    padding: 20px;
+}
+
+section {
+    background-color: var(--bg-secondary);
+    border-radius: 8px;
+    padding: 20px;
+    margin-bottom: 20px;
+    border: 1px solid var(--border-color);
+}
+
+.hidden {
+    display: none !important;
+}
+
+/* Source Card Inspection styles */
+.card-inspector {
+    display: flex;
+    gap: 20px;
+    flex-wrap: wrap;
+}
+
+.card-inspector img {
+    max-width: 240px;
+    height: auto;
+    border-radius: 4%;
+}
+
+.card-details {
+    flex: 1;
+    min-width: 300px;
+}
+
+.oracle-container {
+    background-color: var(--bg-accent);
+    padding: 15px;
+    border-radius: 6px;
+    border-left: 4px solid var(--accent-color);
+    margin: 15px 0;
+}
+
+.selectable-text {
+    user-select: text;
+    font-style: italic;
+    white-space: pre-wrap;
+    margin-top: 10px;
+}
+
+.instruction-note {
+    font-size: 13px;
+    color: var(--text-muted);
+}
+
+/* Filters layout */
+.filters-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 15px;
+    margin-bottom: 15px;
+}
+
+.filter-group {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+}
+
+/* Classic WUBRG "pip" color picker, used for Color Identity / Exact Colors filters. Each pip is
+   a toggle button tinted with that color's traditional Magic pip color; .active marks it as
+   currently included in the filter. Muted/desaturated when inactive so the active selection
+   reads clearly at a glance, the way Scryfall's and EDHREC's own color pickers do. */
+.color-pip-group {
+    display: flex;
+    gap: 6px;
+}
+
+.color-pip {
+    width: 32px;
+    height: 32px;
+    border-radius: 50%;
+    border: 2px solid var(--border-color);
+    font-weight: 700;
+    font-size: 13px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+    line-height: 1;
+    transition: transform 0.1s, filter 0.15s;
+    filter: grayscale(85%) opacity(0.55);
+    color: #1a1a1e;
+}
+
+.color-pip:hover {
+    transform: scale(1.08);
+    filter: grayscale(40%) opacity(0.8);
+}
+
+.color-pip.active {
+    filter: none;
+    border-color: var(--accent-color);
+    box-shadow: 0 0 0 2px var(--accent-color);
+}
+
+.pip-w { background-color: #f8f6d8; }
+.pip-u { background-color: #4f9fe8; color: #0a0a0a; }
+.pip-b { background-color: #6b6b6b; color: #f1f1f1; }
+.pip-r { background-color: #e8734f; }
+.pip-g { background-color: #5fa85f; }
+.pip-c { background-color: #c0c0c8; }
+
+/* Results grid layout */
+.results-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+    gap: 20px;
+}
+
+.card-item {
+    background-color: var(--bg-accent);
+    border-radius: 8px;
+    overflow: hidden;
+    border: 1px solid var(--border-color);
+    transition: transform 0.2s;
+}
+
+.card-item:hover {
+    transform: translateY(-4px);
+}
+
+.card-item img {
+    width: 100%;
+    height: auto;
+    display: block;
+}
+
+.card-item-info {
+    padding: 12px;
+}
+
+.card-item-title {
+    margin: 0 0 5px 0;
+    font-size: 16px;
+}
+
+.card-item-link {
+    display: inline-block;
+    margin-top: 10px;
+    color: #9880ff;
+    text-decoration: none;
+    font-size: 14px;
+}
+
+/* Loading Spinner */
+#loading-indicator {
+    text-align: center;
+    padding: 40px;
+}
+
+.spinner {
+    border: 4px solid var(--bg-accent);
+    border-top: 4px solid var(--accent-color);
+    border-radius: 50%;
+    width: 40px;
+    height: 40px;
+    animation: spin 1s linear infinite;
+    margin: 0 auto 10px;
+}
+
+@keyframes spin {
+    0% { transform: rotate(0deg); }
+    100% { transform: rotate(360deg); }
+}
+
+/* Per-stream progress checklist: small pill-style indicators, one per retrieval stream, so the
+   user can see which specific stage is still pending instead of only one aggregate line. */
+.stream-checklist {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 6px;
+    margin-top: 12px;
+}
+
+.stream-checklist .stream-chip {
+    font-size: 11px;
+    padding: 3px 9px;
+    border-radius: 999px;
+    border: 1px solid var(--bg-accent);
+    color: var(--text-secondary);
+    background-color: var(--bg-accent);
+    transition: background-color 0.2s ease, color 0.2s ease, border-color 0.2s ease;
+}
+
+.stream-checklist .stream-chip.stream-done {
+    color: var(--accent-color);
+    border-color: var(--accent-color);
+    background-color: color-mix(in srgb, var(--accent-color) 12%, transparent);
+}
+
+.stream-checklist .stream-chip.stream-done::before {
+    content: "\2713 ";
+}
+
+/* A card added to the results grid by a later progressive-preview update than the one the user
+   is currently looking at - a brief highlight instead of a silent reshuffle, so a newly-arrived
+   card reads as "the list grew" rather than a confusing, unexplained jump. */
+.card-item.newly-added {
+    animation: newly-added-flash 1.6s ease-out;
+}
+
+@keyframes newly-added-flash {
+    0% { box-shadow: 0 0 0 2px var(--accent-color); }
+    100% { box-shadow: 0 0 0 0px transparent; }
+}
+
+/* Add Light Theme Variables at the top of your CSS file */
+body.light-theme {
+    --bg-primary: #f4f4f5;
+    --bg-secondary: #ffffff;
+    --bg-accent: #e4e4e7;
+    --text-main: #18181b;
+    --text-muted: #52525b;
+    --border-color: #d4d4d8;
+}
+
+/* Header Top Section */
+.header-top {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    max-width: 1200px;
+    margin: 0 auto;
+}
+
+#theme-toggle {
+    background-color: var(--bg-accent);
+    color: var(--text-main);
+    border: 1px solid var(--border-color);
+}
+
+/* App Layout with Sidebar */
+.app-layout {
+    display: flex;
+    gap: 20px;
+    max-width: 1400px;
+    margin: 0 auto;
+}
+
+.sidebar {
+    width: 250px;
+    flex-shrink: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+}
+
+.sidebar-section {
+    background-color: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    padding: 15px;
+}
+
+.sidebar-section h3 {
+    margin-top: 0;
+    font-size: 16px;
+    border-bottom: 1px solid var(--border-color);
+    padding-bottom: 10px;
+}
+
+.main-content {
+    flex-grow: 1;
+}
+
+/* Lists (History & Favorites) */
+.list-container {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+}
+
+.list-container li {
+    padding: 8px;
+    border-bottom: 1px solid var(--border-color);
+    cursor: pointer;
+    font-size: 14px;
+    transition: background-color 0.2s;
+}
+
+.list-container li:hover {
+    background-color: var(--bg-accent);
+}
+
+.list-container li:last-child {
+    border-bottom: none;
+}
+
+/* Header with buttons */
+.card-header, .results-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+#favorite-btn {
+    background-color: transparent;
+    border: 1px solid var(--accent-color);
+    color: var(--accent-color);
+    padding: 5px 15px;
+}
+
+#favorite-btn:hover {
+    background-color: var(--accent-color);
+    color: white;
+}
+
+#export-btn {
+    background-color: #059669; /* Green for export */
+}
+#export-btn:hover {
+    background-color: #047857;
+}
+
+.search-deeper-row {
+    display: flex;
+    justify-content: center;
+    margin-top: 20px;
+}
+
+#search-deeper-btn {
+    background-color: transparent;
+    border: 1px solid var(--accent-color);
+    color: var(--accent-color);
+    padding: 8px 20px;
+}
+#search-deeper-btn:hover:not(:disabled) {
+    background-color: var(--accent-color);
+    color: white;
+}
+#search-deeper-btn:disabled {
+    opacity: 0.6;
+    cursor: default;
+}
+#search-deeper-btn.hidden {
+    display: none;
+}
+
+.setting-hint {
+    font-size: 12px;
+    color: var(--text-muted);
+    margin-top: 6px;
+}
+
+/* Ensure results section handles hidden properly */
+#results-section.hidden {
+    display: none !important;
+}
+
+/* --- REPLACE YOUR EXISTING INPUT STYLES WITH THIS --- */
+input[type="text"], input[type="number"], select {
+    background-color: var(--bg-accent);
+    color: var(--text-main);
+    border: 1px solid var(--border-color);
+    padding: 10px 15px;
+    border-radius: 6px;
+    font-size: 16px;
+    width: 100%; /* Let grid handle the width */
+    box-sizing: border-box; /* Ensure padding doesn't break width */
+}
+
+/* Target the top search bar specifically so it stays wide */
+#card-search-input {
+    width: 350px;
+    max-width: 100%;
+}
+/* ---------------------------------------------------- */
+
+
+/* --- ADD TO THE BOTTOM OF style.css --- */
+/* Comparison Modal */
+#compare-modal {
+    position: fixed;
+    top: 0; left: 0; width: 100%; height: 100%;
+    background-color: rgba(0, 0, 0, 0.8);
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    z-index: 1000;
+}
+
+#compare-modal.hidden {
+    display: none !important;
+}
+
+.modal-content {
+    background-color: var(--bg-secondary);
+    padding: 20px;
+    border-radius: 8px;
+    width: 90%;
+    max-width: 900px;
+    position: relative;
+    border: 1px solid var(--border-color);
+}
+
+#close-modal {
+    position: absolute;
+    top: 15px;
+    right: 20px;
+    font-size: 28px;
+    cursor: pointer;
+    color: var(--text-muted);
+}
+
+#close-modal:hover {
+    color: var(--text-main);
+}
+
+.compare-container {
+    display: flex;
+    gap: 20px;
+    justify-content: space-around;
+    margin-top: 20px;
+}
+
+.compare-card {
+    flex: 1;
+    text-align: center;
+    background-color: var(--bg-accent);
+    padding: 15px;
+    border-radius: 8px;
+}
+
+.compare-card img {
+    max-width: 100%;
+    border-radius: 4.5%;
+    margin-bottom: 15px;
+}
+
+.compare-btn {
+    margin-top: 10px;
+    background-color: var(--bg-primary);
+    border: 1px solid var(--border-color);
+    width: 100%;
+}
+
+/* Custom highlight styles for user selection */
+.highlight-active {
+    font-weight: inherit;
+    color: inherit;
+    border-radius: 3px;
+    padding: 1px 2px;
+    box-decoration-break: clone;
+    -webkit-box-decoration-break: clone;
+}
+
+.bonus-positive {
+    color: #10b981; /* Green */
+    font-weight: bold;
+}
+
+.bonus-negative {
+    color: #ef4444; /* Red */
+    font-weight: bold;
+}
+
+/* Broad Search Checkbox Custom Styles */
+.checkbox-group {
+    display: flex;
+    flex-direction: column;
+}
+
+.checkbox-container:hover {
+    border-color: var(--text-muted);
+}
+
+.checkbox-container input[type="checkbox"] {
+    width: 16px;
+    height: 16px;
+    cursor: pointer;
+    accent-color: var(--text-muted); /* Grayscale UI */
+    margin: 0;
+}
+
+:root {
+    --bg-primary: #121214;
+    --bg-secondary: #1a1a1e;
+    --bg-accent: #2a2a30;
+    --text-main: #e1e1e6;
+    --text-muted: #a8a8b3;
+    --accent-color: #6200ee;
+    --accent-hover: #7f39fb;
+    --border-color: #323238;
+}
+
+body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    background-color: var(--bg-primary);
+    color: var(--text-main);
+    margin: 0;
+    padding: 0;
+    line-height: 1.6;
+    padding-bottom: 80px; /* Space for floating action bar */
+}
+
+header {
+    background-color: var(--bg-secondary);
+    padding: 20px;
+    text-align: center;
+    border-bottom: 1px solid var(--border-color);
+}
+
+.search-container {
+    margin-top: 15px;
+    display: flex;
+    justify-content: center;
+    gap: 10px;
+}
+
+input[type="text"], input[type="number"], select {
+    background-color: var(--bg-accent);
+    color: var(--text-main);
+    border: 1px solid var(--border-color);
+    padding: 10px 15px;
+    border-radius: 6px;
+    font-size: 16px;
+    width: 100%;
+    box-sizing: border-box;
+}
+
+#card-search-input {
+    width: 350px;
+    max-width: 100%;
+}
+
+button {
+    background-color: var(--accent-color);
+    color: white;
+    border: none;
+    padding: 10px 20px;
+    border-radius: 6px;
+    font-size: 16px;
+    cursor: pointer;
+    transition: background-color 0.2s;
+}
+
+button:hover:not(:disabled) {
+    background-color: var(--accent-hover);
+}
+
+button:disabled {
+    background-color: var(--border-color);
+    color: var(--text-muted);
+    cursor: not-allowed;
+}
+
+main {
+    max-width: 1200px;
+    margin: 0 auto;
+    padding: 20px;
+}
+
+section {
+    background-color: var(--bg-secondary);
+    border-radius: 8px;
+    padding: 20px;
+    margin-bottom: 20px;
+    border: 1px solid var(--border-color);
+}
+
+.hidden {
+    display: none !important;
+}
+
+/* Source Card Inspection styles */
+.card-inspector {
+    display: flex;
+    gap: 20px;
+    flex-wrap: wrap;
+}
+
+.card-inspector img {
+    max-width: 240px;
+    height: auto;
+    border-radius: 4%;
+}
+
+.card-details {
+    flex: 1;
+    min-width: 300px;
+}
+
+.oracle-container {
+    background-color: var(--bg-accent);
+    padding: 15px;
+    border-radius: 6px;
+    border-left: 4px solid var(--accent-color);
+    margin: 15px 0;
+}
+
+.selectable-text {
+    user-select: text;
+    font-style: italic;
+    white-space: pre-wrap;
+    margin-top: 10px;
+}
+
+.instruction-note {
+    font-size: 13px;
+    color: var(--text-muted);
+}
+
+/* Filters layout */
+.filters-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 15px;
+    margin-bottom: 15px;
+}
+
+.filter-group {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+}
+
+/* Shown only while the fast "First look" preview (Search A results, before the full scored
+   pipeline finishes) is on screen, so the grid itself signals "not final yet" instead of relying
+   on the status text above the grid, which is easy to miss once cards are already visible. */
+.provisional-results-banner {
+    margin-bottom: 14px;
+    padding: 8px 14px;
+    border-radius: 6px;
+    background-color: color-mix(in srgb, var(--accent-color) 15%, transparent);
+    border: 1px dashed var(--accent-color);
+    color: var(--text-primary);
+    font-size: 13px;
+    text-align: center;
+    animation: provisional-pulse 1.6s ease-in-out infinite;
+}
+
+.provisional-results-banner.hidden {
+    display: none;
+}
+
+@keyframes provisional-pulse {
+    0%, 100% { opacity: 0.75; }
+    50% { opacity: 1; }
+}
+
+/* A result shown only because the minimum-result backfill relaxed the relevance floor to hit a
+   quota, not because it genuinely cleared the usual bar - visually distinguished so it doesn't
+   read with the same confidence as a real match (rank system item 6). */
+.weak-match-badge {
+    font-size: 10px;
+    color: #b8860b;
+    background-color: rgba(184, 134, 11, 0.12);
+    border: 1px solid rgba(184, 134, 11, 0.4);
+    border-radius: 4px;
+    padding: 2px 6px;
+    margin: 0 0 6px 0;
+    display: inline-block;
+    width: fit-content;
+}
+
+/* Results grid layout */
+.results-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+    gap: 20px;
+}
+
+.card-item {
+    position: relative;
+    background-color: var(--bg-accent);
+    border-radius: 8px;
+    overflow: hidden;
+    border: 1px solid var(--border-color);
+    transition: transform 0.2s, border-color 0.2s;
+}
+
+.card-item.selected-card {
+    border: 2px solid var(--accent-color);
+}
+
+.card-item:hover {
+    transform: translateY(-4px);
+}
+
+.card-item img {
+    width: 100%;
+    height: auto;
+    display: block;
+}
+
+/* Checkbox Top-Right Styling */
+.card-select-container {
+    /* Removed absolute positioning */
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    padding: 6px 10px;
+    border-radius: 6px;
+    display: flex;
+    align-items: center;
+    justify-content: center; /* Center it nicely below the stats */
+    gap: 6px;
+    font-size: 13px;
+    cursor: pointer;
+    user-select: none;
+    margin-top: 8px; /* Adds space between the price and the checkbox */
+    transition: background-color 0.2s;
+}
+
+.card-select-container:hover {
+    background-color: var(--bg-accent);
+}
+
+.card-select-container input[type="checkbox"] {
+    cursor: pointer;
+    width: 15px;
+    height: 15px;
+    accent-color: var(--accent-color);
+    margin: 0;
+}
+
+.card-item-info {
+    padding: 12px;
+}
+
+.card-item-title {
+    margin: 0 0 5px 0;
+    font-size: 16px;
+}
+
+.card-item-link {
+    display: inline-block;
+    color: #9880ff;
+    text-decoration: none;
+    font-size: 14px;
+}
+
+/* Price label styling */
+.card-price-label {
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text-main);
+    background-color: var(--bg-secondary);
+    padding: 3px 6px;
+    border-radius: 4px;
+    border: 1px solid var(--border-color);
+    margin-top: 4px;
+    display: inline-block;
+}
+
+/* Loading Spinner */
+#loading-indicator {
+    text-align: center;
+    padding: 40px;
+}
+
+.spinner {
+    border: 4px solid var(--bg-accent);
+    border-top: 4px solid var(--accent-color);
+    border-radius: 50%;
+    width: 40px;
+    height: 40px;
+    animation: spin 1s linear infinite;
+    margin: 0 auto 10px;
+}
+
+@keyframes spin {
+    0% { transform: rotate(0deg); }
+    100% { transform: rotate(360deg); }
+}
+
+/* Light Theme Variables */
+body.light-theme {
+    --bg-primary: #f4f4f5;
+    --bg-secondary: #ffffff;
+    --bg-accent: #e4e4e7;
+    --text-main: #18181b;
+    --text-muted: #52525b;
+    --border-color: #d4d4d8;
+}
+
+.header-top {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    max-width: 1200px;
+    margin: 0 auto;
+}
+
+#theme-toggle {
+    background-color: var(--bg-accent);
+    color: var(--text-main);
+    border: 1px solid var(--border-color);
+}
+
+.app-layout {
+    display: flex;
+    gap: 20px;
+    max-width: 1400px;
+    margin: 0 auto;
+}
+
+.sidebar {
+    width: 250px;
+    flex-shrink: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+}
+
+.sidebar-section {
+    background-color: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    padding: 15px;
+}
+
+.sidebar-section h3 {
+    margin-top: 0;
+    font-size: 16px;
+    border-bottom: 1px solid var(--border-color);
+    padding-bottom: 10px;
+}
+
+.main-content {
+    flex-grow: 1;
+}
+
+.list-container {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+}
+
+.list-container li {
+    padding: 8px;
+    border-bottom: 1px solid var(--border-color);
+    cursor: pointer;
+    font-size: 14px;
+    transition: background-color 0.2s;
+}
+
+.list-container li:hover {
+    background-color: var(--bg-accent);
+}
+
+.list-container li:last-child {
+    border-bottom: none;
+}
+
+.card-header, .results-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+#favorite-btn {
+    background-color: transparent;
+    border: 1px solid var(--accent-color);
+    color: var(--accent-color);
+    padding: 5px 15px;
+}
+
+#favorite-btn:hover {
+    background-color: var(--accent-color);
+    color: white;
+}
+
+#export-btn {
+    background-color: #059669;
+}
+#export-btn:hover {
+    background-color: #047857;
+}
+
+#results-section.hidden {
+    display: none !important;
+}
+
+/* Comparison Modal */
+#compare-modal {
+    position: fixed;
+    top: 0; left: 0; width: 100%; height: 100%;
+    background-color: rgba(0, 0, 0, 0.8);
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    z-index: 1000;
+}
+
+#compare-modal.hidden {
+    display: none !important;
+}
+
+.modal-content {
+    background-color: var(--bg-secondary);
+    padding: 20px;
+    border-radius: 8px;
+    width: 90%;
+    max-width: 900px;
+    position: relative;
+    border: 1px solid var(--border-color);
+}
+
+#close-modal {
+    position: absolute;
+    top: 15px;
+    right: 20px;
+    font-size: 28px;
+    cursor: pointer;
+    color: var(--text-muted);
+}
+
+#close-modal:hover {
+    color: var(--text-main);
+}
+
+.compare-container {
+    display: flex;
+    gap: 20px;
+    justify-content: space-around;
+    margin-top: 20px;
+}
+
+.compare-card {
+    flex: 1;
+    text-align: center;
+    background-color: var(--bg-accent);
+    padding: 15px;
+    border-radius: 8px;
+}
+
+.compare-card img {
+    max-width: 100%;
+    border-radius: 4.5%;
+    margin-bottom: 15px;
+}
+
+.compare-btn {
+    margin-top: 10px;
+    background-color: var(--bg-primary);
+    border: 1px solid var(--border-color);
+    width: 100%;
+}
+
+.highlight-active {
+    font-weight: inherit;
+    color: inherit;
+    border-radius: 3px;
+    padding: 1px 2px;
+    box-decoration-break: clone;
+    -webkit-box-decoration-break: clone;
+}
+
+.bonus-positive {
+    color: #10b981;
+    font-weight: bold;
+}
+
+.bonus-negative {
+    color: #ef4444;
+    font-weight: bold;
+}
+
+.checkbox-group {
+    display: flex;
+    flex-direction: column;
+}
+
+.checkbox-container {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    cursor: pointer;
+    background-color: var(--bg-accent);
+    color: var(--text-main);
+    border: 1px solid var(--border-color);
+    padding: 10px 15px;
+    border-radius: 6px;
+    font-size: 14px;
+    box-sizing: border-box;
+    height: 44px;
+    user-select: none;
+    transition: border-color 0.2s;
+}
+
+.checkbox-container:hover {
+    border-color: var(--text-muted);
+}
+
+.checkbox-container input[type="checkbox"] {
+    width: 16px;
+    height: 16px;
+    cursor: pointer;
+    accent-color: var(--text-muted);
+    margin: 0;
+}
+
+/* FLOATING ACTION BAR FOR RELATED CARDS */
+.floating-bar {
+    position: fixed;
+    bottom: 20px;
+    left: 50%;
+    transform: translateX(-50%);
+    width: 90%;
+    max-width: 1000px;
+    background-color: var(--bg-secondary);
+    border: 1px solid var(--accent-color);
+    border-radius: 12px;
+    padding: 12px 20px;
+    box-shadow: 0 10px 25px rgba(0, 0, 0, 0.5);
+    z-index: 999;
+    backdrop-filter: blur(8px);
+}
+
+.floating-bar-content {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 15px;
+    flex-wrap: wrap;
+}
+
+.selected-cards-info {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    overflow-x: auto;
+    max-width: 65%;
+    
+    /* Add these to hide the scrollbar in Firefox and IE/Edge */
+    scrollbar-width: none;
+    -ms-overflow-style: none;
+}
+
+.selected-cards-info::-webkit-scrollbar {
+    display: none;
+}
+
+.selected-count-label {
+    font-size: 13px;
+    font-weight: bold;
+    color: var(--text-muted);
+    white-space: nowrap;
+}
+
+.chips-list {
+    display: flex;
+    gap: 6px;
+    flex-wrap: nowrap;
+}
+
+.card-chip {
+    background-color: var(--bg-accent);
+    border: 1px solid var(--border-color);
+    color: var(--text-main);
+    padding: 4px 10px;
+    border-radius: 16px;
+    font-size: 12px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    white-space: nowrap;
+}
+
+.card-chip-remove {
+    cursor: pointer;
+    font-weight: bold;
+    color: var(--text-muted);
+}
+
+/* Multi-highlight chips (oracle-text selection) - modeled on .card-chip, with an added
+   mode-toggle button distinguishing 'exact' (must literally appear on a match) from 'variable'
+   (a structural slot whose specific wording/value can differ). */
+.highlight-mode-btn {
+    border: none;
+    border-radius: 10px;
+    padding: 2px 8px;
+    font-size: 11px;
+    font-weight: 600;
+    cursor: pointer;
+    white-space: nowrap;
+}
+.highlight-mode-btn.mode-exact {
+    background-color: rgba(98, 0, 238, 0.25);
+    color: var(--accent-color);
+}
+.highlight-mode-btn.mode-variable {
+    background-color: rgba(234, 179, 8, 0.2);
+    color: #d97706;
+}
+.highlight-mode-btn:hover {
+    filter: brightness(1.2);
+}
+
+/* In-text highlight coloring mirrors the chip's mode colors, so it's clear at a glance which
+   highlighted spans are required verbatim vs. flexible, without needing to check the chip list. */
+.highlight-active.highlight-exact {
+    color: var(--text-main);
+    background-color: rgba(98, 0, 238, 0.28);
+    box-shadow: 0 0 0 1px rgba(98, 0, 238, 0.16);
+}
+.highlight-active.highlight-variable {
+    color: var(--text-main);
+    background-color: rgba(234, 179, 8, 0.30);
+    box-shadow: 0 0 0 1px rgba(234, 179, 8, 0.18);
+}
+
+.card-chip-remove:hover {
+    color: #ef4444;
+}
+
+.floating-bar-actions {
+    display: flex;
+    gap: 10px;
+}
+
+.clear-btn {
+    background-color: transparent;
+    border: 1px solid var(--border-color);
+    color: var(--text-muted);
+}
+.clear-btn:hover {
+    background-color: var(--bg-accent);
+    color: var(--text-main);
+}
+
+.related-search-btn {
+    background-color: var(--accent-color);
+    font-weight: bold;
+}
+.related-search-btn:hover {
+    background-color: var(--accent-hover);
+}
+
+.card-inspector {
+    display: flex;
+    gap: 20px;
+    flex-wrap: wrap;
+    align-items: flex-start; /* Prevents flex items from stretching to match text column height */
+}
+
+.card-inspector img {
+    width: 240px;
+    max-width: 100%;
+    aspect-ratio: 63 / 88;   /* Standard MTG card dimensions ratio (63mm x 88mm) */
+    object-fit: contain;     /* Preserves image frame scaling without stretching */
+    flex-shrink: 0;          /* Keeps image from squishing horizontally */
+    border-radius: 4.5%;
+}
+
+/* Maintain consistent 2px border width */
+.card-item {
+    position: relative;
+    background-color: var(--bg-accent);
+    border-radius: 8px;
+    overflow: hidden;
+    border: 2px solid var(--border-color); /* Set to 2px by default */
+    transition: border-color 0.2s;
+}
+
+.card-item.selected-card {
+    border-color: var(--accent-color); /* Only change color, not width */
+}
+
+.card-item img {
+    width: 100%;
+    aspect-ratio: 5 / 7; /* Fits standard MTG card dimensions */
+    object-fit: cover;
+    display: block;
+}
+
+.card-inspector img {
+    max-width: 240px;
+    width: 100%;
+    aspect-ratio: 5 / 7;
+    height: auto;
+    border-radius: 4%;
+}
+
+.card-item-info {
+    padding: 12px;
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+}
+
+.card-item-title {
+    margin: 0 0 5px 0;
+    font-size: 16px;
+    min-height: 2.6em; /* Reserves 2 lines for card titles */
+    display: -webkit-box;
+    line-clamp: 2;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+}
+
+#card-tags-container {
+    width: 100%;
+    box-sizing: border-box;
+}
+
+/* --- SEARCH METHODS PANEL & MODAL STYLES --- */
+.section-title-bar {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 15px;
+    border-bottom: 1px solid var(--border-color);
+    padding-bottom: 10px;
+}
+
+.section-title-bar h2 {
+    margin: 0;
+}
+
+.filter-group-title {
+    font-size: 13px;
+    font-weight: bold;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    margin: 15px 0 10px 0;
+}
+
+.methods-trigger-btn {
+    background-color: var(--bg-accent);
+    color: var(--text-main);
+    border: 1px solid var(--border-color);
+    padding: 8px 16px;
+    border-radius: 20px;
+    font-size: 14px;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    transition: all 0.2s ease;
+}
+
+.methods-trigger-btn:hover {
+    background-color: var(--border-color);
+    border-color: var(--accent-color);
+}
+
+.badge {
+    background-color: var(--accent-color);
+    color: #fff;
+    font-size: 11px;
+    padding: 2px 8px;
+    border-radius: 10px;
+    font-weight: bold;
+}
+
+.modal-backdrop {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100vw;
+    height: 100vh;
+    background-color: rgba(0, 0, 0, 0.7);
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    z-index: 1050;
+    backdrop-filter: blur(4px);
+}
+
+.modal-card {
+    background-color: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: 12px;
+    width: 90%;
+    max-width: 520px;
+    padding: 20px;
+    box-shadow: 0 12px 30px rgba(0, 0, 0, 0.5);
+}
+
+.modal-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    border-bottom: 1px solid var(--border-color);
+    padding-bottom: 12px;
+    margin-bottom: 16px;
+}
+
+.modal-header h3 {
+    margin: 0;
+    font-size: 18px;
+}
+
+.close-btn {
+    font-size: 24px;
+    cursor: pointer;
+    color: var(--text-muted);
+}
+
+.close-btn:hover {
+    color: var(--text-main);
+}
+
+.methods-list {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+.method-card {
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+    background-color: var(--bg-accent);
+    padding: 12px;
+    border-radius: 8px;
+    border: 1px solid var(--border-color);
+    cursor: pointer;
+    transition: border-color 0.2s;
+}
+
+.method-card:hover {
+    border-color: var(--accent-color);
+}
+
+.method-card input[type="checkbox"] {
+    margin-top: 4px;
+    width: 18px;
+    height: 18px;
+    accent-color: var(--accent-color);
+}
+
+.method-text strong {
+    display: block;
+    font-size: 14px;
+    color: var(--text-main);
+}
+
+.method-text span {
+    font-size: 12px;
+    color: var(--text-muted);
+}
+
+.method-setting-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    background-color: var(--bg-accent);
+    padding: 12px;
+    border-radius: 8px;
+    border: 1px solid var(--border-color);
+}
+
+.modal-footer {
+    display: flex;
+    justify-content: flex-end;
+    margin-top: 20px;
+}
+
+:root {
+    --bg-primary: #121214;
+    --bg-secondary: #1a1a1e;
+    --bg-accent: #2a2a30;
+    --text-main: #e1e1e6;
+    --text-muted: #a8a8b3;
+    --accent-color: #6200ee;
+    --accent-hover: #7f39fb;
+    --border-color: #323238;
+}
+
+body.light-theme {
+    --bg-primary: #f4f4f5;
+    --bg-secondary: #ffffff;
+    --bg-accent: #e4e4e7;
+    --text-main: #18181b;
+    --text-muted: #52525b;
+    --border-color: #d4d4d8;
+}
+
+body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    background-color: var(--bg-primary);
+    color: var(--text-main);
+    margin: 0;
+    padding: 0;
+    line-height: 1.6;
+    padding-bottom: 80px;
+}
+
+header {
+    background-color: var(--bg-secondary);
+    padding: 20px;
+    text-align: center;
+    border-bottom: 1px solid var(--border-color);
+}
+
+.header-top {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    max-width: 1200px;
+    margin: 0 auto;
+}
+
+#theme-toggle {
+    background-color: var(--bg-accent);
+    color: var(--text-main);
+    border: 1px solid var(--border-color);
+}
+
+.search-container {
+    margin-top: 15px;
+    display: flex;
+    justify-content: center;
+    gap: 10px;
+}
+
+input[type="text"], input[type="number"], select {
+    background-color: var(--bg-accent);
+    color: var(--text-main);
+    border: 1px solid var(--border-color);
+    padding: 10px 15px;
+    border-radius: 6px;
+    font-size: 16px;
+    width: 100%;
+    box-sizing: border-box;
+}
+
+#card-search-input {
+    width: 350px;
+    max-width: 100%;
+}
+
+button {
+    background-color: var(--accent-color);
+    color: white;
+    border: none;
+    padding: 10px 20px;
+    border-radius: 6px;
+    font-size: 16px;
+    cursor: pointer;
+    transition: background-color 0.2s;
+}
+
+button:hover:not(:disabled) {
+    background-color: var(--accent-hover);
+}
+
+button:disabled {
+    background-color: var(--border-color);
+    color: var(--text-muted);
+    cursor: not-allowed;
+}
+
+main {
+    max-width: 1400px;
+    margin: 0 auto;
+    padding: 20px;
+}
+
+.app-layout {
+    display: flex;
+    gap: 20px;
+}
+
+.sidebar {
+    width: 250px;
+    flex-shrink: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+}
+
+.sidebar-section {
+    background-color: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    padding: 15px;
+}
+
+.sidebar-section h3 {
+    margin-top: 0;
+    font-size: 16px;
+    border-bottom: 1px solid var(--border-color);
+    padding-bottom: 10px;
+}
+
+.main-content {
+    flex-grow: 1;
+}
+
+section {
+    background-color: var(--bg-secondary);
+    border-radius: 8px;
+    padding: 20px;
+    margin-bottom: 20px;
+    border: 1px solid var(--border-color);
+}
+
+.hidden {
+    display: none !important;
+}
+
+/* SECTION HEADER & MODAL TRIGGER BUTTONS */
+.section-title-bar {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 10px;
+    margin-bottom: 10px;
+}
+
+.section-title-bar h2 {
+    margin: 0;
+}
+
+.trigger-buttons-group {
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+}
+
+.methods-trigger-btn {
+    background-color: var(--bg-accent);
+    color: var(--text-main);
+    border: 1px solid var(--border-color);
+    padding: 8px 14px;
+    border-radius: 6px;
+    font-size: 14px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    cursor: pointer;
+    transition: background-color 0.2s, border-color 0.2s;
+}
+
+.methods-trigger-btn:hover {
+    background-color: var(--bg-secondary);
+    border-color: var(--text-muted);
+}
+
+.badge {
+    background-color: var(--bg-primary);
+    color: var(--text-main);
+    padding: 2px 8px;
+    border-radius: 12px;
+    font-size: 12px;
+    font-weight: 600;
+    border: 1px solid var(--border-color);
+}
+
+#compare-modal {
+    position: fixed;
+    top: 0; left: 0; width: 100%; height: 100%;
+    background-color: rgba(0, 0, 0, 0.8);
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    z-index: 1000;
+}
+
+/* Modal Backdrop & Popup Styling */
+.modal-backdrop {
+    position: fixed;
+    top: 0; left: 0; width: 100%; height: 100%;
+    background-color: rgba(0, 0, 0, 0.75);
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    z-index: 1000;
+}
+
+.modal-card {
+    background-color: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    width: 90%;
+    max-width: 600px;
+    max-height: 85vh;
+    display: flex;
+    flex-direction: column;
+    box-shadow: 0 10px 25px rgba(0,0,0,0.5);
+}
+
+.modal-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 15px 20px;
+    border-bottom: 1px solid var(--border-color);
+}
+
+.modal-header h3 {
+    margin: 0;
+    font-size: 18px;
+}
+
+.modal-body {
+    padding: 20px;
+    overflow-y: auto;
+}
+
+.modal-footer {
+    padding: 15px 20px;
+    border-top: 1px solid var(--border-color);
+    display: flex;
+    justify-content: flex-end;
+}
+
+.close-btn {
+    font-size: 24px;
+    cursor: pointer;
+    color: var(--text-muted);
+}
+
+.close-btn:hover {
+    color: var(--text-main);
+}
+
+/* Header Bar & Filter Trigger Buttons */
+.section-title-bar {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 10px;
+    margin-bottom: 15px;
+}
+
+.section-title-bar h2 {
+    margin: 0;
+}
+
+.trigger-buttons-group {
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+}
+
+.methods-trigger-btn {
+    background-color: var(--bg-accent);
+    color: var(--text-main);
+    border: 1px solid var(--border-color);
+    padding: 8px 14px;
+    font-size: 14px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.methods-trigger-btn:hover {
+    background-color: var(--border-color);
+}
+
+.badge {
+    font-size: 11px;
+    padding: 2px 6px;
+    border-radius: 10px;
+    background-color: var(--bg-primary);
+    color: var(--text-main);
+    border: 1px solid var(--border-color);
+}
+
+/* Method Selection Items inside Modal */
+.methods-list {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+.method-card {
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+    padding: 12px;
+    background-color: var(--bg-accent);
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    cursor: pointer;
+}
+
+.method-card input[type="checkbox"] {
+    margin-top: 4px;
+    width: 18px;
+    height: 18px;
+    accent-color: var(--accent-color);
+}
+
+.method-text {
+    display: flex;
+    flex-direction: column;
+}
+
+.method-text span {
+    font-size: 12px;
+    color: var(--text-muted);
+}
+
+/* Floating Action Bar for Selected Cards */
+.floating-bar {
+    position: fixed;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    background-color: var(--bg-secondary);
+    border-top: 2px solid var(--accent-color);
+    padding: 12px 20px;
+    box-shadow: 0 -4px 15px rgba(0,0,0,0.4);
+    z-index: 900;
+}
+
+.floating-bar-content {
+    max-width: 1200px;
+    margin: 0 auto;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 15px;
+}
+
+.selected-cards-info {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    overflow-x: auto;
+}
+
+.selected-count-label {
+    font-weight: bold;
+    white-space: nowrap;
+    font-size: 14px;
+}
+
+.chips-list {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+}
+
+.card-chip {
+    background-color: var(--bg-accent);
+    border: 1px solid var(--border-color);
+    padding: 4px 10px;
+    border-radius: 12px;
+    font-size: 12px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    white-space: nowrap;
+}
+
+.card-chip-remove {
+    cursor: pointer;
+    color: var(--text-muted);
+    font-weight: bold;
+}
+
+.card-chip-remove:hover {
+    color: #ef4444;
+}
+
+.floating-bar-actions {
+    display: flex;
+    gap: 10px;
+    white-space: nowrap;
+}
+
+.clear-btn {
+    background-color: transparent;
+    border: 1px solid var(--border-color);
+    color: var(--text-muted);
+    font-size: 14px;
+    padding: 8px 14px;
+}
+
+.clear-btn:hover {
+    background-color: var(--bg-accent);
+    color: var(--text-main);
+}
+
+.related-search-btn {
+    font-size: 14px;
+    padding: 8px 16px;
+}
+
+/* Floating Action Bar for Selected Cards */
+.floating-bar {
+    position: fixed;
+    bottom: 20px;
+    left: 50%;
+    transform: translateX(-50%);
+    width: 90%;
+    max-width: 900px;
+    background-color: var(--bg-secondary);
+    border: 1px solid var(--accent-color);
+    border-radius: 8px;
+    padding: 12px 20px;
+    box-shadow: 0 10px 25px rgba(0, 0, 0, 0.5);
+    z-index: 999;
+}
+
+.floating-bar-content {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 15px;
+}
+
+.selected-cards-info {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    overflow-x: auto;
+}
+
+.card-price-label {
+    font-size: 11px;
+    color: var(--text-main);
+    font-weight: 600;
+    margin-top: 2px;
+}
+
+.card-select-container {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    font-size: 12px;
+    margin-top: 4px;
+    cursor: pointer;
+    user-select: none;
+}
+
+/* --------------------------------------------------------------------------
+   ManaSearch compatibility + modern Compare presentation
+   Uses the existing palette/variables; no theme colors are redefined here.
+   -------------------------------------------------------------------------- */
+:root {
+    --text-secondary: var(--text-muted);
+}
+
+/* The newest app.js generates these comparison classes. Keeping the layout
+   here as well as in its runtime fallback makes the HTML/CSS pair work even
+   before the runtime presentation helper is initialized. */
+#compare-modal {
+    overflow-y: auto;
+}
+
+#compare-modal .modal-content {
+    width: min(1120px, calc(100vw - 28px));
+    max-width: 1120px;
+    max-height: calc(100vh - 28px);
+    overflow-y: auto;
+    box-sizing: border-box;
+    padding: 24px;
+}
+
+#compare-modal #close-modal {
+    position: absolute;
+    top: 14px;
+    right: 16px;
+    z-index: 3;
+    border: 0;
+    background: transparent;
+    color: var(--text-muted);
+    padding: 4px 8px;
+    font-size: 28px;
+    line-height: 1;
+    cursor: pointer;
+}
+
+#compare-modal #close-modal:hover {
+    color: var(--text-main);
+    background: transparent;
+}
+
+#compare-modal .compare-container {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 20px;
+    align-items: start;
+    width: 100%;
+}
+
+#compare-modal .compare-card {
+    min-width: 0;
+    box-sizing: border-box;
+    padding: 16px;
+    border: 1px solid var(--border-color);
+    border-radius: 12px;
+    background: var(--bg-secondary);
+    overflow: hidden;
+}
+
+#compare-modal .compare-card h3 {
+    margin: 0 0 10px;
+    font-size: 20px;
+    line-height: 1.25;
+    overflow-wrap: anywhere;
+}
+
+#compare-modal .compare-card-art {
+    display: block;
+    width: min(100%, 260px);
+    height: auto;
+    margin: 0 auto 14px;
+    border-radius: 10px;
+    box-shadow: 0 3px 12px rgba(0, 0, 0, .16);
+}
+
+#compare-modal .compare-card-meta {
+    margin: 0 0 12px;
+    line-height: 1.5;
+    font-size: 13px;
+}
+
+#compare-modal .compare-card-type {
+    color: var(--text-muted);
+}
+
+#compare-modal .compare-oracle {
+    white-space: pre-line;
+    text-align: left;
+    font-size: 14px;
+    line-height: 1.55;
+    padding: 12px;
+    border-radius: 8px;
+    background: var(--bg-primary);
+    border: 1px solid var(--border-color);
+    overflow-wrap: anywhere;
+}
+
+#compare-modal .compare-section {
+    margin-top: 18px;
+    padding-top: 14px;
+    border-top: 1px solid var(--border-color);
+}
+
+#compare-modal .compare-section h3,
+#compare-modal .compare-section h4 {
+    margin: 0 0 8px;
+    line-height: 1.3;
+}
+
+#compare-modal .compare-section h3 { font-size: 17px; }
+#compare-modal .compare-section h4 { font-size: 14px; }
+
+#compare-modal .compare-explanation {
+    margin: 0;
+    line-height: 1.55;
+    font-size: 14px;
+}
+
+#compare-modal .compare-evidence-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 7px;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+}
+
+#compare-modal .compare-evidence-list li {
+    padding: 5px 9px;
+    border-radius: 999px;
+    background: var(--bg-primary);
+    border: 1px solid var(--border-color);
+    font-size: 12px;
+    line-height: 1.25;
+    overflow-wrap: anywhere;
+}
+
+#compare-modal .compare-difference-list {
+    margin: 0;
+    padding-left: 18px;
+    line-height: 1.5;
+    font-size: 13px;
+}
+
+#compare-modal .compare-empty {
+    color: var(--text-muted);
+    font-size: 13px;
+    line-height: 1.5;
+}
+
+/* Benchmark panels are created dynamically by the newest app.js. These
+   fallback rules make them readable without changing the app's palette. */
+#benchmark-runtime-dashboard {
+    margin: 0 auto 16px;
+    max-width: 1200px;
+    padding: 12px 16px;
+    background: var(--bg-secondary);
+    color: var(--text-main);
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    box-sizing: border-box;
+}
+
+#benchmark-runtime-dashboard[hidden] {
+    display: none !important;
+}
+
+@media (max-width: 760px) {
+    #compare-modal .modal-content {
+        width: calc(100vw - 18px);
+        max-height: calc(100vh - 18px);
+        padding: 16px;
+    }
+
+    #compare-modal .compare-container {
+        grid-template-columns: 1fr;
+        gap: 14px;
+    }
+
+    #compare-modal .compare-card-art {
+        width: min(100%, 300px);
+    }
+}
+
+
+/* =====================================================================
+   ManaSearch UI refresh
+   Palette is intentionally inherited from the existing black/purple/gray
+   theme. These rules improve hierarchy, spacing, density and responsive
+   behavior without introducing a new color system.
+   ===================================================================== */
+
+*, *::before, *::after { box-sizing: border-box; }
+
+:root {
+    --ui-radius-sm: 7px;
+    --ui-radius-md: 10px;
+    --ui-radius-lg: 14px;
+    --ui-shadow: 0 14px 34px rgba(0, 0, 0, 0.26);
+    --ui-shadow-soft: 0 7px 20px rgba(0, 0, 0, 0.18);
+}
+
+html { scroll-behavior: smooth; }
+
+body {
+    min-height: 100vh;
+    padding-bottom: 92px;
+    background:
+        radial-gradient(circle at 12% -10%, rgba(98, 0, 238, 0.08), transparent 28%),
+        radial-gradient(circle at 88% 0%, rgba(98, 0, 238, 0.055), transparent 25%),
+        var(--bg-primary);
+}
+
+.site-header {
+    position: relative;
+    padding: 28px 24px 24px;
+    text-align: left;
+    background: rgba(26, 26, 30, 0.96);
+    border-bottom: 1px solid var(--border-color);
+}
+
+body.light-theme .site-header { background: var(--bg-secondary); }
+
+.header-top {
+    width: min(1320px, calc(100% - 24px));
+    min-height: 48px;
+    margin: 0 auto;
+    gap: 20px;
+}
+
+.brand-block { min-width: 0; }
+.brand-block h1 {
+    margin: 0;
+    font-size: clamp(24px, 3vw, 34px);
+    line-height: 1.08;
+    letter-spacing: -0.03em;
+}
+
+.brand-subtitle {
+    margin: 7px 0 0;
+    color: var(--text-muted);
+    font-size: 13px;
+    line-height: 1.4;
+}
+
+#theme-toggle {
+    flex: 0 0 auto;
+    min-height: 42px;
+    min-width: 104px;
+    padding: 9px 16px;
+    border-radius: 9px;
+    letter-spacing: 0.01em;
+}
+
+.search-container {
+    width: min(900px, calc(100% - 24px));
+    margin: 24px auto 0;
+    align-items: stretch;
+}
+
+.search-field-wrap {
+    position: relative;
+    flex: 1 1 auto;
+    min-width: 0;
+}
+
+.search-field-icon {
+    position: absolute;
+    left: 14px;
+    top: 50%;
+    transform: translateY(-51%);
+    color: var(--text-muted);
+    font-size: 22px;
+    line-height: 1;
+    pointer-events: none;
+}
+
+#card-search-input {
+    width: 100%;
+    height: 46px;
+    padding-left: 42px;
+    border-radius: 9px;
+    background: var(--bg-accent);
+    border-color: var(--border-color);
+    font-size: 15px;
+}
+
+#card-search-input:focus,
+input:focus,
+select:focus,
+textarea:focus {
+    outline: 2px solid rgba(98, 0, 238, 0.28);
+    outline-offset: 1px;
+    border-color: var(--accent-color);
+}
+
+.load-card-btn {
+    min-width: 120px;
+    height: 46px;
+    border-radius: 9px;
+}
+
+.search-hint {
+    width: min(900px, calc(100% - 24px));
+    margin: 9px auto 0;
+    color: var(--text-muted);
+    font-size: 12px;
+    line-height: 1.45;
+    text-align: center;
+}
+
+.app-layout {
+    width: min(1400px, calc(100% - 32px));
+    max-width: none;
+    margin: 24px auto 0;
+    gap: 22px;
+    align-items: flex-start;
+}
+
+.sidebar {
+    width: 228px;
+    gap: 14px;
+    position: sticky;
+    top: 18px;
+}
+
+.sidebar-section {
+    padding: 14px;
+    border-radius: var(--ui-radius-md);
+    box-shadow: var(--ui-shadow-soft);
+}
+
+.sidebar-section h3 {
+    display: flex;
+    align-items: center;
+    min-height: 24px;
+    margin-bottom: 8px;
+    font-size: 13px;
+    text-transform: uppercase;
+    letter-spacing: 0.07em;
+    color: var(--text-muted);
+}
+
+.list-container:empty::before {
+    display: block;
+    padding: 7px 2px 3px;
+    content: "Nothing here yet";
+    color: var(--text-muted);
+    font-size: 12px;
+}
+
+.list-container li {
+    padding: 9px 7px;
+    margin: 1px 0;
+    border-bottom: none;
+    border-radius: 6px;
+}
+
+.main-content { min-width: 0; }
+
+section {
+    box-shadow: var(--ui-shadow-soft);
+}
+
+.section-title-bar {
+    gap: 18px;
+    align-items: flex-end;
+}
+
+.section-heading { min-width: 0; }
+.section-kicker {
+    display: block;
+    margin-bottom: 3px;
+    color: var(--accent-color);
+    font-size: 10px;
+    font-weight: 800;
+    letter-spacing: 0.14em;
+}
+
+.section-heading h2 {
+    margin: 0;
+    font-size: 21px;
+    line-height: 1.2;
+    letter-spacing: -0.015em;
+}
+
+.section-note,
+.section-description {
+    color: var(--text-muted);
+    font-size: 12px;
+    line-height: 1.45;
+}
+
+.section-description {
+    margin: 5px 0 0;
+    max-width: 620px;
+}
+
+.trigger-buttons-group {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+.methods-trigger-btn {
+    min-height: 39px;
+    padding: 7px 12px;
+    border-radius: 8px;
+    white-space: nowrap;
+}
+
+.order-control {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    min-height: 39px;
+    padding: 4px 7px 4px 10px;
+    background: var(--bg-accent);
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+}
+
+.order-control label {
+    color: var(--text-muted);
+    font-size: 12px;
+    font-weight: 700;
+}
+
+.order-control select {
+    width: auto;
+    min-width: 135px;
+    padding: 6px 28px 6px 8px;
+    border: none;
+    background: transparent;
+    font-size: 12px;
+}
+
+.order-control select:focus { outline: none; box-shadow: none; }
+
+.primary-search-btn {
+    width: 100%;
+    min-height: 46px;
+    margin-top: 16px;
+    border-radius: 9px;
+    font-weight: 700;
+    letter-spacing: 0.01em;
+}
+
+#source-card-section,
+#filter-section,
+#results-section {
+    padding: 22px;
+    border-radius: var(--ui-radius-lg);
+}
+
+.card-inspector {
+    gap: 24px;
+    align-items: flex-start;
+}
+
+.card-inspector img {
+    border-radius: 10px;
+    box-shadow: var(--ui-shadow-soft);
+}
+
+.card-details { padding-top: 2px; }
+.card-details p { margin: 5px 0; font-size: 13px; }
+.card-header { gap: 14px; }
+.card-header h3 { margin: 0; font-size: 22px; letter-spacing: -0.015em; }
+
+.oracle-container {
+    margin: 17px 0 0;
+    padding: 15px;
+    border-radius: 9px;
+}
+
+.oracle-help {
+    display: block;
+    margin-top: 3px;
+    color: var(--text-muted);
+    font-size: 11px;
+    font-weight: 400;
+}
+
+.highlight-chip-panel {
+    margin-top: 11px;
+    width: 100%;
+}
+
+.source-tags {
+    width: 100%;
+    margin-top: 4px;
+    padding: 14px;
+    border: 1px solid var(--border-color);
+    background: var(--bg-accent);
+    border-radius: 9px;
+}
+
+.source-tags-heading {
+    display: flex;
+    justify-content: space-between;
+    gap: 10px;
+    align-items: center;
+}
+
+.source-tags-heading span {
+    color: var(--text-muted);
+    font-size: 11px;
+}
+
+.source-tag-list { margin-top: 9px; flex-wrap: wrap; }
+#add-tag-input { margin-top: 10px; }
+
+/* Highlight composer: polished around the existing app.js-generated controls. */
+.highlight-chips-row { gap: 7px; }
+.highlight-chip {
+    border-radius: 999px;
+    padding: 4px 7px 4px 8px;
+    background: var(--bg-primary);
+}
+
+.highlight-mode-btn,
+.highlight-composer-mode {
+    border-radius: 999px;
+}
+
+.highlight-add-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 34px;
+    height: 34px;
+    margin: 10px auto 0;
+    padding: 0;
+    border-radius: 50%;
+    background: transparent;
+    border: 1px solid var(--border-color);
+    color: var(--text-muted);
+    font-size: 20px;
+    font-weight: 400;
+}
+
+.highlight-add-btn:hover {
+    color: var(--text-main);
+    border-color: var(--accent-color);
+    background: var(--bg-accent);
+}
+
+.highlight-add-composer {
+    width: min(720px, 100%);
+    margin: 10px auto 0;
+    padding: 13px;
+    border: 1px solid var(--border-color);
+    border-radius: 9px;
+    background: var(--bg-accent);
+}
+
+.highlight-add-input {
+    width: 100%;
+    margin-top: 7px;
+    border-radius: 7px;
+    background: var(--bg-primary);
+}
+
+.results-header { align-items: flex-end; gap: 14px; }
+.results-header .section-description { margin-bottom: 1px; }
+
+#export-btn { min-height: 38px; padding: 8px 13px; border-radius: 8px; }
+
+.results-grid {
+    grid-template-columns: repeat(auto-fill, minmax(225px, 1fr));
+    gap: 15px;
+}
+
+.card-item {
+    border-radius: 10px;
+    box-shadow: none;
+    transition: transform 0.16s ease, border-color 0.16s ease, box-shadow 0.16s ease;
+}
+
+.card-item:hover {
+    transform: translateY(-3px);
+    border-color: var(--accent-color);
+    box-shadow: var(--ui-shadow-soft);
+}
+
+.card-item-info { padding: 13px; }
+.card-item-title { font-size: 15px; }
+
+.result-score-breakdown {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 5px 9px;
+    margin: 8px 0 7px;
+    color: var(--text-muted);
+    font-size: 10px;
+}
+
+.score-line { white-space: nowrap; }
+.score-line-primary { color: var(--text-main); font-weight: 800; }
+
+.card-price-label {
+    width: fit-content;
+    margin-top: 4px;
+}
+
+.card-actions { align-items: stretch; }
+.card-actions .compare-btn { flex: 1 1 auto; }
+
+.modal-backdrop,
+#compare-modal { padding: 18px; }
+
+.modal-card,
+#compare-modal .modal-content {
+    width: min(980px, 100%);
+    max-height: min(90vh, 880px);
+    overflow: auto;
+    border-radius: 14px;
+    box-shadow: var(--ui-shadow);
+}
+
+.modal-header { position: sticky; top: -20px; z-index: 2; background: var(--bg-secondary); }
+.close-btn,
+#close-modal {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 34px;
+    height: 34px;
+    padding: 0;
+    border: 1px solid transparent;
+    border-radius: 8px;
+    background: transparent;
+    color: var(--text-muted);
+    font-size: 23px;
+}
+
+.close-btn:hover,
+#close-modal:hover {
+    border-color: var(--border-color);
+    background: var(--bg-accent);
+    color: var(--text-main);
+}
+
+.modal-intro {
+    margin: 0 0 14px;
+    padding: 9px 11px;
+    border-left: 3px solid var(--accent-color);
+    border-radius: 5px;
+    background: var(--bg-accent);
+    color: var(--text-muted);
+    font-size: 12px;
+}
+
+.modal-footer {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+    margin-top: 16px;
+}
+
+.compare-container {
+    gap: 16px;
+    margin-top: 18px;
+}
+
+#compare-modal .modal-content { max-width: 1120px; padding: 24px; }
+#compare-modal .compare-container { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+#compare-modal .compare-card {
+    min-width: 0;
+    padding: 16px;
+    border: 1px solid var(--border-color);
+    border-radius: 11px;
+}
+
+#compare-modal .compare-card-art { width: min(100%, 285px); border-radius: 11px; }
+#compare-modal .compare-explanation {
+    padding: 13px 14px;
+    border-left: 3px solid var(--accent-color);
+    border-radius: 7px;
+    background: var(--bg-accent);
+}
+
+#compare-modal .compare-section { margin-top: 16px; }
+
+.provisional-results-banner {
+    border-radius: 8px;
+}
+
+.floating-bar {
+    border-radius: 13px;
+    box-shadow: var(--ui-shadow);
+}
+
+@media (max-width: 980px) {
+    .app-layout { width: min(100% - 24px, 900px); }
+    .sidebar { width: 100%; position: static; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .section-title-bar { align-items: flex-start; flex-direction: column; }
+    .trigger-buttons-group { width: 100%; justify-content: flex-start; }
+}
+
+@media (max-width: 700px) {
+    .site-header { padding: 20px 14px 18px; }
+    .header-top { width: 100%; align-items: flex-start; }
+    #theme-toggle { min-height: 38px; padding: 7px 11px; font-size: 13px; }
+    .search-container { width: 100%; flex-direction: column; }
+    .search-hint { width: 100%; }
+    .load-card-btn { width: 100%; }
+    .app-layout { width: calc(100% - 16px); margin-top: 16px; }
+    .sidebar { grid-template-columns: 1fr; }
+    #source-card-section,
+    #filter-section,
+    #results-section { padding: 16px; border-radius: 11px; }
+    .trigger-buttons-group { align-items: stretch; flex-direction: column; }
+    .methods-trigger-btn,
+    .order-control { width: 100%; justify-content: space-between; }
+    .order-control select { flex: 1; }
+    .results-header { align-items: stretch; flex-direction: column; }
+    #export-btn { width: 100%; }
+    .results-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+    #compare-modal .modal-content { padding: 16px; }
+    #compare-modal .compare-container { grid-template-columns: 1fr; }
+    #compare-modal .compare-card-art { width: min(100%, 320px); }
+}
+
+@media (max-width: 470px) {
+    .results-grid { grid-template-columns: 1fr; }
+    .brand-subtitle { max-width: 240px; }
+    .card-header { align-items: flex-start; flex-direction: column; }
+    #favorite-btn { width: 100%; }
+}
+
+
+/* ---- ManaSearch interaction refinements (palette intentionally unchanged) ---- */
+.legacy-source-search { display: none !important; }
+
+.source-card-empty-state {
+    min-height: 285px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+    border: 1px dashed var(--border-color);
+    border-radius: 12px;
+    background: var(--bg-primary);
+    padding: 28px;
+}
+.source-card-empty-state h3 { margin: 14px 0 5px; font-size: 18px; }
+.source-card-empty-state p { margin: 0; color: var(--text-muted); font-size: 13px; }
+.source-card-add-btn {
+    width: 64px;
+    height: 64px;
+    padding: 0;
+    border-radius: 50%;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 34px;
+    line-height: 1;
+    background: var(--bg-accent);
+    color: var(--text-main);
+    border: 1px solid var(--border-color);
+    box-shadow: var(--ui-shadow-soft, none);
+}
+.source-card-add-btn:hover { border-color: var(--accent-color); color: var(--accent-color); transform: translateY(-1px); }
+
+.source-card-picker-modal-card {
+    width: min(980px, 100%);
+    max-width: 980px;
+}
+.source-card-picker-search-wrap {
+    position: relative;
+    margin-top: 4px;
+}
+#source-card-picker-input {
+    width: 100%;
+    height: 46px;
+    box-sizing: border-box;
+    padding-left: 42px;
+    background: var(--bg-primary);
+    color: var(--text-main);
+    border: 1px solid var(--border-color);
+    border-radius: 9px;
+}
+.source-card-picker-search-wrap .search-field-icon { left: 14px; }
+.picker-status { margin: 10px 0 12px; color: var(--text-muted); font-size: 12px; }
+.source-card-picker-results {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(148px, 1fr));
+    gap: 12px;
+    max-height: 62vh;
+    overflow: auto;
+    padding: 2px;
+}
+.source-picker-card {
+    appearance: none;
+    width: 100%;
+    padding: 0;
+    overflow: hidden;
+    text-align: left;
+    background: var(--bg-accent);
+    color: var(--text-main);
+    border: 1px solid var(--border-color);
+    border-radius: 10px;
+    transition: transform .15s ease, border-color .15s ease, box-shadow .15s ease;
+}
+.source-picker-card:hover { transform: translateY(-2px); border-color: var(--accent-color); box-shadow: var(--ui-shadow-soft, none); background: var(--bg-accent); }
+.source-picker-card img,
+.source-picker-card-placeholder {
+    width: 100%;
+    aspect-ratio: 63 / 88;
+    display: block;
+    object-fit: cover;
+    background: var(--bg-primary);
+}
+.source-picker-card-placeholder { display: grid; place-items: center; color: var(--text-muted); font-weight: 800; }
+.source-picker-card-body { display: flex; flex-direction: column; gap: 3px; padding: 9px 10px 10px; }
+.source-picker-card-body strong { font-size: 13px; line-height: 1.25; overflow-wrap: anywhere; }
+.source-picker-card-body span { color: var(--text-muted); font-size: 10px; line-height: 1.35; }
+.source-card-picker-empty { grid-column: 1 / -1; min-height: 120px; display: grid; place-items: center; color: var(--text-muted); border: 1px dashed var(--border-color); border-radius: 10px; }
+
+/* Compact highlight controls: the delete affordance should never overpower the chip. */
+.highlight-remove-btn {
+    width: 20px !important;
+    min-width: 20px !important;
+    height: 20px !important;
+    min-height: 20px !important;
+    padding: 0 !important;
+    margin: 0 !important;
+    border: 0 !important;
+    border-radius: 50% !important;
+    background: transparent !important;
+    color: var(--text-muted) !important;
+    font-size: 13px !important;
+    line-height: 20px !important;
+    display: inline-flex !important;
+    align-items: center;
+    justify-content: center;
+    flex: 0 0 20px;
+}
+.highlight-remove-btn:hover { background: var(--bg-accent) !important; color: var(--text-main) !important; }
+.highlight-add-input,
+.highlight-add-input::placeholder { color: var(--text-main); }
+.highlight-add-input::placeholder { color: var(--text-muted); }
+.highlight-add-composer textarea,
+.highlight-add-composer input { color: var(--text-main) !important; caret-color: var(--text-main); }
+
+/* Use one wide explanation row beneath the two card panels. */
+#compare-modal .modal-content { display: flex; flex-direction: column; }
+#compare-modal .compare-container { align-items: start; }
+#compare-modal .compare-section {
+    grid-column: 1 / -1;
+    width: 100%;
+    box-sizing: border-box;
+}
+#compare-modal .compare-explanation { max-width: none; }
+
+/* Clip anti-aliased/transparent image corners cleanly so frame pixels don't protrude. */
+.card-inspector img,
+.card-item > img,
+.compare-card-art,
+.source-picker-card img {
+    clip-path: inset(1px round 9px);
+}
+.card-item { overflow: hidden; }
+
+@media (max-width: 700px) {
+    .source-card-picker-results { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+
+/* =====================================================================
+   Theme readability pass
+   Existing black / gray / purple / orange palette preserved.
+   ===================================================================== */
+:root {
+    --text-primary: var(--text-main);
+    --text-secondary: var(--text-muted);
+    --text-on-accent: #ffffff;
+    --status-positive: #10b981;
+    --status-negative: #ef4444;
+    --status-warning: #b8860b;
+    --benchmark-exact-color: #f87171;
+    --benchmark-flexible-color: #60a5fa;
+}
+
+body.light-theme {
+    --text-primary: var(--text-main);
+    --text-secondary: var(--text-muted);
+    --text-on-accent: #ffffff;
+    --status-positive: #047857;
+    --status-negative: #b91c1c;
+    --status-warning: #9a6700;
+    --benchmark-exact-color: #b91c1c;
+    --benchmark-flexible-color: #2563eb;
+}
+
+html { color-scheme: dark; }
+body.light-theme { color-scheme: light; }
+
+input,
+select,
+textarea,
+option,
+label,
+legend,
+output {
+    color: var(--text-main);
+}
+
+input::placeholder,
+textarea::placeholder {
+    color: var(--text-muted);
+    opacity: 1;
+}
+
+select option {
+    background-color: var(--bg-secondary);
+    color: var(--text-main);
+}
+
+.benchmark-legend-exact { color: var(--benchmark-exact-color) !important; }
+.benchmark-legend-flexible { color: var(--benchmark-flexible-color) !important; }
+.bonus-positive { color: var(--status-positive) !important; }
+.bonus-negative { color: var(--status-negative) !important; }
+
+.modal-card,
+.modal-content,
+.source-card-picker-modal-card,
+.compare-card,
+.source-picker-card,
+.card-item,
+.sidebar-section,
+#benchmark-runtime-dashboard {
+    color: var(--text-main);
+}
+
+.source-card-picker-modal-card input,
+.source-card-picker-modal-card textarea,
+.compare-card input,
+.compare-card textarea {
+    color: var(--text-main) !important;
+}
+
+button:not(.color-pip):not(.clear-btn):not(#theme-toggle) {
+    color: var(--text-on-accent);
+}
+
+button.clear-btn,
+button#theme-toggle,
+.methods-trigger-btn,
+.order-control,
+.order-control select,
+.compare-btn,
+.source-picker-card {
+    color: var(--text-main);
+}
+
+/* =====================================================================
+   Final theme / contrast + scrollbar pass
+   Palette intentionally unchanged: black / gray / purple / orange.
+   ===================================================================== */
+
+/* User-facing secondary/outline controls must use readable foreground text in both themes.
+   These selectors intentionally outrank the generic button:not(...) accent rule above. */
+button#favorite-btn,
+button.source-card-add-btn,
+button.compare-btn,
+button.methods-trigger-btn,
+button.highlight-add-btn,
+button.highlight-mode-btn,
+button.highlight-composer-mode,
+button.highlight-add-cancel,
+button.clear-btn,
+.order-control,
+.order-control select {
+    color: var(--text-main) !important;
+}
+
+button#favorite-btn {
+    background-color: transparent !important;
+    border-color: var(--accent-color) !important;
+}
+
+button.compare-btn {
+    background-color: var(--bg-primary) !important;
+    border-color: var(--border-color) !important;
+}
+
+button.source-card-add-btn {
+    background-color: var(--bg-accent) !important;
+}
+
+button.methods-trigger-btn:hover,
+button.compare-btn:hover:not(:disabled),
+button.source-card-add-btn:hover:not(:disabled),
+button.highlight-mode-btn:hover,
+button.highlight-composer-mode:hover,
+button.highlight-add-cancel:hover {
+    color: var(--text-main) !important;
+}
+
+/* The primary submit controls remain white-on-purple; everything else follows the theme text. */
+button.highlight-add-submit,
+button.related-search-btn,
+button.primary-search-btn,
+button.load-card-btn,
+#export-btn {
+    color: var(--text-on-accent, #fff) !important;
+}
+
+/* Make all authored form text inherit the theme, including controls embedded in modals. */
+.modal-card,
+.modal-card h1,
+.modal-card h2,
+.modal-card h3,
+.modal-card h4,
+.modal-card p,
+.modal-card label,
+.modal-card span,
+.modal-card strong,
+.compare-card,
+.compare-card h3,
+.compare-card p,
+.source-card-picker-modal-card,
+.source-card-picker-modal-card h3,
+.source-card-picker-modal-card p,
+.source-picker-card-body strong {
+    color: var(--text-main);
+}
+
+.method-text span,
+.picker-status,
+.section-note,
+.section-description,
+.oracle-help,
+.source-tags-heading span,
+.compare-card-type,
+.search-hint,
+.instruction-note,
+.source-card-empty-state p {
+    color: var(--text-muted);
+}
+
+/* Highlight composer/readability in dark and light themes. */
+.highlight-add-input,
+.highlight-add-input::placeholder,
+.highlight-add-composer input,
+.highlight-add-composer textarea {
+    color: var(--text-main) !important;
+}
+.highlight-add-input::placeholder,
+.highlight-add-composer input::placeholder,
+.highlight-add-composer textarea::placeholder {
+    color: var(--text-muted) !important;
+    opacity: 1;
+}
+
+/* Scrollbars follow the same CSS variables as the rest of the theme. */
+html,
+body,
+* {
+    scrollbar-width: thin;
+    scrollbar-color: var(--border-color) var(--bg-primary);
+}
+
+*::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+}
+
+*::-webkit-scrollbar-track {
+    background: var(--bg-primary);
+}
+
+*::-webkit-scrollbar-thumb {
+    background-color: var(--border-color);
+    border: 2px solid var(--bg-primary);
+    border-radius: 999px;
+}
+
+*::-webkit-scrollbar-thumb:hover {
+    background-color: var(--text-muted);
+}
+
+/* Keep dark/light scrolling surfaces synchronized where an element uses the secondary panel. */
+.modal-card,
+#compare-modal .modal-content,
+.source-card-picker-results,
+.modal-body,
+.source-card-picker-modal-card {
+    scrollbar-color: var(--border-color) var(--bg-secondary);
+}
+
+/* Remove the tiny bright image-corner artifacts without visibly changing card proportions. */
+.card-inspector img,
+.card-item > img,
+.compare-card-art,
+.source-picker-card img {
+    border-radius: 4.8% !important;
+    clip-path: inset(1.5px round 4.8%) !important;
+    background: var(--bg-primary);
+}
+
+
+/* Source-card controls */
+.source-card-actions {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+}
+
+.discard-source-card-btn {
+    background: transparent !important;
+    color: var(--text-muted) !important;
+    border: 1px solid var(--border-color) !important;
+    padding: 7px 12px !important;
+    border-radius: 8px !important;
+    font-size: 13px !important;
+}
+
+.discard-source-card-btn:hover:not(:disabled) {
+    color: var(--text-main) !important;
+    border-color: var(--text-muted) !important;
+    background: var(--bg-accent) !important;
+}
+
+.discard-source-card-btn:disabled {
+    opacity: .45;
+}
+
+/* The browser scrollbar is based on variables on the root so the always-visible page scrollbar
+   changes when the body theme changes. */
+html {
+    scrollbar-width: thin;
+    scrollbar-color: var(--border-color) var(--bg-primary);
+    color-scheme: dark;
+}
+
+html:has(body.light-theme) {
+    --bg-primary: #f4f4f5;
+    --bg-secondary: #ffffff;
+    --bg-accent: #e4e4e7;
+    --text-main: #18181b;
+    --text-muted: #52525b;
+    --border-color: #d4d4d8;
+    scrollbar-color: var(--border-color) var(--bg-primary);
+    color-scheme: light;
+}
+
+html::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+}
+
+html::-webkit-scrollbar-track {
+    background: var(--bg-primary);
+}
+
+html::-webkit-scrollbar-thumb {
+    background-color: var(--border-color);
+    border: 2px solid var(--bg-primary);
+    border-radius: 999px;
+}
+
+html::-webkit-scrollbar-thumb:hover {
+    background-color: var(--text-muted);
+}
+
+@media (max-width: 700px) {
+    .source-card-actions {
+        width: 100%;
+        justify-content: flex-start;
+    }
+}
+
+
+/* History/source-card robustness + theme polish. */
+body.light-theme .search-hint { color: var(--text-muted); }
+body.light-theme #theme-toggle { color: var(--text-main) !important; background: var(--bg-accent) !important; border-color: var(--border-color) !important; }
+body:not(.light-theme) #theme-toggle { color: var(--text-main) !important; }
+
+/* Keep the empty-state instruction centered beneath the site tagline. */
+.site-header .search-hint { max-width: 900px; }
+
+/* Do not clip card art with clip-path: that can create bright anti-aliased corner pixels in some
+   browsers. The card containers already provide the desired shape/overflow. */
+.card-inspector img,
+.card-item > img,
+.compare-card-art,
+.source-picker-card img {
+    clip-path: none !important;
+}
+.card-inspector,
+.card-item,
+.compare-card,
+.source-picker-card {
+    overflow: hidden;
+}
+
+
+/* Multi-value hard constraints */
+.filter-group-wide { grid-column: 1 / -1; }
+
+/* Power and Toughness intentionally occupy the same two-column row, like Color Identity / Exact Colors. */
+.filter-power-group,
+.filter-toughness-group {
+    grid-column: span 1;
+}
+
+@media (max-width: 460px) {
+    .filter-power-group,
+    .filter-toughness-group {
+        grid-column: 1 / -1;
+    }
+}
+
+.filter-help {
+    color: var(--text-muted);
+    font-size: 11px;
+    font-weight: 400;
+    margin-left: 5px;
+}
+.constraint-editor {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+.constraint-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    min-height: 4px;
+}
+.constraint-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 5px 8px 5px 10px;
+    border: 1px solid var(--border-color);
+    border-radius: 999px;
+    background: var(--bg-accent);
+    color: var(--text-main);
+    font-size: 12px;
+    line-height: 1;
+}
+.constraint-chip-remove {
+    width: 18px !important;
+    height: 18px !important;
+    min-width: 18px !important;
+    min-height: 18px !important;
+    padding: 0 !important;
+    border: 0 !important;
+    border-radius: 50% !important;
+    background: transparent !important;
+    color: var(--text-muted) !important;
+    font-size: 13px !important;
+    line-height: 18px !important;
+}
+.constraint-chip-remove:hover {
+    color: var(--text-main) !important;
+    background: var(--border-color) !important;
+}
+.constraint-input-row {
+    display: flex;
+    gap: 8px;
+    align-items: stretch;
+}
+.constraint-input-row input,
+.constraint-input-row select { flex: 1 1 auto; min-width: 0; }
+.constraint-add-btn {
+    flex: 0 0 auto;
+    min-width: 64px;
+    padding: 9px 13px;
+    background: var(--bg-accent) !important;
+    color: var(--text-main) !important;
+    border: 1px solid var(--border-color) !important;
+}
+.constraint-add-btn:hover {
+    border-color: var(--accent-color) !important;
+    background: var(--bg-secondary) !important;
+}
+
+/* Search depth */
+.search-depth-control {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 18px;
+    margin-top: 16px;
+    padding: 14px;
+    border: 1px solid var(--border-color);
+    border-radius: 10px;
+    background: var(--bg-accent);
+}
+.search-depth-label { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.search-depth-summary { color: var(--text-muted); font-size: 12px; line-height: 1.35; }
+.search-depth-input-wrap {
+    position: relative;
+    flex: 0 0 92px;
+}
+.search-depth-input-wrap input {
+    width: 100% !important;
+    padding-right: 28px !important;
+    text-align: right;
+}
+.percent-suffix {
+    position: absolute;
+    right: 10px;
+    top: 50%;
+    transform: translateY(-50%);
+    color: var(--text-muted);
+    pointer-events: none;
+    font-size: 14px;
+}
+.search-depth-scale {
+    display: grid;
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+    gap: 8px;
+    margin-top: 10px;
+}
+.search-depth-scale > div {
+    padding: 8px 9px;
+    border-left: 2px solid var(--border-color);
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+.search-depth-scale strong { font-size: 12px; color: var(--text-main); }
+.search-depth-scale span { font-size: 10px; color: var(--text-muted); line-height: 1.3; }
+
+/* Result card title + copy action */
+.card-item-title-row {
+    display: flex;
+    align-items: flex-start;
+    gap: 7px;
+}
+.card-item-title-row .card-item-title {
+    flex: 1 1 auto;
+    min-width: 0;
+    margin-right: 0;
+}
+.copy-card-name-btn {
+    flex: 0 0 auto;
+    padding: 4px 7px !important;
+    min-height: 26px !important;
+    border-radius: 6px !important;
+    background: transparent !important;
+    color: var(--text-muted) !important;
+    border: 1px solid var(--border-color) !important;
+    font-size: 10px !important;
+    line-height: 1 !important;
+}
+.copy-card-name-btn:hover,
+.copy-card-name-btn.copied {
+    color: var(--text-main) !important;
+    border-color: var(--accent-color) !important;
+    background: var(--bg-secondary) !important;
+}
+
+/* Header helper is a full-width centered line below the brand row. */
+.site-header .search-hint {
+    width: 100%;
+    max-width: none;
+    box-sizing: border-box;
+    text-align: center;
+    margin-left: auto;
+    margin-right: auto;
+    padding: 0 24px;
+}
+
+@media (max-width: 760px) {
+    .search-depth-control { align-items: flex-start; flex-direction: column; }
+    .search-depth-input-wrap { flex-basis: auto; width: 100%; max-width: 120px; }
+    .search-depth-scale { grid-template-columns: 1fr; }
+    .search-depth-scale > div { border-left: 0; border-top: 1px solid var(--border-color); padding-top: 7px; }
+    .constraint-input-row { flex-wrap: wrap; }
+    .constraint-add-btn { width: 100%; }
+}
+
+
+/* Benchmark highlights are represented directly in Oracle text; hide any stale debug panel. */
+#benchmark-highlight-preview {
+    display: none !important;
+}

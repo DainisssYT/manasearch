@@ -1,0 +1,393 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <link rel="icon" href="data:,">
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ManaSearch</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <header class="site-header">
+        <div class="header-top">
+            <div class="brand-block">
+                <h1>ManaSearch</h1>
+                <p class="brand-subtitle">MTG similarity search by mechanics, function, and context</p>
+            </div>
+            <button type="button" id="theme-toggle" aria-label="Toggle light and dark theme">Light mode</button>
+        </div>
+        <div id="legacy-source-search" hidden aria-hidden="true">
+            <input type="text" id="card-search-input" autocomplete="off">
+            <button type="button" id="search-btn">Load Card</button>
+        </div>
+        <p class="search-hint">Choose a source card below to begin, then highlight the part that matters most.</p>
+    </header>
+
+    <main class="app-layout">
+        <!-- Sidebar for History and Favorites -->
+        <aside class="sidebar">
+            <div class="sidebar-section">
+                <h3>Search History</h3>
+                <ul id="history-list" class="list-container"></ul>
+            </div>
+            <div class="sidebar-section">
+                <h3>Favorite Searches</h3>
+                <ul id="favorites-list" class="list-container"></ul>
+            </div>
+        </aside>
+
+        <!-- Main Content Area -->
+        <div class="main-content">
+            <!-- Source Card Inspection -->
+            <section id="source-card-section" class="source-card-section">
+                <div class="section-heading">
+                    <div>
+                        <span class="section-kicker">SOURCE</span>
+                        <h2>Source Card</h2>
+                    </div>
+                    <span class="section-note">Choose a card, then highlight Oracle text to focus the search</span>
+                </div>
+
+                <div id="source-card-empty" class="source-card-empty-state">
+                    <button type="button" id="source-card-add-btn" class="source-card-add-btn" aria-label="Choose source card">+</button>
+                    <h3>Choose a source card</h3>
+                    <p>Search for a card to use as the starting point for ManaSearch.</p>
+                </div>
+
+                <div id="source-card-loaded" class="hidden">
+                    <div class="card-inspector">
+                        <img id="source-card-image" src="" alt="Card Artwork">
+                        <div class="card-details">
+                            <div class="card-header">
+                                <h3 id="source-card-name"></h3>
+                                <div class="source-card-actions">
+                                    <button type="button" id="favorite-btn">☆ Favorite</button>
+                                    <button type="button" id="discard-source-card-btn" class="discard-source-card-btn" aria-label="Remove source card">Remove</button>
+                                </div>
+                            </div>
+                            <p><strong>Mana Cost:</strong> <span id="source-card-mana"></span></p>
+                            <p><strong>Type:</strong> <span id="source-card-type"></span></p>
+                            <div class="oracle-container">
+                                <strong>Oracle Text</strong>
+                                <span class="oracle-help">Highlight one or more spans to define what matters most.</span>
+                                <div id="source-card-oracle" class="selectable-text"></div>
+                                <div id="highlight-chips-list" class="highlight-chip-panel"></div>
+                            </div>
+                        </div>
+                        <div id="card-tags-container" class="source-tags">
+                            <div class="source-tags-heading">
+                                <strong>Tags</strong>
+                                <span>Optional custom labels</span>
+                            </div>
+                            <div id="card-tags-list" class="chips-list source-tag-list"></div>
+                            <input type="text" id="add-tag-input" placeholder="Add a custom tag… press Enter" aria-label="Add custom tag">
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Source-card picker -->
+            <div id="source-card-picker-modal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="source-card-picker-title">
+                <div class="modal-card source-card-picker-modal-card">
+                    <div class="modal-header">
+                        <div>
+                            <span class="section-kicker">SOURCE CARD</span>
+                            <h3 id="source-card-picker-title">Choose a card</h3>
+                        </div>
+                        <button type="button" id="close-source-card-picker" class="close-btn" aria-label="Close card picker">&times;</button>
+                    </div>
+                    <div class="source-card-picker-search-wrap">
+                        <span class="search-field-icon" aria-hidden="true">⌕</span>
+                        <input type="text" id="source-card-picker-input" autocomplete="off" placeholder="Search cards by name…" aria-label="Search source cards">
+                    </div>
+                    <p id="source-card-picker-status" class="picker-status">Your recent cards will appear here.</p>
+                    <div id="source-card-picker-results" class="source-card-picker-results"></div>
+                </div>
+            </div>
+            <!-- Filter Control Bar -->
+            <section id="filter-section" class="search-setup-section">
+                <div class="section-title-bar">
+                    <div class="section-heading">
+                        <div>
+                            <span class="section-kicker">SEARCH WORKSPACE</span>
+                            <h2>Configure Search</h2>
+                        </div>
+                        <p class="section-description">Use optional methods and hard filters to shape the candidate pool. Ranking is handled automatically.</p>
+                    </div>
+                    <div class="trigger-buttons-group">
+                        <button type="button" id="toggle-search-methods-btn" class="methods-trigger-btn">
+                            ⚙️ Methods <span id="selected-methods-badge" class="badge">Standard</span> ▾
+                        </button>
+                        <div class="order-control">
+                            <label for="sort-results">Order</label>
+                            <select id="sort-results" aria-label="Order results">
+                                <option value="overall">Overall Match</option>
+                                <option value="synergy">Synergy</option>
+                                <option value="context">Context</option>
+                                <option value="exactness">Exactness</option>
+                                <option value="category">Category</option>
+                            </select>
+                        </div>
+                        <button type="button" id="toggle-card-constraints-btn" class="methods-trigger-btn">
+                            🎛️ Constraints <span id="card-constraints-badge" class="badge">Any</span> ▾
+                        </button>
+                    </div>
+                </div>
+
+                <button type="button" id="find-similar-btn" class="primary-search-btn" disabled>Find Similar Cards</button>
+            </section>
+
+            <!-- Loading Indicator -->
+            <div id="loading-indicator" class="hidden">
+                <div class="spinner"></div>
+                <p>Scanning the multiverse...</p>
+                <div id="stream-checklist" class="stream-checklist"></div>
+            </div>
+
+            <!-- Results Display -->
+            <section id="results-section" class="hidden">
+                <div class="results-header">
+                    <div class="section-heading">
+                        <div>
+                            <span class="section-kicker">RESULTS</span>
+                            <h2>Similar Cards</h2>
+                        </div>
+                        <p class="section-description">Cards are ranked by the engine's mechanical and functional similarity signals.</p>
+                    </div>
+                    <button type="button" id="export-btn">⬇️ Export to CSV</button>
+                </div>
+                <div id="provisional-results-banner" class="provisional-results-banner hidden">⏳ First look - still searching further sources, results will update…</div>
+                <div id="results-grid" class="results-grid"></div>
+                <div class="search-deeper-row">
+                    <button type="button" id="search-deeper-btn" class="hidden">🔍 Search Deeper (+8 pages/stream)</button>
+                </div>
+            </section>
+        </div>
+    </main>
+    <input type="hidden" id="filter-extra-oracle" value="">
+
+    <!-- 1. SEARCH METHODS MODAL PANEL -->
+    <div id="search-methods-modal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="search-methods-title">
+        <div class="modal-card">
+            <div class="modal-header">
+                <h3 id="search-methods-title">Search Methods</h3>
+                <button type="button" id="close-methods-modal" class="close-btn" aria-label="Close search methods">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="methods-list">
+                    <label class="method-card">
+                        <input type="checkbox" id="broad-search">
+                        <div class="method-text">
+                            <strong>Broad Search</strong>
+                            <span>Loosens rule constraints to uncover a broader range of mechanically related cards.</span>
+                        </div>
+                    </label>
+                    <label class="method-card">
+                        <input type="checkbox" id="divergent-search">
+                        <div class="method-text">
+                            <strong>Divergent Search</strong>
+                            <span>Performs multi-step branch exploration to find unexpected combinations and synergies.</span>
+                        </div>
+                    </label>
+                    <label class="method-card">
+                        <input type="checkbox" id="matrix-sweep">
+                        <div class="method-text">
+                            <strong>Matrix Sweep (Top 3 by CMC/Type)</strong>
+                            <span>Groups results by Mana Value and Type to prevent similar-cost clutter.</span>
+                        </div>
+                    </label>
+                    <div class="method-setting-row search-depth-control">
+                        <div class="search-depth-label">
+                            <label for="filter-depth-percent"><strong>Search Depth</strong></label>
+                            <span class="search-depth-summary">How much of the available card pool is explored before results are finalized.</span>
+                        </div>
+                        <div class="search-depth-input-wrap">
+                            <input type="number" id="filter-depth-percent" placeholder="50" min="1" max="100" step="1" value="50" inputmode="numeric" aria-describedby="search-depth-help">
+                            <span class="percent-suffix" aria-hidden="true">%</span>
+                        </div>
+                    </div>
+                    <div id="search-depth-help" class="search-depth-scale" aria-label="Search depth guidance">
+                        <div><strong>1%</strong><span>Fastest results</span></div>
+                        <div><strong>25%</strong><span>Fast, pretty accurate results</span></div>
+                        <div><strong>50%</strong><span>Balanced speed and coverage</span></div>
+                        <div><strong>75%</strong><span>Thorough results</span></div>
+                        <div><strong>100%</strong><span>Slowest, most complete results</span></div>
+                    </div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" id="save-methods-btn">Done</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- CARD ATTRIBUTE CONSTRAINTS MODAL PANEL -->
+    <div id="card-constraints-modal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="card-constraints-title">
+        <div class="modal-card">
+            <div class="modal-header">
+                <h3 id="card-constraints-title">Card Constraints</h3>
+                <button type="button" id="close-card-constraints-modal" class="close-btn" aria-label="Close card constraints">&times;</button>
+            </div>
+            <div class="modal-body">
+                <p class="modal-intro">These filters are hard constraints: matching cards must satisfy them.</p>
+                <div class="filters-grid">
+                    <div class="filter-group filter-group-wide">
+                        <label>Card Types <span class="filter-help">All selected types must be present</span></label>
+                        <div class="constraint-editor" data-source="filter-type">
+                            <div id="filter-type-chips" class="constraint-chips"></div>
+                            <div class="constraint-input-row">
+                                <select id="filter-type-entry" aria-label="Add card type">
+                                    <option value="">Add a type…</option>
+                                    <option value="artifact">Artifact</option>
+                                    <option value="battle">Battle</option>
+                                    <option value="creature">Creature</option>
+                                    <option value="enchantment">Enchantment</option>
+                                    <option value="instant">Instant</option>
+                                    <option value="land">Land</option>
+                                    <option value="planeswalker">Planeswalker</option>
+                                    <option value="sorcery">Sorcery</option>
+                                </select>
+                            </div>
+                        </div>
+                        <input type="hidden" id="filter-type" value="">
+                    </div>
+                    <div class="filter-group filter-group-wide">
+                        <label>Supertypes <span class="filter-help">Examples: Legendary, Basic, Snow</span></label>
+                        <div class="constraint-editor" data-source="filter-supertype">
+                            <div id="filter-supertype-chips" class="constraint-chips"></div>
+                            <div class="constraint-input-row">
+                                <select id="filter-supertype-entry" aria-label="Add card supertype">
+                                    <option value="">Add a supertype…</option>
+                                    <option value="basic">Basic</option>
+                                    <option value="legendary">Legendary</option>
+                                    <option value="ongoing">Ongoing</option>
+                                    <option value="snow">Snow</option>
+                                    <option value="world">World</option>
+                                </select>
+                            </div>
+                        </div>
+                        <input type="hidden" id="filter-supertype" value="">
+                    </div>
+                    <div class="filter-group filter-group-wide">
+                        <label>Subtypes <span class="filter-help">Add one or more, such as Elf or Warrior</span></label>
+                        <div class="constraint-editor" data-source="filter-subtype">
+                            <div id="filter-subtype-chips" class="constraint-chips"></div>
+                            <div class="constraint-input-row">
+                                <input type="text" id="filter-subtype-entry" placeholder="e.g. elf" autocomplete="off" aria-label="Add card subtype">
+                                <button type="button" class="constraint-add-btn" data-target="filter-subtype">Add</button>
+                            </div>
+                        </div>
+                        <input type="hidden" id="filter-subtype" value="">
+                    </div>
+                    <div class="filter-group filter-group-wide">
+                        <label>Keywords <span class="filter-help">Add one or more keyword abilities</span></label>
+                        <div class="constraint-editor" data-source="filter-keyword">
+                            <div id="filter-keyword-chips" class="constraint-chips"></div>
+                            <div class="constraint-input-row">
+                                <input type="text" id="filter-keyword-entry" placeholder="e.g. flash" autocomplete="off" aria-label="Add keyword">
+                                <button type="button" class="constraint-add-btn" data-target="filter-keyword">Add</button>
+                            </div>
+                        </div>
+                        <input type="hidden" id="filter-keyword" value="">
+                    </div>
+                    <div class="filter-group">
+                        <label for="filter-format">Format Legality</label>
+                        <select id="filter-format">
+                            <option value="">Any Format</option>
+                            <option value="commander">Commander</option>
+                            <option value="standard">Standard</option>
+                            <option value="modern">Modern</option>
+                            <option value="pioneer">Pioneer</option>
+                            <option value="legacy">Legacy</option>
+                        </select>
+                    </div>
+                    <div class="filter-group">
+                        <label for="filter-rarity">Rarity</label>
+                        <select id="filter-rarity">
+                            <option value="">Any Rarity</option>
+                            <option value="common">Common</option>
+                            <option value="uncommon">Uncommon</option>
+                            <option value="rare">Rare</option>
+                            <option value="mythic">Mythic</option>
+                        </select>
+                    </div>
+                    <div class="filter-group">
+                        <label for="filter-identity">Color Identity</label>
+                        <div class="color-pip-group" data-target="filter-identity">
+                            <button type="button" class="color-pip pip-w" data-color="w" title="White">W</button>
+                            <button type="button" class="color-pip pip-u" data-color="u" title="Blue">U</button>
+                            <button type="button" class="color-pip pip-b" data-color="b" title="Black">B</button>
+                            <button type="button" class="color-pip pip-r" data-color="r" title="Red">R</button>
+                            <button type="button" class="color-pip pip-g" data-color="g" title="Green">G</button>
+                            <button type="button" class="color-pip pip-c" data-color="c" title="Colorless">C</button>
+                        </div>
+                        <input type="hidden" id="filter-identity">
+                    </div>
+                    <div class="filter-group">
+                        <label for="filter-colors">Exact Colors</label>
+                        <div class="color-pip-group" data-target="filter-colors">
+                            <button type="button" class="color-pip pip-w" data-color="w" title="White">W</button>
+                            <button type="button" class="color-pip pip-u" data-color="u" title="Blue">U</button>
+                            <button type="button" class="color-pip pip-b" data-color="b" title="Black">B</button>
+                            <button type="button" class="color-pip pip-r" data-color="r" title="Red">R</button>
+                            <button type="button" class="color-pip pip-g" data-color="g" title="Green">G</button>
+                        </div>
+                        <input type="hidden" id="filter-colors">
+                    </div>
+                    <div class="filter-group filter-cmc-group">
+                        <label for="filter-cmc">Mana Value (CMC)</label>
+                        <input type="text" id="filter-cmc" placeholder="e.g. 3, <=2, >=4, !=1">
+                    </div>
+                    <div class="filter-group filter-set-group">
+                        <label for="filter-set">Set Code</label>
+                        <input type="text" id="filter-set" placeholder="e.g., lea, khm" maxlength="3">
+                    </div>
+                    <div class="filter-group filter-power-group">
+                        <label for="filter-power">Power</label>
+                        <input type="text" id="filter-power" placeholder="e.g. 2, <=1, >=4">
+                    </div>
+                    <div class="filter-group filter-toughness-group">
+                        <label for="filter-toughness">Toughness</label>
+                        <input type="text" id="filter-toughness" placeholder="e.g. 2, <=1, >=4">
+                    </div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" id="save-card-constraints-btn">Done</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- FLOATING BAR FOR MULTI-SELECTED RELATED CARDS -->
+    <div id="related-cards-bar" class="floating-bar hidden">
+        <div class="floating-bar-content">
+            <div class="selected-cards-info">
+                <span class="selected-count-label">Selected Related Cards:</span>
+                <div id="selected-cards-chips" class="chips-list"></div>
+            </div>
+            <div class="floating-bar-actions">
+                <button type="button" id="clear-selected-btn" class="clear-btn">Clear All</button>
+                <button type="button" id="related-search-btn" class="related-search-btn">🔍 Search Related Cards</button>
+            </div>
+        </div>
+    </div>
+    <!-- CARD COMPARISON MODAL -->
+    <div id="compare-modal" class="hidden" role="dialog" aria-modal="true" aria-labelledby="compare-modal-title">
+        <div class="modal-content">
+            <button type="button" id="close-modal" aria-label="Close card comparison">&times;</button>
+            <h2 id="compare-modal-title">Card Comparison</h2>
+            <p class="instruction-note" id="compare-status">Select another card from the results to compare.</p>
+            <div id="compare-container" class="compare-container"></div>
+        </div>
+    </div>
+
+    <script>
+        window.transformersConfig = { allowLocalModels: false };
+    </script>
+    <script type="module">
+        import * as transformers from "https://cdn.jsdelivr.net/npm/@xenova/transformers@2.16.0";
+        window.transformers = transformers;
+    </script>
+    <script type="module" src="app.js"></script>
+</body>
+</html>
