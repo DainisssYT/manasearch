@@ -12823,7 +12823,9 @@ function renderResults(cards) {
 
         const priceLabel = document.createElement('div');
         priceLabel.className = 'card-price-label';
-        priceLabel.textContent = ` Price: ${priceUsd} / ${priceEur}`;
+        const fullPriceLabel = `Price: ${priceUsd} / ${priceEur}`;
+        priceLabel.textContent = fullPriceLabel;
+        priceLabel.title = fullPriceLabel;
         scoreBreakdown.appendChild(priceLabel);
 
         const actions = document.createElement('div');
