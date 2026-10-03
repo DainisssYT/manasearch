@@ -6427,34 +6427,912 @@ function calculateUniversalMechanicSimilarity(profileA, profileB) {
     };
 }
 
+
+// ---------------------------------------------------------------------------
+// V21 MECHANICAL GRAPH + RULES-AWARE RANKING LAYER
+// ---------------------------------------------------------------------------
+// The parser/universal-keyword layer is now promoted into a graph representation. A Magic card is
+// not merely a bag of words or isolated effects: effects have triggers, targets, costs, zones,
+// restrictions, quantities, durations, replacement/static modes, and an order/dependency relation.
+// This layer compares those relationships explicitly while remaining tolerant of wording changes.
+//
+// Important design rule: this is still evidence, not a rules oracle. The parser can miss things;
+// raw Oracle semantics and Scryfall keyword metadata remain parallel evidence sources. The graph
+// therefore never hard-vetoes a candidate solely because a heuristic field is absent.
+
+const MECHANICAL_GRAPH_VERSION = 1;
+
+const MECHANIC_OBJECT_PARENTS = {
+    'artifact creature': ['creature', 'artifact', 'permanent'],
+    'enchantment creature': ['creature', 'enchantment', 'permanent'],
+    'battle': ['permanent'],
+    'planeswalker': ['permanent'],
+    'creature': ['permanent'],
+    'artifact': ['permanent'],
+    'enchantment': ['permanent'],
+    'land': ['permanent'],
+    'kindred': ['permanent'],
+    'token': ['permanent'],
+    'permanent': [],
+    'spell': [],
+    'ability': [],
+    'card': [],
+    'player': [],
+    'opponent': ['player'],
+    'creature card': ['card'],
+    'artifact card': ['card'],
+    'enchantment card': ['card'],
+    'land card': ['card'],
+    'instant card': ['card'],
+    'sorcery card': ['card'],
+    'planeswalker card': ['card'],
+    'kindred card': ['card']
+};
+
+const MECHANIC_FAMILY_MAP = {
+    destruction: 'removal', exile: 'removal', sacrifice: 'removal', bounce: 'tempo', tuck: 'tempo',
+    reanimate: 'recursion', recursion: 'recursion', cheat_into_play: 'recursion',
+    tutor: 'selection', ramp_tutor: 'acceleration', card_draw: 'card_advantage', discard: 'disruption',
+    mill: 'disruption', counter: 'interaction', direct_damage: 'interaction', gain_control: 'control',
+    cost_reduction: 'cost_modification', token_creation: 'tokens', token_multiplier: 'tokens',
+    tribal_anthem: 'combat', anthem: 'combat', place_counter: 'stats', mana_ability: 'resources',
+    gain_life: 'life', lose_life: 'life', tap: 'board_state', untap: 'board_state',
+    copy: 'copy', clone: 'copy', phase: 'zone_or_state', transform: 'zone_or_state'
+};
+
+// Semantic anchor map for keyword mechanics. Unknown keywords are still retained literally, so
+// this map is an additional bridge between named keyword mechanics and rules-text phrasing rather
+// than a closed vocabulary. The broad map covers high-frequency mechanics whose rules meaning is
+// often expressed differently in Oracle text.
+const KEYWORD_MECHANIC_ANCHORS = {
+    flying: ['evasion', 'block_by_flying_or_reach'],
+    reach: ['block_flying'],
+    trample: ['combat_damage', 'excess_damage_to_player_or_battle'],
+    deathtouch: ['lethal_damage', 'creature_destruction'],
+    lifelink: ['damage', 'life_gain'],
+    vigilance: ['attack', 'does_not_tap'],
+    haste: ['attack', 'tap_ability_immediately'],
+    menace: ['evasion', 'multiple_blockers_required'],
+    double_strike: ['combat_damage', 'two_damage_steps'],
+    first_strike: ['combat_damage', 'first_strike_step'],
+    indestructible: ['destruction_prevention'],
+    hexproof: ['targeting_protection'],
+    shroud: ['targeting_protection'],
+    protection: ['targeting_protection', 'damage_prevention', 'blocking_restriction'],
+    ward: ['targeting_tax', 'targeting_protection'],
+    defender: ['cannot_attack'],
+    flash: ['instant_speed'],
+    morph: ['face_down', 'turn_face_up'],
+    disguise: ['face_down', 'ward', 'turn_face_up'],
+    cloak: ['face_down'],
+    manifest: ['face_down', 'put_card_on_battlefield'],
+    mutate: ['combine_permanents', 'cast_for_mutate'],
+    transform: ['change_face', 'double_faced'],
+    disturb: ['cast_from_graveyard', 'transform'],
+    aftermath: ['split_card', 'cast_from_graveyard'],
+    adventure: ['split_card', 'cast_from_exile'],
+    flashback: ['cast_from_graveyard'],
+    escape: ['cast_from_graveyard', 'additional_cost'],
+    unearth: ['cast_from_graveyard', 'temporary', 'haste'],
+    disturb: ['cast_from_graveyard', 'transform'],
+    embalm: ['token_copy', 'cast_from_graveyard'],
+    eternalize: ['token_copy', 'cast_from_graveyard'],
+    encore: ['graveyard', 'token_copy', 'attack'],
+    suspend: ['exile', 'time_counters', 'cast_later'],
+    foretell: ['exile', 'cast_later', 'alternative_cost'],
+    plot: ['exile', 'cast_later', 'alternative_cost'],
+    rebound: ['cast_from_graveyard_after_cast', 'delayed_trigger'],
+    cascade: ['reveal', 'cast_free', 'library'],
+    discover: ['reveal', 'cast_free', 'library'],
+    storm: ['copy_spell', 'cast_count'],
+    prowess: ['spell_cast', 'stat_buff'],
+    heroic: ['target_you_control', 'triggered_stat_or_effect'],
+    constellation: ['enchantment_enters', 'triggered_effect'],
+    landfall: ['land_enters', 'triggered_effect'],
+    magecraft: ['spell_or_ability_cast', 'triggered_effect'],
+    revolt: ['permanent_left_battlefield', 'triggered_effect'],
+    enrage: ['damage_to_creature', 'triggered_effect'],
+    raid: ['attacked_this_turn', 'triggered_effect'],
+    morbid: ['creature_died_this_turn', 'condition'],
+    ferocious: ['power_threshold', 'condition'],
+    threshold: ['graveyard_count', 'condition'],
+    delirium: ['card_type_count', 'condition'],
+    descend: ['graveyard_count', 'condition'],
+    exalted: ['solo_attacker', 'stat_buff'],
+    mentor: ['attack', 'stat_buff', 'counter'],
+    bolster: ['counter', 'lowest_toughness'],
+    proliferate: ['counter', 'permanent_or_player'],
+    evolve: ['creature_enters', 'counter'],
+    adapt: ['counter', 'activated_ability'],
+    graft: ['counter', 'creature_enters'],
+    undying: ['dies', 'return_from_graveyard', 'counter'],
+    persist: ['dies', 'return_from_graveyard', 'counter'],
+    bloodthirst: ['life_loss_condition', 'counter'],
+    wither: ['damage', 'minus_counters'],
+    infect: ['damage', 'poison_counters', 'minus_counters'],
+    toxic: ['combat_damage', 'poison_counters'],
+    corrupted: ['poison_counters', 'condition'],
+    discover: ['reveal', 'cast_free'],
+    convoke: ['tap_creatures', 'mana_cost'],
+    delve: ['exile_graveyard_cards', 'mana_cost'],
+    affinity: ['cost_reduction', 'object_count'],
+    improvise: ['tap_artifacts', 'mana_cost'],
+    kicker: ['additional_cost', 'optional'],
+    buyback: ['additional_cost', 'return_to_hand'],
+    madness: ['discard', 'cast_from_graveyard_or_exile'],
+    channel: ['discard', 'activated_ability'],
+    cycling: ['discard', 'draw'],
+    transmute: ['discard', 'tutor', 'activated_ability'],
+    transfigure: ['sacrifice', 'tutor', 'activated_ability'],
+    ninjutsu: ['return_to_hand', 'combat', 'put_on_battlefield'],
+    jutsu: ['return_to_hand', 'combat', 'put_on_battlefield'],
+    dash: ['alternative_cost', 'haste', 'return_to_hand'],
+    blitz: ['alternative_cost', 'haste', 'dies', 'draw'],
+    emerge: ['cost_reduction', 'sacrifice'],
+    exploit: ['sacrifice', 'enters_battlefield'],
+    connive: ['draw', 'discard', 'counter'],
+    investigate: ['create_token', 'clue', 'draw'],
+    incubate: ['create_token', 'transform'],
+    create: ['token_creation'],
+    populate: ['token_copy'],
+    living_weapon: ['token_creation', 'equipment', 'attach'],
+    reconfigure: ['equipment', 'attach'],
+    equip: ['equipment', 'attach'],
+    bestow: ['aura', 'alternative_cost', 'creature'],
+    reanimation: ['graveyard', 'battlefield'],
+    ward: ['targeting_tax'],
+    cascade: ['library', 'cast_free'],
+    storm: ['copy_spell'],
+    replicate: ['copy_spell'],
+    offspring: ['token_creation', 'enters_battlefield'],
+    saddle: ['tap_creatures', 'attack'],
+    mount: ['tap_creatures', 'attack'],
+    craft: ['exile_from_graveyard', 'artifact', 'transformation'],
+    bargain: ['additional_cost', 'sacrifice'],
+    gift: ['give_opponent_resource', 'cast_or_effect'],
+    goad: ['attack_requirement', 'combat'],
+    myriad: ['token_creation', 'attack'],
+    myriad: ['token_creation', 'attack'],
+    populate: ['token_copy'],
+    discover: ['library', 'cast_free']
+};
+
+function normalizeMechanicalObject(value) {
+    const raw = normalizeMechanicToken(value);
+    if (!raw) return null;
+    const v = raw
+        .replace(/^a\s+|^an\s+/g, '')
+        .replace(/\s+cards?$/i, ' card')
+        .replace(/\s+permanents?$/i, ' permanent')
+        .replace(/\s+creatures?$/i, ' creature')
+        .replace(/\s+players?$/i, ' player')
+        .trim();
+    const aliases = {
+        'instant or sorcery': 'spell', 'instant or sorcery card': 'card',
+        'any target': 'player_or_permanent', 'noncreature spell': 'spell',
+        'nonland permanent': 'permanent', 'non-token creature': 'creature', 'non-token permanent': 'permanent'
+    };
+    return aliases[v] || v;
+}
+
+function mechanicalObjectAncestors(value) {
+    const root = normalizeMechanicalObject(value);
+    if (!root) return new Set();
+    const out = new Set([root]);
+    const queue = [root];
+    while (queue.length) {
+        const current = queue.shift();
+        for (const parent of (MECHANIC_OBJECT_PARENTS[current] || [])) {
+            if (!out.has(parent)) { out.add(parent); queue.push(parent); }
+        }
+    }
+    return out;
+}
+
+function compareMechanicalObjects(a, b) {
+    const aa = normalizeMechanicalObject(a), bb = normalizeMechanicalObject(b);
+    if (!aa && !bb) return 1;
+    if (!aa || !bb) return 0.58;
+    if (aa === bb) return 1;
+    if ((aa === 'player_or_permanent' && ['player','opponent','permanent'].includes(bb)) ||
+        (bb === 'player_or_permanent' && ['player','opponent','permanent'].includes(aa))) return 0.82;
+    const aAnc = mechanicalObjectAncestors(aa), bAnc = mechanicalObjectAncestors(bb);
+    if (aAnc.has(bb) || bAnc.has(aa)) return 0.86;
+    const overlap = [...aAnc].filter(v => bAnc.has(v));
+    if (overlap.length) {
+        if (overlap.includes('permanent')) return 0.78;
+        if (overlap.includes('card')) return 0.74;
+        if (overlap.includes('player')) return 0.70;
+        return 0.64;
+    }
+    return 0.08;
+}
+
+function normalizeMechanicalSet(value) {
+    if (value instanceof Set) return value;
+    if (Array.isArray(value)) return new Set(value.filter(Boolean).map(normalizeMechanicToken));
+    if (value == null) return new Set();
+    return new Set([normalizeMechanicToken(value)].filter(Boolean));
+}
+
+function compareMechanicalSets(a, b, emptySimilarity = 1) {
+    const aa = normalizeMechanicalSet(a), bb = normalizeMechanicalSet(b);
+    if (!aa.size && !bb.size) return emptySimilarity;
+    if (!aa.size || !bb.size) return 0.55;
+    const union = new Set([...aa, ...bb]);
+    let intersection = 0;
+    aa.forEach(v => { if (bb.has(v)) intersection++; });
+    return intersection / Math.max(1, union.size);
+}
+
+function extractKeywordAnchorSet(card, text = '') {
+    const keywords = extractMechanicKeywords(card, text || card?.oracle_text || '');
+    const anchors = new Set();
+    for (const keyword of keywords) {
+        const clean = normalizeMechanicToken(keyword);
+        anchors.add(`keyword:${clean}`);
+        const mapped = KEYWORD_MECHANIC_ANCHORS[clean];
+        if (mapped) mapped.forEach(x => anchors.add(`anchor:${x}`));
+    }
+    return anchors;
+}
+
+function inferMechanicalEvent(effect) {
+    const raw = String(effect?.raw || '').toLowerCase();
+    if (effect?.activationCost) return 'activated';
+    if (effect?.triggerProfile?.event) return effect.triggerProfile.event;
+    if (/\bwhenever\b/.test(raw)) return 'triggered_event';
+    if (/\bwhen\b/.test(raw)) return 'triggered_event';
+    if (/\bat the beginning of\b|\bat the end of\b/.test(raw)) return 'turn_trigger';
+    if (/\binstead\b/.test(raw)) return 'replacement';
+    if (/\bprevent(?:s|ed)?\b/.test(raw)) return 'prevention';
+    if (/\b(?:can't|cannot)\b/.test(raw)) return 'prohibition';
+    if (/\bas long as\b|\bwhile\b/.test(raw)) return 'static_condition';
+    if (effect?.isStatic) return 'static';
+    return 'resolution';
+}
+
+function inferMechanicalObject(effect, universalAtoms = new Set()) {
+    const candidates = [
+        effect?.canonical?.params?.object,
+        effect?.object,
+        effect?.targetProfile?.object,
+        effect?.tokenType === 'token' ? 'token' : null
+    ];
+    for (const c of candidates) {
+        if (c) return normalizeMechanicalObject(c);
+    }
+    for (const atom of universalAtoms) {
+        const m = /^target:(.+)$/.exec(atom);
+        if (m) return normalizeMechanicalObject(m[1]);
+    }
+    return null;
+}
+
+function mechanicalNodeKeywordAnchors(effect) {
+    const anchors = new Set();
+    const raw = String(effect?.raw || '').toLowerCase();
+    for (const [keyword, mapped] of Object.entries(KEYWORD_MECHANIC_ANCHORS)) {
+        const re = new RegExp(`\\b${escapeMechanicRegexTerm(keyword)}\\b`, 'i');
+        if (re.test(raw)) {
+            anchors.add(`keyword:${keyword}`);
+            mapped.forEach(x => anchors.add(`anchor:${x}`));
+        }
+    }
+    for (const action of UNIVERSAL_RULE_ACTION_TERMS) {
+        const re = new RegExp(`\\b${escapeMechanicRegexTerm(action).replace(/\\s+/g, '\\\\s+')}\\b`, 'i');
+        if (re.test(raw)) anchors.add(`action_anchor:${normalizeMechanicToken(action)}`);
+    }
+    return anchors;
+}
+
+function buildMechanicalEffectNode(effect, index = 0, graphAnchors = new Set()) {
+    const raw = String(effect?.raw || '');
+    const canonical = effect?.canonical || null;
+    const taxonomy = effect?.action ? ACTION_TAXONOMY[effect.action] : null;
+    const p = canonical?.params || {};
+    const universalAnchors = mechanicalNodeKeywordAnchors(effect);
+    // Keep node anchors local to this effect. Card-wide keyword/function atoms live on the graph
+    // itself; copying them onto every node would make every effect look like it contains every
+    // mechanic on the card and would artificially inflate pairwise node matches.
+    const quantityProfile = effect?.quantityProfile || p.quantityProfile || {};
+    const triggerProfile = effect?.triggerProfile || p.triggerProfile || {};
+    const targetProfile = effect?.targetProfile || p.targetProfile || {};
+    const controllerScope = effect?.controllerScope || p.controllerScope || null;
+    const restrictions = new Set([...(effect?.restriction || []), ...(p.restriction || [])].filter(Boolean).map(normalizeMechanicToken));
+    const targetScope = targetProfile.scope || controllerScope ||
+        (restrictions.has('controlledbyyou') ? 'you_control' : restrictions.has('controlledbyopponent') ? 'opponent_control' : null);
+
+    const event = inferMechanicalEvent(effect);
+    const mode = effect?.effectMode || p.effectMode || 'normal';
+    const nodeFamily = canonical?.function
+        ? (MECHANIC_FAMILY_MAP[canonical.function] || taxonomy?.family || canonical.function)
+        : (taxonomy?.family || null);
+
+    const node = {
+        index,
+        sequence: index,
+        action: normalizeMechanicToken(effect?.action || ''),
+        function: normalizeMechanicToken(canonical?.function || ''),
+        outcome: normalizeMechanicToken(canonical?.outcome || ''),
+        family: normalizeMechanicToken(nodeFamily || ''),
+        object: inferMechanicalObject(effect),
+        from: normalizeMechanicToken(effect?.from || p.from || ''),
+        to: normalizeMechanicToken(effect?.to || p.to || ''),
+        targetKind: normalizeMechanicToken(targetProfile.kind || p.target || effect?.target || ''),
+        targetObject: normalizeMechanicalObject(targetProfile.object || p.object || effect?.object),
+        targetScope: normalizeMechanicToken(targetScope || ''),
+        scope: normalizeMechanicToken(p.scope || effect?.scope || ''),
+        restriction: restrictions,
+        quantityProfile: {
+            kind: normalizeMechanicToken(quantityProfile.kind || ''),
+            relation: normalizeMechanicToken(quantityProfile.relation || ''),
+            bound: normalizeMechanicToken(quantityProfile.bound || ''),
+            source: normalizeMechanicToken(quantityProfile.source || '')
+        },
+        quantity: Number.isFinite(Number(effect?.quantity ?? p.quantity)) ? Number(effect?.quantity ?? p.quantity) : null,
+        magnitude: normalizeMechanicToken(p.magnitude || effect?.powerToughness || effect?.amount || ''),
+        duration: normalizeMechanicToken(effect?.durationProfile || p.duration || ''),
+        event,
+        triggerType: normalizeMechanicToken(triggerProfile.type || ''),
+        triggerWindow: normalizeMechanicToken(triggerProfile.window || ''),
+        triggerEvent: normalizeMechanicToken(triggerProfile.event || ''),
+        condition: normalizeMechanicToken(effect?.condition || p.condition || ''),
+        conditionDetail: normalizeMechanicalSet(effect?.conditionDetail || p.conditionDetail),
+        costType: normalizeMechanicToken(effect?.activationCost?.type || ''),
+        costs: new Set([...(effect?.activationCost?.parts || []), effect?.payCost, p.payCost].filter(Boolean).map(normalizeMechanicToken)),
+        effectMode: mode,
+        static: effect?.isStatic === true || mode === 'prohibition' || mode === 'replacement' || mode === 'prevention' || event === 'static' || event === 'static_condition',
+        replacement: mode === 'replacement',
+        prevention: mode === 'prevention',
+        isCost: Boolean(effect?.isCostEffect || p.isCostEffect),
+        isMode: Boolean(effect?.isMode || p.isMode),
+        modeGroupId: effect?.modeGroupId ?? p.modeGroupId ?? null,
+        modeCount: effect?.modeCount || p.modeCount || null,
+        role: normalizeMechanicToken(p.dependencyProfile?.role || effect?.dependencyProfile?.role || (effect?.isCostEffect ? 'cost' : 'primary')),
+        dependencies: new Set(Object.entries(effect?.dependencyProfile || p.dependencyProfile || {}).filter(([,v]) => v === true).map(([k]) => normalizeMechanicToken(k))),
+        keywordAnchors: universalAnchors,
+        raw
+    };
+    if (effect?.stats) node.stats = normalizeMechanicToken(effect.stats);
+    if (effect?.keywords) node.grantedKeywords = normalizeMechanicalSet(effect.keywords);
+    if (effect?.tokenType) node.tokenType = normalizeMechanicToken(effect.tokenType);
+    if (effect?.multiplier != null) node.multiplier = Number(effect.multiplier) || null;
+    return node;
+}
+
+function getCachedMechanicalEffectGraph(card = null, text = '', parsedEffects = null) {
+    const oracle = String(text || card?.oracle_text || (card?.card_faces ? card.card_faces.map(f => f.oracle_text || '').join('\n\n') : '') || '');
+    if (card && card._mechanicalGraphCacheText === oracle && card._mechanicalGraph) return card._mechanicalGraph;
+    const graph = buildMechanicalEffectGraph(card, oracle, parsedEffects);
+    if (card) {
+        card._mechanicalGraphCacheText = oracle;
+        card._mechanicalGraph = graph;
+    }
+    return graph;
+}
+
+function buildMechanicalEffectGraph(card = null, text = '', parsedEffects = null) {
+    const oracle = String(text || card?.oracle_text || (card?.card_faces ? card.card_faces.map(f => f.oracle_text || '').join('\n\n') : '') || '');
+    const effects = Array.isArray(parsedEffects) ? parsedEffects : parseMTGEffect(oracle);
+    const keywordAnchors = extractKeywordAnchorSet(card, oracle);
+    const universalProfile = (effects?._mechanicProfile) || buildUniversalMechanicProfile(card, oracle, effects);
+    universalProfile?.atoms?.forEach?.(a => keywordAnchors.add(a));
+
+    const nodes = effects
+        .map((effect, index) => buildMechanicalEffectNode(effect, index))
+        .filter(node => node.function || node.action || node.keywordAnchors.size || node.object || node.event !== 'resolution');
+
+    const edges = [];
+    for (let i = 1; i < nodes.length; i++) {
+        const prev = nodes[i - 1], curr = nodes[i];
+        const between = `${prev.raw || ''} ${curr.raw || ''}`.toLowerCase();
+        edges.push({
+            from: prev.index,
+            to: curr.index,
+            relation: curr.role === 'dependent_followup' ? 'dependent_followup'
+                : curr.role === 'cost' ? 'cost_before_effect'
+                : curr.isMode && prev.isMode && curr.modeGroupId === prev.modeGroupId ? 'same_mode_group'
+                : /\bthen\b/i.test(between) ? 'then'
+                : /\bif you do\b/i.test(between) ? 'if_you_do'
+                : 'sequence'
+        });
+    }
+
+    const typeCounts = {};
+    nodes.forEach(n => { const key = n.function || n.family || n.action || 'unknown'; typeCounts[key] = (typeCounts[key] || 0) + 1; });
+    return {
+        version: MECHANICAL_GRAPH_VERSION,
+        nodes,
+        edges,
+        keywordAnchors,
+        universalProfile,
+        typeCounts,
+        nodeCount: nodes.length
+    };
+}
+
+function mechanicalNumericSimilarity(a, b) {
+    const aa = Number(a), bb = Number(b);
+    if (!Number.isFinite(aa) && !Number.isFinite(bb)) return 1;
+    if (!Number.isFinite(aa) || !Number.isFinite(bb)) return 0.55;
+    return Math.max(0, 1 - Math.abs(aa - bb) / Math.max(Math.abs(aa), Math.abs(bb), 1));
+}
+
+function mechanicalQuantitySimilarity(a, b) {
+    const qa = a?.quantityProfile || {}, qb = b?.quantityProfile || {};
+    const av = a?.quantity, bv = b?.quantity;
+    let score = mechanicalNumericSimilarity(av, bv);
+    if (qa.kind && qb.kind && qa.kind !== qb.kind) score *= 0.82;
+    if (qa.relation && qb.relation) score *= qa.relation === qb.relation ? 1 : 0.62;
+    if (qa.bound && qb.bound) score *= qa.bound === qb.bound ? 1 : 0.70;
+    if ((qa.source || qb.source) && qa.source !== qb.source) score *= 0.70;
+    return Math.max(0, Math.min(1, score));
+}
+
+function mechanicalDurationSimilarity(a, b) {
+    const aa = a?.duration || '', bb = b?.duration || '';
+    if (!aa && !bb) return 1;
+    if (!aa || !bb) return 0.62;
+    if (aa === bb) return 1;
+    const temporaryA = /until_end_of_turn|while_condition|temporary/.test(aa);
+    const temporaryB = /until_end_of_turn|while_condition|temporary/.test(bb);
+    if (temporaryA === temporaryB) return 0.60;
+    return 0.20;
+}
+
+function mechanicalEventSimilarity(a, b) {
+    const ea = a?.event || '', eb = b?.event || '';
+    if (!ea && !eb) return 1;
+    if (!ea || !eb) return 0.58;
+    if (ea === eb) return 1;
+    const triggerA = a?.triggerEvent || ea, triggerB = b?.triggerEvent || eb;
+    if (triggerA && triggerB && triggerA === triggerB) return 0.95;
+    if (a?.triggerType === b?.triggerType && a?.triggerType) return 0.62;
+    if ((ea === 'triggered_event' || ea === 'turn_trigger') && (eb === 'triggered_event' || eb === 'turn_trigger')) return 0.42;
+    return 0.15;
+}
+
+function mechanicalModeSimilarity(a, b) {
+    const ma = a?.effectMode || 'normal', mb = b?.effectMode || 'normal';
+    if (ma === mb) return 1;
+    const compatible = new Set(['replacement|normal','normal|replacement','prevention|normal','normal|prevention','prohibition|static','static|prohibition']);
+    return compatible.has(`${ma}|${mb}`) ? 0.45 : 0.12;
+}
+
+function mechanicalTriggerSimilarity(a, b) {
+    if (!a?.triggerType && !b?.triggerType && !a?.triggerEvent && !b?.triggerEvent && !a?.triggerWindow && !b?.triggerWindow) return 1;
+    const type = a?.triggerType === b?.triggerType ? 1 : 0.30;
+    const ev = a?.triggerEvent && b?.triggerEvent ? (a.triggerEvent === b.triggerEvent ? 1 : 0.10) : 0.55;
+    const win = a?.triggerWindow && b?.triggerWindow ? (a.triggerWindow === b.triggerWindow ? 1 : 0.30) : 0.65;
+    return Math.max(0, Math.min(1, type * 0.30 + ev * 0.50 + win * 0.20));
+}
+
+function mechanicalRestrictionSimilarity(a, b) {
+    const aa = normalizeMechanicalSet(a), bb = normalizeMechanicalSet(b);
+    if (!aa.size && !bb.size) return 1;
+    if (!aa.size || !bb.size) return 0.64;
+    const exact = compareMechanicalSets(aa, bb, 0.64);
+    const hasOppositeControl = (aa.has('controlledbyyou') && bb.has('controlledbyopponent')) || (bb.has('controlledbyyou') && aa.has('controlledbyopponent'));
+    return hasOppositeControl ? 0.08 : exact;
+}
+
+function mechanicalCostSimilarity(a, b) {
+    const aa = normalizeMechanicalSet(a?.costs), bb = normalizeMechanicalSet(b?.costs);
+    const type = a?.costType && b?.costType ? (a.costType === b.costType ? 1 : 0.30) : (a?.costType || b?.costType ? 0.60 : 1);
+    const parts = compareMechanicalSets(aa, bb, 1);
+    return Math.max(0, Math.min(1, type * 0.45 + parts * 0.55));
+}
+
+function mechanicalRoleSimilarity(a, b) {
+    if (a?.role === b?.role) return 1;
+    const compatible = new Set([
+        'primary|followup','followup|primary','primary|dependent_followup','dependent_followup|primary',
+        'cost|primary','primary|cost'
+    ]);
+    return compatible.has(`${a?.role || ''}|${b?.role || ''}`) ? 0.58 : 0.28;
+}
+
+const OPPOSITE_MECHANICS = new Set([
+    'gain_life|lose_life','lose_life|gain_life','tap|untap','untap|tap',
+    'draw|discard','discard|draw','gain_control|self_sacrifice','self_sacrifice|gain_control',
+    'reanimate|mill','mill|reanimate'
+]);
+
+function mechanicalNodeContradiction(a, b) {
+    let penalty = 0;
+    const key = `${a?.function || a?.action || ''}|${b?.function || b?.action || ''}`;
+    if (OPPOSITE_MECHANICS.has(key)) penalty += 0.30;
+
+    const zoneOpposite = a?.from && a?.to && b?.from && b?.to && a.from === b.to && a.to === b.from && a.from !== a.to;
+    if (zoneOpposite) penalty += 0.22;
+
+    if ((a?.targetScope === 'you_control' && b?.targetScope === 'opponent_control') ||
+        (a?.targetScope === 'opponent_control' && b?.targetScope === 'you_control')) penalty += 0.26;
+
+    const massA = ['all','each'].includes(a?.targetKind), massB = ['all','each'].includes(b?.targetKind);
+    if (massA !== massB) penalty += 0.10;
+
+    const destinationConflict = a?.to && b?.to && a.to !== b.to &&
+        ['battlefield','hand','graveyard','library','exile'].includes(a.to) &&
+        ['battlefield','hand','graveyard','library','exile'].includes(b.to);
+    if (destinationConflict && a?.function && b?.function && a.function === b.function) penalty += 0.16;
+
+    if (a?.replacement !== b?.replacement && (a?.replacement || b?.replacement)) penalty += 0.08;
+    if (a?.prevention !== b?.prevention && (a?.prevention || b?.prevention)) penalty += 0.08;
+    return Math.min(0.55, penalty);
+}
+
+function compareMechanicalEffectNodes(a, b) {
+    if (!a || !b) return { score: 0, contradiction: 0, breakdown: {} };
+
+    const functionExact = a.function && b.function && a.function === b.function;
+    const outcomeExact = a.outcome && b.outcome && a.outcome === b.outcome;
+    const sameFunction = functionExact ? (outcomeExact || !a.outcome || !b.outcome ? 1 : 0.90) : 0;
+    const sameAction = a.action && b.action && a.action === b.action ? 0.96 : 0;
+    const sameOutcome = outcomeExact ? 0.86 : 0;
+    const sameFamily = a.family && b.family && a.family === b.family ? 0.64 : 0;
+    const anchorAffinity = a.keywordAnchors?.size && b.keywordAnchors?.size
+        ? compareMechanicalSets(a.keywordAnchors, b.keywordAnchors, 0)
+        : 0;
+    const core = Math.max(
+        sameFunction,
+        sameAction,
+        sameOutcome,
+        sameFamily,
+        anchorAffinity * 0.93,
+        getFunctionAffinity(a.function, b.function)
+    );
+    if (core <= 0.02) return { score: 0, contradiction: 0, breakdown: { core: 0 } };
+
+    const breakdown = {
+        core,
+        object: compareMechanicalObjects(a.object || a.targetObject, b.object || b.targetObject),
+        target: compareMechanicalTargetNodes(a, b),
+        zone: compareMechanicalZoneNodes(a, b),
+        restriction: mechanicalRestrictionSimilarity(a.restriction, b.restriction),
+        quantity: mechanicalQuantitySimilarity(a, b),
+        trigger: mechanicalTriggerSimilarity(a, b),
+        event: mechanicalEventSimilarity(a, b),
+        duration: mechanicalDurationSimilarity(a, b),
+        mode: mechanicalModeSimilarity(a, b),
+        cost: mechanicalCostSimilarity(a, b),
+        role: mechanicalRoleSimilarity(a, b),
+        condition: a.condition || b.condition ? (a.condition === b.condition ? 1 : 0.45) : 1,
+        stats: a.stats || b.stats ? (a.stats === b.stats ? 1 : 0.45) : 1,
+        keywords: compareMechanicalSets(a.keywordAnchors, b.keywordAnchors, 1)
+    };
+    const fieldParts = [
+        [15, breakdown.object], [14, breakdown.target], [13, breakdown.zone], [10, breakdown.restriction],
+        [9, breakdown.quantity], [10, breakdown.trigger], [8, breakdown.event], [7, breakdown.duration],
+        [7, breakdown.mode], [5, breakdown.cost], [5, breakdown.role], [5, breakdown.condition], [4, breakdown.stats]
+    ];
+    const fieldScore = fieldParts.reduce((sum, [w, v]) => sum + w * v, 0) / fieldParts.reduce((sum, [w]) => sum + w, 0);
+    const contradiction = mechanicalNodeContradiction(a, b);
+
+    // Core mechanics dominate. Parameters refine rather than redefine the mechanic. This is what
+    // makes "destroy target creature" close to "destroy all creatures" while still preferring the
+    // exact target/scope match, and "deal 2 damage" close to "deal 3 damage" without treating the
+    // amount as the entire identity of the effect.
+    const parameterFactor = 0.48 + (0.52 * fieldScore);
+    const score = Math.max(0, Math.min(1, core * parameterFactor * (1 - contradiction)));
+    return { score, contradiction, breakdown };
+}
+
+function compareMechanicalTargetNodes(a, b) {
+    const kindA = a?.targetKind || '', kindB = b?.targetKind || '';
+    const scopeA = a?.targetScope || '', scopeB = b?.targetScope || '';
+    const object = compareMechanicalObjects(a?.targetObject || a?.object, b?.targetObject || b?.object);
+    let kind = 1;
+    if (kindA || kindB) {
+        if (kindA === kindB) kind = 1;
+        else if ((['each','all'].includes(kindA) && ['each','all'].includes(kindB))) kind = 0.92;
+        else if ((kindA === 'target' && ['each','all'].includes(kindB)) || (kindB === 'target' && ['each','all'].includes(kindA))) kind = 0.46;
+        else if (kindA === 'any' || kindB === 'any') kind = 0.82;
+        else kind = 0.58;
+    }
+    const scope = scopeA || scopeB ? (scopeA && scopeB ? (scopeA === scopeB ? 1 : 0.18) : 0.66) : 1;
+    return Math.max(0, Math.min(1, kind * 0.42 + scope * 0.26 + object * 0.32));
+}
+
+function compareMechanicalZoneNodes(a, b) {
+    const from = a?.from || '', fromB = b?.from || '', to = a?.to || '', toB = b?.to || '';
+    const fromScore = from || fromB ? (from === fromB ? 1 : (!from || !fromB ? 0.62 : 0.18)) : 1;
+    const toScore = to || toB ? (to === toB ? 1 : (!to || !toB ? 0.62 : 0.18)) : 1;
+    return fromScore * 0.48 + toScore * 0.52;
+}
+
+function compareMechanicalNodeSetsUnordered(nodesA, nodesB) {
+    const source = Array.isArray(nodesA) ? nodesA : [];
+    const candidate = Array.isArray(nodesB) ? nodesB : [];
+    if (!source.length || !candidate.length) return { sourceCoverage: 0, candidateCoverage: 0, score: 0, matches: [] };
+
+    const sourceWeights = source.map(n => Math.max(0.05, n.isCost ? 0.20 : (n.role === 'followup' ? 0.45 : 0.85)));
+    const candidateWeights = candidate.map(n => Math.max(0.05, n.isCost ? 0.20 : (n.role === 'followup' ? 0.45 : 0.85)));
+    const pairs = [];
+    source.forEach((a, i) => candidate.forEach((b, j) => {
+        const detail = compareMechanicalEffectNodes(a, b);
+        if (detail.score > 0.02) pairs.push({ i, j, ...detail });
+    }));
+    pairs.sort((x, y) => y.score - x.score);
+    const usedA = new Set(), usedB = new Set(), matches = [];
+    for (const pair of pairs) {
+        if (usedA.has(pair.i) || usedB.has(pair.j)) continue;
+        usedA.add(pair.i); usedB.add(pair.j);
+        matches.push(pair);
+    }
+    let sourceMatched = 0, candidateMatched = 0;
+    for (const m of matches) {
+        sourceMatched += sourceWeights[m.i] * m.score;
+        candidateMatched += candidateWeights[m.j] * m.score;
+    }
+    const sourceWeight = sourceWeights.reduce((a,b) => a+b, 0) || 1;
+    const candidateWeight = candidateWeights.reduce((a,b) => a+b, 0) || 1;
+    const sourceCoverage = Math.max(0, Math.min(1, sourceMatched / sourceWeight));
+    const candidateCoverage = Math.max(0, Math.min(1, candidateMatched / candidateWeight));
+    return { sourceCoverage, candidateCoverage, score: Math.sqrt(sourceCoverage * candidateCoverage), matches };
+}
+
+function compareMechanicalNodeSequences(nodesA, nodesB) {
+    const a = Array.isArray(nodesA) ? nodesA : [], b = Array.isArray(nodesB) ? nodesB : [];
+    if (!a.length || !b.length) return { sourceCoverage: 0, candidateCoverage: 0, orderScore: 0, matches: [] };
+    const n = a.length, m = b.length;
+    const dp = Array.from({ length: n + 1 }, () => Array(m + 1).fill(0));
+    const choice = Array.from({ length: n + 1 }, () => Array(m + 1).fill(null));
+    for (let i = 1; i <= n; i++) {
+        for (let j = 1; j <= m; j++) {
+            const detail = compareMechanicalEffectNodes(a[i - 1], b[j - 1]);
+            const match = dp[i - 1][j - 1] + (detail.score * Math.max(0.05, a[i - 1].isCost ? 0.20 : 0.85));
+            const skipA = dp[i - 1][j];
+            const skipB = dp[i][j - 1];
+            if (match >= skipA && match >= skipB && detail.score > 0.02) {
+                dp[i][j] = match;
+                choice[i][j] = { type: 'match', detail };
+            } else if (skipA >= skipB) {
+                dp[i][j] = skipA;
+                choice[i][j] = { type: 'skipA' };
+            } else {
+                dp[i][j] = skipB;
+                choice[i][j] = { type: 'skipB' };
+            }
+        }
+    }
+    const matches = [];
+    let i = n, j = m;
+    while (i > 0 && j > 0) {
+        const step = choice[i][j];
+        if (step?.type === 'match') {
+            matches.push({ i: i - 1, j: j - 1, ...step.detail });
+            i--; j--;
+        } else if (step?.type === 'skipA') i--;
+        else j--;
+    }
+    matches.reverse();
+    const sourceWeights = a.map(x => Math.max(0.05, x.isCost ? 0.20 : (x.role === 'followup' ? 0.45 : 0.85)));
+    const candidateWeights = b.map(x => Math.max(0.05, x.isCost ? 0.20 : (x.role === 'followup' ? 0.45 : 0.85)));
+    const sourceWeight = sourceWeights.reduce((x,y) => x+y, 0) || 1;
+    const candidateWeight = candidateWeights.reduce((x,y) => x+y, 0) || 1;
+    const matchedSource = matches.reduce((sum, x) => sum + sourceWeights[x.i] * x.score, 0);
+    const matchedCandidate = matches.reduce((sum, x) => sum + candidateWeights[x.j] * x.score, 0);
+    const sourceCoverage = Math.max(0, Math.min(1, matchedSource / sourceWeight));
+    const candidateCoverage = Math.max(0, Math.min(1, matchedCandidate / candidateWeight));
+    const orderScore = matches.length <= 1 ? 1 : matches.reduce((sum, x, idx) => {
+        if (idx === 0) return sum + 1;
+        const prev = matches[idx - 1];
+        const sourceGap = x.i - prev.i, candidateGap = x.j - prev.j;
+        return sum + (sourceGap === candidateGap ? 1 : Math.max(0.25, 1 - Math.abs(sourceGap - candidateGap) * 0.25));
+    }, 0) / matches.length;
+    return { sourceCoverage, candidateCoverage, orderScore, matches };
+}
+
+function mechanicalGraphContradictionScore(graphA, graphB, matches = []) {
+    const a = graphA?.nodes || [], b = graphB?.nodes || [];
+    let penalty = 0, checked = 0;
+    for (const match of matches) {
+        const detail = compareMechanicalEffectNodes(a[match.i], b[match.j]);
+        penalty += detail.contradiction || 0;
+        checked++;
+    }
+    // Look for strong candidate-wide opposite mechanics as a secondary contradiction signal.
+    const functionPairs = [];
+    a.forEach(x => b.forEach(y => {
+        const k = `${x.function || x.action}|${y.function || y.action}`;
+        if (OPPOSITE_MECHANICS.has(k)) functionPairs.push(k);
+    }));
+    if (functionPairs.length) penalty += Math.min(0.25, functionPairs.length * 0.06);
+    return Math.min(0.60, checked ? penalty / checked : penalty);
+}
+
+function calculateMechanicalGraphSimilarity(graphA, graphB) {
+    if (!graphA || !graphB) return { score: 0, sourceCoverage: 0, candidateCoverage: 0, orderScore: 0, contradiction: 0, matches: [], featureVector: null, evidence: [] };
+    const unordered = compareMechanicalNodeSetsUnordered(graphA.nodes, graphB.nodes);
+    const sequence = compareMechanicalNodeSequences(graphA.nodes, graphB.nodes);
+    const keywordAnchorCoverage = (graphA.keywordAnchors?.size && graphB.keywordAnchors?.size)
+        ? compareMechanicalSets(graphA.keywordAnchors, graphB.keywordAnchors, 0)
+        : 0;
+    const typeCoverage = compareMechanicalSets(Object.keys(graphA.typeCounts || {}), Object.keys(graphB.typeCounts || {}), 1);
+    const contradiction = mechanicalGraphContradictionScore(graphA, graphB, sequence.matches);
+    const coreCoverage = Math.max(unordered.sourceCoverage, sequence.sourceCoverage);
+    const balanced = Math.max(unordered.score, Math.sqrt(sequence.sourceCoverage * sequence.candidateCoverage));
+    const sequenceAgreement = Math.max(sequence.orderScore, 0.35);
+
+    const featureVector = {
+        sourceCoverage: coreCoverage,
+        candidateCoverage: Math.max(unordered.candidateCoverage, sequence.candidateCoverage),
+        balancedCoverage: balanced,
+        orderScore: sequenceAgreement,
+        keywordAnchorCoverage,
+        typeCoverage,
+        contradiction,
+        nodeCountRatio: Math.min(1, Math.min(graphA.nodes.length, graphB.nodes.length) / Math.max(graphA.nodes.length, graphB.nodes.length)),
+        exactFunctionCoverage: compareMechanicalSets(
+            graphA.nodes.map(n => n.function).filter(Boolean),
+            graphB.nodes.map(n => n.function).filter(Boolean), 1
+        )
+    };
+
+    // Calibration-ready feature blend. The coefficients are conservative, human-auditable defaults
+    // rather than a claim of a trained ML model. A future benchmark export can fit these same feature
+    // columns offline without changing the browser-side graph representation.
+    const hasMechanicalMatch = sequence.matches.length > 0 || unordered.matches.length > 0 ||
+        featureVector.keywordAnchorCoverage > 0.05 || featureVector.exactFunctionCoverage > 0.05;
+
+    // Never manufacture a nonzero mechanical score from generic shape properties alone. A pair
+    // with no shared mechanic may have the same number of parsed nodes and both be one-shot effects,
+    // but that is not evidence that they do the same thing.
+    const rankerScore = hasMechanicalMatch ? Math.max(0, Math.min(1,
+        featureVector.sourceCoverage * 0.24 +
+        featureVector.balancedCoverage * 0.13 +
+        featureVector.exactFunctionCoverage * 0.14 +
+        featureVector.keywordAnchorCoverage * 0.13 +
+        featureVector.typeCoverage * 0.05 +
+        featureVector.orderScore * 0.08 +
+        featureVector.nodeCountRatio * 0.04 +
+        Math.max(0, 1 - featureVector.contradiction) * 0.19
+    )) : 0;
+
+    const score = Math.max(0, Math.min(1,
+        rankerScore * (0.82 + 0.18 * Math.max(coreCoverage, featureVector.keywordAnchorCoverage)) * (1 - contradiction * 0.65)
+    ));
+
+    const evidence = [];
+    if (featureVector.exactFunctionCoverage >= 0.75) evidence.push('shared canonical function');
+    if (featureVector.sourceCoverage >= 0.75) evidence.push('high source-effect coverage');
+    if (featureVector.orderScore >= 0.85 && sequence.matches.length > 1) evidence.push('effect sequence agrees');
+    if (featureVector.keywordAnchorCoverage >= 0.55) evidence.push('shared mechanic anchors');
+    if (featureVector.contradiction >= 0.12) evidence.push('rules-level contradiction detected');
+
+    return {
+        score,
+        sourceCoverage: featureVector.sourceCoverage,
+        candidateCoverage: featureVector.candidateCoverage,
+        balancedCoverage: featureVector.balancedCoverage,
+        orderScore: featureVector.orderScore,
+        contradiction,
+        matches: sequence.matches.length >= unordered.matches.length ? sequence.matches : unordered.matches,
+        featureVector,
+        evidence,
+        unordered,
+        sequence,
+        keywordAnchorCoverage,
+        typeCoverage
+    };
+}
+
+function buildMechanicalConsensusGraph(graphs = []) {
+    const valid = (graphs || []).filter(g => g?.nodes?.length);
+    if (!valid.length) return null;
+    if (valid.length === 1) return valid[0];
+
+    const clusters = [];
+    for (const graph of valid) {
+        for (const node of graph.nodes) {
+            let bestCluster = null, bestScore = 0;
+            for (const cluster of clusters) {
+                const rep = cluster.representative;
+                const detail = compareMechanicalEffectNodes(node, rep);
+                if (detail.score > bestScore) { bestScore = detail.score; bestCluster = cluster; }
+            }
+            if (!bestCluster || bestScore < 0.56) {
+                clusters.push({ representative: node, members: [{ graph, node, score: 1 }], graphIds: new Set([graph]) });
+            } else {
+                bestCluster.members.push({ graph, node, score: bestScore });
+                bestCluster.graphIds.add(graph);
+                const total = bestCluster.members.reduce((s, x) => s + x.score * Math.max(0.05, x.node.isCost ? 0.20 : 0.85), 0);
+                const sorted = bestCluster.members.slice().sort((a,b) => {
+                    const aAvg = bestCluster.members.reduce((s,x) => s + compareMechanicalEffectNodes(a.node,x.node).score, 0);
+                    const bAvg = bestCluster.members.reduce((s,x) => s + compareMechanicalEffectNodes(b.node,x.node).score, 0);
+                    return bAvg - aAvg;
+                });
+                bestCluster.representative = sorted[0].node;
+                bestCluster.weightedSupport = total;
+            }
+        }
+    }
+
+    const consensusNodes = clusters.map((cluster, idx) => {
+        const rep = { ...cluster.representative };
+        rep.index = idx;
+        rep.sequence = idx;
+        rep.consensusSupport = cluster.graphIds.size / valid.length;
+        rep.importance = rep.consensusSupport * (rep.isCost ? 0.20 : 0.85);
+        return rep;
+    });
+    const safeNodes = consensusNodes.filter(node => node.consensusSupport >= (valid.length >= 3 ? 0.50 : 0.34));
+    const fallbackNodes = safeNodes.length ? safeNodes : consensusNodes;
+    const keywordAnchors = new Set();
+    const typeCounts = {};
+    fallbackNodes.forEach(n => {
+        n.keywordAnchors?.forEach?.(a => keywordAnchors.add(a));
+        const key = n.function || n.family || n.action || 'unknown';
+        typeCounts[key] = (typeCounts[key] || 0) + 1;
+    });
+    return { version: MECHANICAL_GRAPH_VERSION, nodes: fallbackNodes, edges: [], keywordAnchors, typeCounts, nodeCount: fallbackNodes.length, isConsensus: true, sourceGraphCount: valid.length };
+}
+
+function buildMechanicalFeatureVector(cardOrGraphA, graphB = null) {
+    const graphA = cardOrGraphA?.nodes ? cardOrGraphA : buildMechanicalEffectGraph(cardOrGraphA);
+    const graph = graphB?.nodes ? graphB : null;
+    if (!graph) return null;
+    return calculateMechanicalGraphSimilarity(graphA, graph).featureVector;
+}
+
 function calculateMechanicalSimilarityDetailed(parsedA, parsedB, profileA = null, profileB = null) {
+    const safeA = Array.isArray(parsedA) ? parsedA : [];
+    const safeB = Array.isArray(parsedB) ? parsedB : [];
+
     const structural = (() => {
-        const sourceCoverage = directionalMechanicalSimilarity(parsedA, parsedB);
+        const sourceCoverage = directionalMechanicalSimilarity(safeA, safeB);
         if (sourceCoverage <= 0) return 0;
-        const candidateExcess = calculateCandidateMechanicalExcess(parsedA, parsedB);
+        const candidateExcess = calculateCandidateMechanicalExcess(safeA, safeB);
         const excessPenalty = 0.18 * Math.pow(candidateExcess, 1.25);
         return Math.max(0, Math.min(1, sourceCoverage * (1 - excessPenalty)));
     })();
 
+    const graphA = safeA._mechanicalGraph || buildMechanicalEffectGraph(null, '', safeA);
+    const graphB = safeB._mechanicalGraph || buildMechanicalEffectGraph(null, '', safeB);
+    const graph = calculateMechanicalGraphSimilarity(graphA, graphB);
+
     const universal = calculateUniversalMechanicSimilarity(
-        profileA || buildUniversalMechanicProfile(null, '', parsedA),
-        profileB || buildUniversalMechanicProfile(null, '', parsedB)
+        profileA || buildUniversalMechanicProfile(null, '', safeA),
+        profileB || buildUniversalMechanicProfile(null, '', safeB)
     );
 
-    // Structural parsing remains the core signal when we understand the effect shape. The
-    // universal mechanic layer fills gaps for keywords and keyword actions the finite parser does
-    // not explicitly model. An exact shared keyword can rescue a structural zero because it is
-    // direct mechanic evidence, not a speculative semantic inference.
-    let score = Math.max(structural, structural * 0.72 + universal.score * 0.28);
-    if (universal.keywordCoverage > 0) {
-        score = Math.max(score, universal.score * 0.96);
-    } else if (structural <= 0.02 && universal.score >= 0.34) {
-        score = Math.max(score, universal.score * 0.78);
-    }
+    // V21: the graph is the primary structured mechanical signal. The older directional matcher is
+    // retained as a second, simpler structural witness; the universal keyword/action signature is
+    // retained as a broad recall witness. This prevents a new graph heuristic from becoming a
+    // single point of failure while still letting it reason about trigger/target/zone/sequence
+    // relationships that the old pairwise field scorer could not represent together.
+    const structuredBlend = Math.max(
+        graph.score,
+        (graph.score * 0.72) + (structural * 0.18) + (universal.score * 0.10),
+        structural * 0.78 + graph.score * 0.22
+    );
+
+    // Exact shared keyword mechanics remain strong evidence, especially for mechanics whose Oracle
+    // implementation is too novel for the regex parser. Conversely, graph contradictions actively
+    // suppress otherwise tempting lexical/keyword coincidences.
+    const keywordRescue = universal.keywordCoverage > 0
+        ? Math.max(0, universal.score * (0.92 + Math.min(0.08, universal.keywordParameterCoverage * 0.08)))
+        : 0;
+    const contradictionPenalty = graph.contradiction || 0;
+    const score = Math.max(0, Math.min(1,
+        Math.max(structuredBlend, keywordRescue * 0.92, universal.score * 0.62)
+        * (1 - Math.min(0.42, contradictionPenalty * 0.72))
+    ));
 
     return {
-        score: Math.max(0, Math.min(1, score)),
+        score,
         structuralScore: structural,
+        graphScore: graph.score,
+        graphSourceCoverage: graph.sourceCoverage,
+        graphCandidateCoverage: graph.candidateCoverage,
+        graphBalancedCoverage: graph.balancedCoverage,
+        graphOrderScore: graph.orderScore,
+        graphContradiction: graph.contradiction,
+        graphFeatureVector: graph.featureVector,
+        graphMatches: graph.matches,
+        graphEvidence: graph.evidence,
         universalScore: universal.score,
         universal
     };
@@ -10453,7 +11331,9 @@ async function scoreCardBatch({
         ? sourceParsedEffectsOverride
         : parseMTGEffect(sourceTextToParse);
     const sourceMechanicProfile = buildUniversalMechanicProfile(sourceCard, sourceTextToParse, parsedSourceCard);
+    const sourceMechanicalGraph = getCachedMechanicalEffectGraph(sourceCard, sourceTextToParse, parsedSourceCard);
     parsedSourceCard._mechanicProfile = sourceMechanicProfile;
+    parsedSourceCard._mechanicalGraph = sourceMechanicalGraph;
     const referenceEffectSets = [parsedSourceCard, ...(Array.isArray(sourceReferenceParsedEffects) ? sourceReferenceParsedEffects : [])]
         .filter(effects => Array.isArray(effects) && effects.length > 0);
     const referenceMechanicProfiles = referenceEffectSets.map((effects, idx) =>
@@ -10492,6 +11372,16 @@ async function scoreCardBatch({
         sourceFunctionVector = await getCachedEmbedding(sourceFunctionText, extractor, embeddingDiagnostics);
     }
 
+    // Build all reference graphs once per scoring batch. Related-card search can supply multiple
+    // references; computing the consensus inside the per-candidate loop would repeat the same
+    // clustering work hundreds of times and make the search slower without adding evidence.
+    const referenceMechanicalGraphs = referenceEffectSets.map((effects, idx) =>
+        effects?._mechanicalGraph || (idx === 0 ? sourceMechanicalGraph : buildMechanicalEffectGraph(null, '', effects))
+    );
+    const consensusMechanicalGraph = referenceMechanicalGraphs.length > 1
+        ? buildMechanicalConsensusGraph(referenceMechanicalGraphs)
+        : null;
+
     for (let i = 0; i < cards.length; i++) {
         const card = cards[i];
         const cardText = card.oracle_text || (card.card_faces ? card.card_faces.map(f => f.oracle_text).join(' ') : '');
@@ -10504,6 +11394,8 @@ async function scoreCardBatch({
         const parsedCandidateCard = parseMTGEffect(cardText);
         const candidateMechanicProfile = buildUniversalMechanicProfile(card, cardText, parsedCandidateCard);
         parsedCandidateCard._mechanicProfile = candidateMechanicProfile;
+        const candidateMechanicalGraph = getCachedMechanicalEffectGraph(card, cardText, parsedCandidateCard);
+        parsedCandidateCard._mechanicalGraph = candidateMechanicalGraph;
 
         // Related-card search can have several legitimate mechanical reference cards. Score the
         // candidate against each reference and keep the strongest coherent mechanical match. This
@@ -10522,12 +11414,43 @@ async function scoreCardBatch({
                 candidateMechanicProfile
             );
             const mechanical = mechanicalDetail.score;
+            const referenceGraph = referenceMechanicalGraphs[referenceIndex] || buildMechanicalEffectGraph(null, '', referenceEffects);
+            const graphDetail = calculateMechanicalGraphSimilarity(referenceGraph, candidateMechanicalGraph);
+            const graphAwareMechanical = Math.max(mechanical, graphDetail.score);
             const coverage = calculateEffectCoverageProfile(referenceEffects, parsedCandidateCard);
             const functional = calculateFunctionalSimilarity(referenceEffects, parsedCandidateCard);
             const quantity = calculateAggregateQuantitySimilarity(referenceEffects, parsedCandidateCard, coverage);
-            if (!bestMechanical || mechanical > bestMechanical.mechanical ||
-                (mechanical === bestMechanical.mechanical && functional > bestMechanical.functional)) {
-                bestMechanical = { mechanical, coverage, functional, quantity, referenceEffects, mechanicalDetail };
+            if (!bestMechanical || graphAwareMechanical > bestMechanical.mechanical ||
+                (graphAwareMechanical === bestMechanical.mechanical && functional > bestMechanical.functional)) {
+                bestMechanical = { mechanical: graphAwareMechanical, coverage, functional, quantity, referenceEffects, mechanicalDetail, graphDetail };
+            }
+        }
+
+        if (consensusMechanicalGraph) {
+            const consensusDetail = calculateMechanicalGraphSimilarity(consensusMechanicalGraph, candidateMechanicalGraph);
+            if (!bestMechanical || consensusDetail.score > bestMechanical.mechanical) {
+                const consensusCoverage = calculateEffectCoverageProfile(
+                    referenceEffectSets[0] || parsedSourceCard,
+                    parsedCandidateCard
+                );
+                bestMechanical = {
+                    mechanical: consensusDetail.score,
+                    coverage: consensusCoverage,
+                    functional: calculateFunctionalSimilarity(referenceEffectSets[0] || parsedSourceCard, parsedCandidateCard),
+                    quantity: calculateAggregateQuantitySimilarity(referenceEffectSets[0] || parsedSourceCard, parsedCandidateCard, consensusCoverage),
+                    referenceEffects: referenceEffectSets[0] || parsedSourceCard,
+                    mechanicalDetail: {
+                        score: consensusDetail.score,
+                        structuralScore: bestMechanical?.mechanicalDetail?.structuralScore || 0,
+                        graphScore: consensusDetail.score,
+                        graphFeatureVector: consensusDetail.featureVector,
+                        graphEvidence: [...(consensusDetail.evidence || []), 'consensus across related cards'],
+                        universalScore: candidateMechanicProfile ? calculateUniversalMechanicSimilarity((consensusMechanicalGraph.universalProfile || sourceMechanicProfile), candidateMechanicProfile).score : 0,
+                        universal: candidateMechanicProfile ? calculateUniversalMechanicSimilarity((consensusMechanicalGraph.universalProfile || sourceMechanicProfile), candidateMechanicProfile) : null
+                    },
+                    graphDetail: consensusDetail,
+                    consensus: true
+                };
             }
         }
 
@@ -10537,11 +11460,19 @@ async function scoreCardBatch({
             functional: 0,
             quantity: 0,
             referenceEffects: parsedSourceCard,
-            mechanicalDetail: calculateMechanicalSimilarityDetailed(parsedSourceCard, parsedCandidateCard, sourceMechanicProfile, candidateMechanicProfile)
+            mechanicalDetail: calculateMechanicalSimilarityDetailed(parsedSourceCard, parsedCandidateCard, sourceMechanicProfile, candidateMechanicProfile),
+            graphDetail: calculateMechanicalGraphSimilarity(sourceMechanicalGraph, candidateMechanicalGraph)
         };
 
         card.mechanicalScore = bestMechanical.mechanical;
-        card.mechanicalEvidence = bestMechanical.mechanicalDetail?.universal || null;
+        card.mechanicalEvidence = {
+            universal: bestMechanical.mechanicalDetail?.universal || null,
+            graph: bestMechanical.mechanicalDetail?.graphFeatureVector || bestMechanical.graphDetail?.featureVector || null,
+            evidence: bestMechanical.mechanicalDetail?.graphEvidence || bestMechanical.graphDetail?.evidence || [],
+            consensus: Boolean(bestMechanical.consensus),
+            referenceName: bestMechanical.referenceEffects === parsedSourceCard ? sourceCard?.name || '' : ''
+        };
+        card.mechanicalBreakdown = bestMechanical.mechanicalDetail || null;
         card.effectCoverageProfile = bestMechanical.coverage;
         card.effectCoverageScore = card.effectCoverageProfile.sourceCoverage;
         card.balancedEffectCoverage = card.effectCoverageProfile.balancedCoverage;
@@ -10948,10 +11879,12 @@ async function executeRelatedCardSearch() {
         };
         const parsedPatternEffects = parseMTGEffect(combinedTargetText);
         parsedPatternEffects._mechanicProfile = buildUniversalMechanicProfile(relatedKeywordSeedCard, combinedTargetText, parsedPatternEffects);
+        parsedPatternEffects._mechanicalGraph = buildMechanicalEffectGraph(relatedKeywordSeedCard, combinedTargetText, parsedPatternEffects);
         const relatedReferenceParsedEffects = allCardsInSet
             .map(card => {
                 const effects = parseMTGEffect(getCurrentSourceOracleText(card));
                 effects._mechanicProfile = buildUniversalMechanicProfile(card, getCurrentSourceOracleText(card), effects);
+                effects._mechanicalGraph = buildMechanicalEffectGraph(card, getCurrentSourceOracleText(card), effects);
                 return effects;
             })
             .filter(effects => Array.isArray(effects) && effects.length > 0);
