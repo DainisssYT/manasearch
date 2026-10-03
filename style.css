@@ -3621,3 +3621,346 @@ body:not(.light-theme) #theme-toggle { color: var(--text-main) !important; }
     overflow-wrap: normal;
     word-break: normal;
 }
+
+/* =====================================================================
+   Final responsive/mobile layout pass
+   The app uses a two-column desktop shell. On narrow screens the sidebar
+   and main workspace must become a single vertical flow; otherwise the
+   sidebar can consume the width and squeeze Source Card/Search Workspace
+   into an unusable sliver.
+   ===================================================================== */
+html,
+body {
+    width: 100%;
+    max-width: 100%;
+    overflow-x: hidden;
+}
+
+@media (max-width: 900px) {
+    .app-layout {
+        display: grid !important;
+        grid-template-columns: minmax(0, 1fr) !important;
+        width: min(100% - 24px, 760px) !important;
+        max-width: 760px !important;
+        margin: 18px auto 0 !important;
+        gap: 16px !important;
+    }
+
+    .sidebar {
+        width: 100% !important;
+        min-width: 0 !important;
+        position: static !important;
+        display: grid !important;
+        grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+        gap: 12px !important;
+    }
+
+    .sidebar-section {
+        min-width: 0;
+    }
+
+    .main-content {
+        width: 100% !important;
+        min-width: 0 !important;
+    }
+
+    #source-card-section,
+    #filter-section,
+    #results-section {
+        width: 100%;
+        min-width: 0;
+    }
+
+    .section-heading,
+    .section-title-bar,
+    .results-header {
+        min-width: 0;
+    }
+
+    .section-title-bar,
+    .results-header {
+        flex-wrap: wrap;
+    }
+
+    .trigger-buttons-group {
+        max-width: 100%;
+    }
+
+    .card-inspector {
+        min-width: 0;
+    }
+
+    .card-details {
+        min-width: 0 !important;
+        width: 100%;
+    }
+
+    .source-tags {
+        min-width: 0;
+    }
+
+    .oracle-container,
+    .selectable-text {
+        max-width: 100%;
+        overflow-wrap: anywhere;
+    }
+
+    .source-card-picker-modal-card {
+        width: min(100%, 720px);
+    }
+}
+
+@media (max-width: 700px) {
+    body {
+        padding-bottom: 118px;
+    }
+
+    .site-header {
+        width: 100%;
+        padding: 18px 14px 16px;
+    }
+
+    .header-top {
+        width: 100%;
+        max-width: none;
+        gap: 12px;
+    }
+
+    .brand-block {
+        min-width: 0;
+        flex: 1 1 auto;
+    }
+
+    .brand-subtitle {
+        max-width: none;
+        overflow-wrap: anywhere;
+    }
+
+    #theme-toggle {
+        flex: 0 0 auto;
+        min-width: 92px;
+        max-width: 42%;
+    }
+
+    .search-hint {
+        width: 100%;
+        padding: 0 4px !important;
+    }
+
+    .app-layout {
+        width: calc(100% - 20px) !important;
+        max-width: none !important;
+        margin-top: 14px !important;
+        gap: 14px !important;
+    }
+
+    .sidebar {
+        grid-template-columns: 1fr !important;
+    }
+
+    .sidebar-section {
+        padding: 13px;
+    }
+
+    #source-card-section,
+    #filter-section,
+    #results-section {
+        padding: 14px !important;
+        border-radius: 11px;
+    }
+
+    .section-heading h2 {
+        font-size: 19px;
+    }
+
+    .section-note,
+    .section-description {
+        font-size: 11px;
+    }
+
+    .section-title-bar,
+    .results-header {
+        align-items: stretch !important;
+        flex-direction: column;
+        gap: 11px;
+    }
+
+    .trigger-buttons-group {
+        width: 100%;
+        align-items: stretch;
+        flex-direction: column;
+    }
+
+    .methods-trigger-btn,
+    .order-control,
+    #export-btn {
+        width: 100%;
+        max-width: none;
+    }
+
+    .order-control {
+        justify-content: space-between;
+    }
+
+    .order-control select {
+        flex: 1 1 auto;
+        min-width: 0;
+    }
+
+    #export-btn {
+        position: static;
+        margin-top: 0;
+    }
+
+    .card-inspector {
+        display: flex;
+        flex-direction: column;
+        align-items: stretch;
+        gap: 16px;
+    }
+
+    .card-inspector > img {
+        width: min(240px, 100%);
+        max-width: 240px;
+        margin: 0 auto;
+    }
+
+    .card-header {
+        gap: 9px;
+    }
+
+    .source-card-actions {
+        width: 100%;
+        display: flex;
+        flex-wrap: wrap;
+        gap: 7px;
+    }
+
+    .source-card-actions button {
+        flex: 1 1 auto;
+        min-width: 0;
+    }
+
+    .results-grid {
+        grid-template-columns: 1fr !important;
+        gap: 12px;
+    }
+
+    .card-item {
+        width: 100%;
+        min-width: 0;
+    }
+
+    .card-item-info {
+        min-width: 0;
+    }
+
+    .card-item-title-row {
+        min-width: 0;
+    }
+
+    .card-item-title {
+        min-width: 0;
+        overflow-wrap: anywhere;
+    }
+
+    .result-score-breakdown {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .search-depth-control {
+        gap: 12px;
+    }
+
+    .floating-bar {
+        left: 8px !important;
+        right: 8px !important;
+        bottom: 8px !important;
+        width: auto !important;
+        max-width: none !important;
+    }
+
+    .floating-bar-content {
+        min-width: 0;
+        flex-direction: column;
+        align-items: stretch;
+        gap: 9px;
+    }
+
+    .floating-bar .selected-cards-info,
+    .floating-bar .chips-list,
+    .floating-bar .floating-bar-actions {
+        min-width: 0;
+        width: 100%;
+        max-width: none;
+    }
+
+    .floating-bar .chips-list {
+        overflow-x: auto;
+        scrollbar-width: thin;
+    }
+
+    .floating-bar .floating-bar-actions {
+        display: flex;
+    }
+
+    .floating-bar .floating-bar-actions > button {
+        flex: 1 1 0;
+        min-width: 0;
+    }
+
+    .modal-backdrop,
+    #compare-modal,
+    .selected-related-modal {
+        padding: 8px !important;
+    }
+
+    .modal-card,
+    #compare-modal .modal-content,
+    .selected-related-modal-content {
+        width: 100% !important;
+        max-width: none !important;
+        max-height: calc(100vh - 16px) !important;
+        padding: 14px !important;
+    }
+
+    .source-card-picker-results,
+    .selected-related-modal-grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 9px;
+    }
+
+    .source-card-picker-search-wrap input {
+        min-width: 0;
+    }
+}
+
+@media (max-width: 420px) {
+    .header-top {
+        align-items: flex-start;
+    }
+
+    .brand-block h1 {
+        font-size: 25px;
+    }
+
+    #theme-toggle {
+        min-width: 84px;
+        padding-left: 9px;
+        padding-right: 9px;
+        font-size: 12px;
+    }
+
+    .source-card-actions {
+        flex-direction: column;
+    }
+
+    .source-card-actions button {
+        width: 100%;
+    }
+
+    .source-card-picker-results,
+    .selected-related-modal-grid {
+        grid-template-columns: 1fr;
+    }
+}
