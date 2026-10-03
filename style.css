@@ -518,12 +518,11 @@ input[type="text"], input[type="number"], select {
 
 /* Custom highlight styles for user selection */
 .highlight-active {
-    font-weight: inherit;
-    color: inherit;
+    font-weight: bold;
+    color: var(--accent-color);
+    background-color: rgba(98, 0, 238, 0.1);
     border-radius: 3px;
-    padding: 1px 2px;
-    box-decoration-break: clone;
-    -webkit-box-decoration-break: clone;
+    padding: 0 2px;
 }
 
 .bonus-positive {
@@ -1020,12 +1019,11 @@ body.light-theme {
 }
 
 .highlight-active {
-    font-weight: inherit;
-    color: inherit;
+    font-weight: bold;
+    color: var(--accent-color);
+    background-color: rgba(98, 0, 238, 0.1);
     border-radius: 3px;
-    padding: 1px 2px;
-    box-decoration-break: clone;
-    -webkit-box-decoration-break: clone;
+    padding: 0 2px;
 }
 
 .bonus-positive {
@@ -1172,14 +1170,12 @@ body.light-theme {
 /* In-text highlight coloring mirrors the chip's mode colors, so it's clear at a glance which
    highlighted spans are required verbatim vs. flexible, without needing to check the chip list. */
 .highlight-active.highlight-exact {
-    color: var(--text-main);
-    background-color: rgba(98, 0, 238, 0.28);
-    box-shadow: 0 0 0 1px rgba(98, 0, 238, 0.16);
+    color: var(--accent-color);
+    background-color: rgba(98, 0, 238, 0.1);
 }
 .highlight-active.highlight-variable {
-    color: var(--text-main);
-    background-color: rgba(234, 179, 8, 0.30);
-    box-shadow: 0 0 0 1px rgba(234, 179, 8, 0.18);
+    color: #d97706;
+    background-color: rgba(234, 179, 8, 0.15);
 }
 
 .card-chip-remove:hover {
@@ -2477,7 +2473,7 @@ section {
 .results-header { align-items: flex-end; gap: 14px; }
 .results-header .section-description { margin-bottom: 1px; }
 
-#export-btn { min-height: 38px; padding: 8px 13px; border-radius: 8px; position: relative; top: -6px; }
+#export-btn { min-height: 38px; padding: 8px 13px; border-radius: 8px; }
 
 .results-grid {
     grid-template-columns: repeat(auto-fill, minmax(225px, 1fr));
@@ -3116,20 +3112,6 @@ body:not(.light-theme) #theme-toggle { color: var(--text-main) !important; }
 
 /* Multi-value hard constraints */
 .filter-group-wide { grid-column: 1 / -1; }
-
-/* Power and Toughness intentionally occupy the same two-column row, like Color Identity / Exact Colors. */
-.filter-power-group,
-.filter-toughness-group {
-    grid-column: span 1;
-}
-
-@media (max-width: 460px) {
-    .filter-power-group,
-    .filter-toughness-group {
-        grid-column: 1 / -1;
-    }
-}
-
 .filter-help {
     color: var(--text-muted);
     font-size: 11px;
@@ -3293,674 +3275,209 @@ body:not(.light-theme) #theme-toggle { color: var(--text-main) !important; }
     .constraint-add-btn { width: 100%; }
 }
 
-
-/* Benchmark highlights are represented directly in Oracle text; hide any stale debug panel. */
-#benchmark-highlight-preview {
-    display: none !important;
-}
-
-
-/* --------------------------------------------------------------------------
-   Selected Related Cards overflow + stable result-score slots
-   -------------------------------------------------------------------------- */
-.floating-bar .selected-cards-info {
-    display: flex;
-    align-items: center;
-    gap: 9px;
-    min-width: 0;
-    flex: 1 1 auto;
-}
-
-.floating-bar .chips-list {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    flex: 1 1 auto;
-    min-width: 0;
-    overflow: hidden;
-    flex-wrap: nowrap;
-}
-
-.floating-bar .card-chip {
-    flex: 0 0 auto;
-}
-
-.floating-bar .card-chip-remove {
-    border: 0;
-    padding: 0;
-    margin: 0;
-    background: transparent;
-    line-height: 1;
-    font-size: 15px;
-    min-width: 15px;
-    min-height: 15px;
-}
-
-.selected-cards-more-btn {
-    flex: 0 0 auto;
-    min-width: 34px;
-    height: 28px;
-    padding: 0 7px;
-    border: 1px solid var(--border-color);
-    border-radius: 8px;
-    background: var(--bg-accent);
-    color: var(--text-main);
-    font-weight: 800;
-    letter-spacing: 1px;
-    cursor: pointer;
-}
-
-.selected-cards-more-btn:hover {
-    border-color: var(--accent-color);
-    color: var(--accent-color);
-}
-
-.selected-related-modal {
-    position: fixed;
-    inset: 0;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    padding: 22px;
-    background: rgba(0, 0, 0, 0.62);
-    z-index: 1500;
-}
-
-.selected-related-modal.hidden {
-    display: none;
-}
-
-.selected-related-modal-content {
-    width: min(1000px, 100%);
-    max-height: min(86vh, 820px);
-    overflow: auto;
-    box-sizing: border-box;
-    padding: 20px;
-    background: var(--bg-secondary);
-    border: 1px solid var(--accent-color);
-    border-radius: 14px;
-    box-shadow: var(--ui-shadow);
-}
-
-.selected-related-modal-header {
-    display: flex;
-    align-items: flex-start;
-    justify-content: space-between;
-    gap: 18px;
-    margin-bottom: 18px;
-}
-
-.selected-related-modal-kicker {
-    margin: 0 0 3px;
-    color: var(--accent-color);
-    font-size: 10px;
-    font-weight: 800;
-    letter-spacing: 0.14em;
-}
-
-.selected-related-modal-header h2 {
-    margin: 0;
-    font-size: 22px;
-}
-
-.selected-related-modal-close {
-    flex: 0 0 auto;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    width: 36px;
-    height: 36px;
-    padding: 0;
-    border: 1px solid var(--border-color);
-    border-radius: 9px;
-    background: var(--bg-primary);
-    color: var(--text-muted);
-    font-size: 25px;
-    line-height: 1;
-    cursor: pointer;
-}
-
-.selected-related-modal-close:hover {
-    color: var(--text-main);
-    border-color: var(--accent-color);
-}
-
-.selected-related-modal-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
-    gap: 16px;
-    align-items: start;
-}
-
-.selected-related-card-tile {
-    position: relative;
-    min-width: 0;
-    box-sizing: border-box;
-    padding: 34px 8px 9px;
-    border: 1px solid var(--border-color);
-    border-radius: 11px;
-    background: var(--bg-primary);
-}
-
-.selected-related-card-remove {
-    position: absolute;
-    top: 7px;
-    right: 7px;
-    z-index: 2;
-    width: 25px;
-    height: 25px;
-    padding: 0;
-    border: 1px solid var(--border-color);
-    border-radius: 7px;
-    background: var(--bg-secondary);
-    color: var(--text-muted);
-    font-size: 18px;
-    line-height: 1;
-    cursor: pointer;
-}
-
-.selected-related-card-remove:hover {
-    color: #ef4444;
-    border-color: #ef4444;
-}
-
-.selected-related-card-art-wrap {
-    width: 100%;
-}
-
-.selected-related-card-art-wrap img {
-    display: block;
-    width: 100%;
-    height: auto;
-    aspect-ratio: 63 / 88;
-    object-fit: cover;
-    border-radius: 7px;
-}
-
-.selected-related-card-name {
-    margin-top: 8px;
-    color: var(--text-main);
-    font-size: 12px;
-    font-weight: 700;
-    line-height: 1.25;
-    overflow-wrap: anywhere;
-}
-
-/* The score breakdown is a 2-column grid: the price occupies exactly one slot, so the
-   Mechanical/Context, Synergy/Exactness, Category/Price rows stay visually aligned even when
-   one price string is longer than another. */
-.result-score-breakdown {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    align-items: start;
-}
-
-.result-score-breakdown .score-line,
-.result-score-breakdown .card-price-label {
-    min-width: 0;
-    width: 100%;
-    box-sizing: border-box;
-}
-
-.result-score-breakdown .card-price-label {
-    display: block;
-    margin: 0;
-    min-height: 1.2em;
-    overflow-wrap: anywhere;
-}
-
-@media (max-width: 700px) {
-    .floating-bar .selected-cards-info {
-        width: 100%;
-        max-width: none;
-    }
-
-    .floating-bar .floating-bar-actions {
-        width: 100%;
-    }
-
-    .floating-bar .floating-bar-actions > button {
-        flex: 1 1 0;
-    }
-
-    .selected-related-modal {
-        padding: 10px;
-    }
-
-    .selected-related-modal-content {
-        max-height: 92vh;
-        padding: 15px;
-    }
-
-    .selected-related-modal-grid {
-        grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
-        gap: 10px;
-    }
-}
-
-/* --------------------------------------------------------------------------
-   Result-card double-faced controls + perfectly stable card action alignment
-   -------------------------------------------------------------------------- */
-.card-item {
-    display: flex;
-    flex-direction: column;
-    height: 100%;
-    min-height: 0;
-}
-
-.card-art-wrap {
-    position: relative;
-    width: 100%;
-    flex: 0 0 auto;
-}
-
-.card-art-wrap > img {
-    width: 100%;
-    height: auto;
-    display: block;
-}
-
-.card-flip-btn {
-    position: absolute;
-    top: 14%;
-    right: 5%;
-    z-index: 2;
-    min-width: 42px;
-    min-height: 24px;
-    padding: 3px 7px;
-    border: 1px solid rgba(255, 255, 255, 0.32);
-    border-radius: 5px;
-    background: rgba(0, 0, 0, 0.04) !important;
-    color: rgba(255, 255, 255, 0.88) !important;
-    font-size: 10px;
-    font-weight: 700;
-    line-height: 1;
-    cursor: pointer;
-    opacity: 0.82;
-    backdrop-filter: blur(1px);
-    box-shadow: none;
-}
-
-.card-flip-btn:hover,
-.card-flip-btn:focus-visible {
-    background: rgba(0, 0, 0, 0.18) !important;
-    border-color: rgba(255, 255, 255, 0.66);
-    color: #fff !important;
-    opacity: 1;
-}
-
-.card-item-info {
-    display: flex;
-    flex-direction: column;
-    flex: 1 1 auto;
-    min-height: 0;
-}
-
-.card-actions {
-    margin-top: auto !important;
-}
-
-/* Price gets one fixed, readable row in the score grid. The slot is fixed in TOTAL height
-   (including padding/border), so it can never create a second text line or push Compare lower. */
-.result-score-breakdown .card-price-label {
-    box-sizing: border-box;
-    width: 100%;
-    height: 22px;
-    min-height: 22px;
-    max-height: 22px;
-    margin: 0;
-    padding: 2px 5px;
-    display: flex;
-    align-items: center;
-    justify-content: flex-start;
-    font-size: 10px;
-    line-height: 16px;
-    letter-spacing: -0.15px;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    overflow-wrap: normal;
-    word-break: normal;
-}
-
 /* =====================================================================
-   Final responsive/mobile layout pass
-   The app uses a two-column desktop shell. On narrow screens the sidebar
-   and main workspace must become a single vertical flow; otherwise the
-   sidebar can consume the width and squeeze Source Card/Search Workspace
-   into an unusable sliver.
+   ManaSearch mobile layout fix
+   The previous responsive rules changed the sidebar to a vertical grid,
+   but the parent .app-layout stayed a horizontal flex row. On phones
+   that left the 228px sidebar beside the main content and squeezed the
+   Source Card / Search Workspace into a narrow strip.
    ===================================================================== */
-html,
-body {
-    width: 100%;
-    max-width: 100%;
-    overflow-x: hidden;
-}
-
-@media (max-width: 900px) {
-    .app-layout {
-        display: grid !important;
-        grid-template-columns: minmax(0, 1fr) !important;
-        width: min(100% - 24px, 760px) !important;
-        max-width: 760px !important;
-        margin: 18px auto 0 !important;
-        gap: 16px !important;
-    }
-
-    .sidebar {
-        width: 100% !important;
-        min-width: 0 !important;
-        position: static !important;
-        display: grid !important;
-        grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
-        gap: 12px !important;
-    }
-
-    .sidebar-section {
-        min-width: 0;
-    }
-
-    .main-content {
-        width: 100% !important;
-        min-width: 0 !important;
-    }
-
-    #source-card-section,
-    #filter-section,
-    #results-section {
+@media (max-width: 760px) {
+    html, body {
         width: 100%;
-        min-width: 0;
-    }
-
-    .section-heading,
-    .section-title-bar,
-    .results-header {
-        min-width: 0;
-    }
-
-    .section-title-bar,
-    .results-header {
-        flex-wrap: wrap;
-    }
-
-    .trigger-buttons-group {
         max-width: 100%;
-    }
-
-    .card-inspector {
-        min-width: 0;
-    }
-
-    .card-details {
-        min-width: 0 !important;
-        width: 100%;
-    }
-
-    .source-tags {
-        min-width: 0;
-    }
-
-    .oracle-container,
-    .selectable-text {
-        max-width: 100%;
-        overflow-wrap: anywhere;
-    }
-
-    .source-card-picker-modal-card {
-        width: min(100%, 720px);
-    }
-}
-
-@media (max-width: 700px) {
-    body {
-        padding-bottom: 118px;
+        overflow-x: hidden;
     }
 
     .site-header {
         width: 100%;
+        max-width: none;
         padding: 18px 14px 16px;
     }
 
     .header-top {
         width: 100%;
         max-width: none;
+        min-width: 0;
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
         gap: 12px;
     }
 
     .brand-block {
+        flex: 1 1 180px;
         min-width: 0;
-        flex: 1 1 auto;
-    }
-
-    .brand-subtitle {
-        max-width: none;
-        overflow-wrap: anywhere;
     }
 
     #theme-toggle {
         flex: 0 0 auto;
-        min-width: 92px;
-        max-width: 42%;
+        white-space: nowrap;
     }
 
-    .search-hint {
+    .site-header .search-hint {
         width: 100%;
-        padding: 0 4px !important;
+        max-width: none;
+        padding: 0;
+        margin-top: 12px;
+        text-align: center;
     }
 
+    /* Critical fix: stack sidebar and main content instead of keeping them
+       side-by-side on narrow screens. */
     .app-layout {
-        width: calc(100% - 20px) !important;
-        max-width: none !important;
-        margin-top: 14px !important;
-        gap: 14px !important;
+        display: flex;
+        flex-direction: column;
+        align-items: stretch;
+        width: calc(100% - 20px);
+        max-width: none;
+        min-width: 0;
+        margin: 14px auto 0;
+        gap: 14px;
     }
 
     .sidebar {
-        grid-template-columns: 1fr !important;
+        width: 100%;
+        flex: 0 0 auto;
+        position: static;
+        display: grid;
+        grid-template-columns: 1fr;
+        gap: 12px;
+        min-width: 0;
     }
 
-    .sidebar-section {
-        padding: 13px;
+    .main-content {
+        width: 100%;
+        min-width: 0;
+        flex: 0 0 auto;
     }
 
     #source-card-section,
     #filter-section,
     #results-section {
-        padding: 14px !important;
+        width: 100%;
+        min-width: 0;
+        max-width: none;
+        padding: 14px;
         border-radius: 11px;
     }
 
-    .section-heading h2 {
-        font-size: 19px;
-    }
-
-    .section-note,
-    .section-description {
-        font-size: 11px;
-    }
-
+    .section-heading,
     .section-title-bar,
     .results-header {
-        align-items: stretch !important;
-        flex-direction: column;
-        gap: 11px;
-    }
-
-    .trigger-buttons-group {
         width: 100%;
-        align-items: stretch;
-        flex-direction: column;
-    }
-
-    .methods-trigger-btn,
-    .order-control,
-    #export-btn {
-        width: 100%;
-        max-width: none;
-    }
-
-    .order-control {
-        justify-content: space-between;
-    }
-
-    .order-control select {
-        flex: 1 1 auto;
         min-width: 0;
     }
 
-    #export-btn {
-        position: static;
-        margin-top: 0;
+    .section-heading h2 {
+        overflow-wrap: anywhere;
     }
 
     .card-inspector {
+        width: 100%;
+        min-width: 0;
         display: flex;
         flex-direction: column;
         align-items: stretch;
         gap: 16px;
     }
 
-    .card-inspector > img {
-        width: min(240px, 100%);
-        max-width: 240px;
+    .card-inspector img {
+        width: min(100%, 300px);
+        max-width: 100%;
         margin: 0 auto;
     }
 
-    .card-header {
-        gap: 9px;
-    }
-
-    .source-card-actions {
+    .card-details,
+    .source-tags {
         width: 100%;
-        display: flex;
-        flex-wrap: wrap;
-        gap: 7px;
-    }
-
-    .source-card-actions button {
-        flex: 1 1 auto;
         min-width: 0;
     }
 
+    .source-card-empty-state {
+        width: 100%;
+        min-width: 0;
+        min-height: 240px;
+        padding: 24px 16px;
+    }
+
+    .trigger-buttons-group {
+        width: 100%;
+        min-width: 0;
+    }
+
+    .methods-trigger-btn,
+    .order-control,
+    .primary-search-btn,
+    #export-btn {
+        min-height: 44px;
+    }
+
+    .order-control {
+        width: 100%;
+        min-width: 0;
+    }
+
+    .order-control select {
+        min-width: 0;
+        max-width: 100%;
+    }
+
+    .results-header {
+        align-items: stretch;
+    }
+
+    #export-btn {
+        width: 100%;
+    }
+
     .results-grid {
-        grid-template-columns: 1fr !important;
+        width: 100%;
+        min-width: 0;
+        grid-template-columns: 1fr;
         gap: 12px;
     }
 
     .card-item {
-        width: 100%;
         min-width: 0;
-    }
-
-    .card-item-info {
-        min-width: 0;
-    }
-
-    .card-item-title-row {
-        min-width: 0;
-    }
-
-    .card-item-title {
-        min-width: 0;
-        overflow-wrap: anywhere;
-    }
-
-    .result-score-breakdown {
-        grid-template-columns: repeat(2, minmax(0, 1fr));
-    }
-
-    .search-depth-control {
-        gap: 12px;
     }
 
     .floating-bar {
         left: 8px !important;
         right: 8px !important;
-        bottom: 8px !important;
+        bottom: calc(8px + env(safe-area-inset-bottom)) !important;
         width: auto !important;
         max-width: none !important;
-    }
-
-    .floating-bar-content {
-        min-width: 0;
-        flex-direction: column;
-        align-items: stretch;
-        gap: 9px;
-    }
-
-    .floating-bar .selected-cards-info,
-    .floating-bar .chips-list,
-    .floating-bar .floating-bar-actions {
-        min-width: 0;
-        width: 100%;
-        max-width: none;
-    }
-
-    .floating-bar .chips-list {
-        overflow-x: auto;
-        scrollbar-width: thin;
-    }
-
-    .floating-bar .floating-bar-actions {
-        display: flex;
-    }
-
-    .floating-bar .floating-bar-actions > button {
-        flex: 1 1 0;
-        min-width: 0;
-    }
-
-    .modal-backdrop,
-    #compare-modal,
-    .selected-related-modal {
-        padding: 8px !important;
-    }
-
-    .modal-card,
-    #compare-modal .modal-content,
-    .selected-related-modal-content {
-        width: 100% !important;
-        max-width: none !important;
-        max-height: calc(100vh - 16px) !important;
-        padding: 14px !important;
-    }
-
-    .source-card-picker-results,
-    .selected-related-modal-grid {
-        grid-template-columns: repeat(2, minmax(0, 1fr));
-        gap: 9px;
-    }
-
-    .source-card-picker-search-wrap input {
-        min-width: 0;
+        box-sizing: border-box;
     }
 }
 
 @media (max-width: 420px) {
-    .header-top {
-        align-items: flex-start;
+    .site-header {
+        padding-left: 12px;
+        padding-right: 12px;
+    }
+
+    .app-layout {
+        width: calc(100% - 14px);
+    }
+
+    #source-card-section,
+    #filter-section,
+    #results-section {
+        padding: 12px;
     }
 
     .brand-block h1 {
         font-size: 25px;
     }
 
-    #theme-toggle {
-        min-width: 84px;
-        padding-left: 9px;
-        padding-right: 9px;
+    .brand-subtitle {
         font-size: 12px;
     }
 
-    .source-card-actions {
-        flex-direction: column;
-    }
-
-    .source-card-actions button {
-        width: 100%;
-    }
-
-    .source-card-picker-results,
-    .selected-related-modal-grid {
-        grid-template-columns: 1fr;
+    .site-header .search-hint {
+        font-size: 12px;
+        line-height: 1.45;
     }
 }
