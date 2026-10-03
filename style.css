@@ -3913,3 +3913,36 @@ body:not(.light-theme) #theme-toggle { color: var(--text-main) !important; }
         line-height: 1.45;
     }
 }
+
+/* --------------------------------------------------------------------------
+   Card-art corner cleanup
+   Scryfall image files can retain a tiny amount of light/white corner material.
+   Clip the result art slightly inside the outer card frame so those pixels never
+   protrude past ManaSearch's rounded card shell.
+   -------------------------------------------------------------------------- */
+.card-item {
+    overflow: hidden;
+    border-radius: 10px;
+}
+.card-art-wrap {
+    overflow: hidden;
+    border-radius: 10px 10px 0 0;
+}
+.card-art-wrap > img {
+    border-radius: 10px 10px 0 0;
+    clip-path: inset(2px 2px 0 2px round 10px 10px 0 0);
+}
+.source-picker-card img {
+    clip-path: inset(2px 2px 0 2px round 10px 10px 0 0);
+}
+
+/* Keep the small DFC Flip control above the clipped art edge. */
+.card-flip-btn { z-index: 3; }
+
+@media (max-width: 700px) {
+    .benchmark-runtime-dashboard {
+        padding-left: 12px !important;
+        padding-right: 44px !important;
+    }
+}
+

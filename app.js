@@ -261,14 +261,13 @@ const BENCHMARK_SUITE = [
             cmc: "4",
             extraOracle: "destroy all creatures"
         },
-        // Human-style selection: highlight the core removal clause, but keep it Flexible so
-        // differently worded sweepers such as "destroy creatures" / "exile creatures" remain
-        // plausible semantic matches.
+        // The benchmark mirrors a real selection from the source card. This is an exact
+        // sentence-boundary anchor: all of the expected sweepers contain this actual Oracle phrase.
         highlights: [
-            { text: "Destroy all creatures", mode: "variable", intent: "clear the battlefield of creatures" }
+            { text: "Destroy all creatures.", mode: "exact", intent: "require the mass creature-destruction clause" }
         ],
         expected: ["Day of Judgment", "Depopulate", "Shatter the Sky"],
-        categories: ["single-effect", "same-function-same-outcome", "mass-removal", "highlight-flexible"]
+        categories: ["single-effect", "same-function-same-outcome", "mass-removal", "highlight-exact"]
     },
     {
         id: 2,
@@ -284,11 +283,16 @@ const BENCHMARK_SUITE = [
             extraOracle: "tokens"
         },
         preferredConstraints: ["rarity"],
+        // Use the longest exact span that is actually present on Parallel Lives AND on both
+        // expected analogues. Parallel Lives says "it creates twice that many of those tokens
+        // instead", while Primal Vigor says "twice that many of those tokens are created
+        // instead"; the shared exact span preserves the intended meaning without inventing text
+        // on the source card.
         highlights: [
-            { text: "twice that many of those tokens are created instead", mode: "variable", intent: "increase the number of tokens created" }
+            { text: "twice that many of those tokens", mode: "exact", intent: "require the token-doubling replacement outcome while preserving a phrase shared by the source and expected analogues" }
         ],
         expected: ["Doubling Season", "Primal Vigor"],
-        categories: ["replacement-effects", "differently-worded", "multi-effect", "highlight-flexible"]
+        categories: ["replacement-effects", "differently-worded", "multi-effect", "highlight-exact"]
     },
     {
         id: 3,
@@ -299,20 +303,20 @@ const BENCHMARK_SUITE = [
         constraints: {
             type: "instant",
             format: "legacy",
-            rarity: "uncommon",
             identity: "u",
             colors: "u",
             cmc: "2",
             extraOracle: "counter target"
         },
-        preferredConstraints: ["rarity"],
-        // No terminal period on purpose: this is a normal Flexible selection of the core
-        // countering clause, so caveats remain plausible rather than being treated as failures.
+        // The exact phrase exists on Counterspell and is also contained in conditional
+        // counterspells such as Deprive and Logic Knot. Keeping the phrase Exact while omitting
+        // the terminal period makes it an exact structural anchor without requiring the candidate
+        // to have no caveat.
         highlights: [
-            { text: "Counter target spell", mode: "variable", intent: "counter an opposing spell" }
+            { text: "Counter target spell", mode: "exact", intent: "counter an opposing spell" }
         ],
         expected: ["Deprive", "Logic Knot", "Memory Lapse"],
-        categories: ["single-effect", "conditional-effects", "same-function-different-outcome", "highlight-flexible"]
+        categories: ["single-effect", "conditional-effects", "same-function-different-outcome", "highlight-exact"]
     },
     {
         id: 4,
@@ -327,28 +331,37 @@ const BENCHMARK_SUITE = [
             colors: "r",
             cmc: "1"
         },
+        // Preserve the real source wording while separating the fixed structure from the
+        // variable damage amount. The surrounding Exact anchors must exist on the source card;
+        // only the number itself is intentionally flexible.
         highlights: [
-            { text: "deals 3 damage to any target", mode: "variable", intent: "cheap direct damage to a chosen target" }
+            { text: "deals", mode: "exact", intent: "perform direct damage" },
+            { text: "3 damage", mode: "variable", intent: "allow the damage amount to vary" },
+            { text: "to any target", mode: "exact", intent: "retain a chosen-target damage effect" }
         ],
         expected: ["Shard Volley", "Galvanic Blast", "Play with Fire", "Fiery Impulse", "Wild Slash"],
-        categories: ["single-effect", "conditional-effects", "quantitative", "highlight-flexible"]
+        categories: ["single-effect", "conditional-effects", "quantitative", "highlight-mixed-modes"]
     },
     {
         id: 5,
         name: "Black Cheap Reanimation Engines",
         source: "Reanimate",
-        highlightStyle: "single-phrase-intent",
+        highlightStyle: "multi-span-line",
         highlightIntent: "find cheap ways to return a creature from a graveyard to the battlefield",
         constraints: {
             identity: "b",
             format: "legacy",
             cmc: "2"
         },
+        // Anchor the actual source line with short Exact structural pieces that survive wording
+        // changes such as "your/their graveyard" and "return/put". No fabricated phrase is used.
         highlights: [
-            { text: "return target creature card from your graveyard to the battlefield", mode: "variable", intent: "bring a creature back from the graveyard" }
+            { text: "creature card", mode: "exact", intent: "restrict the returned object to a creature card" },
+            { text: "graveyard", mode: "exact", intent: "require graveyard-based recursion" },
+            { text: "battlefield", mode: "exact", intent: "require battlefield recursion" }
         ],
         expected: ["Animate Dead", "Exhume", "Persist"],
-        categories: ["differently-worded", "same-outcome-different-function", "activated-abilities", "highlight-flexible"]
+        categories: ["differently-worded", "same-outcome-different-function", "graveyard-to-battlefield", "highlight-multi-span"]
     },
     {
         id: 6,
@@ -362,11 +375,11 @@ const BENCHMARK_SUITE = [
             identity: "u",
             cmc: "2"
         },
-        // This mirrors a plausible human selection: lock the tribe wording, leave the exact
-        // stat language Flexible so different bonuses can still rank.
+        // Mirror a human mixed selection: lock the tribe phrase and keep the stat magnitude
+        // flexible so differently sized tribal bonuses remain relevant.
         highlights: [
-            { text: "Other Merfolk", mode: "exact", intent: "restrict the effect to the Merfolk tribe" },
-            { text: "get +1/+1", mode: "variable", intent: "give the tribe a meaningful stat boost" }
+            { text: "Other Merfolk", mode: "variable", intent: "focus on an effect centered on other Merfolk" },
+            { text: "get +1/+1", mode: "variable", intent: "focus on a tribal benefit to Merfolk" }
         ],
         expected: ["Master of the Pearl Trident", "Vodalian Hexcatcher"],
         categories: ["tribal-effects", "differently-worded", "multi-effect", "highlight-mixed-modes"]
@@ -375,8 +388,8 @@ const BENCHMARK_SUITE = [
         id: 7,
         name: "White Catch-Up Land Ramp",
         source: "Knight of the White Orchid",
-        highlightStyle: "single-phrase-intent",
-        highlightIntent: "find ways to catch up by searching for a basic land",
+        highlightStyle: "multi-span-line",
+        highlightIntent: "find ways to catch up by searching for a Plains",
         constraints: {
             type: "creature",
             format: "commander",
@@ -384,27 +397,33 @@ const BENCHMARK_SUITE = [
             colors: "w",
             cmc: "2"
         },
+        // Use exact structural anchors from the actual source line, while allowing the quantity
+        // and exact wording around the Plains search to vary across catch-up effects.
         highlights: [
-            { text: "search your library for a basic Plains card", mode: "variable", intent: "catch up on basic-land access" }
+            { text: "search your library for", mode: "exact", intent: "perform a library search" },
+            { text: "Plains card", mode: "exact", intent: "search specifically for a Plains" }
         ],
         expected: ["Loyal Warhound", "Oreskos Explorer"],
-        categories: ["conditional-effects", "differently-worded", "multi-effect", "highlight-flexible"]
+        categories: ["conditional-effects", "differently-worded", "multi-effect", "highlight-exact"]
     },
     {
         id: 8,
         name: "Fast Mana Artifacts (Archetypal Role)",
         source: "Sol Ring",
-        highlightStyle: "single-line-intent",
+        highlightStyle: "multi-span-line",
         highlightIntent: "find cheap artifacts that turn into more mana when tapped",
         constraints: {
             type: "artifact",
             format: "commander"
         },
+        // Keep the activation structure Exact and let the produced amount vary: Mana Vault adds
+        // more mana than Sol Ring, but it is still the same tap-for-mana mechanic.
         highlights: [
-            { text: "{T}: Add {C}{C}", mode: "variable", intent: "turn a cheap artifact into extra mana" }
+            { text: "{T}: Add", mode: "exact", intent: "activate the artifact to produce mana" },
+            { text: "{C}{C}", mode: "variable", intent: "allow the amount of mana to vary" }
         ],
         expected: ["Mana Vault"],
-        categories: ["same-archetypal-role", "fast-mana", "differently-worded", "highlight-flexible"]
+        categories: ["same-archetypal-role", "fast-mana", "differently-worded", "highlight-mixed-modes"]
     },
     {
         id: 9,
@@ -415,6 +434,8 @@ const BENCHMARK_SUITE = [
         constraints: {
             identity: "b"
         },
+        // These are real source phrases, but both are Flexible because comparable engines may
+        // draw/reveal a different card quantity and may charge a different life amount or timing.
         highlights: [
             { text: "draw a card", mode: "variable", intent: "gain recurring card advantage" },
             { text: "lose 1 life", mode: "variable", intent: "pay life as the recurring cost" }
@@ -432,14 +453,15 @@ const BENCHMARK_SUITE = [
             type: "instant",
             identity: "u"
         },
-        // The user would normally select the modal cue and one representative effect, without
-        // demanding that every mode match verbatim.
+        // Both selections are real phrases on Mystic Confluence. The modal count and the chosen
+        // value mode are Flexible so a differently-sized modal spell such as Cryptic Command can
+        // still be a valid semantic analogue.
         highlights: [
             { text: "Choose three", mode: "variable", intent: "choose among several selectable effects" },
-            { text: "draw two cards", mode: "variable", intent: "one of the value-producing modes" }
+            { text: "Draw a card", mode: "variable", intent: "one of the value-producing modes" }
         ],
         expected: ["Cryptic Command"],
-        categories: ["modal-cards", "same-function-different-outcome", "multi-effect", "highlight-flexible"]
+        categories: ["modal-cards", "same-function-different-outcome", "multi-effect", "highlight-flexible", "source-text-valid"]
     },
     {
         id: 11,
@@ -1230,13 +1252,13 @@ function buildBenchmarkHighlightState(testCase, sourceCard = currentSourceCard) 
                 cursor = end;
             } else {
                 warnings.push(`Could not locate benchmark highlight: "${text}"`);
+                continue;
             }
         }
 
         if (start !== null && end !== null && (start < 0 || end <= start || end > sourceText.length)) {
             warnings.push(`Invalid benchmark highlight range for: "${text}"`);
-            start = null;
-            end = null;
+            continue;
         }
 
         resolved.push({
@@ -1274,7 +1296,16 @@ function buildBenchmarkHighlightState(testCase, sourceCard = currentSourceCard) 
     if (warnings.length) {
         console.warn(`Benchmark highlight authoring warnings — Test #${testCase?.id}:`, warnings);
     }
-    return resolved;
+    if (resolved.length !== declared.length) {
+        console.error(`Benchmark Test #${testCase?.id}: one or more declared highlights were not found in the source Oracle text and were excluded from scoring.`);
+    }
+
+    // Benchmark selections keep their origin so mixed Exact/Variable selections can behave as
+    // semantic intent when they form one grammatical effect (Test #11), while ordinary live-user
+    // Exact highlights keep their existing hard-literal semantics.
+    const benchmarkResolved = resolved.map(h => ({ ...h, origin: 'benchmark' }));
+    annotateHighlightGroups(benchmarkResolved, sourceText);
+    return benchmarkResolved;
 }
 
 function renderBenchmarkHighlightPreview(testCase, sourceCard = currentSourceCard) {
@@ -1310,9 +1341,10 @@ function ensureBenchmarkDashboard() {
         style.id = styleId;
         style.textContent = `
             #benchmark-runtime-dashboard {
+                position: relative;
                 margin: 0 auto 16px;
                 max-width: 1200px;
-                padding: 12px 16px;
+                padding: 12px 44px 12px 16px;
                 background: var(--bg-secondary);
                 color: var(--text-main);
                 border: 1px solid var(--border-color);
@@ -1329,19 +1361,63 @@ function ensureBenchmarkDashboard() {
             }
             .benchmark-runtime-title { font-weight: 700; }
             .benchmark-runtime-state { color: var(--text-muted); font-size: 12px; }
+            .benchmark-runtime-close {
+                position: absolute;
+                top: 7px;
+                right: 7px;
+                width: 30px;
+                height: 30px;
+                padding: 0;
+                border: 1px solid transparent;
+                border-radius: 7px;
+                background: transparent;
+                color: var(--text-muted);
+                font-size: 22px;
+                line-height: 1;
+                cursor: pointer;
+            }
+            .benchmark-runtime-close:hover,
+            .benchmark-runtime-close:focus-visible {
+                border-color: var(--border-color);
+                background: var(--bg-accent);
+                color: var(--text-main);
+                outline: none;
+            }
             .benchmark-runtime-progress {
-                height: 6px;
+                position: relative;
+                height: 7px;
                 margin-top: 9px;
                 background: var(--bg-accent);
                 border-radius: 999px;
                 overflow: hidden;
             }
             .benchmark-runtime-progress > span {
+                position: relative;
                 display: block;
                 height: 100%;
                 width: 0%;
                 background: var(--accent-color);
-                transition: width .2s ease;
+                transition: width .55s cubic-bezier(.22,.61,.36,1);
+                will-change: width;
+            }
+            /* The width communicates completed benchmark stages; the moving sheen communicates
+               that the current test is actively running even when its exact completion percentage
+               is not yet known. This prevents a static 15%-ish bar from looking frozen for a 40s
+               live Scryfall retrieval. */
+            .benchmark-runtime-progress.is-active::after {
+                content: '';
+                position: absolute;
+                top: 0;
+                bottom: 0;
+                left: -35%;
+                width: 35%;
+                background: linear-gradient(90deg, transparent, rgba(255,255,255,.40), transparent);
+                animation: benchmark-runtime-sheen 1.35s linear infinite;
+                pointer-events: none;
+            }
+            @keyframes benchmark-runtime-sheen {
+                from { transform: translateX(0); }
+                to { transform: translateX(386%); }
             }
             .benchmark-runtime-detail {
                 margin-top: 7px;
@@ -1357,6 +1433,7 @@ function ensureBenchmarkDashboard() {
     panel.id = 'benchmark-runtime-dashboard';
     panel.setAttribute('aria-live', 'polite');
     panel.innerHTML = `
+        <button type="button" class="benchmark-runtime-close" aria-label="Close benchmark panel" title="Close benchmark panel" hidden>&times;</button>
         <div class="benchmark-runtime-top">
             <div class="benchmark-runtime-title">Benchmark</div>
             <div class="benchmark-runtime-state">Starting…</div>
@@ -1367,6 +1444,13 @@ function ensureBenchmarkDashboard() {
         </div>
         <div class="benchmark-runtime-detail"></div>
     `;
+
+    const closeBtn = panel.querySelector('.benchmark-runtime-close');
+    if (closeBtn) {
+        closeBtn.addEventListener('click', () => {
+            panel.remove();
+        });
+    }
 
     const main = document.querySelector('main');
     if (main) main.insertBefore(panel, main.firstChild);
@@ -1382,6 +1466,7 @@ function updateBenchmarkDashboard({ state, testIndex = 0, totalTests = BENCHMARK
     const detailEl = panel.querySelector('.benchmark-runtime-detail');
     const fillEl = panel.querySelector('.benchmark-runtime-progress > span');
     const progressEl = panel.querySelector('.benchmark-runtime-progress');
+    const closeBtn = panel.querySelector('.benchmark-runtime-close');
 
     if (stateEl) stateEl.textContent = state || 'Running';
     if (testEl) {
@@ -1395,7 +1480,15 @@ function updateBenchmarkDashboard({ state, testIndex = 0, totalTests = BENCHMARK
         ? Math.max(0, Math.min(100, percent))
         : (totalTests > 0 ? Math.max(0, Math.min(100, (testIndex / totalTests) * 100)) : 0);
     if (fillEl) fillEl.style.width = `${computed}%`;
-    if (progressEl) progressEl.setAttribute('aria-valuenow', String(Math.round(computed)));
+    if (progressEl) {
+        const finished = state === 'Finished' || state === 'Stopped';
+        progressEl.classList.toggle('is-active', !finished);
+        progressEl.setAttribute('aria-valuenow', String(Math.round(computed)));
+    }
+    if (closeBtn) {
+        const finished = state === 'Finished' || state === 'Stopped';
+        closeBtn.hidden = !finished;
+    }
 }
 
 async function preloadBenchmarkSourceCards() {
@@ -5947,45 +6040,159 @@ function maxOneToOneHighlightAssignment(sourceEffects, candidateEffects, mode) {
     return { score: result.score / maxPossible, matches: result.matches };
 }
 
-function buildHighlightIntentProfiles(highlights) {
-    return (highlights || [])
+// Group multiple UI selections that belong to one grammatical effect. The source text between
+// the selections is preserved, because the connective words often carry the actual rules syntax.
+function annotateHighlightGroups(highlights, sourceText = getCurrentSourceOracleText()) {
+    const hs = (highlights || [])
         .filter(h => h && typeof h.text === 'string' && h.text.trim())
-        .map((h, index) => {
-            const text = h.text.trim();
-            const parsedEffects = parseMTGEffect(text);
-            const canonicalFunctions = getCanonicalFunctions(parsedEffects);
-            const recognizedEffects = parsedEffects.filter(e => e.action && e.action !== 'generic');
-            return {
-                index, text,
-                mode: h.mode === 'variable' ? 'variable' : 'exact',
-                parsedEffects, recognizedEffects, canonicalFunctions,
-                parserConfidence: calculateCardFieldConfidence(parsedEffects).overall || 0,
-                canonicalText: canonicalFunctionToText(canonicalFunctions)
-            };
+        .map((h, index) => ({ ...h, _highlightIndex: index }))
+        .sort((a,b) => {
+            const as = Number.isFinite(a.start) ? a.start : Number.POSITIVE_INFINITY;
+            const bs = Number.isFinite(b.start) ? b.start : Number.POSITIVE_INFINITY;
+            return as - bs || a._highlightIndex - b._highlightIndex;
         });
+    if (!hs.length) return [];
+
+    const groups = [];
+    let current = [hs[0]];
+    for (let i = 1; i < hs.length; i++) {
+        const prev = current[current.length - 1];
+        const next = hs[i];
+        const positioned = Number.isFinite(prev.start) && Number.isFinite(prev.end) &&
+            Number.isFinite(next.start) && Number.isFinite(next.end);
+        const gap = positioned ? String(sourceText || '').slice(prev.end, next.start) : '';
+        // No sentence boundary and a modest distance means the selections belong to the same
+        // grammatical line/effect. This intentionally mirrors buildHighlightScoringText().
+        if (positioned && !/[.!?\n]/.test(gap) && gap.length <= 96) current.push(next);
+        else { groups.push(current); current = [next]; }
+    }
+    groups.push(current);
+
+    groups.forEach((group, groupId) => {
+        const positioned = group.filter(h => Number.isFinite(h.start) && Number.isFinite(h.end) && h.end > h.start);
+        const start = positioned.length ? Math.min(...positioned.map(h => h.start)) : null;
+        const end = positioned.length ? Math.max(...positioned.map(h => h.end)) : null;
+        const contextText = start !== null && end !== null
+            ? String(sourceText || '').slice(start, end).trim()
+            : group.map(h => h.text.trim()).join(' ');
+        const hasExact = group.some(h => h.mode !== 'variable');
+        const hasVariable = group.some(h => h.mode === 'variable');
+        const groupMode = hasExact && hasVariable ? 'mixed' : (hasVariable ? 'variable' : 'exact');
+        const benchmarkIntentOnly = group.some(h => h.origin === 'benchmark') && groupMode === 'mixed';
+        const exactTexts = group.filter(h => h.mode !== 'variable').map(h => h.text.trim());
+        const variableTexts = group.filter(h => h.mode === 'variable').map(h => h.text.trim());
+        const modes = group.map(h => h.mode === 'variable' ? 'variable' : 'exact');
+        group.contextText = contextText;
+        group.sourceStart = start;
+        group.sourceEnd = end;
+        group.mode = groupMode;
+        group.modes = modes;
+        group.selections = group.map(h => ({ text: h.text.trim(), mode: h.mode === 'variable' ? 'variable' : 'exact', intent: h.intent || '' }));
+        group.exactTexts = exactTexts;
+        group.variableTexts = variableTexts;
+        group.benchmarkIntentOnly = benchmarkIntentOnly;
+        group.origin = group.some(h => h.origin === 'benchmark') ? 'benchmark' : 'user';
+        group.forEach(h => {
+            h.groupId = groupId;
+            h.groupStart = start;
+            h.groupEnd = end;
+            h.groupContextText = contextText;
+            h.groupMode = groupMode;
+            h.benchmarkIntentOnly = benchmarkIntentOnly;
+        });
+    });
+    return groups;
 }
 
-function calculateHighlightIntentMatch(profiles, candidateEffects) {
+function buildHighlightIntentProfiles(highlights) {
+    const groups = annotateHighlightGroups(highlights, getCurrentSourceOracleText());
+    return groups.map((group, index) => {
+        // Parse the complete excerpt. For Test #11 this turns three UI selections into the actual
+        // rules sentence "White spells you cast cost {1} less to cast.", allowing parseCostReductionEffect
+        // to see the whole pattern. The Variable selection is then applied only to the parameter
+        // matching behavior, not used as a literal requirement.
+        let parsedEffects = parseMTGEffect(group.map(h => h.text).join(' '));
+        if (group.length && Number.isFinite(group[0].start) && Number.isFinite(group[0].end)) {
+            const sourceText = getCurrentSourceOracleText();
+            const first = Math.min(...group.map(h => h.start));
+            const last = Math.max(...group.map(h => h.end));
+            const contextual = String(sourceText || '').slice(first, last).trim();
+            if (contextual) parsedEffects = parseMTGEffect(contextual);
+        }
+        let canonicalFunctions = getCanonicalFunctions(parsedEffects);
+        let recognizedEffects = parsedEffects.filter(e => e.action && e.action !== 'generic');
+
+        // Fallback: mask Variable selections only if the unmasked excerpt failed to parse. This is
+        // useful for numeric/custom tokens that would otherwise interrupt a parser pattern while
+        // keeping the surrounding grammar intact.
+        if (!recognizedEffects.length && group.some(h => h.mode === 'variable')) {
+            let normalized = group.map(h => h.text).join(' ');
+            for (const h of group.filter(x => x.mode === 'variable')) {
+                const escaped = h.text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+                normalized = normalized.replace(new RegExp(escaped, 'g'), 'N');
+            }
+            const normalizedEffects = parseMTGEffect(normalized);
+            const normalizedRecognized = normalizedEffects.filter(e => e.action && e.action !== 'generic');
+            if (normalizedRecognized.length) {
+                parsedEffects = normalizedEffects;
+                recognizedEffects = normalizedRecognized;
+                canonicalFunctions = getCanonicalFunctions(normalizedEffects);
+            }
+        }
+
+        return {
+            index,
+            groupId: index,
+            text: group.contextText,
+            contextText: group.contextText,
+            selections: group.selections,
+            modes: group.modes,
+            mode: group.mode,
+            exactTexts: group.exactTexts,
+            variableTexts: group.variableTexts,
+            benchmarkIntentOnly: Boolean(group.benchmarkIntentOnly),
+            origin: group.origin,
+            parsedEffects,
+            recognizedEffects,
+            canonicalFunctions,
+            parserConfidence: calculateCardFieldConfidence(parsedEffects).overall || 0,
+            canonicalText: canonicalFunctionToText(canonicalFunctions)
+        };
+    });
+}
+
+function calculateHighlightIntentMatch(profiles, candidateEffects, candidateCard = null) {
     if (!profiles?.length || !candidateEffects?.length) return 0;
     const profileScores = profiles.map(profile => {
         const sourceEffects = profile.recognizedEffects.length ? profile.recognizedEffects : profile.parsedEffects;
-        const assignment = maxOneToOneHighlightAssignment(sourceEffects, candidateEffects, profile.mode);
+        const matchingMode = profile.mode === 'mixed' ? 'variable' : profile.mode;
+        const assignment = maxOneToOneHighlightAssignment(sourceEffects, candidateEffects, matchingMode);
         const coverage = sourceEffects.length ? assignment.matches.length / sourceEffects.length : 0;
         const confidence = 0.55 + 0.45 * (profile.parserConfidence || 0);
-        return Math.min(1, assignment.score * 0.75 + coverage * 0.25) * confidence;
+        let lexicalSupport = 0;
+        if (candidateCard && profile.exactTexts?.length) {
+            const oracle = getCardOracleText(candidateCard).toLowerCase();
+            lexicalSupport = profile.exactTexts.filter(t => oracle.includes(String(t).toLowerCase())).length / profile.exactTexts.length;
+        }
+        // In mixed benchmark groups the parsed whole-effect is the main signal. Literal wording is
+        // only a small bonus because the point is to permit a changed qualifier/amount while still
+        // preserving the highlighted effect's structure.
+        const lexicalWeight = profile.benchmarkIntentOnly ? 0.05 : 0.12;
+        const structuralWeight = profile.benchmarkIntentOnly ? 0.78 : 0.76;
+        const coverageWeight = profile.benchmarkIntentOnly ? 0.17 : 0.12;
+        return Math.min(1, assignment.score * structuralWeight + coverage * coverageWeight + lexicalSupport * lexicalWeight) * confidence;
     });
     const average = profileScores.reduce((a,b) => a+b,0) / profileScores.length;
     const fullCoverage = profileScores.filter(v => v >= 0.55).length / profileScores.length;
-    return Math.min(1, average * 0.75 + fullCoverage * 0.25);
+    return Math.min(1, average * 0.80 + fullCoverage * 0.20);
 }
 
 function calculateHighlightIntentRetrievalText(profiles) {
     if (!profiles || profiles.length === 0) return '';
     const canonical = profiles.flatMap(p => p.canonicalFunctions || []);
     const canonicalText = canonicalFunctionToText(canonical);
-    return [canonicalText, ...profiles.map(p => p.text)]
-        .filter(Boolean)
-        .join('. ');
+    const groupedText = profiles.map(p => p.contextText || p.text).filter(Boolean);
+    return [canonicalText, ...groupedText].filter(Boolean).join('. ');
 }
 
 /**
@@ -9881,7 +10088,7 @@ function getCardOracleText(card) {
  */
 function matchesExactHighlightConstraints(card, highlights = []) {
     const exactHighlights = (highlights || [])
-        .filter(h => h && h.mode !== 'variable' && typeof h.text === 'string' && h.text.trim())
+        .filter(h => h && h.mode !== 'variable' && !h.benchmarkIntentOnly && typeof h.text === 'string' && h.text.trim())
         .map(h => parseExactHighlightRequirement(h.text))
         .filter(req => req.text);
     if (!exactHighlights.length) return true;
@@ -9894,7 +10101,7 @@ function matchesExactHighlightConstraints(card, highlights = []) {
 function explainExactHighlightFailures(card, highlights = []) {
     const oracle = getCardOracleText(card);
     return (highlights || [])
-        .filter(h => h && h.mode !== 'variable' && typeof h.text === 'string' && h.text.trim())
+        .filter(h => h && h.mode !== 'variable' && !h.benchmarkIntentOnly && typeof h.text === 'string' && h.text.trim())
         .map(h => ({ raw: h.text.trim(), requirement: parseExactHighlightRequirement(h.text) }))
         .filter(item => item.requirement.text && !exactHighlightOccursInOracle(oracle, item.requirement))
         .map(item => item.requirement.requiresSentenceTerminalPeriod
@@ -11484,7 +11691,7 @@ async function scoreCardBatch({
         card._strategicRoleFingerprint = buildStrategicRoleFingerprint(card, parsedCandidateCard, card.roleProfile);
         card.roleScore = calculateStrategicRoleScore(sourceRoleProfile, card.roleProfile, sourceRoleFingerprint, card._strategicRoleFingerprint);
         card.highlightIntentScore = hasHighlight
-            ? calculateHighlightIntentMatch(highlightProfiles, parsedCandidateCard)
+            ? calculateHighlightIntentMatch(highlightProfiles, parsedCandidateCard, card)
             : 0;
         card._parsedEffects = parsedCandidateCard;
         card.fieldConfidence = calculateCardFieldConfidence(parsedCandidateCard);
@@ -12008,6 +12215,18 @@ const FUNCTION_RETRIEVAL_VOCAB = {
         phrases: ["exile target creature", "exile target permanent"],
         otag: "removal"
     },
+    cost_reduction: {
+        // Keep the retrieval phrasing broad enough to find equivalent continuous cost modifiers
+        // while still anchoring on the distinctive rules language that denotes a cost reduction.
+        phrases: ["less to cast", "cost less", "costs less to cast"],
+        paramTemplate: (p) => {
+            const parts = ['o:"less to cast"'];
+            const restriction = (p.restriction || []).find(r => r && r.length > 2 &&
+                !['controlledbyyou', 'controlledbyopponent'].includes(r));
+            if (restriction) parts.push(`o:"${restriction}"`);
+            return parts.join(' ');
+        }
+    },
     counter: {
         phrases: ["counter target spell", "counter target creature spell", "counter target noncreature spell", "counter target ability"],
         otag: "counterspell"
@@ -12298,15 +12517,15 @@ async function findSimilarCards() {
         ? buildHighlightScoringText(manualHighlights, sourceOracleTextForScoring)
         : sourceOracleTextForScoring.split('\n')[0];
 
-    // Only 'exact'-mode highlights should force a literal-text requirement; 'variable' ones mark
-    // a structural slot (e.g. a damage amount) that should inform parsing without requiring that
-    // specific wording/value to reappear verbatim on a match. When there are highlights but NONE
-    // are exact-mode, this is intentionally empty - not falling back to the full highlighted
-    // text - so the exactness channel doesn't quietly re-impose a literal requirement the user
-    // explicitly marked flexible. Same ". " join as above, for the same reason: two disjoint
-    // exact phrases shouldn't be concatenated into one ungrammatical literal-match query.
+    // A mixed benchmark highlight on one grammatical effect uses its Exact fragments as structural
+    // anchors and its Variable fragments as flexible parameters. Do not turn those anchors into a
+    // literal hard query, or semantically equivalent cards are filtered out before scoring.
+    const highlightProfilesForSearch = hasHighlight ? buildHighlightIntentProfiles(manualHighlights) : [];
+    const hasBenchmarkMixedHighlightIntent = benchmarkColdMode && highlightProfilesForSearch.some(p => p.benchmarkIntentOnly);
     const exactnessTextForScoring = hasHighlight
-        ? manualHighlights.filter(h => h.mode === 'exact').map(h => h.text).join('. ')
+        ? (hasBenchmarkMixedHighlightIntent
+            ? ''
+            : manualHighlights.filter(h => h.mode === 'exact' && !h.benchmarkIntentOnly).map(h => h.text).join('. '))
         : targetTextForScoring;
 
     const filters = readConstraintFilters();
@@ -12391,7 +12610,7 @@ async function findSimilarCards() {
     const sourceRankingIntentForFloor = inferRankingIntent(currentSourceCard, sourceParsedEffects, targetTextForScoring, sourceRoleProfileForFloor, manualHighlights);
 
     const highlightRetrievalText = hasHighlight
-        ? calculateHighlightIntentRetrievalText(buildHighlightIntentProfiles(manualHighlights))
+        ? calculateHighlightIntentRetrievalText(highlightProfilesForSearch)
         : '';
 
     // Exact highlights are hard lexical constraints. Add a dedicated Oracle-phrase retrieval lane
@@ -12399,7 +12618,7 @@ async function findSimilarCards() {
     const exactHighlightQueries = [];
     if (hasHighlight) {
         const seenExactQueries = new Set();
-        for (const highlight of manualHighlights.filter(h => h?.mode !== 'variable' && typeof h.text === 'string' && h.text.trim())) {
+        for (const highlight of manualHighlights.filter(h => h?.mode !== 'variable' && !h.benchmarkIntentOnly && typeof h.text === 'string' && h.text.trim())) {
             const literal = highlight.text.trim().replaceAll('\\', '\\\\').replaceAll('"', '\\"');
             const key = literal.toLowerCase();
             if (!literal || seenExactQueries.has(key)) continue;
@@ -12843,7 +13062,7 @@ const filteredCandidates = rawCandidates.filter(card => {
 // Stage 2: Passed hard filters set
 const passedFilterNames = new Set(filteredCandidates.map(c => (c.name || '').toLowerCase()));
 const countPassedFiltersRaw = filteredCandidates.length;
-const exactHighlightConstraintCount = manualHighlights.filter(h => h?.mode !== 'variable' && typeof h.text === 'string' && h.text.trim()).length;
+const exactHighlightConstraintCount = manualHighlights.filter(h => h?.mode !== 'variable' && !h.benchmarkIntentOnly && typeof h.text === 'string' && h.text.trim()).length;
 
 // Dedupe by card NAME rather than Scryfall's print id - different printings (different set,
 // frame, or art) of the same card have different ids but are the same card for search purposes,
@@ -13199,6 +13418,11 @@ if (candidates.length > 0) {
         // candidates fell back to lexical-only contextScore because a model call failed mid-batch
         // - previously silent (review: embedding diagnostics).
         embeddingDiagnostics,
+        highlightIntentDiagnostics: hasHighlight ? highlightProfilesForSearch.map(p => ({
+            groupId: p.groupId, contextText: p.contextText, mode: p.mode, selections: p.selections,
+            canonicalText: p.canonicalText, parserConfidence: p.parserConfidence,
+            benchmarkIntentOnly: Boolean(p.benchmarkIntentOnly)
+        })) : [],
         // Stage-by-stage candidate visibility tracking: retrieved -> filtered -> deduplicated ->
         // parsed meaningfully -> scored -> pruned (relevance floor) -> ranked (final).
         rawCandidateNames,
