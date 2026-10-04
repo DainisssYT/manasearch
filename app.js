@@ -66,6 +66,12 @@ const benchmarkSourceCardCatalog = new Map();
 // Selected Related Cards State (Persistent across infinite searches)
 const selectedRelatedCards = new Map();
 
+// Multi-source search context. The first card is the primary source shown in the existing inspector;
+// additional cards participate in the shared-text retrieval lane.
+const sourceCards = new Map();
+const MAX_SOURCE_CARDS = 4;
+let primarySourceCardKey = null;
+
 // Local Storage Keys
 const HISTORY_KEY = 'manamatch_history';
 const HISTORY_CARD_PREVIEWS_KEY = 'manamatch_history_card_previews';
@@ -1213,6 +1219,8 @@ function resetBenchmarkColdState({ keepSourceCard = false } = {}) {
     manualHighlights = [];
     highlightComposerOpen = false;
     selectedRelatedCards.clear();
+    sourceCards.clear();
+    primarySourceCardKey = null;
 
     // Source-card metadata is immutable input, not retrieval state. Keep the source cache across
     // benchmark tests so a previously loaded benchmark source can be reused without another
@@ -6325,8 +6333,10 @@ function calculateEffectCoverageProfile(parsedSource, parsedCandidate) {
 function calculateFunctionalSimilarity(parsedSource, parsedCandidate) {
     const source = (parsedSource || []).filter(e => e?.canonical);
     const candidate = (parsedCandidate || []).filter(e => e?.canonical);
-    if (!source.length || !candidate.length) return 0;
-
+    const sourceProfile = parsedSource?._mechanicProfile || buildUniversalMechanicProfile(null, '', parsedSource || []);
+    const candidateProfile = parsedCandidate?._mechanicProfile || buildUniversalMechanicProfile(null, '', parsedCandidate || []);
+    const universal = calculateUniversalMechanicSimilarity(sourceProfile, candidateProfile);
+    if (!source.length || !candidate.length) return universal.score * 0.88;
     const sourceFns = source.map(e => e.canonical.function).filter(Boolean);
     const candidateFns = candidate.map(e => e.canonical.function).filter(Boolean);
     let total = 0, weight = 0;
@@ -6336,7 +6346,11 @@ function calculateFunctionalSimilarity(parsedSource, parsedCandidate) {
         total += best * Math.max(0.05, importance);
         weight += Math.max(0.05, importance);
     }
-    return weight ? Math.max(0, Math.min(1, total / weight)) : 0;
+    const canonicalScore = weight ? total / weight : 0;
+    const graphA = parsedSource?._mechanicalGraph || buildMechanicalEffectGraph(null, '', parsedSource || []);
+    const graphB = parsedCandidate?._mechanicalGraph || buildMechanicalEffectGraph(null, '', parsedCandidate || []);
+    const graphScore = calculateMechanicalGraphSimilarity(graphA, graphB).score;
+    return Math.max(0, Math.min(1, canonicalScore * 0.62 + graphScore * 0.23 + universal.score * 0.15));
 }
 
 /**
@@ -6541,6 +6555,7 @@ function buildUniversalMechanicProfile(card = null, text = '', parsedEffects = n
     const counters = collectRegexTokens(oracle, UNIVERSAL_COUNTER_REGEX);
     const tokens = collectRegexGroupTokens(oracle, UNIVERSAL_TOKEN_REGEX);
     const manaSymbols = collectRegexTokens(oracle, UNIVERSAL_MANA_SYMBOL_REGEX);
+    const polarity = polarityProfile(oracle);
 
     const atoms = new Set();
     keywords.forEach(v => atoms.add(`keyword:${v}`));
@@ -6553,6 +6568,9 @@ function buildUniversalMechanicProfile(card = null, text = '', parsedEffects = n
     resources.forEach(v => atoms.add(`resource:${v}`));
     counters.forEach(v => atoms.add(`counter:${v}`));
     tokens.forEach(v => atoms.add(`token:${v}`));
+    stats.forEach(v => atoms.add(`stat:${v}`));
+    manaSymbols.forEach(v => atoms.add(`mana:${v}`));
+    Object.entries(polarity).forEach(([kind, value]) => { if (value) atoms.add(`polarity:${kind}`); });
     Object.entries(context).forEach(([kind, set]) => set.forEach(v => atoms.add(`${kind}:${v}`)));
 
     return {
@@ -6569,6 +6587,7 @@ function buildUniversalMechanicProfile(card = null, text = '', parsedEffects = n
         counters,
         tokens,
         manaSymbols,
+        polarity,
         atoms,
         keywordCount: keywords.size,
         actionCount: actions.size,
@@ -6576,64 +6595,120 @@ function buildUniversalMechanicProfile(card = null, text = '', parsedEffects = n
     };
 }
 
-function calculateUniversalMechanicSimilarity(profileA, profileB) {
-    if (!profileA || !profileB) return {
-        score: 0, keywordCoverage: 0, keywordParameterCoverage: 0,
-        actionCoverage: 0, parsedActionCoverage: 0, functionCoverage: 0,
-        outcomeCoverage: 0, zoneCoverage: 0, targetCoverage: 0,
-        scopeCoverage: 0, triggerCoverage: 0, costCoverage: 0,
-        choiceCoverage: 0, resourceCoverage: 0, atomCoverage: 0,
-        sharedKeywords: []
-    };
 
-    const keywordCoverage = setCoverage(profileA.keywords, profileB.keywords);
-    const keywordParameterCoverage = setCoverage(profileA.keywordParameters, profileB.keywordParameters);
-    const actionCoverage = setCoverage(profileA.actions, profileB.actions);
-    const parsedActionCoverage = setCoverage(profileA.parsedActions, profileB.parsedActions);
-    const functionCoverage = setCoverage(profileA.canonicalFunctions, profileB.canonicalFunctions);
-    const outcomeCoverage = setCoverage(profileA.canonicalOutcomes, profileB.canonicalOutcomes);
-    const zoneCoverage = setCoverage(profileA.zones, profileB.zones);
-    const targetCoverage = setCoverage(profileA.context?.target, profileB.context?.target);
-    const scopeCoverage = setCoverage(profileA.context?.scope, profileB.context?.scope);
-    const triggerCoverage = setCoverage(profileA.context?.trigger, profileB.context?.trigger);
-    const costCoverage = setCoverage(profileA.context?.cost, profileB.context?.cost);
-    const choiceCoverage = setCoverage(profileA.context?.choice, profileB.context?.choice);
-    const resourceCoverage = setCoverage(profileA.resources, profileB.resources);
-    const atomCoverage = setCoverage(profileA.atoms, profileB.atoms);
-    const sharedKeywords = [...profileA.keywords].filter(k => profileB.keywords.has(k));
-
-    // Exact keyword agreement is direct mechanic evidence. It receives a strong floor even when
-    // the rest of the card is worded differently; this makes obscure/future keyword mechanics
-    // mechanically visible without having to hand-code their rules text.
-    const exactKeywordEvidence = keywordCoverage > 0
-        ? Math.min(1, 0.52 + (keywordCoverage * 0.33) + (keywordParameterCoverage * 0.10))
-        : 0;
-
-    const textMechanicEvidence = Math.max(0, Math.min(1,
-        (actionCoverage * 0.25) +
-        (parsedActionCoverage * 0.12) +
-        (functionCoverage * 0.18) +
-        (outcomeCoverage * 0.10) +
-        (zoneCoverage * 0.06) +
-        (targetCoverage * 0.08) +
-        (scopeCoverage * 0.05) +
-        (triggerCoverage * 0.05) +
-        (costCoverage * 0.03) +
-        (choiceCoverage * 0.02) +
-        (resourceCoverage * 0.06)
-    ));
-
-    const score = Math.max(exactKeywordEvidence, textMechanicEvidence, atomCoverage * 0.62);
+// V22: universal evidence weighting. Generic Oracle grammar tokens are useful for parsing but are
+// weak proof of a shared mechanic. Specific actions, outcomes, zones, counters, and keyword data
+// therefore carry more weight while the generic signature remains a recall backstop for mechanics
+// the finite parser does not recognize.
+const UNIVERSAL_FEATURE_WEIGHTS = Object.freeze({
+    actions: 0.78, parsedActions: 0.86, canonicalFunctions: 1.10, canonicalOutcomes: 1.12,
+    zones: 0.90, resources: 0.62, target: 0.62, scope: 0.46, trigger: 0.68,
+    cost: 0.34, choice: 0.30, counters: 0.80, tokens: 0.76, stats: 0.58, polarity: 0.90
+});
+const UNIVERSAL_GENERIC_TOKENS = new Set([
+    'choose', 'chosen', 'target', 'a', 'an', 'the', 'you', 'your', 'card', 'cards', 'permanent',
+    'permanents', 'player', 'players', 'opponent', 'opponents', 'may', 'one', 'two', 'three',
+    'each', 'all', 'any', 'some', 'this', 'that', 'those', 'when', 'whenever', 'if', 'unless',
+    'then', 'instead', 'for each', 'up to'
+]);
+function weightedSymmetricCoverage(sourceSet, candidateSet, factor = 0.9) {
+    const source = sourceSet instanceof Set ? sourceSet : new Set(sourceSet || []);
+    const candidate = candidateSet instanceof Set ? candidateSet : new Set(candidateSet || []);
+    if (!source.size && !candidate.size) return 1;
+    if (!source.size || !candidate.size) return 0;
+    const useful = value => !UNIVERSAL_GENERIC_TOKENS.has(normalizeMechanicToken(value));
+    const a = [...source].filter(useful);
+    const b = [...candidate].filter(useful);
+    const aa = a.length ? a : [...source];
+    const bb = b.length ? b : [...candidate];
+    const overlap = aa.filter(v => bb.includes(v)).length;
+    const directionalA = overlap / Math.max(1, aa.length);
+    const directionalB = overlap / Math.max(1, bb.length);
+    return Math.max(0, Math.min(1, Math.sqrt(directionalA * directionalB) * factor + (1 - factor) * Math.min(directionalA, directionalB)));
+}
+function polarityProfile(text) {
+    const value = String(text || '').toLowerCase();
     return {
-        score: Math.max(0, Math.min(1, score)),
-        keywordCoverage, keywordParameterCoverage, actionCoverage,
-        parsedActionCoverage, functionCoverage, outcomeCoverage,
-        zoneCoverage, targetCoverage, scopeCoverage, triggerCoverage,
-        costCoverage, choiceCoverage, resourceCoverage, atomCoverage,
-        sharedKeywords
+        negative: /\b(?:can't|cannot|do not|doesn't|don't|isn't|aren't|never|no longer)\b/.test(value),
+        replacement: /\b(?:instead|replace|rather than)\b/.test(value),
+        prevention: /\b(?:prevent|prevents|prevented)\b/.test(value),
+        prohibition: /\b(?:can't|cannot|may not|don't)\b/.test(value)
     };
 }
+function comparePolarity(a = {}, b = {}) {
+    const keys = ['negative', 'replacement', 'prevention', 'prohibition'];
+    let seen = 0, equal = 0;
+    for (const key of keys) {
+        if (a[key] !== undefined || b[key] !== undefined) {
+            seen++;
+            if (a[key] === b[key]) equal++;
+        }
+    }
+    return seen ? equal / seen : 1;
+}
+function buildUniversalFunctionalText(card = null, text = '', parsedEffects = null) {
+    const oracle = String(text || card?.oracle_text || (card?.card_faces ? card.card_faces.map(f => f.oracle_text || '').join(' ') : '') || '').trim();
+    let parsed = parsedEffects;
+    try { parsed = Array.isArray(parsed) ? parsed : parseMTGEffect(oracle); } catch (_) { parsed = []; }
+    const profile = buildUniversalMechanicProfile(card, oracle, parsed);
+    const parts = [];
+    const canonical = canonicalFunctionToText(getCanonicalFunctions(parsed));
+    if (canonical) parts.push(canonical);
+    if (profile.keywords.size) parts.push(`keywords ${[...profile.keywords].join(' ')}`);
+    const usefulActions = [...profile.actions].filter(x => !UNIVERSAL_GENERIC_TOKENS.has(x));
+    if (usefulActions.length) parts.push(`actions ${usefulActions.join(' ')}`);
+    if (profile.zones.size) parts.push(`zones ${[...profile.zones].join(' ')}`);
+    if (profile.resources.size) parts.push(`resources ${[...profile.resources].join(' ')}`);
+    if (profile.counters.size) parts.push(`counters ${[...profile.counters].join(' ')}`);
+    if (profile.stats.size) parts.push(`stats ${[...profile.stats].join(' ')}`);
+    if (profile.context?.target?.size) parts.push(`targets ${[...profile.context.target].join(' ')}`);
+    if (profile.context?.scope?.size) parts.push(`scope ${[...profile.context.scope].join(' ')}`);
+    if (profile.context?.trigger?.size) parts.push(`triggers ${[...profile.context.trigger].join(' ')}`);
+    return parts.join('. ');
+}
 
+function calculateUniversalMechanicSimilarity(profileA, profileB) {
+    if (!profileA || !profileB) return { score: 0, keywordCoverage: 0, keywordParameterCoverage: 0, actionCoverage: 0, parsedActionCoverage: 0, functionCoverage: 0, outcomeCoverage: 0, zoneCoverage: 0, targetCoverage: 0, scopeCoverage: 0, triggerCoverage: 0, costCoverage: 0, choiceCoverage: 0, resourceCoverage: 0, atomCoverage: 0, counterCoverage: 0, tokenCoverage: 0, statCoverage: 0, polaritySimilarity: 0, sharedKeywords: [] };
+    const keywordCoverage = weightedSymmetricCoverage(profileA.keywords, profileB.keywords, 1.0);
+    const keywordParameterCoverage = weightedSymmetricCoverage(profileA.keywordParameters, profileB.keywordParameters, 1.0);
+    const actionCoverage = weightedSymmetricCoverage(profileA.actions, profileB.actions, 0.90);
+    const parsedActionCoverage = weightedSymmetricCoverage(profileA.parsedActions, profileB.parsedActions, 0.92);
+    const functionCoverage = weightedSymmetricCoverage(profileA.canonicalFunctions, profileB.canonicalFunctions, 1.0);
+    const outcomeCoverage = weightedSymmetricCoverage(profileA.canonicalOutcomes, profileB.canonicalOutcomes, 1.0);
+    const zoneCoverage = weightedSymmetricCoverage(profileA.zones, profileB.zones, 0.95);
+    const targetCoverage = weightedSymmetricCoverage(profileA.context?.target, profileB.context?.target, 0.78);
+    const scopeCoverage = weightedSymmetricCoverage(profileA.context?.scope, profileB.context?.scope, 0.68);
+    const triggerCoverage = weightedSymmetricCoverage(profileA.context?.trigger, profileB.context?.trigger, 0.82);
+    const costCoverage = weightedSymmetricCoverage(profileA.context?.cost, profileB.context?.cost, 0.52);
+    const choiceCoverage = weightedSymmetricCoverage(profileA.context?.choice, profileB.context?.choice, 0.48);
+    const resourceCoverage = weightedSymmetricCoverage(profileA.resources, profileB.resources, 0.72);
+    const counterCoverage = weightedSymmetricCoverage(profileA.counters, profileB.counters, 0.88);
+    const tokenCoverage = weightedSymmetricCoverage(profileA.tokens, profileB.tokens, 0.84);
+    const statCoverage = weightedSymmetricCoverage(profileA.stats, profileB.stats, 0.65);
+    const atomCoverage = weightedSymmetricCoverage(profileA.atoms, profileB.atoms, 0.82);
+    const polaritySimilarity = comparePolarity(profileA.polarity || {}, profileB.polarity || {});
+    const sharedKeywords = [...profileA.keywords].filter(k => profileB.keywords.has(k));
+    const exactKeywordEvidence = keywordCoverage > 0
+        ? Math.min(1, keywordCoverage * 0.78 + keywordParameterCoverage * 0.16)
+        : 0;
+    const weights = UNIVERSAL_FEATURE_WEIGHTS;
+    const numerator = actionCoverage * weights.actions + parsedActionCoverage * weights.parsedActions +
+        functionCoverage * weights.canonicalFunctions + outcomeCoverage * weights.canonicalOutcomes +
+        zoneCoverage * weights.zones + targetCoverage * weights.target + scopeCoverage * weights.scope +
+        triggerCoverage * weights.trigger + costCoverage * weights.cost + choiceCoverage * weights.choice +
+        resourceCoverage * weights.resources + counterCoverage * weights.counters + tokenCoverage * weights.tokens +
+        statCoverage * weights.stats + polaritySimilarity * weights.polarity;
+    const denominator = Object.values(weights).reduce((a, b) => a + b, 0);
+    const weightedTextEvidence = denominator ? numerator / denominator : 0;
+    const signatureEvidence = Math.max(weightedTextEvidence, exactKeywordEvidence, atomCoverage * 0.72,
+        keywordCoverage * 0.70 + counterCoverage * 0.15 + tokenCoverage * 0.15);
+    return {
+        score: Math.max(0, Math.min(1, signatureEvidence)), keywordCoverage, keywordParameterCoverage,
+        actionCoverage, parsedActionCoverage, functionCoverage, outcomeCoverage, zoneCoverage,
+        targetCoverage, scopeCoverage, triggerCoverage, costCoverage, choiceCoverage, resourceCoverage,
+        atomCoverage, counterCoverage, tokenCoverage, statCoverage, polaritySimilarity, sharedKeywords
+    };
+}
 
 // ---------------------------------------------------------------------------
 // V21 MECHANICAL GRAPH + RULES-AWARE RANKING LAYER
@@ -7550,27 +7625,34 @@ function calculateMechanicalSimilarity(parsedA, parsedB, profileA = null, profil
 }
 
 // Cache tag extraction to prevent running ~70 regex operations repeatedly per card
-function calculateCategoryScore(targetCard, tags) {
-    if (!tags || tags.length === 0) return 0;
-    if (!targetCard._cachedTags) {
-        targetCard._cachedTags = generateTags(targetCard, tags).map(t => t.toLowerCase());
+function calculateCategoryScore(targetCard, tags, sourceCard = null, sourceEffects = null) {
+    if (!targetCard) return 0;
+    const sourceTags = new Set((tags || []).map(t => normalizeMechanicToken(t)).filter(Boolean));
+    if (!sourceTags.size && !sourceCard) return 0;
+    if (!targetCard._cachedTags) targetCard._cachedTags = generateTags(targetCard, tags || []).map(normalizeMechanicToken);
+    const targetTags = new Set(targetCard._cachedTags.filter(Boolean));
+    const explicitOverlap = sourceTags.size ? weightedSymmetricCoverage(sourceTags, targetTags, 0.86) : 0;
+
+    const sourceText = sourceCard ? strategicRoleCardText(sourceCard) : '';
+    const targetText = strategicRoleCardText(targetCard);
+    const sourceParsed = Array.isArray(sourceEffects) ? sourceEffects : (sourceCard?._parsedEffects || (sourceText ? parseMTGEffect(sourceText) : []));
+    const targetParsed = targetCard._parsedEffects || parseMTGEffect(targetText);
+    const sourceProfile = buildUniversalMechanicProfile(sourceCard, sourceText, sourceParsed);
+    const targetProfile = buildUniversalMechanicProfile(targetCard, targetText, targetParsed);
+    const universalScore = sourceCard ? calculateUniversalMechanicSimilarity(sourceProfile, targetProfile).score : 0;
+
+    const sourceRole = sourceCard ? inferStrategicRoleProfile(sourceCard, sourceParsed, sourceText) : [];
+    const targetRole = inferStrategicRoleProfile(targetCard, targetParsed, targetText);
+    let roleScore = 0;
+    for (const a of sourceRole) for (const b of targetRole) {
+        if (a.role === b.role) roleScore = Math.max(roleScore, Math.sqrt(a.score * b.score));
+        else if (a.group && a.group === b.group) roleScore = Math.max(roleScore, Math.sqrt(a.score * b.score) * 0.65);
     }
-    const targetTags = targetCard._cachedTags;
-    // Y: the candidate's own total tag count. A candidate with no tags at all has nothing to
-    // compute a share of, so it scores 0 rather than dividing by zero.
-    if (targetTags.length === 0) return 0;
 
-    // X: how many of the candidate's OWN tags are also present in the source/active tag list -
-    // a plain count of shared categories, not a weighted sum, and drawn from the candidate's tag
-    // set (targetTags) rather than the source's, so it can never exceed Y by construction.
-    const sourceTagSet = new Set(tags.map(t => t.toLowerCase()));
-    const sharedCount = targetTags.filter(t => sourceTagSet.has(t)).length;
-
-    // Capped at 1.0 (100%) as a safety net: X should never exceed Y given it's counted as a
-    // subset of targetTags, but the cap guards against that invariant ever being broken by a
-    // future change (e.g. duplicate entries in either tag list) rather than relying on it holding
-    // implicitly forever.
-    return Math.min(1, sharedCount / targetTags.length);
+    // Explicit category tags remain the anchor; universal profile/role evidence prevents Category
+    // from collapsing to zero for new or obscure mechanics simply because no bespoke tag exists.
+    if (sourceCard) return Math.max(0, Math.min(1, explicitOverlap * 0.55 + universalScore * 0.30 + roleScore * 0.15));
+    return explicitOverlap;
 }
 
 
@@ -8772,53 +8854,20 @@ async function loadTransformersLib() {
 }
 
 function calculateSimpleSimilarity(text1, text2) {
-    const normalize = (text) => text
-        .toLowerCase()
-        .replace(/[^\w\s]/g, ' ')
-        .split(/\s+/)
-        .filter(w => w.length > 2);
-
-    const words1 = normalize(text1);
-    const words2 = normalize(text2);
-    if (words1.length === 0 || words2.length === 0) return 0;
-
-    const set1 = new Set(words1);
-    const set2 = new Set(words2);
-    let shared = 0;
-    set1.forEach(w => { if (set2.has(w)) shared++; });
-
-    // Directional lexical coverage: the important question is how much of the SOURCE wording
-    // appears on the candidate, not how much of the candidate happens to appear on the source.
-    const sourceCoverage = shared / set1.size;
-
-    // Preserve a small phrase/order signal without returning to a symmetric Jaccard score.
-    // Consecutive source bigrams are useful evidence for phrases such as "graveyard battlefield"
-    // or "draw a card"; extra candidate words do not directly reduce this value.
-    let phraseMatches = 0;
-    let phraseTotal = Math.max(1, words1.length - 1);
-    if (words1.length === 1) {
-        phraseMatches = shared ? 1 : 0;
-        phraseTotal = 1;
-    } else {
-        for (let i = 0; i < words1.length - 1; i++) {
-            const bigram = `${words1[i]} ${words1[i + 1]}`;
-            for (let j = 0; j < words2.length - 1; j++) {
-                if (`${words2[j]} ${words2[j + 1]}` === bigram) {
-                    phraseMatches++;
-                    break;
-                }
-            }
-        }
-    }
-    const phraseCoverage = phraseMatches / phraseTotal;
-
-    // Extra candidate vocabulary gets only a bounded penalty. This keeps "same effect + rider"
-    // close to the source while still making a candidate made almost entirely of unrelated text
-    // worse than a clean match.
-    const candidateExcess = [...set2].filter(w => !set1.has(w)).length / Math.max(1, set2.size);
-    const excessPenalty = 0.10 * Math.pow(candidateExcess, 1.15);
-
-    return Math.max(0, Math.min(1, (sourceCoverage * 0.75) + (phraseCoverage * 0.25))) * (1 - excessPenalty);
+    if (!text1 || !text2) return 0;
+    const lexical = lexicalTokenCoverage(text1, text2);
+    const normalizedA = String(text1).toLowerCase().replace(/[^a-z0-9+\-\s]/g, ' ').replace(/\s+/g, ' ').trim();
+    const normalizedB = String(text2).toLowerCase().replace(/[^a-z0-9+\-\s]/g, ' ').replace(/\s+/g, ' ').trim();
+    if (!normalizedA || !normalizedB) return 0;
+    if (normalizedB.includes(normalizedA)) return 1;
+    const sourceWords = normalizedA.split(/\s+/).map(normalizeLexicalStem).filter(Boolean);
+    const targetWords = normalizedB.split(/\s+/).map(normalizeLexicalStem).filter(Boolean);
+    const sourceBigrams = new Set();
+    for (let i = 0; i + 1 < sourceWords.length; i++) sourceBigrams.add(`${sourceWords[i]} ${sourceWords[i + 1]}`);
+    let sharedBigrams = 0;
+    for (let i = 0; i + 1 < targetWords.length; i++) if (sourceBigrams.has(`${targetWords[i]} ${targetWords[i + 1]}`)) sharedBigrams++;
+    const bigramScore = sourceBigrams.size ? sharedBigrams / sourceBigrams.size : lexical;
+    return Math.max(0, Math.min(1, lexical * 0.72 + bigramScore * 0.28));
 }
 
 async function getNLPModel() {
@@ -8904,6 +8953,7 @@ const FULL_SEMANTIC_INDEX_BUILD_BATCH = 32;
 const STATIC_SEMANTIC_INDEX_FILENAME = 'semantic-index.bin';
 const STATIC_SEMANTIC_INDEX_VERSION = 1;
 const STATIC_SEMANTIC_INDEX_MAGIC = 'MSIDX1';
+const ALLOW_CLIENT_FULL_SEMANTIC_INDEX_BUILD = false;
 let staticSemanticIndexPromise = null;
 let staticSemanticIndexAttempted = false;
 let staticSemanticIndexLoadError = null;
@@ -9163,408 +9213,34 @@ function calibrateSemanticCosineFromVectors(vectors) {
 }
 
 async function loadFullSemanticIndexMemory() {
-    if (fullSemanticIndexMemory) return fullSemanticIndexMemory;
-    const db = await openFullSemanticIndexDB();
-    const state = await fullSemanticIndexGet(db, 'meta', 'state');
-    if (!state || state.status !== 'ready' || state.version !== FULL_SEMANTIC_INDEX_VERSION) {
-        db.close();
-        return null;
-    }
-    const chunks = await fullSemanticIndexReadAllChunks(db);
-    db.close();
-    const memory = {
-        dim: state.dim || 384,
-        total: state.total || 0,
-        source: 'indexeddb-fallback',
-        chunks: chunks.map(chunk => ({
-            names: chunk.names || [],
-            ids: chunk.ids || [],
-            cards: Array.isArray(chunk.cards) ? chunk.cards : [],
-            vectors: new Int8Array(chunk.vectors),
-            count: chunk.count || (chunk.names || []).length
-        }))
-    };
-    fullSemanticIndexMemory = memory;
-
-    // The full index is a stable source of unrelated raw-Oracle pairs, so it is a much better
-    // cosine baseline than a mixed cache containing both oracle and canonical-function vectors.
-    const calibrationVectors = [];
-    for (const chunk of memory.chunks) {
-        const max = Math.min(chunk.count, 12);
-        for (let i = 0; i < max; i++) {
-            const view = chunk.vectors.subarray(i * memory.dim, (i + 1) * memory.dim);
-            // Dequantization is only used here for calibration, never for normal search.
-            const f = new Float32Array(memory.dim);
-            for (let j = 0; j < memory.dim; j++) f[j] = view[j] / 127;
-            calibrationVectors.push(f);
-            if (calibrationVectors.length >= 96) break;
-        }
-        if (calibrationVectors.length >= 96) break;
-    }
-    if (calibrationVectors.length >= 12) calibrateSemanticCosineFromVectors(calibrationVectors);
-    return memory;
-}
-
-function normalizeBulkDataDescriptor(raw, fallbackType = 'oracle_cards') {
-    if (!raw || typeof raw !== 'object') return null;
-    const descriptor = raw.data && !Array.isArray(raw.data) ? raw.data : raw;
-    const type = String(descriptor.type || fallbackType).toLowerCase();
-    const name = String(descriptor.name || '').trim();
-    const jsonlDownloadUri = descriptor.jsonl_download_uri || descriptor.jsonlDownloadUri || descriptor.jsonl_download_url || null;
-    const downloadUri = descriptor.download_uri || descriptor.downloadUri || descriptor.download_url || null;
-    const updatedAt = descriptor.updated_at || descriptor.updatedAt || null;
-    const uri = descriptor.uri || null;
-    return {
-        ...descriptor,
-        type,
-        name,
-        download_uri: downloadUri || jsonlDownloadUri,
-        jsonl_download_uri: jsonlDownloadUri,
-        updated_at: updatedAt,
-        uri
-    };
-}
-
-async function fetchScryfallStaticBulk(url) {
-    // Bulk exports live on *.scryfall.io and are separate from api.scryfall.com rate limits.
-    // Never route a static bulk download through the API request queue.
-    return fetch(url, {
-        headers: {
-            'User-Agent': 'ManaMatch/1.0 (Semantic Magic Search)',
-            'Accept': 'application/json, application/jsonl, application/gzip, */*'
-        },
-        cache: 'no-store'
-    });
-}
-
-async function resolveScryfallBulkDataDescriptor(type = 'oracle_cards') {
-    const requestedType = String(type || 'oracle_cards').toLowerCase();
-
-    try {
-        const listResponse = await scryfallThrottledFetch('https://api.scryfall.com/bulk-data', {
-            headers: { 'User-Agent': 'ManaMatch/1.0 (Semantic Magic Search)', 'Accept': 'application/json' }
-        });
-        if (listResponse?.ok) {
-            const metaJson = await listResponse.json();
-            const entries = Array.isArray(metaJson)
-                ? metaJson
-                : (Array.isArray(metaJson?.data) ? metaJson.data : []);
-            const match = entries.find(x => String(x?.type || '').toLowerCase() === requestedType)
-                || entries.find(x => String(x?.name || '').toLowerCase() === requestedType.replace(/_/g, ' '));
-            const descriptor = normalizeBulkDataDescriptor(match, requestedType);
-            if (descriptor?.download_uri || descriptor?.jsonl_download_uri) return descriptor;
-        }
-    } catch (_) {}
-
-    try {
-        const byType = await resolveScryfallBulkDataByType(requestedType);
-        if (byType?.download_uri || byType?.jsonl_download_uri) return byType;
-    } catch (_) {}
-
-    const staticCandidates = requestedType === 'oracle_cards'
-        ? [
-            'https://data.scryfall.io/oracle-cards/oracle-cards.jsonl.gz',
-            'https://data.scryfall.io/oracle-cards/oracle-cards.json',
-            'https://data.scryfall.io/oracle-cards/oracle-cards.json.gz'
-        ]
-        : [];
-    for (const url of staticCandidates) {
-        try {
-            const probe = await fetchScryfallStaticBulk(url);
-            if (probe.ok) {
-                return normalizeBulkDataDescriptor({
-                    type: requestedType,
-                    name: 'Oracle Cards',
-                    jsonl_download_uri: url.endsWith('.jsonl.gz') ? url : null,
-                    download_uri: url
-                }, requestedType);
-            }
-        } catch (_) {}
-    }
+    // Production visitors must never reuse a full corpus created on-device. The static deployment
+    // asset is the single source of truth for full-corpus semantic retrieval.
     return null;
 }
 
-async function resolveScryfallBulkDataByType(type) {
-    const requestedType = String(type || 'oracle_cards').toLowerCase();
-    const endpoints = [
-        `https://api.scryfall.com/bulk-data/${encodeURIComponent(requestedType)}`,
-        `https://api.scryfall.com/bulk-data?type=${encodeURIComponent(requestedType)}`
-    ];
-    for (const endpoint of endpoints) {
-        try {
-            const response = await scryfallThrottledFetch(endpoint, {
-                headers: { 'User-Agent': 'ManaMatch/1.0 (Semantic Magic Search)', 'Accept': 'application/json' }
-            });
-            if (!response?.ok) continue;
-            const json = await response.json();
-            const descriptor = normalizeBulkDataDescriptor(json, requestedType);
-            if (descriptor?.download_uri || descriptor?.jsonl_download_uri) return descriptor;
-        } catch (err) {
-            // A client-wide rate limit is terminal for this resolution attempt. Do not try a
-            // second metadata endpoint during the same cooldown.
-            if (isScryfallRateLimitError(err)) return null;
-            // Otherwise try the next compatible form.
-        }
-    }
-    return null;
-}
-
-function makeFullSemanticIndexCard(card) {
-    if (!card || !card.name) return null;
-    return {
-        id: card.id || null,
-        oracle_id: card.oracle_id || null,
-        name: card.name,
-        oracle_text: card.oracle_text || '',
-        card_faces: Array.isArray(card.card_faces)
-            ? card.card_faces.map(face => ({
-                name: face.name || '',
-                oracle_text: face.oracle_text || '',
-                mana_cost: face.mana_cost || ''
-            }))
-            : null,
-        mana_cost: card.mana_cost || '',
-        type_line: card.type_line || '',
-        cmc: Number.isFinite(card.cmc) ? card.cmc : null,
-        colors: Array.isArray(card.colors) ? card.colors : [],
-        color_identity: Array.isArray(card.color_identity) ? card.color_identity : [],
-        rarity: card.rarity || '',
-        legalities: card.legalities || {},
-        power: card.power ?? null,
-        toughness: card.toughness ?? null,
-        set: card.set || '',
-        set_name: card.set_name || '',
-        keywords: Array.isArray(card.keywords) ? card.keywords : []
-    };
-}
-
-async function streamScryfallBulkCards(response, uri, startSkip, batchSize, onBatch) {
-    const isGz = /\.gz(?:\?|$)/i.test(uri || '');
-    const isJsonl = /\.jsonl(?:\.gz)?(?:\?|$)/i.test(uri || '') ||
-        /jsonl|ndjson/i.test(response.headers?.get?.('content-type') || '');
-
-    let body = response.body;
-    if (!body) throw new Error('Scryfall bulk response has no readable body.');
-    if (isGz) {
-        if (typeof DecompressionStream !== 'function') {
-            throw new Error('This browser does not support streaming gzip decompression for Scryfall bulk data.');
-        }
-        body = body.pipeThrough(new DecompressionStream('gzip'));
-    }
-
-    if (!isJsonl) {
-        const reader = body.getReader();
-        const decoder = new TextDecoder();
-        let text = '';
-        while (true) {
-            const { value, done } = await reader.read();
-            if (done) break;
-            text += decoder.decode(value, { stream: true });
-        }
-        text += decoder.decode();
-        const parsed = JSON.parse(text);
-        const cards = Array.isArray(parsed) ? parsed : (Array.isArray(parsed?.data) ? parsed.data : []);
-        let batch = [];
-        let seen = 0;
-        for (const card of cards) {
-            if (seen++ < startSkip) continue;
-            const compact = makeFullSemanticIndexCard(card);
-            if (!compact) continue;
-            batch.push(compact);
-            if (batch.length >= batchSize) {
-                await onBatch(batch);
-                batch = [];
-            }
-        }
-        if (batch.length) await onBatch(batch);
-        return;
-    }
-
-    const reader = body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = '';
-    let recordIndex = 0;
-    let batch = [];
-
-    const flush = async () => {
-        if (!batch.length) return;
-        const toSend = batch;
-        batch = [];
-        await onBatch(toSend);
-    };
-
-    while (true) {
-        const { value, done } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split(/\r?\n/);
-        buffer = lines.pop() || '';
-        for (const line of lines) {
-            const trimmed = line.trim();
-            if (!trimmed) continue;
-            if (recordIndex++ < startSkip) continue;
-            let card;
-            try { card = JSON.parse(trimmed); } catch (_) { continue; }
-            const compact = makeFullSemanticIndexCard(card);
-            if (!compact) continue;
-            batch.push(compact);
-            if (batch.length >= batchSize) await flush();
-        }
-    }
-    buffer += decoder.decode();
-    const tail = buffer.trim();
-    if (tail) {
-        try {
-            if (recordIndex++ >= startSkip) {
-                const compact = makeFullSemanticIndexCard(JSON.parse(tail));
-                if (compact) batch.push(compact);
-            }
-        } catch (_) {}
-    }
-    await flush();
-}
-
-async function buildFullSemanticIndex(extractor) {
-    if (!extractor || extractor.type === 'fallback') return null;
-
-    const db = await openFullSemanticIndexDB();
-    let oracleBulk = null;
-    try {
-        oracleBulk = await resolveScryfallBulkDataDescriptor('oracle_cards');
-    } catch (resolveErr) {
-        db.close();
-        throw new Error(`Scryfall Oracle bulk-data descriptor lookup failed: ${resolveErr?.message || resolveErr}`);
-    }
-    const bulkUri = oracleBulk?.jsonl_download_uri || oracleBulk?.download_uri || null;
-    if (!bulkUri) {
-        db.close();
-        throw new Error('Scryfall Oracle bulk-data download URL could not be resolved.');
-    }
-
-    let state = await fullSemanticIndexGet(db, 'meta', 'state');
-    const bulkRevision = oracleBulk.updated_at || bulkUri;
-    const sameRevision = state && state.bulkUpdatedAt === bulkRevision && state.status === 'building' && state.version === FULL_SEMANTIC_INDEX_VERSION;
-    const alreadyReady = state && state.status === 'ready' && state.bulkUpdatedAt === bulkRevision && state.version === FULL_SEMANTIC_INDEX_VERSION;
-    if (alreadyReady) {
-        db.close();
-        return await loadFullSemanticIndexMemory();
-    }
-    if (!sameRevision) {
-        await fullSemanticIndexDeleteAllChunks(db);
-        state = {
-            key: 'state', version: FULL_SEMANTIC_INDEX_VERSION, status: 'building',
-            bulkUpdatedAt: bulkRevision, bulkUri,
-            embedded: 0, total: 0, dim: 384, chunkCount: 0, startedAt: Date.now()
-        };
-        await fullSemanticIndexPut(db, 'meta', state);
-    }
-
-    let response;
-    try {
-        response = await fetchScryfallStaticBulk(bulkUri);
-    } catch (downloadErr) {
-        db.close();
-        throw new Error(`Scryfall Oracle bulk download request failed: ${downloadErr?.message || downloadErr}`);
-    }
-    if (!response.ok) {
-        db.close();
-        throw new Error(`Scryfall Oracle bulk download failed (${response.status}).`);
-    }
-
-    const startEmbedded = Math.max(0, Number(state.embedded) || 0);
-    let embeddedCount = startEmbedded;
-    let chunkIndex = Number(state.chunkCount) || 0;
-    semanticIndexBuildState = { embedded: startEmbedded, total: state.total || 0, startedAt: state.startedAt };
-    updateProgress(null, null, `Building full semantic index from Scryfall Oracle bulk data: ${startEmbedded.toLocaleString()} cards already embedded...`);
-
-    await streamScryfallBulkCards(response, bulkUri, startEmbedded, FULL_SEMANTIC_INDEX_BUILD_BATCH, async (batchCards) => {
-        const texts = batchCards.map(card => buildSemanticRetrievalText(card));
-        let vectors;
-        try {
-            vectors = await embedTextBatch(texts, extractor);
-        } catch (batchErr) {
-            vectors = [];
-            for (const textValue of texts) {
-                const v = await getCachedEmbedding(textValue, extractor, null);
-                if (!v) throw batchErr;
-                vectors.push(v);
-            }
-        }
-        const dim = vectors[0]?.length || state.dim || 384;
-        const packed = new Int8Array(vectors.length * dim);
-        vectors.forEach((vec, idx) => packed.set(quantizeEmbeddingVector(vec), idx * dim));
-        await fullSemanticIndexPut(db, 'chunks', {
-            key: chunkIndex,
-            names: batchCards.map(c => c.name),
-            ids: batchCards.map(c => c.id || c.oracle_id || null),
-            cards: batchCards,
-            vectors: packed.buffer,
-            count: batchCards.length,
-            dim
-        });
-        chunkIndex++;
-        embeddedCount += batchCards.length;
-        state = {
-            ...state,
-            status: 'building', dim, embedded: embeddedCount,
-            total: state.total || embeddedCount, chunkCount: chunkIndex
-        };
-        await fullSemanticIndexPut(db, 'meta', state);
-        semanticIndexBuildState = { embedded: embeddedCount, total: state.total, startedAt: state.startedAt };
-        updateProgress(null, null, `Building full semantic index from Scryfall Oracle bulk data: ${embeddedCount.toLocaleString()} cards...`);
-        await backgroundAwareDelay(0);
-    });
-
-    state = {
-        ...state,
-        status: 'ready', embedded: embeddedCount,
-        total: Math.max(Number(state.total) || 0, embeddedCount),
-        chunkCount: chunkIndex, version: FULL_SEMANTIC_INDEX_VERSION
-    };
-    await fullSemanticIndexPut(db, 'meta', state);
-    db.close();
-    semanticIndexBuildState = { embedded: embeddedCount, total: state.total, startedAt: state.startedAt, complete: true };
-    fullSemanticIndexMemory = null;
-    return await loadFullSemanticIndexMemory();
+async function buildFullSemanticIndex() {
+    // Deliberately disabled in the production browser. ManaSearch semantic indexes are generated
+    // by the deployment pipeline and served as a static asset. Keeping this hard failure here
+    // prevents accidental client-side corpus generation if an old call site is reintroduced.
+    throw new Error('Client-side full semantic index building is disabled. Use the deployed semantic-index.bin asset.');
 }
 
 async function ensureFullSemanticIndex(extractor) {
-    if (fullSemanticIndexMemory) return fullSemanticIndexMemory;
-    // Do not hammer Scryfall's bulk-data endpoint once the browser has established that the
-    // optional fallback index is unavailable. Normal Search A-F and live/session semantic search
-    // remain fully functional. A page reload is the explicit retry boundary.
+    if (fullSemanticIndexMemory?.source === 'static') return fullSemanticIndexMemory;
+    // IMPORTANT: visitor devices are never allowed to build or hydrate a full semantic index.
+    // The only supported corpus is the precomputed static `semantic-index.bin` generated during
+    // deployment. If that asset is unavailable, semantic corpus retrieval is simply unavailable
+    // for this search and the normal lexical/structured/functional ranking continues.
     if (fullSemanticIndexUnavailable) return null;
-    if (fullSemanticIndexPromise) return fullSemanticIndexPromise;
-    fullSemanticIndexPromise = (async () => {
-        try {
-            // Preferred path: a precomputed index emitted by the GitHub Pages deployment. This is
-            // the normal path for real visitors and requires no client-side embedding of the corpus.
-            const staticIndex = await loadStaticSemanticIndex();
-            if (staticIndex) return staticIndex;
-
-            // Fallback path: only reached when the deployed static asset failed to download or
-            // failed validation. Reuse any previously persisted client-built index before doing new
-            // work, then silently build one in the background as the last resort.
-            if (!extractor || extractor.type === 'fallback') return null;
-            const existing = await loadFullSemanticIndexMemory();
-            if (existing) {
-                existing.source = 'indexeddb-fallback';
-                fullSemanticIndexMemory = existing;
-                return existing;
-            }
-            const built = await buildFullSemanticIndex(extractor);
-            if (built) built.source = 'client-built-fallback';
-            return built;
-        } catch (err) {
-            fullSemanticIndexUnavailable = true;
-            fullSemanticIndexUnavailableReason = err?.message || String(err);
-            console.info('Full semantic index unavailable; continuing with live semantic retrieval:', fullSemanticIndexUnavailableReason);
-            return null;
-        } finally {
-            fullSemanticIndexPromise = null;
-        }
-    })();
-    return fullSemanticIndexPromise;
+    if (staticSemanticIndexPromise) {
+        const pending = await staticSemanticIndexPromise;
+        return pending?.source === 'static' ? pending : null;
+    }
+    const staticIndex = await loadStaticSemanticIndex();
+    if (staticIndex?.source === 'static') return staticIndex;
+    fullSemanticIndexUnavailable = true;
+    fullSemanticIndexUnavailableReason = staticSemanticIndexLoadError || 'Precomputed semantic index unavailable.';
+    return null;
 }
 
 function resetFullSemanticIndexAvailability() {
@@ -10186,27 +9862,39 @@ function getScoreKeyByCriteria(criteria) {
     }
 }
 
+function normalizeLexicalStem(token) {
+    let t = normalizeMechanicToken(token).replace(/[^a-z0-9+\-]/g, '');
+    if (!t) return '';
+    if (t.length > 5 && /ies$/.test(t)) t = t.slice(0, -3) + 'y';
+    else if (t.length > 5 && /(ches|shes|xes|zes|ses)$/.test(t)) t = t.slice(0, -2);
+    else if (t.length > 4 && /s$/.test(t) && !/ss$/.test(t)) t = t.slice(0, -1);
+    if (t.length > 6 && /ing$/.test(t)) t = t.slice(0, -3);
+    else if (t.length > 6 && /ed$/.test(t)) t = t.slice(0, -2);
+    return t;
+}
+function lexicalTokenCoverage(sourceText, candidateText) {
+    const sourceTokens = String(sourceText || '').toLowerCase().match(/[a-z0-9+\-]+/g) || [];
+    const candidateTokens = String(candidateText || '').toLowerCase().match(/[a-z0-9+\-]+/g) || [];
+    if (!sourceTokens.length || !candidateTokens.length) return 0;
+    const sourceSet = new Set(sourceTokens.map(normalizeLexicalStem).filter(Boolean));
+    const candidateSet = new Set(candidateTokens.map(normalizeLexicalStem).filter(Boolean));
+    const meaningful = [...sourceSet].filter(t => !UNIVERSAL_GENERIC_TOKENS.has(t));
+    const pool = meaningful.length ? meaningful : [...sourceSet];
+    return pool.filter(t => candidateSet.has(t)).length / Math.max(1, pool.length);
+}
 function calculateCombinedFuzzyScore(sourceCard, targetCard, targetTextForScoring) {
-    const nameScore = calculateFuzzySimilarity(sourceCard.name, targetCard.name);
     const targetOracle = targetCard.oracle_text || (targetCard.card_faces ? targetCard.card_faces.map(f => f.oracle_text).join(' ') : '');
     const textScore = calculateFuzzyTextMatch(targetTextForScoring, targetOracle);
-
-    let score = (nameScore * 0.05) + (textScore * 0.95);
-
+    const lexicalCoverage = lexicalTokenCoverage(targetTextForScoring, targetOracle);
+    const hasUsableSourceText = String(targetTextForScoring || '').trim().length >= 4;
+    const nameScore = hasUsableSourceText ? 0 : calculateFuzzySimilarity(sourceCard.name, targetCard.name);
+    let score = nameScore * 0.02 + textScore * 0.73 + lexicalCoverage * 0.25;
     if (targetTextForScoring && targetTextForScoring.length > 3) {
         const cleanQuery = targetTextForScoring.toLowerCase().replace(/^o:"|"$|-name:.*$/g, '').replace(/[^\w\s]/g, '').trim();
         const cleanOracle = targetOracle.toLowerCase().replace(/[^\w\s]/g, '').trim();
-
-        // A literal phrase match is strong textual evidence, but exactness is meant to be a
-        // supporting signal (project spec 2.6), not an automatic "best alternative" verdict - so
-        // it's boosted rather than maxed out, leaving room for semantic/mechanical/category
-        // evidence to still matter for cards that are worded differently.
-        if (cleanQuery && cleanOracle.includes(cleanQuery)) {
-            score = Math.max(score, 0.85);
-        }
+        if (cleanQuery && cleanOracle.includes(cleanQuery)) score = Math.max(score, 0.90);
     }
-
-    return score;
+    return Math.max(0, Math.min(1, score));
 }
 
 
@@ -10367,59 +10055,65 @@ function calculateRankingStability(card, coreEvidence, supportingEvidence) {
 // --- ENGINE 3: SYNERGY (Filter-Aware) ---
 function calculateSynergyScore(sourceCard, targetCard, activeFilters = {}) {
     if (!sourceCard || !targetCard) return 0;
-    let synergyScore = 0;
-    let maxSynergy = 0;
-
-    // Color Identity: Ignore if color or identity is hard-filtered
-    const isColorConstrained = Boolean(activeFilters.identity || activeFilters.colors);
-    if (!isColorConstrained) {
-        maxSynergy += 2;
-        if (sourceCard.color_identity && targetCard.color_identity) {
-            const sourceColors = new Set(sourceCard.color_identity);
-            const targetColors = new Set(targetCard.color_identity);
-            const intersection = [...sourceColors].filter(x => targetColors.has(x));
-            const union = new Set([...sourceColors, ...targetColors]);
-            if (union.size === 0) synergyScore += 2; 
-            else synergyScore += (intersection.length / union.size) * 2;
+    let score = 0, max = 0;
+    const identityConstrained = Boolean(activeFilters.identity || activeFilters.colors);
+    if (!identityConstrained) {
+        max += 2;
+        const a = new Set(sourceCard.color_identity || []);
+        const b = new Set(targetCard.color_identity || []);
+        if (a.size === 0 && b.size === 0) score += 2;
+        else if (a.size === 0 || b.size === 0) score += 0.55;
+        else {
+            const inter = [...a].filter(x => b.has(x)).length;
+            const union = new Set([...a, ...b]).size;
+            const containment = inter / Math.max(1, a.size);
+            score += Math.max(inter / Math.max(1, union), containment * 0.72) * 2;
         }
     }
 
-    // CMC: Ignore if CMC is explicitly constrained
-    const isCmcConstrained = activeFilters.cmc !== undefined && activeFilters.cmc !== "";
-    if (!isCmcConstrained) {
-        maxSynergy += 1;
-        if (sourceCard.cmc !== undefined && targetCard.cmc !== undefined) {
+    const cmcConstrained = activeFilters.cmc !== undefined && activeFilters.cmc !== '';
+    if (!cmcConstrained) {
+        max += 1;
+        if (Number.isFinite(sourceCard.cmc) && Number.isFinite(targetCard.cmc)) {
             const diff = Math.abs(sourceCard.cmc - targetCard.cmc);
-            synergyScore += Math.max(0, 1 - (diff * 0.15));
+            score += Math.exp(-(diff * diff) / 12);
         }
     }
 
-    // Keywords: Retain keyword similarity unless universally disabled
-    maxSynergy += 2;
-    if (sourceCard.keywords && targetCard.keywords && sourceCard.keywords.length > 0) {
-        const sourceKeys = new Set(sourceCard.keywords);
-        const targetKeys = new Set(targetCard.keywords);
-        let overlap = 0;
-        sourceKeys.forEach(k => { if (targetKeys.has(k)) overlap++; });
-        synergyScore += (overlap / sourceKeys.size) * 2;
-    } else if (!sourceCard.keywords || sourceCard.keywords.length === 0) {
-        maxSynergy -= 2;
+    max += 2;
+    const sourceKeywords = new Set((sourceCard.keywords || []).map(normalizeMechanicToken).filter(Boolean));
+    const targetKeywords = new Set((targetCard.keywords || []).map(normalizeMechanicToken).filter(Boolean));
+    if (!sourceKeywords.size && !targetKeywords.size) {
+        max -= 2;
+    } else {
+        score += weightedSymmetricCoverage(sourceKeywords, targetKeywords, 0.95) * 2;
     }
 
-    // Type Overlap: Ignore if type is hard-filtered
-    const isTypeConstrained = Boolean(activeFilters.type);
-    if (!isTypeConstrained) {
-        maxSynergy += 1.5;
-        const sourceTypes = (sourceCard.type_line || '').toLowerCase().split(/[-—\s]+/).filter(t => t.length > 2);
-        const targetTypes = (targetCard.type_line || '').toLowerCase().split(/[-—\s]+/).filter(t => t.length > 2);
-        let typeOverlap = 0;
-        sourceTypes.forEach(t => { if (targetTypes.includes(t)) typeOverlap++; });
-        if (sourceTypes.length > 0) {
-            synergyScore += Math.min(1.5, (typeOverlap / sourceTypes.length) * 1.5);
-        }
+    const typeConstrained = Boolean(activeFilters.type);
+    if (!typeConstrained) {
+        max += 1.5;
+        const typeTokens = card => new Set((getTypeLineParts(card.type_line || '') || []).map(normalizeMechanicToken).filter(Boolean));
+        const a = typeTokens(sourceCard), b = typeTokens(targetCard);
+        if (a.size && b.size) score += weightedSymmetricCoverage(a, b, 0.90) * 1.5;
+        else if (!a.size && !b.size) score += 0.6;
     }
 
-    return maxSynergy > 0 ? (synergyScore / maxSynergy) : 0;
+    // Synergy also reflects shared deckbuilding role, but this is intentionally a small term. It
+    // supports cards with different implementations without turning role similarity into a second
+    // mechanical score.
+    max += 0.75;
+    const sourceEffects = Array.isArray(sourceCard._parsedEffects) ? sourceCard._parsedEffects : parseMTGEffect(strategicRoleCardText(sourceCard));
+    const targetEffects = Array.isArray(targetCard._parsedEffects) ? targetCard._parsedEffects : parseMTGEffect(strategicRoleCardText(targetCard));
+    const sourceRoles = inferStrategicRoleProfile(sourceCard, sourceEffects, strategicRoleCardText(sourceCard));
+    const targetRoles = inferStrategicRoleProfile(targetCard, targetEffects, strategicRoleCardText(targetCard));
+    let roleSim = 0;
+    for (const a of sourceRoles) for (const b of targetRoles) {
+        if (a.role === b.role) roleSim = Math.max(roleSim, Math.sqrt(a.score * b.score));
+        else if (a.group && a.group === b.group) roleSim = Math.max(roleSim, Math.sqrt(a.score * b.score) * 0.65);
+    }
+    score += roleSim * 0.75;
+
+    return max > 0 ? Math.max(0, Math.min(1, score / max)) : 0;
 }
 
 // --- PATTERN EXTRACTION FOR RELATED CARDS ---
@@ -10588,9 +10282,10 @@ function initApp() {
     if (favoriteBtn) favoriteBtn.addEventListener('click', toggleFavorite);
     const discardSourceCardBtn = document.getElementById('discard-source-card-btn');
     if (discardSourceCardBtn) {
-        discardSourceCardBtn.addEventListener('click', clearSourceCard);
+        discardSourceCardBtn.addEventListener('click', () => currentSourceCard ? removeSourceCardFromSet(currentSourceCard) : clearSourceCard());
         discardSourceCardBtn.disabled = !currentSourceCard;
     }
+    updateSourceCardMultiSearchState();
     if (exportBtn) exportBtn.addEventListener('click', exportToCSV);
     
     if (clearSelectedBtn) clearSelectedBtn.addEventListener('click', clearSelectedRelatedCards);
@@ -11006,6 +10701,89 @@ function checkFavoriteStatus(cardName) {
     favoriteBtn.textContent = favorites.includes(cardName) ? '★ Favorited' : '☆ Favorite';
 }
 
+// --- MULTI-SOURCE CARD CONTEXT ------------------------------------------------------------
+function getSourceCardIdentity(card) {
+    return String(card?.id || card?.oracle_id || card?.name || '').trim().toLowerCase();
+}
+function getActiveSourceCards() {
+    const cards = [];
+    if (primarySourceCardKey && sourceCards.has(primarySourceCardKey)) cards.push(sourceCards.get(primarySourceCardKey));
+    sourceCards.forEach((card, key) => { if (key !== primarySourceCardKey) cards.push(card); });
+    return cards.filter(Boolean);
+}
+function addSourceCardToSet(card, { makePrimary = false } = {}) {
+    if (!card?.name) return false;
+    const key = getSourceCardIdentity(card);
+    if (!key) return false;
+    if (!sourceCards.has(key) && sourceCards.size >= MAX_SOURCE_CARDS) { alert(`ManaSearch supports up to ${MAX_SOURCE_CARDS} source cards at once.`); return false; }
+    sourceCards.set(key, card);
+    if (!primarySourceCardKey || makePrimary) primarySourceCardKey = key;
+    renderAdditionalSourceCards(); updateSourceCardMultiSearchState(); return true;
+}
+function removeSourceCardFromSet(cardOrKey) {
+    const key = typeof cardOrKey === 'string' ? cardOrKey : getSourceCardIdentity(cardOrKey);
+    if (!key || !sourceCards.has(key)) return;
+    const wasPrimary = key === primarySourceCardKey; sourceCards.delete(key);
+    if (wasPrimary) {
+        const next = sourceCards.values().next().value || null;
+        primarySourceCardKey = next ? getSourceCardIdentity(next) : null; currentSourceCard = next;
+        if (next) { displaySourceCard(next); activeTags = generateTags(next); renderTags(); checkFavoriteStatus(next.name); }
+        else { clearSourceCard(); return; }
+    }
+    renderAdditionalSourceCards(); updateSourceCardMultiSearchState();
+}
+function renderAdditionalSourceCards() {
+    const container = document.getElementById('additional-source-cards'); if (!container) return;
+    container.replaceChildren();
+    const cards = getActiveSourceCards().filter(c => getSourceCardIdentity(c) !== primarySourceCardKey);
+    if (!cards.length) { container.classList.add('hidden'); return; }
+    container.classList.remove('hidden');
+    const heading = document.createElement('div'); heading.className='additional-source-cards-heading';
+    const title=document.createElement('strong'); title.textContent=`Additional source cards (${cards.length})`;
+    const hint=document.createElement('span'); hint.textContent='Shared-text search uses all source cards'; heading.append(title,hint);
+    const grid=document.createElement('div'); grid.className='additional-source-cards-grid';
+    cards.forEach(card => {
+        const tile=document.createElement('article'); tile.className='additional-source-card';
+        const img=document.createElement('img'); img.src=getCardImageUrl(card)||''; img.alt=card.name; img.loading='lazy';
+        const meta=document.createElement('div'); meta.className='additional-source-card-meta';
+        const name=document.createElement('strong'); name.textContent=card.name; const type=document.createElement('span'); type.textContent=card.type_line||''; meta.append(name,type);
+        const remove=document.createElement('button'); remove.type='button'; remove.className='additional-source-card-remove'; remove.textContent='\u00D7'; remove.title=`Remove ${card.name}`; remove.setAttribute('aria-label',`Remove ${card.name} from source cards`);
+        remove.addEventListener('click',e=>{e.preventDefault();e.stopPropagation();removeSourceCardFromSet(card);});
+        tile.append(img,meta,remove); grid.appendChild(tile);
+    });
+    container.append(heading,grid);
+}
+async function addAdditionalSourceCard(card) {
+    if (!card?.name) return; const key=getSourceCardIdentity(card); if (sourceCards.has(key)) {closeSourceCardPicker();return;}
+    if (sourceCards.size>=MAX_SOURCE_CARDS) {closeSourceCardPicker();alert(`ManaSearch supports up to ${MAX_SOURCE_CARDS} source cards at once.`);return;}
+    try {
+        let fullCard=card;
+        if (!hasUsableOracleText(fullCard)) {
+            const response=await scryfallThrottledFetch(`https://api.scryfall.com/cards/named?fuzzy=${encodeURIComponent(card.name)}`,{headers:{'User-Agent':'ManaMatch/1.0 (Semantic Magic Search)','Accept':'application/json'}});
+            if(!response.ok) throw new Error('Unable to load the additional source card.'); fullCard=await response.json();
+        }
+        sourceCardCache.set(fullCard.name.toLowerCase(),fullCard); addSourceCardToSet(fullCard); closeSourceCardPicker();
+    } catch(error) { alert(error.message||'Unable to add source card.'); }
+}
+function updateSourceCardMultiSearchState() {
+    const count=sourceCards.size, badge=document.getElementById('source-card-count-badge'); if(badge) badge.textContent=String(Math.max(1,count));
+    const button=document.getElementById('add-source-card-btn'); if(button){button.disabled=count>=MAX_SOURCE_CARDS;button.textContent=count>=MAX_SOURCE_CARDS?'Source Card Limit':'Add Source Card';}
+}
+function buildSharedSourceTextSearchQuery(cards, excludeNames='') {
+    if(!Array.isArray(cards)||cards.length<2)return null;
+    const stop=new Set(['the','of','and','a','to','in','is','that','it','for','on','are','as','with','they','at','be','this','have','from','or','by','but','not','what','all','were','we','when','your','can','there','an','which','do','their','if','will','up','about','out','then','them','these','so','some','would','make','like','into','has','more','no','could','my','than','first','been','who','its','now','down','may','you']);
+    const mtg=new Set(['target','targets','targeting','creature','creatures','card','cards','damage','battlefield','control','controls','controlled','controller','player','players','permanent','permanents','ability','abilities','spell','spells','choose','mana','opponent','opponents','turn','until','each','another','deals','deal','put','onto','enters','becomes','gets','gain','gains','equal','instead','additional','whenever','number','other','any','exile','exiled','hand','graveyard','library','tap','tapped','untap','sacrifice','nontoken','nonland','cost','costs','pay','resolves','owner','you','yours']);
+    const texts=cards.map(c=>extractBulkOracleCardText(c).toLowerCase().replace(/[^a-z0-9+\-\s]/g,' ').split(/\s+/).filter(Boolean));
+    const sets=texts.map(ws=>new Set(ws.filter(w=>w.length>2&&!stop.has(w)&&!mtg.has(w)&&!/^\d+$/.test(w))));
+    const common=[...sets[0]].filter(w=>sets.every(s=>s.has(w)));
+    const phraseSets=texts.map(ws=>{const out=new Set();for(let len=2;len<=4;len++)for(let i=0;i<=ws.length-len;i++){const part=ws.slice(i,i+len);if(part.filter(w=>w.length>2&&!stop.has(w)&&!mtg.has(w)).length>=2)out.add(part.join(' '));}return out;});
+    const phrases=[...phraseSets[0]].filter(p=>phraseSets.every(s=>s.has(p))).sort((a,b)=>b.split(/\s+/).length-a.split(/\s+/).length||b.length-a.length).slice(0,4);
+    const clauses=phrases.map(p=>`o:"${p.replace(/"/g,'\\"')}"`);
+    if(!clauses.length)for(let i=0;i+1<common.length&&clauses.length<4;i+=2)clauses.push(`(o:"${common[i]}" o:"${common[i+1]}")`);
+    if(!clauses.length&&common.length)clauses.push(`o:"${common[0]}"`);
+    return clauses.length?`(${clauses.join(' OR ')}) ${excludeNames}`.trim():null;
+}
+
 // --- RELATED CARDS SELECTION & FLOATING BAR ---
 function invalidateInFlightRelatedSearch() {
     // Selection changes alter the related-card query context. Invalidate any outstanding related
@@ -11209,9 +10987,9 @@ function renderSourceCardPickerCards(cards, emptyMessage = 'No cards found.') {
         body.append(name, type);
         button.appendChild(body);
         button.addEventListener('click', () => {
-            closeSourceCardPicker();
             cardSearchInput.value = card.name;
-            loadSourceCard(card.name, card);
+            if (currentSourceCard) addAdditionalSourceCard(card);
+            else { closeSourceCardPicker(); loadSourceCard(card.name, card); }
         });
         fragment.appendChild(button);
     });
@@ -11282,6 +11060,7 @@ function setupSourceCardPicker() {
     closeSourceCardPickerBtn = document.getElementById('close-source-card-picker');
 
     sourceCardAddBtn?.addEventListener('click', openSourceCardPicker);
+    document.getElementById('add-source-card-btn')?.addEventListener('click', openSourceCardPicker);
     closeSourceCardPickerBtn?.addEventListener('click', closeSourceCardPicker);
     sourceCardPickerModal?.addEventListener('click', event => {
         if (event.target === sourceCardPickerModal) closeSourceCardPicker();
@@ -11300,6 +11079,10 @@ function clearSourceCard() {
     ++searchRequestId;
     ++sourceCardPickerRequestId;
     currentSourceCard = null;
+    sourceCards.clear();
+    primarySourceCardKey = null;
+    renderAdditionalSourceCards();
+    updateSourceCardMultiSearchState();
     lastSearchResults = [];
     manualHighlights = [];
     highlightComposerOpen = false;
@@ -11417,9 +11200,14 @@ async function loadSourceCard(query, providedCard = null) {
         if (requestId !== searchRequestId) return;
 
         currentSourceCard = cardData;
+        sourceCards.clear();
+        primarySourceCardKey = getSourceCardIdentity(cardData);
+        if (primarySourceCardKey) sourceCards.set(primarySourceCardKey, cardData);
         sourceCardCache.set(cacheKey, cardData);
         
         displaySourceCard(cardData);
+        renderAdditionalSourceCards();
+        updateSourceCardMultiSearchState();
         activeTags = generateTags(cardData);
         renderTags();
         addToHistory(cardData.name, cardData);
@@ -11573,7 +11361,8 @@ async function scoreCardBatch({
     // text. Embedding THIS instead of only raw Oracle wording means the model compares MTG
     // meaning rather than being asked to infer mechanics from arbitrary phrasing - which is the
     // whole point when the alternative card is worded completely differently (review Priority 8).
-    const sourceFunctionText = canonicalFunctionToText(getCanonicalFunctions(parsedSourceCard));
+    const sourceFunctionText = canonicalFunctionToText(getCanonicalFunctions(parsedSourceCard)) ||
+        buildUniversalFunctionalText(sourceCard, sourceTextToParse, parsedSourceCard);
     let sourceFunctionVector = null;
     if (extractor && extractor.type !== 'fallback' && sourceFunctionText) {
         sourceFunctionVector = await getCachedEmbedding(sourceFunctionText, extractor, embeddingDiagnostics);
@@ -11703,7 +11492,7 @@ async function scoreCardBatch({
             card.exactnessScore = Math.min(1.0, Math.max(card.exactnessScore, ((nameScore * 0.05) + (textScore * 0.95)) + 0.40));
         }
 
-        card.categoryScore = calculateCategoryScore(card, tags);
+        card.categoryScore = calculateCategoryScore(card, tags, sourceCard, parsedSourceCard);
 
         if (i % 50 === 0) {
             await backgroundAwareDelay(0);
@@ -11888,7 +11677,8 @@ async function scoreCardBatch({
             // one is weighted higher (review Priority 8).
             let functionScore = null;
             if (sourceFunctionVector && card._parsedEffects && semanticEligibleSet.has(card)) {
-                const candidateFunctionText = canonicalFunctionToText(getCanonicalFunctions(card._parsedEffects));
+                const candidateFunctionText = canonicalFunctionToText(getCanonicalFunctions(card._parsedEffects)) ||
+                    buildUniversalFunctionalText(card, cardText, card._parsedEffects);
                 if (candidateFunctionText) {
                     const fnVector = await getCachedEmbedding(candidateFunctionText, extractor, embeddingDiagnostics);
                     if (fnVector) functionScore = calibratedCosineSimilarity(sourceFunctionVector, fnVector);
@@ -11945,12 +11735,14 @@ async function scoreCardBatch({
         const structural = Math.max(0, Math.min(1, card.mechanicalScore || 0));
         const rawSemantic = hasMeaningful(card.oracleSemanticScore) ? Math.max(0, Math.min(1, card.oracleSemanticScore)) : 0;
         const functionSemantic = hasMeaningful(card.functionScore) ? Math.max(0, Math.min(1, card.functionScore)) : 0;
+        const universalMechanical = Number(card.mechanicalBreakdown?.universalScore) || Number(card.mechanicalEvidence?.universal?.score) || 0;
+        const functionSemanticAugmented = Math.max(functionSemantic, universalMechanical * 0.72);
         const roleSemantic = Math.max(0, Math.min(1, card.roleScore || 0));
 
         // Role intent gets role dominance; ordinary effect search keeps function semantic dominant.
         const functionRole = rankingIntent.kind === 'strategic_role'
-            ? Math.max(roleSemantic, functionSemantic)
-            : Math.max(functionSemantic * 0.72 + roleSemantic * 0.28, roleSemantic * 0.70);
+            ? Math.max(roleSemantic, functionSemanticAugmented)
+            : Math.max(functionSemanticAugmented * 0.72 + roleSemantic * 0.28, roleSemantic * 0.70);
 
         const channelScore = (structural * structuralW) + (rawSemantic * semanticW) + (functionRole * functionRoleW);
 
@@ -11981,7 +11773,7 @@ async function scoreCardBatch({
         const contradictionPenalty = calculateCanonicalContradictionPenalty(sourceCard, card);
         const directBest = rankingIntent.kind === 'strategic_role'
             ? Math.max(functionRole, rawSemantic)
-            : Math.max(structural, functionSemantic, rawSemantic, card.highlightIntentScore || 0);
+            : Math.max(structural, functionSemanticAugmented, rawSemantic, card.highlightIntentScore || 0);
         const evidenceThreshold = 0.24;
         const evidenceRatio = Math.min(1, directBest / evidenceThreshold);
         const evidenceGate = directBest >= evidenceThreshold
@@ -11993,7 +11785,7 @@ async function scoreCardBatch({
         card.coreEvidenceScore = channelScore;
         card.supportingEvidenceScore = Math.max(roleSemantic, card.exactnessScore || 0, card.categoryScore || 0);
         card.relevanceEvidenceScore = Math.min(1,
-            structural * 0.46 + rawSemantic * 0.30 + functionRole * 0.24
+            structural * 0.44 + rawSemantic * 0.28 + functionRole * 0.28
         );
         card.rankingIntent = rankingIntent.kind;
         card.rankingIntentConfidence = rankingIntent.confidence;
@@ -12500,7 +12292,9 @@ async function findSimilarCards() {
     const isDivergent = Boolean(document.getElementById('divergent-search')?.checked);
     const totalSteps = isDivergent ? 5 : 2;
 
-    updateProgress(1, totalSteps, "Executing sub-searches (A through G)...");
+    updateProgress(1, totalSteps, getActiveSourceCards().length > 1
+        ? "Executing sub-searches, including shared-text search across all source cards..."
+        : "Executing sub-searches (A through G)...");
 
     const hasHighlight = Boolean(manualHighlights && manualHighlights.length > 0);
 
@@ -12565,7 +12359,12 @@ async function findSimilarCards() {
     const baseOracleQuery = cleanKeywords.length > 0 ? `(${cleanKeywords.map(w => `oracle:${w}`).join(' OR ')})` : '';
 
     const escapedTargetText = exactnessTextForScoring ? exactnessTextForScoring.replace(/"/g, '\\"') : '';
-    const excludeSelf = `-name:"${currentSourceCard.name.replace(/"/g, '\\"')}"`;
+    const activeSourceCardsForSearch = getActiveSourceCards();
+    const allSourceExclusions = activeSourceCardsForSearch.map(card => `-name:"${String(card.name || '').replace(/"/g, '\"')}"`).join(' ');
+    const excludeSelf = allSourceExclusions || `-name:"${currentSourceCard.name.replace(/"/g, '\"')}"`;
+    const sharedSourceTextQuery = activeSourceCardsForSearch.length > 1
+        ? buildSharedSourceTextSearchQuery(activeSourceCardsForSearch, allSourceExclusions)
+        : null;
 
     let searchA_Query = null;
     if (escapedTargetText) {
@@ -12664,7 +12463,7 @@ async function findSimilarCards() {
     // one static message for however long the slowest stream takes (user request: "make sure the
     // user is aware of the current search and display stages"). trackStream wraps a promise
     // without changing what it resolves to.
-    const totalTrackedStreams = 7; // A, B, C, D, E, F, Exact Highlight
+    const totalTrackedStreams = sharedSourceTextQuery ? 8 : 7; // A, B, C, D, E, F, Shared Source Text, Exact Highlight
     let streamsSettled = 0;
     const streamChecklistState = new Map(); // label -> done (boolean)
     function renderStreamChecklist() {
@@ -12756,6 +12555,7 @@ async function findSimilarCards() {
             updateProgress(1, totalSteps, `First look: ${sorted.length} match${sorted.length === 1 ? '' : 'es'} found so far (just updated by ${previewRenderLabel || 'another search stage'}) - still searching further sources...`);
             document.getElementById('provisional-results-banner')?.classList.remove('hidden');
             renderResults(sorted);
+            if (typeof requestProgressiveRanking === 'function') requestProgressiveRanking();
         }
 
         function schedulePreviewRender(label) {
@@ -12837,6 +12637,14 @@ async function findSimilarCards() {
             "Broader Mechanical"
         );
         streamEPromise.then(r => mergeIntoPreview(r, "broader mechanical match")).catch(() => {});
+        const streamSharedPromise = sharedSourceTextQuery
+            ? trackStream(
+                benchmarkUseLocalOracleCorpus ? Promise.resolve([]) :
+                fetchScryfallSearch(sharedSourceTextQuery, benchmarkPageCap, "Shared Source Text").catch(() => []),
+                "Shared Source Text"
+            )
+            : Promise.resolve([]);
+        streamSharedPromise.then(r => mergeIntoPreview(r, "shared source text")).catch(() => {});
         // Coverage policy is per-query, not one global page cap. A narrow functional query
         // ("reanimate + creature + graveyard + battlefield") matches few cards and we want near
         // complete coverage of it - missing page 3 there means missing the answer. A broad
@@ -12874,14 +12682,72 @@ async function findSimilarCards() {
         // Search G (below) needs to query the session semantic corpus by meaning.
         const extractorPromise = getNLPModel();
 
-        const [resultsA, resultsB, resultsC, resultsD, resultsE, resultsFSets, resultsExactSets, extractor] = await Promise.all([
-            streamAPromise, streamBPromise, streamCPromise, streamDPromise, streamEPromise,
+        // Continuous ranking: retrieve and score concurrently. As soon as a retrieval stream adds
+        // candidates to previewPool, a serialized queue scores the strongest 18-card batches and
+        // re-renders the provisional result order. The final full-pool pass remains authoritative
+        // and reuses the embedding cache, so this improves time-to-ranked-results without changing
+        // the final ranking model.
+        let requestProgressiveRanking = null;
+        let progressiveRankingRunning = false;
+        const progressiveRankingPending = new Map();
+        const progressiveRankingBatchSize = 18;
+        let progressiveTargetVectorPromise = null;
+        const getProgressiveTargetVector = async () => {
+            if (progressiveTargetVectorPromise) return progressiveTargetVectorPromise;
+            progressiveTargetVectorPromise = (async () => {
+                const ex = await extractorPromise;
+                if (!ex || ex.type === 'fallback') return null;
+                try { return await getCachedEmbedding(normalizeOracleForEmbedding(targetTextForScoring, currentSourceCard.name), ex); }
+                catch (_) { return null; }
+            })();
+            return progressiveTargetVectorPromise;
+        };
+        const runProgressiveRanking = async () => {
+            if (progressiveRankingRunning || requestId !== searchRequestId) return;
+            progressiveRankingRunning = true;
+            try {
+                const ex = await extractorPromise;
+                if (!ex || requestId !== searchRequestId) return;
+                const targetVector = await getProgressiveTargetVector();
+                while (progressiveRankingPending.size && requestId === searchRequestId) {
+                    const batch = Array.from(progressiveRankingPending.values())
+                        .sort((a,b)=>(b._previewScore||0)-(a._previewScore||0))
+                        .slice(0, progressiveRankingBatchSize);
+                    if (!batch.length) break;
+                    batch.forEach(card => progressiveRankingPending.delete((card.name||'').toLowerCase()));
+                    await scoreCardBatch({
+                        cards: batch, sourceCard: currentSourceCard, targetText: targetTextForScoring,
+                        exactnessText: exactnessTextForScoring, targetVector, extractor: ex,
+                        weights:{mechanical:45,synergy:10,context:20,exactness:15,category:10},
+                        tags:activeTags, topNNames:new Set(), sniperIds:new Set(), activeFilters:filters
+                    });
+                    if (requestId !== searchRequestId) break;
+                    batch.forEach(card=>{card._progressivelyRanked=true;});
+                    const ranked=Array.from(previewPool.values()).sort((a,b)=>{
+                        const as=Number.isFinite(a.similarityScore)?a.similarityScore:(a._previewScore||0);
+                        const bs=Number.isFinite(b.similarityScore)?b.similarityScore:(b._previewScore||0); return bs-as;
+                    });
+                    renderResults(ranked);
+                    await backgroundAwareDelay(0);
+                }
+            } catch(error) { console.info('Progressive ranking paused; final ranking continues:', error?.message||error); }
+            finally { progressiveRankingRunning=false; }
+        };
+        requestProgressiveRanking = () => {
+            if (requestId !== searchRequestId) return;
+            previewPool.forEach((card,key)=>{ if(card && key && !card._progressivelyRanked) progressiveRankingPending.set(key,card); });
+            runProgressiveRanking();
+        };
+
+        const [resultsA, resultsB, resultsC, resultsD, resultsE, resultsShared, resultsFSets, resultsExactSets, extractor] = await Promise.all([
+            streamAPromise, streamBPromise, streamCPromise, streamDPromise, streamEPromise, streamSharedPromise,
             trackStream(Promise.all(functionalQueryPromises), "Functional Match"),
             trackStream(Promise.all(exactHighlightPromises), "Exact Highlight"),
             extractorPromise
         ]);
         const resultsF = resultsFSets.flat();
         const resultsExact = resultsExactSets.flat();
+        const resultsSharedFlat = resultsShared || [];
 
         // Search G: full-corpus semantic nearest-neighbor retrieval. This is deliberately run
         // BEFORE scoring and independently of the Scryfall lexical/tag streams, so a differently
@@ -12999,6 +12865,7 @@ const streamDiagnostics = {
     "Search C": new Set((resultsC || []).map(c => c.name.toLowerCase())),
     "Search D": new Set((resultsD || []).map(c => c.name.toLowerCase())),
     "Search E": new Set((resultsE || []).map(c => c.name.toLowerCase())),
+    "Shared Source Text": new Set((resultsSharedFlat || []).map(c => c.name.toLowerCase())),
     "Search F": new Set((resultsF || []).map(c => c.name.toLowerCase())),
     "Search G": new Set((resultsG || []).map(c => c.name.toLowerCase())),
     "Search H": new Set((resultsExact || []).map(c => c.name.toLowerCase()))
@@ -13014,11 +12881,12 @@ const streamCoverage = {
     "Search A": resultsA?.coverage || null,
     "Search B": resultsB?.coverage || null,
     "Search C": resultsC?.coverage || null,
-    "Search E": resultsE?.coverage || null
+    "Search E": resultsE?.coverage || null,
+    "Shared Source Text": resultsSharedFlat?.coverage || null
 };
 
 const sniperCardIds = new Set((resultsA || []).map(card => card.id));
-const rawCandidates = [...resultsA, ...resultsB, ...resultsC, ...resultsD, ...resultsE, ...resultsF, ...resultsG, ...resultsExact];
+const rawCandidates = [...resultsA, ...resultsB, ...resultsC, ...resultsD, ...resultsE, ...resultsSharedFlat, ...resultsF, ...resultsG, ...resultsExact];
 const countRetrieved = rawCandidates.length;
 
 // Stage 1: Raw candidate pool set
@@ -14346,7 +14214,7 @@ function compareEffectDescription(cf) {
         case 'cheat_into_play': return `put${object ? ` ${object}` : ''} onto the battlefield${from ? ` from ${from}` : ''}`;
         case 'tuck': return `put${object ? ` ${object}` : ''} into the library`;
         case 'zone_change': return `move${object ? ` ${object}` : ''}${from ? ` from ${from}` : ''}${to ? ` to ${to}` : ''}`;
-        case 'counter': return `counter ${target || object || 'the relevant spell or ability'}`;
+        case 'counter': return `counter${target ? ` ${target}` : ` ${object || 'the relevant spell or ability'}`}`;
         case 'gain_control': {
             const restriction = compareRestrictionPhrase(cf);
             return `gain control of ${target || object || 'the relevant permanent'}${restriction ? ` ${restriction}` : ''}`;
@@ -14776,8 +14644,41 @@ function compareMechanicalSentences(cardA, cardB, a, b) {
     return { sentences: Array.from(new Set(sentences)), ...compound };
 }
 
+function compareSharedEffectSentence(cardA, cardB, af, bf) {
+    const aDesc = compareEffectDescription(af);
+    const bDesc = compareEffectDescription(bf);
+    if (!aDesc && !bDesc) return '';
+    if (aDesc && bDesc && aDesc === bDesc) return `Both ${cardA.name} and ${cardB.name} ${aDesc}.`;
+    if (aDesc && bDesc) return `Both cards share a related ${compareFunctionLabel(af?.function).toLowerCase()} effect: ${cardA.name} ${aDesc}, while ${cardB.name} ${bDesc}.`;
+    return '';
+}
+
+function compareAdditionalEffectSentence(cardName, cf) {
+    const description = compareEffectDescription(cf);
+    if (!description) return '';
+    const fn = String(cf?.function || '');
+    switch (fn) {
+        case 'direct_damage': return `${cardName} additionally deals ${description.replace(/^\\s*damage/i, 'damage')}.`;
+        case 'card_draw': return `${cardName} additionally ${description}.`;
+        case 'mill': return `${cardName} additionally ${description}.`;
+        case 'discard': return `${cardName} additionally ${description}.`;
+        case 'gain_life': return `${cardName} additionally ${description}.`;
+        case 'lose_life': return `${cardName} additionally causes its controller to ${description}.`;
+        case 'mana_ability': return `${cardName} additionally ${description}.`;
+        case 'token_creation': return `${cardName} additionally ${description}.`;
+        case 'place_counter': return `${cardName} additionally ${description}.`;
+        case 'self_sacrifice': return `${cardName} additionally must ${description}.`;
+        case 'tap': return `${cardName} additionally ${description}.`;
+        case 'untap': return `${cardName} additionally ${description}.`;
+        default: return `${cardName} additionally ${description}.`;
+    }
+}
+
 function compareAdditionalEffects(cardName, effects) {
-    return effects.slice(0, 5).map(cf => `${cardName} also ${compareEffectDescription(cf)}.`);
+    return (effects || [])
+        .slice(0, 6)
+        .map(cf => compareAdditionalEffectSentence(cardName, cf))
+        .filter(Boolean);
 }
 
 function buildCompareExplanation(cardA, cardB) {
@@ -14787,49 +14688,40 @@ function buildCompareExplanation(cardA, cardB) {
     const { matches, onlyA, onlyB } = mechanical;
     const archetypes = compareArchetypeSentences(cardA, cardB, a, b);
 
-    const detail = [...mechanical.sentences, ...archetypes.shared];
-
-    const evidence = [];
+    const common = [];
     matches.slice(0, 8).forEach(({ af, bf }) => {
-        const ad = compareEffectDescription(af), bd = compareEffectDescription(bf);
-        if (ad && bd && ad === bd) evidence.push(`Both ${cardA.name} and ${cardB.name} ${ad}.`);
+        const sentence = compareSharedEffectSentence(cardA, cardB, af, bf);
+        if (sentence) common.push(sentence);
     });
-    evidence.push(...archetypes.shared);
+    common.push(...archetypes.shared);
 
     const differences = [];
+    // Differences in matched effects: target, amount, zone, restriction, condition, costs, etc.
+    matches.slice(0, 8).forEach(({ af, bf }) => {
+        differences.push(...compareDifferenceSentences(cardA, cardB, af, bf));
+        differences.push(...compareConditionCostSentences(cardA, cardB, af, bf));
+    });
+    // Effects that have no partner at all are especially important because they represent what one
+    // card does in addition to the shared core mechanic.
     differences.push(...compareAdditionalEffects(cardA.name, onlyA));
     differences.push(...compareAdditionalEffects(cardB.name, onlyB));
     differences.push(...archetypes.differences);
-    if (onlyA.length || onlyB.length) {
-        differences.push(`${cardA.name} has ${onlyA.length} unmatched parsed effect${onlyA.length === 1 ? '' : 's'}, while ${cardB.name} has ${onlyB.length} unmatched parsed effect${onlyB.length === 1 ? '' : 's'}.`);
+
+    const aMV = compareManaValue(cardA), bMV = compareManaValue(cardB);
+    if (aMV !== bMV && aMV > 0 && bMV > 0) {
+        const delta = Math.abs(aMV - bMV);
+        const cheaper = aMV < bMV ? cardA.name : cardB.name;
+        const pricier = aMV < bMV ? cardB.name : cardA.name;
+        differences.push(`The mana cost differs: ${cheaper} costs ${delta === 1 ? 'one' : delta} less mana than ${pricier}.`);
     }
+
+    const uniqueCommon = Array.from(new Set(common.filter(Boolean)));
+    const uniqueDifferences = Array.from(new Set(differences.filter(Boolean)));
 
     let summary;
     if (matches.length) {
-        // Prefer the most informative concrete sentence(s) and collapse repetitions. The UI shows
-        // one human-readable explanation; the detailed evidence remains internal to the engine.
-        const unique = [];
-        const seenSignatures = new Set();
-        detail.forEach(sentence => {
-            const normalized = sentence.toLowerCase()
-                .replace(/both\s+/g, '')
-                .replace(/the\s+(cards?|effect|targeting|amount|mana cost)\s+/g, '')
-                .replace(/\s+/g, ' ')
-                .trim();
-            if (!normalized || seenSignatures.has(normalized)) return;
-            seenSignatures.add(normalized);
-            unique.push(sentence);
-        });
-        const selected = unique.slice(0, 2);
-        if (selected.length) {
-            // Keep the visible explanation to one compact sentence while allowing a second clause
-            // when it adds a genuinely new fact.
-            const clauses = selected.map(sentence => String(sentence).trim().replace(/[.!?]+$/g, ''));
-            summary = clauses.join('; ') + '.';
-        } else {
-            summary = `These cards are similar because they share ${matches.length === 1 ? 'a mechanical effect' : `${matches.length} mechanical effects`}.`;
-        }
-        if (!/^[A-Z]/.test(summary)) summary = summary.charAt(0).toUpperCase() + summary.slice(1);
+        const lead = uniqueCommon[0] || `The cards share ${matches.length === 1 ? 'a mechanical effect' : `${matches.length} mechanical effects`}`;
+        summary = lead;
     } else if (archetypes.shared.length) {
         summary = archetypes.shared[0];
     } else {
@@ -14838,9 +14730,10 @@ function buildCompareExplanation(cardA, cardB) {
 
     return {
         summary,
-        detail: Array.from(new Set(detail)),
-        evidence: Array.from(new Set(evidence)),
-        differences: Array.from(new Set(differences)),
+        common: uniqueCommon,
+        differences: uniqueDifferences,
+        detail: Array.from(new Set([...mechanical.sentences, ...uniqueDifferences, ...archetypes.shared])),
+        evidence: uniqueCommon,
         archetypes,
         a, b, matches, onlyA, onlyB
     };
@@ -14909,16 +14802,60 @@ function renderComparison() {
     });
 
     const explanationSection = document.createElement('section');
-    explanationSection.className = 'compare-section';
+    explanationSection.className = 'compare-section compare-analysis';
 
-    const explanationHeading = document.createElement('h3');
-    explanationHeading.textContent = 'Why these cards are similar';
-    explanationSection.appendChild(explanationHeading);
+    const summaryHeading = document.createElement('h3');
+    summaryHeading.textContent = 'How these cards compare';
+    explanationSection.appendChild(summaryHeading);
 
     const summary = document.createElement('p');
     summary.className = 'compare-explanation';
     summary.textContent = explanation.summary;
     explanationSection.appendChild(summary);
+
+    const commonSection = document.createElement('div');
+    commonSection.className = 'compare-subsection';
+    const commonHeading = document.createElement('h4');
+    commonHeading.textContent = 'What they have in common';
+    commonSection.appendChild(commonHeading);
+    if (explanation.common.length) {
+        const list = document.createElement('ul');
+        list.className = 'compare-evidence-list compare-analysis-list';
+        explanation.common.slice(0, 8).forEach(sentence => {
+            const li = document.createElement('li');
+            li.textContent = sentence;
+            list.appendChild(li);
+        });
+        commonSection.appendChild(list);
+    } else {
+        const empty = document.createElement('p');
+        empty.className = 'compare-empty';
+        empty.textContent = 'No directly shared parsed effect was identified.';
+        commonSection.appendChild(empty);
+    }
+    explanationSection.appendChild(commonSection);
+
+    const diffSection = document.createElement('div');
+    diffSection.className = 'compare-subsection compare-differences';
+    const diffHeading = document.createElement('h4');
+    diffHeading.textContent = 'What they do differently';
+    diffSection.appendChild(diffHeading);
+    if (explanation.differences.length) {
+        const list = document.createElement('ul');
+        list.className = 'compare-difference-list';
+        explanation.differences.slice(0, 12).forEach(sentence => {
+            const li = document.createElement('li');
+            li.textContent = sentence;
+            list.appendChild(li);
+        });
+        diffSection.appendChild(list);
+    } else {
+        const empty = document.createElement('p');
+        empty.className = 'compare-empty';
+        empty.textContent = 'No material parsed differences were identified beyond the shared effect.';
+        diffSection.appendChild(empty);
+    }
+    explanationSection.appendChild(diffSection);
 
     compareContainer.appendChild(explanationSection);
 }
