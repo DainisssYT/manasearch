@@ -518,11 +518,12 @@ input[type="text"], input[type="number"], select {
 
 /* Custom highlight styles for user selection */
 .highlight-active {
-    font-weight: bold;
-    color: var(--accent-color);
-    background-color: rgba(98, 0, 238, 0.1);
+    font-weight: inherit;
+    color: inherit;
     border-radius: 3px;
-    padding: 0 2px;
+    padding: 1px 2px;
+    box-decoration-break: clone;
+    -webkit-box-decoration-break: clone;
 }
 
 .bonus-positive {
@@ -1019,11 +1020,12 @@ body.light-theme {
 }
 
 .highlight-active {
-    font-weight: bold;
-    color: var(--accent-color);
-    background-color: rgba(98, 0, 238, 0.1);
+    font-weight: inherit;
+    color: inherit;
     border-radius: 3px;
-    padding: 0 2px;
+    padding: 1px 2px;
+    box-decoration-break: clone;
+    -webkit-box-decoration-break: clone;
 }
 
 .bonus-positive {
@@ -1170,12 +1172,14 @@ body.light-theme {
 /* In-text highlight coloring mirrors the chip's mode colors, so it's clear at a glance which
    highlighted spans are required verbatim vs. flexible, without needing to check the chip list. */
 .highlight-active.highlight-exact {
-    color: var(--accent-color);
-    background-color: rgba(98, 0, 238, 0.1);
+    color: var(--text-main);
+    background-color: rgba(98, 0, 238, 0.28);
+    box-shadow: 0 0 0 1px rgba(98, 0, 238, 0.16);
 }
 .highlight-active.highlight-variable {
-    color: #d97706;
-    background-color: rgba(234, 179, 8, 0.15);
+    color: var(--text-main);
+    background-color: rgba(234, 179, 8, 0.30);
+    box-shadow: 0 0 0 1px rgba(234, 179, 8, 0.18);
 }
 
 .card-chip-remove:hover {
@@ -2473,7 +2477,7 @@ section {
 .results-header { align-items: flex-end; gap: 14px; }
 .results-header .section-description { margin-bottom: 1px; }
 
-#export-btn { min-height: 38px; padding: 8px 13px; border-radius: 8px; }
+#export-btn { min-height: 38px; padding: 8px 13px; border-radius: 8px; position: relative; top: -6px; }
 
 .results-grid {
     grid-template-columns: repeat(auto-fill, minmax(225px, 1fr));
@@ -3112,6 +3116,20 @@ body:not(.light-theme) #theme-toggle { color: var(--text-main) !important; }
 
 /* Multi-value hard constraints */
 .filter-group-wide { grid-column: 1 / -1; }
+
+/* Power and Toughness intentionally occupy the same two-column row, like Color Identity / Exact Colors. */
+.filter-power-group,
+.filter-toughness-group {
+    grid-column: span 1;
+}
+
+@media (max-width: 460px) {
+    .filter-power-group,
+    .filter-toughness-group {
+        grid-column: 1 / -1;
+    }
+}
+
 .filter-help {
     color: var(--text-muted);
     font-size: 11px;
@@ -3275,12 +3293,428 @@ body:not(.light-theme) #theme-toggle { color: var(--text-main) !important; }
     .constraint-add-btn { width: 100%; }
 }
 
+
+/* Benchmark highlights are represented directly in Oracle text; hide any stale debug panel. */
+#benchmark-highlight-preview {
+    display: none !important;
+}
+
+
+/* --------------------------------------------------------------------------
+   Selected Related Cards overflow + stable result-score slots
+   -------------------------------------------------------------------------- */
+.floating-bar .selected-cards-info {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    min-width: 0;
+    flex: 1 1 auto;
+}
+
+.floating-bar .chips-list {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    flex-wrap: nowrap;
+}
+
+.floating-bar .card-chip {
+    flex: 0 0 auto;
+}
+
+.floating-bar .card-chip-remove {
+    border: 0;
+    padding: 0;
+    margin: 0;
+    background: transparent;
+    line-height: 1;
+    font-size: 15px;
+    min-width: 15px;
+    min-height: 15px;
+}
+
+.selected-cards-more-btn {
+    flex: 0 0 auto;
+    min-width: 34px;
+    height: 28px;
+    padding: 0 7px;
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    background: var(--bg-accent);
+    color: var(--text-main);
+    font-weight: 800;
+    letter-spacing: 1px;
+    cursor: pointer;
+}
+
+.selected-cards-more-btn:hover {
+    border-color: var(--accent-color);
+    color: var(--accent-color);
+}
+
+.selected-related-modal {
+    position: fixed;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 22px;
+    background: rgba(0, 0, 0, 0.62);
+    z-index: 1500;
+}
+
+.selected-related-modal.hidden {
+    display: none;
+}
+
+.selected-related-modal-content {
+    width: min(1000px, 100%);
+    max-height: min(86vh, 820px);
+    overflow: auto;
+    box-sizing: border-box;
+    padding: 20px;
+    background: var(--bg-secondary);
+    border: 1px solid var(--accent-color);
+    border-radius: 14px;
+    box-shadow: var(--ui-shadow);
+}
+
+.selected-related-modal-header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 18px;
+    margin-bottom: 18px;
+}
+
+.selected-related-modal-kicker {
+    margin: 0 0 3px;
+    color: var(--accent-color);
+    font-size: 10px;
+    font-weight: 800;
+    letter-spacing: 0.14em;
+}
+
+.selected-related-modal-header h2 {
+    margin: 0;
+    font-size: 22px;
+}
+
+.selected-related-modal-close {
+    flex: 0 0 auto;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 36px;
+    height: 36px;
+    padding: 0;
+    border: 1px solid var(--border-color);
+    border-radius: 9px;
+    background: var(--bg-primary);
+    color: var(--text-muted);
+    font-size: 25px;
+    line-height: 1;
+    cursor: pointer;
+}
+
+.selected-related-modal-close:hover {
+    color: var(--text-main);
+    border-color: var(--accent-color);
+}
+
+.selected-related-modal-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+    gap: 16px;
+    align-items: start;
+}
+
+.selected-related-card-tile {
+    position: relative;
+    min-width: 0;
+    box-sizing: border-box;
+    padding: 34px 8px 9px;
+    border: 1px solid var(--border-color);
+    border-radius: 11px;
+    background: var(--bg-primary);
+}
+
+.selected-related-card-remove {
+    position: absolute;
+    top: 7px;
+    right: 7px;
+    z-index: 2;
+    width: 25px;
+    height: 25px;
+    padding: 0;
+    border: 1px solid var(--border-color);
+    border-radius: 7px;
+    background: var(--bg-secondary);
+    color: var(--text-muted);
+    font-size: 18px;
+    line-height: 1;
+    cursor: pointer;
+}
+
+.selected-related-card-remove:hover {
+    color: #ef4444;
+    border-color: #ef4444;
+}
+
+.selected-related-card-art-wrap {
+    width: 100%;
+}
+
+.selected-related-card-art-wrap img {
+    display: block;
+    width: 100%;
+    height: auto;
+    aspect-ratio: 63 / 88;
+    object-fit: cover;
+    border-radius: 7px;
+}
+
+.selected-related-card-name {
+    margin-top: 8px;
+    color: var(--text-main);
+    font-size: 12px;
+    font-weight: 700;
+    line-height: 1.25;
+    overflow-wrap: anywhere;
+}
+
+/* The score breakdown is a 2-column grid: the price occupies exactly one slot, so the
+   Mechanical/Context, Synergy/Exactness, Category/Price rows stay visually aligned even when
+   one price string is longer than another. */
+.result-score-breakdown {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    align-items: start;
+}
+
+.result-score-breakdown .score-line,
+.result-score-breakdown .card-price-label {
+    min-width: 0;
+    width: 100%;
+    box-sizing: border-box;
+}
+
+.result-score-breakdown .card-price-label {
+    display: block;
+    margin: 0;
+    min-height: 1.2em;
+    overflow-wrap: anywhere;
+}
+
+@media (max-width: 700px) {
+    .floating-bar .selected-cards-info {
+        width: 100%;
+        max-width: none;
+    }
+
+    .floating-bar .floating-bar-actions {
+        width: 100%;
+    }
+
+    .floating-bar .floating-bar-actions > button {
+        flex: 1 1 0;
+    }
+
+    .selected-related-modal {
+        padding: 10px;
+    }
+
+    .selected-related-modal-content {
+        max-height: 92vh;
+        padding: 15px;
+    }
+
+    .selected-related-modal-grid {
+        grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+        gap: 10px;
+    }
+}
+
+/* --------------------------------------------------------------------------
+   Result-card double-faced controls + perfectly stable card action alignment
+   -------------------------------------------------------------------------- */
+.card-item {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    min-height: 0;
+}
+
+.card-art-wrap {
+    position: relative;
+    width: 100%;
+    flex: 0 0 auto;
+}
+
+.card-art-wrap > img {
+    width: 100%;
+    height: auto;
+    display: block;
+}
+
+.card-flip-btn {
+    position: absolute;
+    top: 14%;
+    right: 5%;
+    z-index: 2;
+    min-width: 42px;
+    min-height: 24px;
+    padding: 3px 7px;
+    border: 1px solid rgba(255, 255, 255, 0.32);
+    border-radius: 5px;
+    background: rgba(0, 0, 0, 0.04) !important;
+    color: rgba(255, 255, 255, 0.88) !important;
+    font-size: 10px;
+    font-weight: 700;
+    line-height: 1;
+    cursor: pointer;
+    opacity: 0.82;
+    backdrop-filter: blur(1px);
+    box-shadow: none;
+}
+
+.card-flip-btn:hover,
+.card-flip-btn:focus-visible {
+    background: rgba(0, 0, 0, 0.18) !important;
+    border-color: rgba(255, 255, 255, 0.66);
+    color: #fff !important;
+    opacity: 1;
+}
+
+.card-item-info {
+    display: flex;
+    flex-direction: column;
+    flex: 1 1 auto;
+    min-height: 0;
+}
+
+.card-actions {
+    margin-top: auto !important;
+}
+
+/* Price gets one fixed, readable row in the score grid. The slot is fixed in TOTAL height
+   (including padding/border), so it can never create a second text line or push Compare lower. */
+.result-score-breakdown .card-price-label {
+    box-sizing: border-box;
+    width: 100%;
+    height: 22px;
+    min-height: 22px;
+    max-height: 22px;
+    margin: 0;
+    padding: 2px 5px;
+    display: flex;
+    align-items: center;
+    justify-content: flex-start;
+    font-size: 10px;
+    line-height: 16px;
+    letter-spacing: -0.15px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    overflow-wrap: normal;
+    word-break: normal;
+}
+
 /* =====================================================================
-   ManaSearch mobile layout fix
-   The previous responsive rules changed the sidebar to a vertical grid,
-   but the parent .app-layout stayed a horizontal flex row. On phones
-   that left the 228px sidebar beside the main content and squeezed the
-   Source Card / Search Workspace into a narrow strip.
+   ManaSearch tablet + landscape rescue
+   The phone portrait layout already stacks the application at <=760px.
+   Landscape phones and many tablets are wider than that, so they need the
+   same structural change before the fixed-width sidebar can squeeze the
+   main workspace into a narrow strip.
+   ===================================================================== */
+@media (min-width: 761px) and (max-width: 1100px) {
+    html, body {
+        width: 100%;
+        max-width: 100%;
+        overflow-x: hidden;
+    }
+
+    .app-layout {
+        display: flex;
+        flex-direction: column;
+        align-items: stretch;
+        width: min(100% - 24px, 1040px);
+        max-width: none;
+        min-width: 0;
+        margin: 18px auto 0;
+        gap: 16px;
+    }
+
+    .sidebar {
+        width: 100%;
+        flex: 0 0 auto;
+        position: static;
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 14px;
+        min-width: 0;
+    }
+
+    .main-content {
+        width: 100%;
+        min-width: 0;
+        flex: 0 0 auto;
+    }
+
+    #source-card-section,
+    #filter-section,
+    #results-section {
+        width: 100%;
+        min-width: 0;
+        max-width: none;
+    }
+
+    .section-title-bar,
+    .section-heading,
+    .results-header {
+        min-width: 0;
+    }
+
+    .section-title-bar {
+        align-items: flex-start;
+        flex-direction: column;
+    }
+
+    .trigger-buttons-group {
+        width: 100%;
+        min-width: 0;
+        flex-wrap: wrap;
+        justify-content: flex-start;
+    }
+
+    .methods-trigger-btn,
+    .order-control {
+        min-width: 0;
+    }
+
+    .results-grid {
+        width: 100%;
+        min-width: 0;
+        grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
+    }
+
+    .card-item,
+    .card-item-info {
+        min-width: 0;
+    }
+
+    .source-card-picker-modal-card,
+    .modal-card,
+    #compare-modal .modal-content {
+        max-width: calc(100vw - 24px);
+    }
+}
+
+/* =====================================================================
+   ManaSearch phone layout
+   Explicitly stacks every major region below tablet width.
    ===================================================================== */
 @media (max-width: 760px) {
     html, body {
@@ -3323,8 +3757,6 @@ body:not(.light-theme) #theme-toggle { color: var(--text-main) !important; }
         text-align: center;
     }
 
-    /* Critical fix: stack sidebar and main content instead of keeping them
-       side-by-side on narrow screens. */
     .app-layout {
         display: flex;
         flex-direction: column;
@@ -3482,6 +3914,95 @@ body:not(.light-theme) #theme-toggle { color: var(--text-main) !important; }
     }
 }
 
+/* --------------------------------------------------------------------------
+   Card-art corner cleanup
+   Scryfall image files can retain a tiny amount of light/white corner material.
+   Clip the result art slightly inside the outer card frame so those pixels never
+   protrude past ManaSearch's rounded card shell.
+   -------------------------------------------------------------------------- */
+.card-item {
+    overflow: hidden;
+    border-radius: 10px;
+}
+.card-art-wrap {
+    overflow: hidden;
+    border-radius: 10px 10px 0 0;
+}
+.card-art-wrap > img {
+    border-radius: 10px 10px 0 0;
+    clip-path: inset(2px 2px 0 2px round 10px 10px 0 0);
+}
+.source-picker-card img {
+    clip-path: inset(2px 2px 0 2px round 10px 10px 0 0);
+}
+
+/* Keep the small DFC Flip control above the clipped art edge. */
+.card-flip-btn { z-index: 3; }
+
+@media (max-width: 700px) {
+    .benchmark-runtime-dashboard {
+        padding-left: 12px !important;
+        padding-right: 44px !important;
+    }
+}
+
+
+
+/* Compare analysis: expose both the shared mechanic and the card-specific differences. */
+#compare-modal .compare-analysis {
+    display: grid;
+    gap: 16px;
+}
+
+#compare-modal .compare-subsection {
+    margin-top: 2px;
+}
+
+#compare-modal .compare-subsection h4 {
+    margin-bottom: 8px;
+}
+
+#compare-modal .compare-analysis-list {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 7px;
+}
+
+#compare-modal .compare-analysis-list li {
+    border-radius: 8px;
+    background: var(--bg-primary);
+    border: 1px solid var(--border-color);
+    padding: 8px 10px;
+    font-size: 13px;
+    line-height: 1.45;
+}
+
+#compare-modal .compare-differences {
+    padding-top: 2px;
+}
+
+#compare-modal .compare-difference-list {
+    margin: 0;
+    padding-left: 20px;
+    font-size: 13px;
+    line-height: 1.55;
+}
+
+#compare-modal .compare-difference-list li + li {
+    margin-top: 7px;
+}
+
+@media (max-width: 700px) {
+    #compare-modal .compare-analysis {
+        gap: 12px;
+    }
+
+    #compare-modal .compare-analysis-list li,
+    #compare-modal .compare-difference-list {
+        font-size: 12px;
+    }
+}
+\n\n/* Multi-source search UI */\n.add-source-card-btn{background:transparent!important;color:var(--text-muted)!important;border:1px solid var(--border-color)!important;padding:7px 12px!important;border-radius:8px!important;font-size:13px!important}\n.add-source-card-btn:hover:not(:disabled){color:var(--text-main)!important;border-color:var(--accent-color)!important;background:var(--bg-accent)!important}.add-source-card-btn:disabled{opacity:.45;cursor:not-allowed}\n.additional-source-cards{margin-top:18px;padding-top:15px;border-top:1px solid var(--border-color)}.additional-source-cards-heading{display:flex;align-items:baseline;gap:8px;margin-bottom:10px}.additional-source-cards-heading strong{font-size:13px}.additional-source-cards-heading span{font-size:11px;color:var(--text-muted)}.additional-source-cards-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:10px}.additional-source-card{position:relative;display:flex;align-items:center;gap:10px;min-width:0;padding:9px;border:1px solid var(--border-color);border-radius:10px;background:var(--bg-primary)}.additional-source-card img{width:48px;aspect-ratio:63/88;object-fit:cover;flex:0 0 auto;border-radius:5px}.additional-source-card-meta{display:flex;flex-direction:column;min-width:0;gap:2px;padding-right:22px}.additional-source-card-meta strong{font-size:12px;line-height:1.25;overflow-wrap:anywhere}.additional-source-card-meta span{font-size:10px;color:var(--text-muted);line-height:1.25}.additional-source-card-remove{position:absolute;top:6px;right:6px;width:24px;height:24px;padding:0;border:1px solid var(--border-color);border-radius:6px;background:var(--bg-secondary);color:var(--text-muted);font-size:17px;line-height:1}.additional-source-card-remove:hover{border-color:var(--accent-color);color:var(--text-main)}@media(max-width:700px){.additional-source-cards-grid{grid-template-columns:1fr}}\n
 
 /* Refined Compare analysis: show shared mechanics once, then only meaningful differences. */
 

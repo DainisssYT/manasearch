@@ -62,6 +62,7 @@
                                 <h3 id="source-card-name"></h3>
                                 <div class="source-card-actions">
                                     <button type="button" id="favorite-btn">☆ Favorite</button>
+                                    <button type="button" id="add-source-card-btn" class="add-source-card-btn">Add Source Card</button>
                                     <button type="button" id="discard-source-card-btn" class="discard-source-card-btn" aria-label="Remove source card">Remove</button>
                                 </div>
                             </div>
@@ -83,6 +84,7 @@
                             <input type="text" id="add-tag-input" placeholder="Add a custom tag… press Enter" aria-label="Add custom tag">
                         </div>
                     </div>
+                    <div id="additional-source-cards" class="additional-source-cards hidden"></div>
                 </div>
             </section>
 
@@ -116,12 +118,13 @@
                     </div>
                     <div class="trigger-buttons-group">
                         <button type="button" id="toggle-search-methods-btn" class="methods-trigger-btn">
-                            ⚙️ Methods <span id="selected-methods-badge" class="badge">Standard</span> ▾
+                            Methods <span id="selected-methods-badge" class="badge">Standard</span> ▾
                         </button>
                         <div class="order-control">
                             <label for="sort-results">Order</label>
                             <select id="sort-results" aria-label="Order results">
                                 <option value="overall">Overall Match</option>
+                                <option value="mechanical">Mechanical</option>
                                 <option value="synergy">Synergy</option>
                                 <option value="context">Context</option>
                                 <option value="exactness">Exactness</option>
@@ -129,7 +132,7 @@
                             </select>
                         </div>
                         <button type="button" id="toggle-card-constraints-btn" class="methods-trigger-btn">
-                            🎛️ Constraints <span id="card-constraints-badge" class="badge">Any</span> ▾
+                            Constraints <span id="card-constraints-badge" class="badge">Any</span> ▾
                         </button>
                     </div>
                 </div>
@@ -154,9 +157,9 @@
                         </div>
                         <p class="section-description">Cards are ranked by the engine's mechanical and functional similarity signals.</p>
                     </div>
-                    <button type="button" id="export-btn">⬇️ Export to CSV</button>
+                    <button type="button" id="export-btn">Export to CSV</button>
                 </div>
-                <div id="provisional-results-banner" class="provisional-results-banner hidden">⏳ First look - still searching further sources, results will update…</div>
+                <div id="provisional-results-banner" class="provisional-results-banner hidden">First look — still searching further sources, results will update…</div>
                 <div id="results-grid" class="results-grid"></div>
                 <div class="search-deeper-row">
                     <button type="button" id="search-deeper-btn" class="hidden">🔍 Search Deeper (+8 pages/stream)</button>
@@ -247,7 +250,6 @@
                                     <option value="planeswalker">Planeswalker</option>
                                     <option value="sorcery">Sorcery</option>
                                 </select>
-                                <button type="button" class="constraint-add-btn" data-target="filter-type">Add</button>
                             </div>
                         </div>
                         <input type="hidden" id="filter-type" value="">
@@ -265,7 +267,6 @@
                                     <option value="snow">Snow</option>
                                     <option value="world">World</option>
                                 </select>
-                                <button type="button" class="constraint-add-btn" data-target="filter-supertype">Add</button>
                             </div>
                         </div>
                         <input type="hidden" id="filter-supertype" value="">
@@ -336,21 +337,21 @@
                         </div>
                         <input type="hidden" id="filter-colors">
                     </div>
-                    <div class="filter-group">
+                    <div class="filter-group filter-cmc-group">
                         <label for="filter-cmc">Mana Value (CMC)</label>
                         <input type="text" id="filter-cmc" placeholder="e.g. 3, <=2, >=4, !=1">
                     </div>
-                    <div class="filter-group">
+                    <div class="filter-group filter-set-group">
+                        <label for="filter-set">Set Code</label>
+                        <input type="text" id="filter-set" placeholder="e.g., lea, khm" maxlength="3">
+                    </div>
+                    <div class="filter-group filter-power-group">
                         <label for="filter-power">Power</label>
                         <input type="text" id="filter-power" placeholder="e.g. 2, <=1, >=4">
                     </div>
-                    <div class="filter-group">
+                    <div class="filter-group filter-toughness-group">
                         <label for="filter-toughness">Toughness</label>
                         <input type="text" id="filter-toughness" placeholder="e.g. 2, <=1, >=4">
-                    </div>
-                    <div class="filter-group">
-                        <label for="filter-set">Set Code</label>
-                        <input type="text" id="filter-set" placeholder="e.g., lea, khm" maxlength="3">
                     </div>
                 </div>
             </div>
@@ -366,11 +367,25 @@
             <div class="selected-cards-info">
                 <span class="selected-count-label">Selected Related Cards:</span>
                 <div id="selected-cards-chips" class="chips-list"></div>
+                <button type="button" id="selected-cards-more-btn" class="selected-cards-more-btn hidden" aria-label="Show all selected related cards">...</button>
             </div>
             <div class="floating-bar-actions">
                 <button type="button" id="clear-selected-btn" class="clear-btn">Clear All</button>
                 <button type="button" id="related-search-btn" class="related-search-btn">🔍 Search Related Cards</button>
             </div>
+        </div>
+    </div>
+    <!-- SELECTED RELATED CARDS OVERFLOW PANEL -->
+    <div id="selected-related-modal" class="selected-related-modal hidden" role="dialog" aria-modal="true" aria-labelledby="selected-related-modal-title">
+        <div class="selected-related-modal-content">
+            <div class="selected-related-modal-header">
+                <div>
+                    <p class="selected-related-modal-kicker">SELECTION</p>
+                    <h2 id="selected-related-modal-title">Selected Related Cards</h2>
+                </div>
+                <button type="button" id="selected-related-modal-close" class="selected-related-modal-close" aria-label="Close selected related cards panel">&times;</button>
+            </div>
+            <div id="selected-related-modal-grid" class="selected-related-modal-grid"></div>
         </div>
     </div>
     <!-- CARD COMPARISON MODAL -->
