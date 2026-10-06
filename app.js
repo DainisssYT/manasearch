@@ -7693,7 +7693,16 @@ function updateProgress(step, total, message) {
         // strings today, but there's no reason this one sink should be the exception.
         p.innerHTML = '';
         const strong = document.createElement('strong');
-        strong.textContent = `${step}/${total} search stuff done!`;
+        const phaseLabel = step === 1
+            ? 'Searching for candidates'
+            : step === 2
+                ? 'Scoring candidates'
+                : step === 3
+                    ? 'Finalizing results'
+                    : step === 4
+                        ? 'Diversifying results'
+                        : 'Finalizing search';
+        strong.textContent = phaseLabel;
         const span = document.createElement('span');
         span.className = 'progress-text';
         span.style.cssText = 'font-size: 12px; color: var(--text-muted);';
@@ -11701,7 +11710,7 @@ async function scoreCardBatch({
 
     for (let i = 0; i < cards.length; i++) {
         const card = cards[i];
-        const cardText = card.oracle_text || (card.card_faces ? card.card_faces.map(f => f.oracle_text).join(' ') : '');
+        const cardText = card.oracle_text || (card.card_faces ? card.card_faces.map(f => f.oracle_text || '').join(' ') : '');
 
         if (card.contextScore === undefined) {
             const lexicalScore = calculateSimpleSimilarity(targetText, cardText);
@@ -12830,6 +12839,8 @@ async function findSimilarCards() {
                 const key = c.name.toLowerCase();
                 if (previewPool.has(key)) return;
                 c._previewScore = computePreviewScore(c);
+                c.similarityScore = c._previewScore;
+                c._isProvisionalScore = true;
                 previewPool.set(key, c);
                 addedAny = true;
             });
@@ -13424,7 +13435,10 @@ if (candidates.length > 0) {
     }
 
     candidates = qualified;
-    candidates.forEach(c => { if (!c._catastrophicEmptyRescue) c._weakBackfillMatch = false; });
+    candidates.forEach(c => {
+        if (!c._catastrophicEmptyRescue) c._weakBackfillMatch = false;
+        c._isProvisionalScore = false;
+    });
 
     candidates = applyResultOrdering(candidates, priorityValue);
 
@@ -14155,7 +14169,14 @@ function renderResults(cards) {
 
     topCards.forEach((card, index) => {
         const cardImg = card.image_uris?.normal || card.card_faces?.[0]?.image_uris?.normal || 'https://placeholder.pics/svg/220x310/EAEAEA/999999/No%20Image';
-        const matchPercentage = card.similarityScore ? Math.round(card.similarityScore * 100) : 0;
+        // Progressive results arrive before the authoritative scorer has finished. During that
+        // window `_previewScore` is the best available overall estimate, so never display a false
+        // 0% Overall Match just because `similarityScore` has not been populated yet. The final
+        // scoring pass overwrites `similarityScore` with the authoritative value.
+        const displaySimilarityScore = Number.isFinite(Number(card.similarityScore))
+            ? Number(card.similarityScore)
+            : (Number.isFinite(Number(card._previewScore)) ? Number(card._previewScore) : 0);
+        const matchPercentage = Math.round(Math.max(0, Math.min(1, displaySimilarityScore)) * 100);
         
         // Fix: Define isSelected, priceUsd, and priceEur variables
         const isSelected = selectedRelatedCards.has(card.id);
@@ -14279,11 +14300,15 @@ function renderResults(cards) {
 
         const actions = document.createElement('div');
         actions.className = 'card-actions';
-        actions.style.cssText = 'display: flex; gap: 8px; margin-top: 8px;';
+        // Keep Favorite and Compare on the same visual baseline. The CSS turns this into a
+        // three-column action row: Favorite | Compare | Select, so the small star is centered
+        // vertically with the main Compare button rather than floating above/below it.
+        actions.style.cssText = 'display: grid; grid-template-columns: 40px minmax(110px, 1fr) auto; align-items: center; gap: 8px; margin-top: 8px;';
 
         const favoriteCandidateBtn = document.createElement('button');
         favoriteCandidateBtn.type = 'button';
         favoriteCandidateBtn.className = 'result-favorite-btn';
+        favoriteCandidateBtn.style.alignSelf = 'center';
         favoriteCandidateBtn.dataset.favoriteCardName = card.name;
         const candidateIsFavorite = getStoredArray(FAVORITES_KEY).some(name => String(name).toLowerCase() === String(card.name).toLowerCase());
         favoriteCandidateBtn.textContent = candidateIsFavorite ? '★' : '☆';
@@ -14302,7 +14327,8 @@ function renderResults(cards) {
         compareBtn.textContent = 'Compare';
 
         const selectLabel = document.createElement('label');
-        selectLabel.style.cssText = 'font-size: 11px; display: flex; align-items: center; gap: 4px; cursor: pointer;';
+        selectLabel.className = 'result-select-label';
+        selectLabel.style.cssText = 'font-size: 11px; display: flex; align-items: center; justify-content: center; gap: 4px; cursor: pointer; white-space: nowrap;';
         const selectCheckbox = document.createElement('input');
         selectCheckbox.type = 'checkbox';
         selectCheckbox.className = 'related-checkbox';

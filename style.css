@@ -274,6 +274,25 @@ section {
     content: "\2713 ";
 }
 
+/* Progressive search status: keep the process readable while streams resolve instead of
+   presenting a fake fraction such as "1/2 search stuff done" that does not correspond to the
+   actual retrieval workload. */
+#loading-indicator > p {
+    margin: 0 auto;
+    max-width: 900px;
+    line-height: 1.45;
+}
+#loading-indicator > p strong {
+    display: inline-block;
+    margin-bottom: 2px;
+    color: var(--text-main);
+    font-size: 16px;
+}
+#loading-indicator > p .progress-text {
+    color: var(--text-muted) !important;
+    font-size: 12px !important;
+}
+
 /* A card added to the results grid by a later progressive-preview update than the one the user
    is currently looking at - a brief highlight instead of a silent reshuffle, so a newly-arrived
    card reads as "the list grew" rather than a confusing, unexplained jump. */
@@ -2561,8 +2580,31 @@ section {
     margin-top: 4px;
 }
 
-.card-actions { align-items: stretch; }
-.card-actions .compare-btn { flex: 1 1 auto; }
+.card-actions {
+    display: grid !important;
+    grid-template-columns: 40px minmax(110px, 1fr) auto;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+}
+.card-actions .result-favorite-btn {
+    width: 40px;
+    min-width: 40px;
+    height: 38px;
+    padding: 0;
+    align-self: center;
+}
+.card-actions .compare-btn {
+    width: 100%;
+    min-width: 0;
+    height: 38px;
+    margin: 0;
+    align-self: center;
+}
+.result-select-label {
+    min-height: 38px;
+    align-self: center;
+}
 
 .modal-backdrop,
 #compare-modal { padding: 18px; }
