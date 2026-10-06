@@ -86,6 +86,8 @@ const selectedRelatedCards = new Map();
 const sourceCards = new Map();
 const MAX_SOURCE_CARDS = 4;
 let primarySourceCardKey = null;
+// Routes live pagination/status updates from retrieval streams into the detailed loading checklist.
+let activeSearchStreamProgressReporter = null;
 
 // Local Storage Keys
 const HISTORY_KEY = 'manamatch_history';
@@ -8676,7 +8678,12 @@ async function fetchScryfallSearch(query, maxPagesOverride = MIN_SEARCH_PAGES, s
             url = data.next_page;
             pagesFetched++;
             
-            updateProgress(null, null, `[${searchLabel}] ${pagesFetched}/${maxPages} pages searched...`);
+            const pageProgressMessage = `${pagesFetched}/${maxPages} pages searched`;
+            if (typeof activeSearchStreamProgressReporter === 'function') {
+                activeSearchStreamProgressReporter({ label: searchLabel, message: pageProgressMessage, kind: 'progress' });
+            } else {
+                updateProgress(null, null, `[${searchLabel}] ${pageProgressMessage}...`);
+            }
             if (pagesFetched >= maxPages) break;
             
         // 429 -> Rate Limit. The shared queue has already opened a client-wide cooldown, so
@@ -8706,7 +8713,12 @@ async function fetchScryfallSearch(query, maxPagesOverride = MIN_SEARCH_PAGES, s
                 break;
             }
             const backoffMs = Math.min(1000 * 2 ** rateLimitRetries, 15000);
-            updateProgress(null, null, `[${searchLabel}] API error (${response.status}). Retry ${rateLimitRetries}/${MAX_RATE_LIMIT_RETRIES}...`);
+            const retryMessage = `API error (${response.status}) — retry ${rateLimitRetries}/${MAX_RATE_LIMIT_RETRIES}`;
+            if (typeof activeSearchStreamProgressReporter === 'function') {
+                activeSearchStreamProgressReporter({ label: searchLabel, message: retryMessage, kind: 'error' });
+            } else {
+                updateProgress(null, null, `[${searchLabel}] ${retryMessage}...`);
+            }
             await backgroundAwareDelay(backoffMs);
             continue;
         }
@@ -11271,6 +11283,7 @@ async function loadSourceCard(query, providedCard = null) {
         const removeBtn = document.getElementById('discard-source-card-btn');
         if (removeBtn) removeBtn.disabled = false;
     } catch (error) {
+        activeSearchStreamProgressReporter = null;
         if (requestId !== searchRequestId) return;
         if (benchmarkColdMode && isScryfallRateLimitError(error)) {
             // A benchmark-wide Scryfall circuit is a suite stop condition, not a browser alert.
@@ -11791,6 +11804,16 @@ async function scoreCardBatch({
 
     for (let i = 0; i < cards.length; i++) {
         const card = cards[i];
+        const cardText = card.oracle_text || (card.card_faces ? card.card_faces.map(f => f.oracle_text || '').join(' ') : '');
+        // Reuse the parsed candidate profile created during the structural scoring pass. The old
+        // locals were scoped to that earlier loop, which caused the final ranking pass to throw
+        // before similarityScore was assigned.
+        const candidateParsedEffects = Array.isArray(card._parsedEffects) ? card._parsedEffects : [];
+        const candidateMechanicProfile = candidateParsedEffects?._mechanicProfile
+            || buildUniversalMechanicProfile(card, cardText, candidateParsedEffects);
+        if (candidateParsedEffects.length && !candidateParsedEffects._mechanicProfile) {
+            candidateParsedEffects._mechanicProfile = candidateMechanicProfile;
+        }
         const structural = Math.max(0, Math.min(1, card.mechanicalScore || 0));
         const rawSemantic = hasMeaningful(card.oracleSemanticScore) ? Math.max(0, Math.min(1, card.oracleSemanticScore)) : 0;
         const functionSemantic = hasMeaningful(card.functionScore) ? Math.max(0, Math.min(1, card.functionScore)) : 0;
@@ -12611,11 +12634,14 @@ async function findSimilarCards() {
         ? `${activeTags.map(tag => `(otag:"${tag}" OR oracle:"${tag}")`).join(' OR ')} ${filterParts.join(' ')} ${excludeSelf}`.trim()
         : null;
 
-    // Show the detailed process immediately, before any slow network/model work begins. The
-    // checklist represents high-level retrieval streams; Search F may contain multiple underlying
-    // formulations, whose page counters are still shown in the headline progress text.
+    // Show the detailed process immediately, before any slow network/model work begins. Search F
+    // and Search H can each contain multiple independent queries, so every underlying query gets
+    // its own checklist row. This keeps each page denominator attached to the query that owns it.
+    const functionalStreamLabels = functionalQueries.map((_, idx) => `Search F #${idx + 1} (Functional Match)`);
+    const exactHighlightStreamLabels = exactHighlightQueries.map((_, idx) => `Search H #${idx + 1} (Exact Highlight)`);
     const plannedStreamLabels = [
-        'Exact Phrase', 'Oracle Terms', 'Mechanics/Tags', 'Card2Vec', 'Broader Mechanical', 'Functional Match', 'Exact Highlight'
+        'Exact Phrase', 'Oracle Terms', 'Mechanics/Tags', 'Card2Vec', 'Broader Mechanical',
+        ...functionalStreamLabels, ...exactHighlightStreamLabels
     ];
     if (isBroadSearch) plannedStreamLabels.push('Broad Retrieval');
     if (sharedSourceTextQuery) plannedStreamLabels.push('Shared Source Text');
@@ -12717,29 +12743,56 @@ async function findSimilarCards() {
     // one static message for however long the slowest stream takes (user request: "make sure the
     // user is aware of the current search and display stages"). trackStream wraps a promise
     // without changing what it resolves to.
-    const selectedMethodStreamCount = Object.values(methodQueries).filter(Boolean).length;
-    const totalTrackedStreams = 7 + (sharedSourceTextQuery ? 1 : 0) + (isBroadSearch ? 1 : 0) + selectedMethodStreamCount; // A-E, F, optional Broad/Shared/H, selected methods
+    const totalTrackedStreams = plannedStreamLabels.length;
     let streamsSettled = 0;
     const streamChecklistState = new Map(); // label -> done (boolean)
-    plannedStreamLabels.forEach(label => streamChecklistState.set(label, false));
+    const streamChecklistDetail = new Map(); // label -> current page/status detail
+    plannedStreamLabels.forEach(label => {
+        streamChecklistState.set(label, false);
+        streamChecklistDetail.set(label, 'Waiting to start');
+    });
     function renderStreamChecklist() {
         if (!streamChecklistEl) return;
         streamChecklistEl.innerHTML = '';
         streamChecklistState.forEach((done, label) => {
             const chip = document.createElement('span');
             chip.className = `stream-chip${done ? ' stream-done' : ''}`;
-            chip.textContent = label;
+            const labelSpan = document.createElement('span');
+            labelSpan.className = 'stream-chip-label';
+            labelSpan.textContent = label;
+            const detailSpan = document.createElement('span');
+            detailSpan.className = 'stream-chip-detail';
+            detailSpan.textContent = streamChecklistDetail.get(label) || (done ? 'Done' : 'Waiting');
+            chip.title = `${label}: ${detailSpan.textContent}`;
+            chip.append(labelSpan, detailSpan);
             streamChecklistEl.appendChild(chip);
         });
     }
+
+    // Route per-query pagination/status updates into the corresponding checklist row. The global
+    // headline stays on the broad search phase, so it never flips between unrelated F-query
+    // denominators while several streams run concurrently.
+    activeSearchStreamProgressReporter = ({ label, message, kind = 'progress' } = {}) => {
+        if (requestId !== searchRequestId || !label) return;
+        if (!streamChecklistState.has(label)) streamChecklistState.set(label, false);
+        streamChecklistDetail.set(label, message || (kind === 'done' ? 'Done' : 'Working'));
+        renderStreamChecklist();
+    };
+
     const trackStream = (promise, label) => {
         streamChecklistState.set(label, false);
+        streamChecklistDetail.set(label, 'Starting');
         renderStreamChecklist();
         return promise.then(r => {
             streamsSettled++;
             streamChecklistState.set(label, true);
+            const coverage = r?.coverage;
+            const detail = coverage
+                ? `Done • ${coverage.pagesFetched}/${coverage.maxPages} pages • ${coverage.retrievedCount} cards`
+                : 'Done';
+            streamChecklistDetail.set(label, detail);
             renderStreamChecklist();
-            updateProgress(1, totalSteps, `Retrieval in progress — ${streamsSettled}/${totalTrackedStreams} search streams finished; ${label} just finished.`);
+            updateProgress(1, totalSteps, `Retrieval in progress — ${streamsSettled}/${totalTrackedStreams} search streams finished; ${label} finished.`);
             return r;
         });
     };
@@ -12939,17 +12992,20 @@ async function findSimilarCards() {
             uniqueFunctionalQueries.push(q);
         });
         const functionalQueryPromises = benchmarkUseLocalOracleCorpus ? [] : uniqueFunctionalQueries.map((q, idx) => {
-            // Search F is a family of independent functional formulations. Each formulation can
-            // legitimately have a different Scryfall result-set size, so its page budget must be
-            // shown with a unique label. Reusing one label made the UI look as though the same
-            // stream changed from (for example) 3/7 pages to 3/8 pages mid-search.
             const streamLabel = `Search F #${idx + 1} (Functional Match)`;
-            const p = fetchScryfallSearch(q.query, benchmarkPageCap, streamLabel).catch(() => []);
+            const p = trackStream(
+                fetchScryfallSearch(q.query, benchmarkPageCap, streamLabel).catch(() => []),
+                streamLabel
+            );
             p.then(r => mergeIntoPreview(r, `functional match ${idx + 1}`)).catch(() => {});
             return p;
         });
         const exactHighlightPromises = benchmarkUseLocalOracleCorpus ? [] : exactHighlightQueries.map((q, idx) => {
-            const p = fetchScryfallSearch(q.query, benchmarkPageCap, "Search H (Exact Highlight)").catch(() => []);
+            const streamLabel = `Search H #${idx + 1} (Exact Highlight)`;
+            const p = trackStream(
+                fetchScryfallSearch(q.query, benchmarkPageCap, streamLabel).catch(() => []),
+                streamLabel
+            );
             p.then(r => mergeIntoPreview(r, `exact highlight ${idx + 1}`)).catch(() => {});
             return p;
         });
@@ -13035,8 +13091,8 @@ async function findSimilarCards() {
 
         const [resultsA, resultsB, resultsC, resultsD, resultsE, resultsBroad, resultsShared, resultsFSets, resultsExactSets, extractor, resolvedMethodStreams] = await Promise.all([
             streamAPromise, streamBPromise, streamCPromise, streamDPromise, streamEPromise, streamBroadPromise, streamSharedPromise,
-            trackStream(Promise.all(functionalQueryPromises), "Functional Match"),
-            trackStream(Promise.all(exactHighlightPromises), "Exact Highlight"),
+            Promise.all(functionalQueryPromises),
+            Promise.all(exactHighlightPromises),
             extractorPromise,
             Promise.all(methodStreamPromises.map(entry => entry.promise))
         ]);
@@ -13637,6 +13693,7 @@ if (candidates.length > 0) {
         if (requestId !== searchRequestId) return;
 
         pipelineCompleted = true;
+        activeSearchStreamProgressReporter = null;
         updateProgress(3, totalSteps, `Finalizing results — ranking complete; found ${Array.isArray(lastSearchResults) ? lastSearchResults.length : 0} final matches.`);
         clearTimeout(searchTimeoutId);
         if (previewRenderTimer) { clearTimeout(previewRenderTimer); previewRenderTimer = null; }
@@ -13810,6 +13867,7 @@ if (candidates.length > 0) {
             if (typeof alert === 'function') alert(error.message);
         }
     } finally {
+        if (requestId === searchRequestId) activeSearchStreamProgressReporter = null;
         clearTimeout(searchTimeoutId);
         if (requestId === searchRequestId) {
             updateProgress(null, null, "All done! Candidates retrieved and ranked purely by similarity.");
