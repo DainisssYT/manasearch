@@ -10184,6 +10184,60 @@ function initApp() {
         searchMethodsModal.classList.add('hidden');
     });
 
+    // --- ORDER MODAL LOGIC ---
+    const toggleOrderBtn = document.getElementById('toggle-order-btn');
+    const orderModal = document.getElementById('order-modal');
+    const closeOrderBtn = document.getElementById('close-order-modal');
+    const saveOrderBtn = document.getElementById('save-order-btn');
+    const orderBadge = document.getElementById('selected-order-badge');
+    const orderRadios = Array.from(document.querySelectorAll('input[name="order-choice"]'));
+
+    const orderLabels = {
+        overall: 'Overall Match',
+        mechanical: 'Mechanical',
+        functional: 'Functional',
+        semantic: 'Semantic',
+        role: 'Strategic Role',
+        balanced: 'Mechanical + Functional',
+        synergy: 'Synergy',
+        exactness: 'Exactness',
+        category: 'Category',
+        matrix: 'Matrix Sweep',
+        diverse: 'Diverse Spread'
+    };
+
+    function syncOrderModalSelection() {
+        const current = sortSelect?.value || 'overall';
+        orderRadios.forEach(radio => { radio.checked = radio.value === current; });
+    }
+
+    function updateOrderBadge() {
+        const current = sortSelect?.value || 'overall';
+        if (orderBadge) orderBadge.textContent = orderLabels[current] || 'Overall Match';
+    }
+
+    if (toggleOrderBtn) toggleOrderBtn.addEventListener('click', () => {
+        syncOrderModalSelection();
+        orderModal?.classList.remove('hidden');
+    });
+    if (closeOrderBtn) closeOrderBtn.addEventListener('click', () => {
+        syncOrderModalSelection();
+        orderModal?.classList.add('hidden');
+    });
+    if (saveOrderBtn) saveOrderBtn.addEventListener('click', () => {
+        const selected = orderRadios.find(radio => radio.checked)?.value || 'overall';
+        if (sortSelect && sortSelect.value !== selected) {
+            sortSelect.value = selected;
+            sortSelect.dispatchEvent(new Event('change', { bubbles: true }));
+        }
+        updateOrderBadge();
+        orderModal?.classList.add('hidden');
+    });
+    orderRadios.forEach(radio => radio.addEventListener('change', () => {
+        // Update only the visible selection; the actual ordering is committed with Done.
+    }));
+    updateOrderBadge();
+
     ['broad-search', 'divergent-search', 'wording-search', 'functional-search', 'target-search', 'role-search', 'alternate-search', 'synergy-search'].forEach(id => {
         const el = document.getElementById(id);
         if (el) el.addEventListener('change', updateMethodsBadge);
@@ -10328,7 +10382,10 @@ function initApp() {
 
     ['sort-results', 'weight-synergy', 'weight-context', 'weight-exactness', 'weight-category'].forEach(id => {
         const el = document.getElementById(id);
-        if (el) el.addEventListener('input', updateSortingWeightsBadge);
+        if (el) {
+            el.addEventListener('input', updateSortingWeightsBadge);
+            if (id === 'sort-results') el.addEventListener('change', updateOrderBadge);
+        }
     });
 
     // --- CARD CONSTRAINTS MODAL LOGIC ---

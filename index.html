@@ -120,22 +120,22 @@
                         <button type="button" id="toggle-search-methods-btn" class="methods-trigger-btn">
                             Methods <span id="selected-methods-badge" class="badge">Standard</span> ▾
                         </button>
-                        <div class="order-control">
-                            <label for="sort-results">Order</label>
-                            <select id="sort-results" aria-label="Order results">
-                                <option value="overall">Overall Match</option>
-                                <option value="mechanical">Mechanical</option>
-                                <option value="functional">Functional</option>
-                                <option value="semantic">Semantic</option>
-                                <option value="role">Strategic Role</option>
-                                <option value="balanced">Mechanical + Functional</option>
-                                <option value="synergy">Synergy</option>
-                                <option value="exactness">Exactness</option>
-                                <option value="category">Category</option>
-                                <option value="matrix">Matrix Sweep</option>
-                                <option value="diverse">Diverse Spread</option>
-                            </select>
-                        </div>
+                        <button type="button" id="toggle-order-btn" class="methods-trigger-btn">
+                            Order <span id="selected-order-badge" class="badge">Overall Match</span> ▾
+                        </button>
+                        <select id="sort-results" class="order-select-source" aria-hidden="true" tabindex="-1">
+                            <option value="overall">Overall Match</option>
+                            <option value="mechanical">Mechanical</option>
+                            <option value="functional">Functional</option>
+                            <option value="semantic">Semantic</option>
+                            <option value="role">Strategic Role</option>
+                            <option value="balanced">Mechanical + Functional</option>
+                            <option value="synergy">Synergy</option>
+                            <option value="exactness">Exactness</option>
+                            <option value="category">Category</option>
+                            <option value="matrix">Matrix Sweep</option>
+                            <option value="diverse">Diverse Spread</option>
+                        </select>
                         <button type="button" id="toggle-card-constraints-btn" class="methods-trigger-btn">
                             Constraints <span id="card-constraints-badge" class="badge">Any</span> ▾
                         </button>
@@ -269,6 +269,112 @@
             </div>
             <div class="modal-footer">
                 <button type="button" id="save-methods-btn">Done</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- ORDER MODAL PANEL -->
+    <div id="order-modal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="order-title">
+        <div class="modal-card order-modal-card">
+            <div class="modal-header">
+                <h3 id="order-title">Order Results</h3>
+                <button type="button" id="close-order-modal" class="close-btn" aria-label="Close result ordering">&times;</button>
+            </div>
+            <div class="modal-body">
+                <p class="modal-intro">Choose how the already-scored candidates should be arranged. This changes the order, not which cards are eligible to appear.</p>
+                <div class="methods-list order-list">
+                    <label class="method-card order-card">
+                        <input type="radio" name="order-choice" value="overall" checked>
+                        <div class="method-text">
+                            <strong>Overall Match</strong>
+                            <span>Uses the full ranking score, balancing mechanical, functional, semantic, synergy, exactness, and category signals.</span>
+                            <small>Best for: the normal all-purpose ranking.</small>
+                        </div>
+                    </label>
+                    <label class="method-card order-card">
+                        <input type="radio" name="order-choice" value="mechanical">
+                        <div class="method-text">
+                            <strong>Mechanical</strong>
+                            <span>Orders cards by how closely their underlying game actions match the source.</span>
+                            <small>Best for: finding cards that actually perform the same mechanics.</small>
+                        </div>
+                    </label>
+                    <label class="method-card order-card">
+                        <input type="radio" name="order-choice" value="functional">
+                        <div class="method-text">
+                            <strong>Functional</strong>
+                            <span>Prioritizes cards that accomplish the same practical job, even when their mechanics differ.</span>
+                            <small>Best for: replacement effects and deck-building substitutes.</small>
+                        </div>
+                    </label>
+                    <label class="method-card order-card">
+                        <input type="radio" name="order-choice" value="semantic">
+                        <div class="method-text">
+                            <strong>Semantic</strong>
+                            <span>Orders by meaning-level similarity in the cards' rules text.</span>
+                            <small>Best for: differently worded effects with similar meaning.</small>
+                        </div>
+                    </label>
+                    <label class="method-card order-card">
+                        <input type="radio" name="order-choice" value="role">
+                        <div class="method-text">
+                            <strong>Strategic Role</strong>
+                            <span>Prioritizes the strategic job the card fills, such as removal, ramp, recursion, or card advantage.</span>
+                            <small>Best for: building or tuning a deck around a role.</small>
+                        </div>
+                    </label>
+                    <label class="method-card order-card">
+                        <input type="radio" name="order-choice" value="balanced">
+                        <div class="method-text">
+                            <strong>Mechanical + Functional</strong>
+                            <span>Balances literal game mechanics with whether the cards serve the same overall purpose.</span>
+                            <small>Best for: a middle ground between exact mechanics and broad substitutions.</small>
+                        </div>
+                    </label>
+                    <label class="method-card order-card">
+                        <input type="radio" name="order-choice" value="synergy">
+                        <div class="method-text">
+                            <strong>Synergy</strong>
+                            <span>Favors cards that interact with the same themes, types, subtypes, keywords, or strategic context.</span>
+                            <small>Best for: tribal, build-around, and combo-focused searches.</small>
+                        </div>
+                    </label>
+                    <label class="method-card order-card">
+                        <input type="radio" name="order-choice" value="exactness">
+                        <div class="method-text">
+                            <strong>Exactness</strong>
+                            <span>Favors literal matches to highlighted or important Oracle wording.</span>
+                            <small>Best for: wording-specific searches and templated effects.</small>
+                        </div>
+                    </label>
+                    <label class="method-card order-card">
+                        <input type="radio" name="order-choice" value="category">
+                        <div class="method-text">
+                            <strong>Category</strong>
+                            <span>Prioritizes cards that match the source's broader card/effect categories.</span>
+                            <small>Best for: keeping results in the same general card class.</small>
+                        </div>
+                    </label>
+                    <label class="method-card order-card">
+                        <input type="radio" name="order-choice" value="matrix">
+                        <div class="method-text">
+                            <strong>Matrix Sweep</strong>
+                            <span>Spreads the result list across mana-value and card-type buckets instead of clustering around one narrow group.</span>
+                            <small>Best for: exploring a variety of costs and card types quickly.</small>
+                        </div>
+                    </label>
+                    <label class="method-card order-card">
+                        <input type="radio" name="order-choice" value="diverse">
+                        <div class="method-text">
+                            <strong>Diverse Spread</strong>
+                            <span>Uses semantic diversity to reduce near-duplicate results while preserving strong matches.</span>
+                            <small>Best for: discovering distinct alternatives rather than ten versions of the same idea.</small>
+                        </div>
+                    </label>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" id="save-order-btn">Done</button>
             </div>
         </div>
     </div>

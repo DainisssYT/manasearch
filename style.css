@@ -4335,3 +4335,52 @@ body:not(.light-theme) #theme-toggle { color: var(--text-main) !important; }
     outline: 2px solid var(--accent-color);
     outline-offset: 2px;
 }
+
+
+/* Order uses the same modal/card language as Search Methods. The native select remains
+   as a hidden compatibility control for the ranking pipeline. */
+.order-select-source {
+    position: absolute !important;
+    width: 1px !important;
+    height: 1px !important;
+    padding: 0 !important;
+    margin: -1px !important;
+    overflow: hidden !important;
+    clip: rect(0, 0, 0, 0) !important;
+    white-space: nowrap !important;
+    border: 0 !important;
+}
+
+.order-modal-card {
+    width: min(620px, calc(100vw - 24px));
+    max-width: 620px;
+    max-height: calc(100vh - 24px);
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+}
+
+.order-modal-card .modal-body {
+    min-height: 0;
+    overflow-y: auto;
+}
+
+.order-card input[type="radio"] {
+    margin-top: 4px;
+    width: 18px;
+    height: 18px;
+    accent-color: var(--accent-color);
+    flex: 0 0 auto;
+}
+
+.order-card:has(input[type="radio"]:checked) {
+    border-color: var(--accent-color);
+    box-shadow: 0 0 0 1px var(--accent-color);
+}
+
+@media (max-width: 700px) {
+    .order-modal-card {
+        width: calc(100vw - 16px);
+        max-height: calc(100vh - 16px);
+    }
+}
