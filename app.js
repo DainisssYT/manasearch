@@ -71,6 +71,12 @@ let activeSearchMethodFlags = {
     broad: false, divergent: false, wording: false, functional: false, target: false,
     role: false, alternate: false, synergy: false
 };
+// Primary result ranking plus optional presentation features. Matrix Sweep and Diverse Spread are
+// intentionally features, not mutually-exclusive ranking categories.
+let activeOrderFeatureFlags = {
+    matrix: false,
+    diverse: false
+};
 
 // Selected Related Cards State (Persistent across infinite searches)
 const selectedRelatedCards = new Map();
@@ -10191,6 +10197,8 @@ function initApp() {
     const saveOrderBtn = document.getElementById('save-order-btn');
     const orderBadge = document.getElementById('selected-order-badge');
     const orderRadios = Array.from(document.querySelectorAll('input[name="order-choice"]'));
+    const orderMatrixFeature = document.getElementById('order-feature-matrix');
+    const orderDiverseFeature = document.getElementById('order-feature-diverse');
 
     const orderLabels = {
         overall: 'Overall Match',
@@ -10201,19 +10209,34 @@ function initApp() {
         balanced: 'Mechanical + Functional',
         synergy: 'Synergy',
         exactness: 'Exactness',
-        category: 'Category',
-        matrix: 'Matrix Sweep',
-        diverse: 'Diverse Spread'
+        category: 'Category'
     };
+    const validOrderRankings = new Set(Object.keys(orderLabels));
+
+    function getActiveOrderCriteria() {
+        const current = sortSelect?.value || 'overall';
+        return validOrderRankings.has(current) ? current : 'overall';
+    }
 
     function syncOrderModalSelection() {
-        const current = sortSelect?.value || 'overall';
+        const current = getActiveOrderCriteria();
         orderRadios.forEach(radio => { radio.checked = radio.value === current; });
+        if (orderMatrixFeature) orderMatrixFeature.checked = Boolean(activeOrderFeatureFlags.matrix);
+        if (orderDiverseFeature) orderDiverseFeature.checked = Boolean(activeOrderFeatureFlags.diverse);
     }
 
     function updateOrderBadge() {
-        const current = sortSelect?.value || 'overall';
-        if (orderBadge) orderBadge.textContent = orderLabels[current] || 'Overall Match';
+        const current = getActiveOrderCriteria();
+        const baseLabel = orderLabels[current] || 'Overall Match';
+        const features = [];
+        if (activeOrderFeatureFlags.matrix) features.push('Matrix');
+        if (activeOrderFeatureFlags.diverse) features.push('Diverse');
+        if (orderBadge) {
+            orderBadge.textContent = features.length ? `${baseLabel} + ${features.join(' + ')}` : baseLabel;
+            orderBadge.title = features.length
+                ? `Ranking: ${baseLabel}. Features: ${features.join(', ')}`
+                : `Ranking: ${baseLabel}`;
+        }
     }
 
     if (toggleOrderBtn) toggleOrderBtn.addEventListener('click', () => {
@@ -10226,15 +10249,21 @@ function initApp() {
     });
     if (saveOrderBtn) saveOrderBtn.addEventListener('click', () => {
         const selected = orderRadios.find(radio => radio.checked)?.value || 'overall';
+        activeOrderFeatureFlags.matrix = Boolean(orderMatrixFeature?.checked);
+        activeOrderFeatureFlags.diverse = Boolean(orderDiverseFeature?.checked);
+
         if (sortSelect && sortSelect.value !== selected) {
             sortSelect.value = selected;
             sortSelect.dispatchEvent(new Event('change', { bubbles: true }));
+        } else if (lastSearchResults && lastSearchResults.length > 0) {
+            reorderResults();
+            renderResults(lastSearchResults);
         }
         updateOrderBadge();
         orderModal?.classList.add('hidden');
     });
     orderRadios.forEach(radio => radio.addEventListener('change', () => {
-        // Update only the visible selection; the actual ordering is committed with Done.
+        // The actual ranking/features are committed with Done, matching the Search Methods panel.
     }));
     updateOrderBadge();
 
@@ -10314,6 +10343,10 @@ function initApp() {
 
     if (sortSelect) {
         sortSelect.addEventListener('change', () => {
+            if (validOrderCriteriaForOrdering(sortSelect.value) !== sortSelect.value) {
+                sortSelect.value = 'overall';
+            }
+            updateOrderBadge();
             if (lastSearchResults && lastSearchResults.length > 0) {
                 reorderResults();
                 renderResults(lastSearchResults);
@@ -13466,7 +13499,7 @@ if (candidates.length > 0) {
             weights: { mechanical: wM, synergy: wS, context: wC, exactness: wE, category: wCa },
             tags: activeTags, topNNames, sniperIds: sniperCardIds,
             targetTextForScoring, targetVector, extractor,
-            sourceCard: currentSourceCard, scoreKey, orderCriteria: priorityValue,
+            sourceCard: currentSourceCard, scoreKey, orderCriteria: validOrderCriteriaForOrdering(priorityValue),
             // Snapshot the highlight state so Search Deeper cannot accidentally consult mutated
             // global UI state if the user changes/removes a highlight after the initial search.
             highlightConstraints: (manualHighlights || []).map(h => ({
@@ -13872,7 +13905,7 @@ function getRankingScoreForCriteria(card, criteria) {
     }
 }
 
-function buildMatrixSweepOrder(cards) {
+function buildMatrixSweepOrder(cards, criteria = 'overall') {
     const groups = new Map();
     (cards || []).forEach(card => {
         const cmc = Number.isFinite(Number(card?.cmc)) ? Math.floor(Number(card.cmc)) : 'X';
@@ -13883,20 +13916,21 @@ function buildMatrixSweepOrder(cards) {
         if (!groups.has(key)) groups.set(key, []);
         groups.get(key).push(card);
     });
+    const scoreOf = card => getRankingScoreForCriteria(card, criteria);
     const orderedGroups = Array.from(groups.values()).map(group =>
-        group.slice().sort((a, b) => (Number(b.similarityScore) || 0) - (Number(a.similarityScore) || 0))
+        group.slice().sort((a, b) => scoreOf(b) - scoreOf(a))
     );
     const output = [];
     const maxLength = orderedGroups.reduce((m, group) => Math.max(m, group.length), 0);
     for (let round = 0; round < maxLength; round++) {
         const roundCards = orderedGroups.filter(group => group[round]).map(group => group[round]);
-        roundCards.sort((a, b) => (Number(b.similarityScore) || 0) - (Number(a.similarityScore) || 0));
+        roundCards.sort((a, b) => scoreOf(b) - scoreOf(a));
         output.push(...roundCards);
     }
     return output;
 }
 
-function buildDiverseOrder(cards) {
+function buildDiverseOrder(cards, criteria = 'overall') {
     const input = Array.isArray(cards) ? cards.slice() : [];
     if (input.length < 3) return input;
     const pool = input.slice(0, 80);
@@ -13909,7 +13943,8 @@ function buildDiverseOrder(cards) {
         return normalized && embeddingCache.has(normalized) ? embeddingCache.get(normalized) : null;
     };
     const entries = pool.map(card => ({ card, vector: vectorOf(card) }));
-    const bestScore = Math.max(0.0001, ...entries.map(e => Number(e.card?.similarityScore) || 0));
+    const scoreOf = card => Math.max(0, Number(getRankingScoreForCriteria(card, criteria)) || 0);
+    const bestScore = Math.max(0.0001, ...entries.map(e => scoreOf(e.card)));
     const selected = [];
     const remaining = entries.slice();
     const lambda = 0.62;
@@ -13919,7 +13954,7 @@ function buildDiverseOrder(cards) {
         let bestValue = -Infinity;
         for (let i = 0; i < remaining.length; i++) {
             const item = remaining[i];
-            const relevance = (Number(item.card?.similarityScore) || 0) / bestScore;
+            const relevance = scoreOf(item.card) / bestScore;
             let redundancy = 0;
             for (const picked of selected) {
                 const sim = item.vector && picked.vector
@@ -13935,17 +13970,28 @@ function buildDiverseOrder(cards) {
     return [...selected.map(x => x.card), ...rest];
 }
 
-function applyResultOrdering(cards, criteria) {
+function applyResultOrdering(cards, criteria, featureFlags = null) {
     const input = Array.isArray(cards) ? cards.slice() : [];
-    if (criteria === 'matrix') return buildMatrixSweepOrder(input);
-    if (criteria === 'diverse') return buildDiverseOrder(input);
-    return input.sort((a, b) => getRankingScoreForCriteria(b, criteria) - getRankingScoreForCriteria(a, criteria));
+    const ranking = validOrderCriteriaForOrdering(criteria);
+    const features = featureFlags || activeOrderFeatureFlags;
+    let output = input.sort((a, b) => getRankingScoreForCriteria(b, ranking) - getRankingScoreForCriteria(a, ranking));
+
+    // Features are presentation modifiers layered on top of the selected ranking. They can be
+    // combined with one another and never replace the primary ranking category.
+    if (features.diverse) output = buildDiverseOrder(output, ranking);
+    if (features.matrix) output = buildMatrixSweepOrder(output, ranking);
+    return output;
+}
+
+function validOrderCriteriaForOrdering(criteria) {
+    const allowed = new Set(['overall','mechanical','functional','semantic','role','balanced','synergy','exactness','category']);
+    return allowed.has(criteria) ? criteria : 'overall';
 }
 
 function reorderResults() {
     if (!lastSearchResults || lastSearchResults.length === 0) return;
-    const criteria = document.getElementById('sort-results')?.value || 'overall';
-    lastSearchResults = applyResultOrdering(lastSearchResults, criteria);
+    const criteria = validOrderCriteriaForOrdering(document.getElementById('sort-results')?.value || 'overall');
+    lastSearchResults = applyResultOrdering(lastSearchResults, criteria, activeOrderFeatureFlags);
 }
 
 async function copyCardNameToClipboard(cardName, button = null) {
