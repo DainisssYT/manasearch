@@ -715,6 +715,31 @@ section {
     display: none;
 }
 
+.search-initial-state {
+    min-height: 180px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    padding: 28px 18px;
+    border: 1px dashed var(--border-color);
+    border-radius: 10px;
+    background: var(--bg-primary);
+    color: var(--text-muted);
+    text-align: center;
+}
+
+.search-initial-state strong {
+    color: var(--text-main);
+    font-size: 15px;
+}
+
+.search-initial-state span {
+    font-size: 12px;
+    line-height: 1.5;
+}
+
 @keyframes provisional-pulse {
     0%, 100% { opacity: 0.75; }
     50% { opacity: 1; }

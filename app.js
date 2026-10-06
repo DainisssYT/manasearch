@@ -12456,9 +12456,31 @@ async function findSimilarCards() {
     const timings = {};
 
     showLoading(true);
-    if (resultsSection) resultsSection.classList.add('hidden');
-    if (resultsGrid) resultsGrid.innerHTML = '';
-    document.getElementById('provisional-results-banner')?.classList.add('hidden');
+    // Keep the Results area visible during the search. The user should be able to see the
+    // first-pass candidates as soon as they arrive instead of waiting for the entire pipeline.
+    if (resultsSection) resultsSection.classList.remove('hidden');
+    const resultsSummaryEl = document.getElementById('results-summary');
+    if (resultsSummaryEl) {
+        resultsSummaryEl.textContent = 'Searching… initial matches will appear as soon as they are found.';
+        resultsSummaryEl.classList.remove('hidden');
+    }
+    if (resultsGrid) {
+        resultsGrid.innerHTML = '';
+        const initialState = document.createElement('div');
+        initialState.className = 'search-initial-state';
+        initialState.setAttribute('aria-live', 'polite');
+        const title = document.createElement('strong');
+        title.textContent = 'Searching for similar cards…';
+        const detail = document.createElement('span');
+        detail.textContent = 'Initial matches will appear here as soon as a retrieval stream returns them.';
+        initialState.append(title, detail);
+        resultsGrid.appendChild(initialState);
+    }
+    const provisionalBannerEl = document.getElementById('provisional-results-banner');
+    if (provisionalBannerEl) {
+        provisionalBannerEl.textContent = 'Initial results will appear while the remaining search streams continue.';
+        provisionalBannerEl.classList.remove('hidden');
+    }
     const streamChecklistEl = document.getElementById('stream-checklist');
     if (streamChecklistEl) streamChecklistEl.innerHTML = '';
     // A fresh search makes any earlier search's "more pages available" cursors meaningless (the
@@ -12481,11 +12503,14 @@ async function findSimilarCards() {
         synergy: Boolean(document.getElementById('synergy-search')?.checked)
     };
     const priorityValue = document.getElementById('sort-results')?.value || 'overall';
-    const totalSteps = isDivergent ? 5 : 2;
+    // The large checklist below is the detailed process view. The headline progress is kept as
+    // a high-level pipeline stage indicator so it does not pretend that "1/2" means half of the
+    // actual retrieval work has finished.
+    const totalSteps = 3;
 
     updateProgress(1, totalSteps, getActiveSourceCards().length > 1
-        ? "Executing sub-searches, including shared-text search across all source cards..."
-        : "Executing retrieval and ranking streams...");
+        ? "Retrieval in progress — searching multiple source cards and gathering initial candidates..."
+        : "Retrieval in progress — gathering initial candidates from the search streams...");
 
     const hasHighlight = Boolean(manualHighlights && manualHighlights.length > 0);
 
@@ -12576,6 +12601,21 @@ async function findSimilarCards() {
     const searchC_Query = activeTags && activeTags.length > 0 
         ? `${activeTags.map(tag => `(otag:"${tag}" OR oracle:"${tag}")`).join(' OR ')} ${filterParts.join(' ')} ${excludeSelf}`.trim()
         : null;
+
+    // Show the detailed process immediately, before any slow network/model work begins. The
+    // checklist represents high-level retrieval streams; Search F may contain multiple underlying
+    // formulations, whose page counters are still shown in the headline progress text.
+    const plannedStreamLabels = [
+        'Exact Phrase', 'Oracle Terms', 'Mechanics/Tags', 'Card2Vec', 'Broader Mechanical', 'Functional Match', 'Exact Highlight'
+    ];
+    if (isBroadSearch) plannedStreamLabels.push('Broad Retrieval');
+    if (sharedSourceTextQuery) plannedStreamLabels.push('Shared Source Text');
+    if (activeSearchMethodFlags.wording) plannedStreamLabels.push('Wording Search');
+    if (activeSearchMethodFlags.functional) plannedStreamLabels.push('Functional Search');
+    if (activeSearchMethodFlags.target) plannedStreamLabels.push('Target Search');
+    if (activeSearchMethodFlags.role) plannedStreamLabels.push('Role Search');
+    if (activeSearchMethodFlags.alternate) plannedStreamLabels.push('Alternative Search');
+    if (activeSearchMethodFlags.synergy) plannedStreamLabels.push('Synergy Search');
 
     const card2vecRecs = typeof getCard2VecRecommendations === 'function' 
         ? await getCard2VecRecommendations(currentSourceCard.name) 
@@ -12672,6 +12712,7 @@ async function findSimilarCards() {
     const totalTrackedStreams = 7 + (sharedSourceTextQuery ? 1 : 0) + (isBroadSearch ? 1 : 0) + selectedMethodStreamCount; // A-E, F, optional Broad/Shared/H, selected methods
     let streamsSettled = 0;
     const streamChecklistState = new Map(); // label -> done (boolean)
+    plannedStreamLabels.forEach(label => streamChecklistState.set(label, false));
     function renderStreamChecklist() {
         if (!streamChecklistEl) return;
         streamChecklistEl.innerHTML = '';
@@ -12689,7 +12730,7 @@ async function findSimilarCards() {
             streamsSettled++;
             streamChecklistState.set(label, true);
             renderStreamChecklist();
-            updateProgress(1, totalSteps, `Executing sub-searches... (${streamsSettled}/${totalTrackedStreams} stages done - ${label} just finished)`);
+            updateProgress(1, totalSteps, `Retrieval in progress — ${streamsSettled}/${totalTrackedStreams} search streams finished; ${label} just finished.`);
             return r;
         });
     };
@@ -12726,7 +12767,7 @@ async function findSimilarCards() {
         // pipeline completes.
         const previewPool = new Map();
         const previouslyRenderedNames = new Set();
-        const MIN_PREVIEW_RESULTS = 3;
+        const MIN_PREVIEW_RESULTS = 1;
         const PREVIEW_RENDER_CAP = 20;
         const PREVIEW_RENDER_MIN_INTERVAL_MS = 300;
         let previewRenderTimer = null;
@@ -12989,6 +13030,7 @@ async function findSimilarCards() {
             Promise.all(methodStreamPromises.map(entry => entry.promise))
         ]);
         const methodResults = Object.fromEntries(methodStreamPromises.map((entry, index) => [entry.key, resolvedMethodStreams[index] || []]));
+        updateProgress(2, totalSteps, 'Scoring in progress — combining retrieved candidates and calculating similarity signals...');
         const resultsF = resultsFSets.flat();
         const resultsExact = resultsExactSets.flat();
         const resultsSharedFlat = resultsShared || [];
@@ -13581,6 +13623,7 @@ if (candidates.length > 0) {
         if (requestId !== searchRequestId) return;
 
         pipelineCompleted = true;
+        updateProgress(3, totalSteps, `Finalizing results — ranking complete; found ${Array.isArray(lastSearchResults) ? lastSearchResults.length : 0} final matches.`);
         clearTimeout(searchTimeoutId);
         if (previewRenderTimer) { clearTimeout(previewRenderTimer); previewRenderTimer = null; }
         previewRenderDirty = false;
