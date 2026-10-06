@@ -65,6 +65,12 @@ let benchmarkLocalOracleCorpus = null;
 // already exists, use it; otherwise bound live API pagination so the suite can still execute.
 let benchmarkApiConservativeMode = false;
 const benchmarkSourceCardCatalog = new Map();
+// Active search-method switches for the current user search. These are strategy switches, not
+// hidden card constraints: they add retrieval evidence and/or bounded ranking preferences.
+let activeSearchMethodFlags = {
+    broad: false, divergent: false, wording: false, functional: false, target: false,
+    role: false, alternate: false, synergy: false
+};
 
 // Selected Related Cards State (Persistent across infinite searches)
 const selectedRelatedCards = new Map();
@@ -9748,12 +9754,20 @@ function calculateFuzzyTextMatch(sourceText, targetText) {
 function getScoreKeyByCriteria(criteria) {
     switch (criteria) {
         case 'mechanical': return 'mechanicalScore';
-        case 'synergy': return 'synergyScore';
+        case 'functional': return 'functionScore';
+        case 'semantic':
         case 'context': return 'contextScore';
+        case 'role': return 'roleScore';
+        case 'synergy': return 'synergyScore';
         case 'exactness': return 'exactnessScore';
         case 'category': return 'categoryScore';
-        case 'role': return 'roleScore';
-        case 'overall': default: return 'similarityScore';
+        // Composite / presentation-only order modes do not represent a single stored score.
+        // Callers that need those modes should use applyResultOrdering(), not this scalar key.
+        case 'balanced':
+        case 'matrix':
+        case 'diverse':
+        case 'overall':
+        default: return 'similarityScore';
     }
 }
 
@@ -10140,15 +10154,25 @@ function initApp() {
 
     function updateMethodsBadge() {
         const selected = [];
-        if (document.getElementById('broad-search').checked) selected.push('Broad');
-        if (document.getElementById('divergent-search').checked) selected.push('Divergent');
-        if (document.getElementById('matrix-sweep').checked) selected.push('Matrix');
+        const labels = [
+            ['broad-search', 'Broad Search'],
+            ['divergent-search', 'Divergent Search'],
+            ['wording-search', 'Wording Search'],
+            ['functional-search', 'Functional Search'],
+            ['target-search', 'Target Search'],
+            ['role-search', 'Role Search'],
+            ['alternate-search', 'Alternative Search'],
+            ['synergy-search', 'Synergy Search']
+        ];
+        labels.forEach(([id, label]) => {
+            if (document.getElementById(id)?.checked) selected.push(label);
+        });
 
         if (selected.length === 0) {
             methodsBadge.textContent = 'Standard';
             methodsBadge.style.backgroundColor = 'var(--bg-primary)';
         } else {
-            methodsBadge.textContent = selected.join(', ');
+            methodsBadge.textContent = selected.length <= 3 ? selected.join(', ') : `${selected.length} selected`;
             methodsBadge.style.backgroundColor = 'var(--accent-color)';
         }
     }
@@ -10160,7 +10184,7 @@ function initApp() {
         searchMethodsModal.classList.add('hidden');
     });
 
-    ['broad-search', 'divergent-search', 'matrix-sweep'].forEach(id => {
+    ['broad-search', 'divergent-search', 'wording-search', 'functional-search', 'target-search', 'role-search', 'alternate-search', 'synergy-search'].forEach(id => {
         const el = document.getElementById(id);
         if (el) el.addEventListener('change', updateMethodsBadge);
     });
@@ -10539,25 +10563,62 @@ function addToHistory(cardName, card = currentSourceCard) {
     renderSidebarLists();
 }
 
-function toggleFavorite() {
-    if (!currentSourceCard) return;
+function setFavoriteState(cardName, shouldFavorite) {
+    const normalizedName = String(cardName || '').trim();
+    if (!normalizedName) return false;
+
     let favorites = getStoredArray(FAVORITES_KEY);
-    const cardName = currentSourceCard.name;
-    
-    if (favorites.includes(cardName)) {
-        favorites = favorites.filter(name => name !== cardName);
-        favoriteBtn.textContent = '☆ Favorite';
-    } else {
-        favorites.push(cardName);
-        favoriteBtn.textContent = '★ Favorited';
+    const existingIndex = favorites.findIndex(name => String(name).toLowerCase() === normalizedName.toLowerCase());
+
+    if (shouldFavorite) {
+        if (existingIndex === -1) favorites.push(normalizedName);
+    } else if (existingIndex !== -1) {
+        favorites.splice(existingIndex, 1);
     }
-    
+
     try {
         localStorage.setItem(FAVORITES_KEY, JSON.stringify(favorites));
     } catch (err) {
         console.warn("Favorites could not be saved:", err.message);
+        return false;
     }
+
     renderSidebarLists();
+    updateFavoriteButtons(normalizedName);
+    return true;
+}
+
+function updateFavoriteButtons(cardName) {
+    const normalizedName = String(cardName || '').trim().toLowerCase();
+    if (!normalizedName) return;
+    const favorites = getStoredArray(FAVORITES_KEY);
+    const isFavorite = favorites.some(name => String(name).toLowerCase() === normalizedName);
+
+    if (favoriteBtn && currentSourceCard && String(currentSourceCard.name || '').toLowerCase() === normalizedName) {
+        favoriteBtn.textContent = isFavorite ? '★ Favorited' : '☆ Favorite';
+    }
+
+    document.querySelectorAll('[data-favorite-card-name]').forEach(button => {
+        if (String(button.dataset.favoriteCardName || '').toLowerCase() !== normalizedName) return;
+        button.textContent = isFavorite ? '★' : '☆';
+        button.title = isFavorite ? `Remove ${button.dataset.favoriteCardName} from favorites` : `Add ${button.dataset.favoriteCardName} to favorites`;
+        button.setAttribute('aria-label', button.title);
+        button.classList.toggle('is-favorited', isFavorite);
+    });
+}
+
+function toggleFavoriteCard(card) {
+    if (!card?.name) return;
+    const favorites = getStoredArray(FAVORITES_KEY);
+    const isFavorite = favorites.some(name => String(name).toLowerCase() === String(card.name).toLowerCase());
+    setFavoriteState(card.name, !isFavorite);
+}
+
+function toggleFavorite() {
+    if (!currentSourceCard) return;
+    const favorites = getStoredArray(FAVORITES_KEY);
+    const isFavorite = favorites.some(name => String(name).toLowerCase() === String(currentSourceCard.name).toLowerCase());
+    setFavoriteState(currentSourceCard.name, !isFavorite);
 }
 
 function renderSidebarLists() {
@@ -11613,9 +11674,12 @@ async function scoreCardBatch({
     const profile = channelWeights[rankingIntent.kind] || channelWeights.effect_match;
 
     const hasMeaningful = v => Number.isFinite(v) && v > 0;
-    const userStructuralBias = Math.max(0.75, Math.min(1.25, rawWM / 45));
-    const userSemanticBias = Math.max(0.75, Math.min(1.25, rawWC / 20));
-    const userFunctionBias = Math.max(0.75, Math.min(1.25, (rawWE + rawWCa) / 25));
+    const methodStructuralBias = activeSearchMethodFlags.alternate ? 0.92 : 1;
+    const methodSemanticBias = activeSearchMethodFlags.role ? 0.92 : (activeSearchMethodFlags.synergy ? 0.96 : 1);
+    const methodFunctionBias = activeSearchMethodFlags.functional ? 1.22 : 1;
+    const userStructuralBias = Math.max(0.75, Math.min(1.35, (rawWM / 45) * methodStructuralBias));
+    const userSemanticBias = Math.max(0.75, Math.min(1.35, (rawWC / 20) * methodSemanticBias));
+    const userFunctionBias = Math.max(0.75, Math.min(1.35, ((rawWE + rawWCa) / 25) * methodFunctionBias));
     const rawChannels = [
         profile.structural * userStructuralBias,
         profile.rawSemantic * userSemanticBias,
@@ -11685,8 +11749,29 @@ async function scoreCardBatch({
         );
         card.rankingIntent = rankingIntent.kind;
         card.rankingIntentConfidence = rankingIntent.confidence;
+        const universalMethodDetail = (activeSearchMethodFlags.target || activeSearchMethodFlags.alternate)
+            ? calculateUniversalMechanicSimilarity(sourceMechanicProfile, candidateMechanicProfile)
+            : null;
+        const targetFocusSignal = universalMethodDetail
+            ? Math.max(0, Math.min(1, universalMethodDetail.targetCoverage * 0.62 + universalMethodDetail.zoneCoverage * 0.18 + universalMethodDetail.scopeCoverage * 0.20))
+            : 0;
+        const roleFocusSignal = roleSemantic;
+        const alternateSignal = universalMethodDetail
+            ? Math.max(0, Math.min(1, universalMethodDetail.outcomeCoverage * 0.55 + universalMethodDetail.targetCoverage * 0.22 + universalMethodDetail.zoneCoverage * 0.13 + (1 - universalMethodDetail.functionCoverage) * 0.10))
+            : 0;
+        const synergySignal = Math.max(0, Math.min(1, (card.synergyScore || 0) * 0.65 + (card.categoryScore || 0) * 0.20 + roleSemantic * 0.15));
+        const wordingSignal = Math.max(0, Math.min(1, (card.exactnessScore || 0) * 0.72 + calculateSimpleSimilarity(targetText, cardText) * 0.28));
+        const methodBoost =
+            (activeSearchMethodFlags.functional ? Math.min(0.055, Math.max(0, functionalSimilarity - 0.45) * 0.10) : 0) +
+            (activeSearchMethodFlags.target ? Math.min(0.055, Math.max(0, targetFocusSignal - 0.45) * 0.11) : 0) +
+            (activeSearchMethodFlags.role ? Math.min(0.060, Math.max(0, roleFocusSignal - 0.45) * 0.11) : 0) +
+            (activeSearchMethodFlags.alternate ? Math.min(0.060, Math.max(0, alternateSignal - 0.45) * 0.12) : 0) +
+            (activeSearchMethodFlags.synergy ? Math.min(0.050, Math.max(0, synergySignal - 0.42) * 0.10) : 0) +
+            (activeSearchMethodFlags.wording ? Math.min(0.050, Math.max(0, wordingSignal - 0.50) * 0.10) : 0);
+        card.methodSignals = { target: targetFocusSignal, role: roleFocusSignal, alternate: alternateSignal, synergy: synergySignal, wording: wordingSignal };
+
         const rankingRefinement = compoundCoverageBonus + balancedCoverageBonus + primaryMatchBonus
-            + functionalSubstituteBonus + quantityBonus;
+            + functionalSubstituteBonus + quantityBonus + methodBoost;
 
         card.rankingRefinementScore = rankingRefinement;
         card.similarityScore = Math.max(0, Math.min(1,
@@ -11820,9 +11905,10 @@ async function executeRelatedCardSearch() {
 
         // 7. FINAL RANKING
         const priorityValue = document.getElementById('sort-results')?.value || 'overall';
-        const scoreKey = getScoreKeyByCriteria(priorityValue);
-        
-        const nonSelected = finalCardPool.filter(c => !selectedCardsAtStart.has(c.id)).sort((a, b) => (b[scoreKey] || 0) - (a[scoreKey] || 0));
+        const nonSelected = applyResultOrdering(
+            finalCardPool.filter(c => !selectedCardsAtStart.has(c.id)),
+            priorityValue
+        );
         
         lastSearchResults = [...Array.from(selectedCardsAtStart.values()), ...nonSelected];
         // Related-card search runs its own pipeline and produces no stage diagnostics; clear
@@ -12070,13 +12156,122 @@ function buildGenericFeatureCombinationQuery(canonicalFn) {
  * @param {string} excludeSelf
  * @returns {Array<{query: string, narrow: boolean}>} query descriptors with a coverage policy flag
  */
-function buildFunctionalRetrievalQueries(sourceCard, parsedEffects, excludeSelf) {
+function buildWordingRetrievalQuery(sourceCard, excludeSelf, stopWords = new Set(), mtgStopWords = new Set()) {
+    const text = String(sourceCard?.oracle_text || (sourceCard?.card_faces ? sourceCard.card_faces.map(f => f.oracle_text || '').join(' ') : '') || '').replace(/\s+/g, ' ').trim();
+    if (!text) return null;
+    const sentences = text.split(/(?<=[.!?])\s+/).map(x => x.trim()).filter(Boolean);
+    const phrases = sentences.slice(0, 2).map(sentence => {
+        const words = sentence.split(/\s+/).filter(Boolean);
+        return words.length > 9 ? words.slice(0, 9).join(' ') : sentence;
+    }).filter(x => x.length >= 12);
+    const usefulWords = [...new Set(text.toLowerCase().replace(/[^a-z0-9+\/-\s]/g, ' ').split(/\s+/))]
+        .filter(w => w.length >= 4 && !stopWords.has(w) && !mtgStopWords.has(w))
+        .slice(0, 5);
+    const clauses = [];
+    phrases.forEach(p => clauses.push(`o:"${p.replace(/"/g, '\\"')}"`));
+    usefulWords.slice(0, 3).forEach(w => clauses.push(`o:"${w}"`));
+    return clauses.length ? `(${clauses.join(' or ')}) ${excludeSelf}`.trim() : null;
+}
+
+function buildTargetFocusedRetrievalQuery(sourceCard, parsedEffects, excludeSelf) {
+    const canonicals = getCanonicalFunctions(parsedEffects).slice(0, 3);
+    const clauses = [];
+    const seen = new Set();
+    const push = value => {
+        const clean = String(value || '').replace(/^[._]+|[._]+$/g, '').trim().toLowerCase();
+        if (!clean || clean.length < 3 || seen.has(clean)) return;
+        seen.add(clean);
+        clauses.push(`o:"${clean.replace(/"/g, '')}"`);
+    };
+    canonicals.forEach(cf => {
+        const p = cf?.params || {};
+        if (p.object && !['generic', 'card'].includes(String(p.object).toLowerCase())) push(p.object);
+        if (p.subtype) push(p.subtype);
+        if (p.from) push(p.from);
+        if (p.to) push(p.to);
+        if (p.scope && p.scope !== 'any') push(p.scope);
+        const restriction = Array.isArray(p.restriction) ? p.restriction.find(r => r && !/controlledbyyou|controlledbyopponent/i.test(r)) : null;
+        if (restriction) push(restriction);
+    });
+    if (clauses.length < 2) return null;
+    return `(${clauses.slice(0, 5).join(' ')}) ${excludeSelf}`.trim();
+}
+
+const ROLE_RETRIEVAL_PHRASES = {
+    fast_mana: ['add mana', 'add two mana', 'mana ability'],
+    catch_up_ramp: ['more lands', 'search your library for a basic land'],
+    land_ramp: ['search your library for a basic land', 'put it onto the battlefield'],
+    card_advantage_engine: ['draw a card', 'draw cards', 'put it into your hand'],
+    token_multiplier: ['twice that many', 'tokens would be created'],
+    token_engine: ['create a token', 'create a creature token'],
+    tribal_anthem: ['other creatures you control get', 'get +1/+1'],
+    anthem: ['creatures you control get', 'creatures get +1/+1'],
+    counterspell: ['counter target spell', 'counter target ability'],
+    board_wipe: ['destroy all', 'exile all'],
+    single_target_removal: ['destroy target', 'exile target'],
+    bounce: ['return target creature to its owner', 'return target permanent to its owner'],
+    burn: ['damage to any target', 'damage to target creature'],
+    graveyard_recursion: ['return target card from your graveyard', 'from your graveyard to the battlefield'],
+    tutor: ['search your library for a card'],
+    discard_engine: ['discard a card', 'discards a card'],
+    mill_engine: ['mill cards', 'puts the top cards of'],
+    life_gain_engine: ['gain life', 'you gain life'],
+    life_loss_engine: ['lose life', 'loses life']
+};
+
+function buildRoleFocusedRetrievalQuery(sourceCard, parsedEffects, excludeSelf) {
+    const roles = inferStrategicRoleProfile(sourceCard, parsedEffects, '') || [];
+    const phrases = [];
+    roles.slice(0, 3).forEach(roleRecord => {
+        (ROLE_RETRIEVAL_PHRASES[roleRecord.role] || []).slice(0, 2).forEach(phrase => phrases.push(`o:"${phrase}"`));
+        (roleRecord.anchors || []).slice(0, 1).forEach(anchor => {
+            const clean = String(anchor).replace(/\s+/g, ' ').trim();
+            if (clean.length >= 5) phrases.push(`o:"${clean.replace(/"/g, '')}"`);
+        });
+    });
+    const unique = [...new Set(phrases)];
+    return unique.length ? `(${unique.slice(0, 8).join(' or ')}) ${excludeSelf}`.trim() : null;
+}
+
+function buildAlternateMechanicRetrievalQuery(sourceCard, parsedEffects, excludeSelf) {
+    const canonicals = getCanonicalFunctions(parsedEffects).slice(0, 3);
+    const clauses = [];
+    const seen = new Set();
+    const add = (value) => {
+        const clean = String(value || '').replace(/\s+/g, ' ').trim().toLowerCase();
+        if (!clean || clean.length < 3 || seen.has(clean)) return;
+        seen.add(clean);
+        clauses.push(`o:"${clean.replace(/"/g, '')}"`);
+    };
+    canonicals.forEach(cf => {
+        const p = cf?.params || {};
+        if (p.object && !['generic', 'card'].includes(String(p.object).toLowerCase())) add(p.object);
+        if (p.subtype) add(p.subtype);
+        if (p.to) add(p.to);
+    });
+    return clauses.length >= 2 ? `(${clauses.slice(0, 6).join(' ')}) ${excludeSelf}`.trim() : null;
+}
+
+function buildSynergyRetrievalQuery(sourceCard, parsedEffects, excludeSelf) {
+    const typeLine = String(sourceCard?.type_line || '').replace(/—/g, ' ').split(/\s+/).map(x => x.trim()).filter(Boolean);
+    const subtypeText = String(sourceCard?.type_line || '').split('—')[1] || '';
+    const subtypes = subtypeText.split(/\s+/).map(x => x.trim()).filter(Boolean).filter(x => /^[A-Za-z]+$/.test(x));
+    const parts = [];
+    subtypes.slice(0, 2).forEach(s => parts.push(`o:"${s.replace(/"/g, '')}"`));
+    const keywords = Array.isArray(sourceCard?.keywords) ? sourceCard.keywords.slice(0, 3) : [];
+    keywords.forEach(k => parts.push(`o:"${String(k).replace(/"/g, '')}"`));
+    const permanentType = ['creature','artifact','enchantment','planeswalker','battle','land'].find(t => typeLine.map(x => x.toLowerCase()).includes(t));
+    if (permanentType) parts.push(`type:${permanentType}`);
+    return parts.length ? `(${[...new Set(parts)].join(' or ')}) ${excludeSelf}`.trim() : null;
+}
+
+function buildFunctionalRetrievalQueries(sourceCard, parsedEffects, excludeSelf, maxFunctions = 2) {
     const sourceText = (sourceCard.oracle_text || (sourceCard.card_faces ? sourceCard.card_faces.map(f => f.oracle_text).join(' ') : '')).toLowerCase();
 
     // Take the top functions by importance, not merely the first parsed effect - a card whose
     // opening clause is a rider shouldn't have its whole retrieval strategy built from that rider
     // (review Priority 1).
-    const canonicals = getCanonicalFunctions(parsedEffects).slice(0, 2);
+    const canonicals = getCanonicalFunctions(parsedEffects).slice(0, Math.max(1, Number(maxFunctions) || 2));
 
     const descriptors = [];
     const seenQueries = new Set();
@@ -12184,13 +12379,23 @@ async function findSimilarCards() {
     if (searchDeeperBtnEl) searchDeeperBtnEl.classList.add('hidden');
 
     const isBroadSearch = Boolean(document.getElementById('broad-search')?.checked);
-    const isMatrixSweep = Boolean(document.getElementById('matrix-sweep')?.checked);
     const isDivergent = Boolean(document.getElementById('divergent-search')?.checked);
+    activeSearchMethodFlags = {
+        broad: isBroadSearch,
+        divergent: isDivergent,
+        wording: Boolean(document.getElementById('wording-search')?.checked),
+        functional: Boolean(document.getElementById('functional-search')?.checked),
+        target: Boolean(document.getElementById('target-search')?.checked),
+        role: Boolean(document.getElementById('role-search')?.checked),
+        alternate: Boolean(document.getElementById('alternate-search')?.checked),
+        synergy: Boolean(document.getElementById('synergy-search')?.checked)
+    };
+    const priorityValue = document.getElementById('sort-results')?.value || 'overall';
     const totalSteps = isDivergent ? 5 : 2;
 
     updateProgress(1, totalSteps, getActiveSourceCards().length > 1
         ? "Executing sub-searches, including shared-text search across all source cards..."
-        : "Executing sub-searches (A through G)...");
+        : "Executing retrieval and ranking streams...");
 
     const hasHighlight = Boolean(manualHighlights && manualHighlights.length > 0);
 
@@ -12221,22 +12426,9 @@ async function findSimilarCards() {
     const filters = readConstraintFilters();
 
     const hasActiveFilters = hasActiveConstraintFilters(filters);
-    let broadFallbackFilters = null;
-
-    if (isBroadSearch && !hasActiveFilters) {
-        broadFallbackFilters = {};
-        if (currentSourceCard.color_identity && currentSourceCard.color_identity.length > 0) {
-            broadFallbackFilters.identity = currentSourceCard.color_identity.join('');
-        }
-        if (currentSourceCard.type_line) {
-            const primaryTypes = ['creature', 'instant', 'sorcery', 'enchantment', 'artifact', 'planeswalker', 'land'];
-            const lowerTypeLine = currentSourceCard.type_line.toLowerCase();
-            const detectedTypes = primaryTypes.filter(t => lowerTypeLine.includes(t));
-            if (detectedTypes.length > 0) {
-                broadFallbackFilters.detectedTypes = detectedTypes;
-            }
-        }
-    }
+    // Broad Search widens retrieval without inventing new hard filters. All explicit UI constraints
+    // remain mandatory in the local filtering stage.
+    const broadFallbackFilters = null;
 
     const filterParts = buildScryfallConstraintParts(filters);
 
@@ -12258,6 +12450,23 @@ async function findSimilarCards() {
     const activeSourceCardsForSearch = getActiveSourceCards();
     const allSourceExclusions = activeSourceCardsForSearch.map(card => `-name:"${String(card.name || '').replace(/"/g, '\"')}"`).join(' ');
     const excludeSelf = allSourceExclusions || `-name:"${currentSourceCard.name.replace(/"/g, '\"')}"`;
+
+    // Broad Search uses more source-text terms than Search B and deliberately omits narrow
+    // Scryfall constraint clauses here. The local hard-filter stage still enforces every explicit
+    // constraint chosen by the user.
+    const broadSourceText = hasHighlight ? targetTextForScoring : sourceOracleTextForParsing;
+    const broadKeywords = isBroadSearch
+        ? [...new Set(
+            broadSourceText.toLowerCase()
+                .replace(/[^\w+\/-\s]/g, ' ')
+                .split(/\s+/)
+                .filter(w => w.length > 2 && !stopWords.has(w))
+        )].slice(0, 8)
+        : [];
+    const broadOracleQuery = broadKeywords.length > 0
+        ? `(${broadKeywords.map(w => `oracle:${w}`).join(' OR ')}) ${excludeSelf}`.trim()
+        : null;
+
     const sharedSourceTextQuery = activeSourceCardsForSearch.length > 1
         ? buildSharedSourceTextSearchQuery(activeSourceCardsForSearch, allSourceExclusions)
         : null;
@@ -12326,7 +12535,17 @@ async function findSimilarCards() {
         }
     }
 
-    const functionalQueries = buildFunctionalRetrievalQueries(currentSourceCard, sourceParsedEffects, excludeSelf);
+    const functionalQueries = buildFunctionalRetrievalQueries(
+        currentSourceCard, sourceParsedEffects, excludeSelf,
+        activeSearchMethodFlags.functional ? 3 : 2
+    );
+    const methodQueries = {
+        wording: activeSearchMethodFlags.wording ? buildWordingRetrievalQuery(currentSourceCard, excludeSelf, stopWords, mtgStopWords) : null,
+        target: activeSearchMethodFlags.target ? buildTargetFocusedRetrievalQuery(currentSourceCard, sourceParsedEffects, excludeSelf) : null,
+        role: activeSearchMethodFlags.role ? buildRoleFocusedRetrievalQuery(currentSourceCard, sourceParsedEffects, excludeSelf) : null,
+        alternate: activeSearchMethodFlags.alternate ? buildAlternateMechanicRetrievalQuery(currentSourceCard, sourceParsedEffects, excludeSelf) : null,
+        synergy: activeSearchMethodFlags.synergy ? buildSynergyRetrievalQuery(currentSourceCard, sourceParsedEffects, excludeSelf) : null
+    };
     if (highlightRetrievalText) {
         const highlightWords = [...new Set(highlightRetrievalText.toLowerCase().match(/[a-z][a-z0-9+\/-]{2,}/g) || [])]
             .filter(w => !mtgStopWords.has(w) && !stopWords.has(w))
@@ -12359,7 +12578,8 @@ async function findSimilarCards() {
     // one static message for however long the slowest stream takes (user request: "make sure the
     // user is aware of the current search and display stages"). trackStream wraps a promise
     // without changing what it resolves to.
-    const totalTrackedStreams = sharedSourceTextQuery ? 8 : 7; // A, B, C, D, E, F, Shared Source Text, Exact Highlight
+    const selectedMethodStreamCount = Object.values(methodQueries).filter(Boolean).length;
+    const totalTrackedStreams = 7 + (sharedSourceTextQuery ? 1 : 0) + (isBroadSearch ? 1 : 0) + selectedMethodStreamCount; // A-E, F, optional Broad/Shared/H, selected methods
     let streamsSettled = 0;
     const streamChecklistState = new Map(); // label -> done (boolean)
     function renderStreamChecklist() {
@@ -12533,6 +12753,20 @@ async function findSimilarCards() {
             "Broader Mechanical"
         );
         streamEPromise.then(r => mergeIntoPreview(r, "broader mechanical match")).catch(() => {});
+
+        // Search I: Broad Retrieval. A separate retrieval lane makes Broad Search an actual
+        // candidate-recall method rather than a dormant toggle.
+        const broadSearchMaxPages = benchmarkColdMode && benchmarkApiConservativeMode ? 1 : 8;
+        const streamBroadPromise = isBroadSearch
+            ? trackStream(
+                benchmarkUseLocalOracleCorpus ? Promise.resolve([]) :
+                (broadOracleQuery
+                    ? fetchScryfallSearch(broadOracleQuery, broadSearchMaxPages, "Broad Retrieval").catch(() => [])
+                    : Promise.resolve([])),
+                "Broad Retrieval"
+            )
+            : Promise.resolve([]);
+        streamBroadPromise.then(r => mergeIntoPreview(r, "broad retrieval")).catch(() => {});
         const streamSharedPromise = sharedSourceTextQuery
             ? trackStream(
                 benchmarkUseLocalOracleCorpus ? Promise.resolve([]) :
@@ -12577,6 +12811,23 @@ async function findSimilarCards() {
             p.then(r => mergeIntoPreview(r, `exact highlight ${idx + 1}`)).catch(() => {});
             return p;
         });
+        const methodStreamPromises = [];
+        const registerMethodStream = (key, query, label) => {
+            if (!query) return;
+            const promise = trackStream(
+                benchmarkUseLocalOracleCorpus ? Promise.resolve([]) :
+                fetchScryfallSearch(query, benchmarkPageCap, label).catch(() => []),
+                label
+            );
+            promise.then(r => mergeIntoPreview(r, key)).catch(() => {});
+            methodStreamPromises.push({ key, promise });
+        };
+        if (activeSearchMethodFlags.wording) registerMethodStream('wording search', methodQueries.wording, 'Wording Search');
+        if (activeSearchMethodFlags.target) registerMethodStream('target search', methodQueries.target, 'Target Search');
+        if (activeSearchMethodFlags.role) registerMethodStream('role search', methodQueries.role, 'Role Search');
+        if (activeSearchMethodFlags.alternate) registerMethodStream('alternative search', methodQueries.alternate, 'Alternative Search');
+        if (activeSearchMethodFlags.synergy) registerMethodStream('synergy search', methodQueries.synergy, 'Synergy Search');
+
         // The NLP model's first load (~20MB) used to happen only AFTER retrieval finished,
         // serializing two independent slow operations back to back. Loading it here instead lets
         // it overlap with the Scryfall network round-trips, and its resolved extractor is what
@@ -12640,12 +12891,14 @@ async function findSimilarCards() {
             runProgressiveRanking();
         };
 
-        const [resultsA, resultsB, resultsC, resultsD, resultsE, resultsShared, resultsFSets, resultsExactSets, extractor] = await Promise.all([
-            streamAPromise, streamBPromise, streamCPromise, streamDPromise, streamEPromise, streamSharedPromise,
+        const [resultsA, resultsB, resultsC, resultsD, resultsE, resultsBroad, resultsShared, resultsFSets, resultsExactSets, extractor, resolvedMethodStreams] = await Promise.all([
+            streamAPromise, streamBPromise, streamCPromise, streamDPromise, streamEPromise, streamBroadPromise, streamSharedPromise,
             trackStream(Promise.all(functionalQueryPromises), "Functional Match"),
             trackStream(Promise.all(exactHighlightPromises), "Exact Highlight"),
-            extractorPromise
+            extractorPromise,
+            Promise.all(methodStreamPromises.map(entry => entry.promise))
         ]);
+        const methodResults = Object.fromEntries(methodStreamPromises.map((entry, index) => [entry.key, resolvedMethodStreams[index] || []]));
         const resultsF = resultsFSets.flat();
         const resultsExact = resultsExactSets.flat();
         const resultsSharedFlat = resultsShared || [];
@@ -12766,10 +13019,12 @@ const streamDiagnostics = {
     "Search C": new Set((resultsC || []).map(c => c.name.toLowerCase())),
     "Search D": new Set((resultsD || []).map(c => c.name.toLowerCase())),
     "Search E": new Set((resultsE || []).map(c => c.name.toLowerCase())),
+    "Broad Retrieval": new Set((resultsBroad || []).map(c => c.name.toLowerCase())),
     "Shared Source Text": new Set((resultsSharedFlat || []).map(c => c.name.toLowerCase())),
     "Search F": new Set((resultsF || []).map(c => c.name.toLowerCase())),
     "Search G": new Set((resultsG || []).map(c => c.name.toLowerCase())),
-    "Search H": new Set((resultsExact || []).map(c => c.name.toLowerCase()))
+    "Search H": new Set((resultsExact || []).map(c => c.name.toLowerCase())),
+    ...Object.fromEntries(Object.entries(methodResults).map(([key, value]) => [key, new Set((value || []).map(c => c.name.toLowerCase()))]))
 };
 
 // Per-stream coverage (total_cards vs. what was actually fetched) - lets a caller tell "this
@@ -12783,11 +13038,13 @@ const streamCoverage = {
     "Search B": resultsB?.coverage || null,
     "Search C": resultsC?.coverage || null,
     "Search E": resultsE?.coverage || null,
+    "Broad Retrieval": resultsBroad?.coverage || null,
     "Shared Source Text": resultsSharedFlat?.coverage || null
 };
 
 const sniperCardIds = new Set((resultsA || []).map(card => card.id));
-const rawCandidates = [...resultsA, ...resultsB, ...resultsC, ...resultsD, ...resultsE, ...resultsSharedFlat, ...resultsF, ...resultsG, ...resultsExact];
+const methodRawCandidates = Object.values(methodResults).flatMap(value => Array.isArray(value) ? value : []);
+const rawCandidates = [...resultsA, ...resultsB, ...resultsC, ...resultsD, ...resultsE, ...resultsBroad, ...resultsSharedFlat, ...resultsF, ...resultsG, ...resultsExact, ...methodRawCandidates];
 const countRetrieved = rawCandidates.length;
 
 // Stage 1: Raw candidate pool set
@@ -12934,8 +13191,10 @@ if (candidates.length > 0) {
     // scored -> pruned breakdown; also feeds the confidence-aware weighting above).
     const meaningfulParseNames = new Set(candidates.filter(c => (c.parseConfidence || 0) > 0).map(c => (c.name || '').toLowerCase()));
 
-    const priorityValue = document.getElementById('sort-results')?.value || 'overall';
-    const scoreKey = typeof getScoreKeyByCriteria === 'function' ? getScoreKeyByCriteria(priorityValue) : 'similarityScore';
+    // Order is a presentation/ranking choice. Relevance pruning stays anchored to the canonical
+    // Overall Match score so selecting e.g. Category or Strategic Role does not accidentally turn
+    // those secondary channels into hard eligibility tests.
+    const scoreKey = 'similarityScore';
     candidates.sort((a, b) => (b[scoreKey] || 0) - (a[scoreKey] || 0));
 
     // Stage 5: Relevance Floor.
@@ -12945,7 +13204,7 @@ if (candidates.length > 0) {
     // default path therefore uses absolute + relative thresholds, while a small set of candidates
     // with *strong, direct* evidence can bypass the relative cutoff. Those protected candidates are
     // still subject to the absolute floor unless their direct signal itself is strong enough.
-    const ABSOLUTE_RELEVANCE_FLOOR = isDivergent ? 0.17 : 0.18;
+    const ABSOLUTE_RELEVANCE_FLOOR = isBroadSearch ? 0.145 : (isDivergent ? 0.17 : 0.18);
     // Strongly parsed source cards get a tighter relative floor; uncertain sources receive a little
     // more distance so wording/parse gaps do not erase legitimate semantic matches.
     // This is the same source-confidence definition used inside scoreCardBatch, made local here so
@@ -12955,7 +13214,9 @@ if (candidates.length > 0) {
     ));
     const RELATIVE_RELEVANCE_OFFSET = isDivergent
         ? 0.52
-        : (0.24 + (1 - floorSourceConfidence) * 0.10);
+        : (isBroadSearch
+            ? 0.30 + (1 - floorSourceConfidence) * 0.12
+            : 0.24 + (1 - floorSourceConfidence) * 0.10);
 
     const bestKeyScore = candidates.reduce((max, c) => Math.max(max, c[scoreKey] || 0), 0);
     const relativeFloor = Math.max(0, bestKeyScore - RELATIVE_RELEVANCE_OFFSET);
@@ -13033,22 +13294,15 @@ if (candidates.length > 0) {
     candidates = qualified;
     candidates.forEach(c => { if (!c._catastrophicEmptyRescue) c._weakBackfillMatch = false; });
 
-    candidates.sort((a, b) => (b[scoreKey] || 0) - (a[scoreKey] || 0));
+    candidates = applyResultOrdering(candidates, priorityValue);
 
     const countAfterRelevanceFloor = candidates.length;
     const relevanceFloorRescued = candidates.filter(c => c._catastrophicEmptyRescue).length;
-    // Stage 6: what survived pruning, before any matrix-sweep bucketing further trims the list.
+    // Stage 6: what survived pruning. Matrix Sweep is an Order mode, so it never trims the
+    // scored candidate pool.
     const passedRelevanceFloorNames = new Set(candidates.map(c => (c.name || '').toLowerCase()));
 
-    if (isMatrixSweep) {
-        const buckets = {};
-        candidates.forEach(card => {
-            const key = `${card.cmc !== undefined ? Math.floor(card.cmc) : 'X'}-${['creature', 'instant', 'sorcery', 'enchantment', 'artifact', 'planeswalker', 'land'].find(t => (card.type_line||'').toLowerCase().includes(t)) || 'other'}`;
-            if (!buckets[key]) buckets[key] = [];
-            if (buckets[key].length < 3) buckets[key].push(card);
-        });
-        candidates = Object.values(buckets).flat().sort((a, b) => (b[scoreKey] || 0) - (a[scoreKey] || 0));
-    } else if (isDivergent) {
+    if (isDivergent) {
         // "Divergent Search" was previously a dead checkbox (found while auditing the pipeline):
         // it set totalSteps to 5, but nothing anywhere else ever branched on isDivergent, so
         // checking it changed the progress bar's denominator and NOTHING about the actual
@@ -13143,7 +13397,7 @@ if (candidates.length > 0) {
     // importantly, exact-highlight constraints must be re-applied before scoring/ranking deeper
     // candidates, because a continuation page is not semantically privileged just because it came
     // from a broader lexical stream.
-    const deeperStreamCursors = [resultsA, resultsB, resultsC, resultsE, ...resultsFSets, ...resultsExactSets]
+    const deeperStreamCursors = [resultsA, resultsB, resultsC, resultsE, resultsBroad, ...resultsFSets, ...resultsExactSets]
         .map(r => r?.continuation)
         .filter(Boolean);
     pendingDeeperSearch = deeperStreamCursors.length > 0 ? {
@@ -13155,7 +13409,7 @@ if (candidates.length > 0) {
             weights: { mechanical: wM, synergy: wS, context: wC, exactness: wE, category: wCa },
             tags: activeTags, topNNames, sniperIds: sniperCardIds,
             targetTextForScoring, targetVector, extractor,
-            sourceCard: currentSourceCard, scoreKey,
+            sourceCard: currentSourceCard, scoreKey, orderCriteria: priorityValue,
             // Snapshot the highlight state so Search Deeper cannot accidentally consult mutated
             // global UI state if the user changes/removes a highlight after the initial search.
             highlightConstraints: (manualHighlights || []).map(h => ({
@@ -13352,8 +13606,10 @@ if (candidates.length > 0) {
                         if (semanticQualified.length > 0) {
                             semanticAddedCount = semanticQualified.length;
                             if (Number.isFinite(lastSearchCandidateCount)) lastSearchCandidateCount += semanticQualified.length;
-                            lastSearchResults = [...lastSearchResults, ...semanticQualified]
-                                .sort((a, b) => (Number(b[scoreKey]) || 0) - (Number(a[scoreKey]) || 0));
+                            lastSearchResults = applyResultOrdering(
+                                [...lastSearchResults, ...semanticQualified],
+                                priorityValue
+                            );
                             renderResults(lastSearchResults);
                         }
                     }
@@ -13426,10 +13682,9 @@ if (candidates.length > 0) {
  * instead means every fetch here is for genuinely new pages, and every score computed here is for
  * a genuinely new card.
  *
- * Scope note: this applies the same ABSOLUTE_RELEVANCE_FLOOR quality gate the main pipeline uses,
- * but does not re-run the relative-to-best floor, matrix-sweep bucketing, or divergent MMR pass
- * against the newly-merged set - those are relative to "the pool as a whole" in ways that would
- * require re-deriving embeddings/vectors context this function intentionally avoids duplicating.
+ * Scope note: this applies the same relevance-quality gate as the main pipeline uses, but does not
+ * re-run the relative-to-best pruning pass or the divergent/MMR pass against the newly-merged set.
+ * Matrix Sweep is an Order mode and is re-applied through the saved order criterion instead.
  * New results are simply merged in and re-sorted by the same scoreKey the original search used.
  */
 async function searchDeeper() {
@@ -13509,8 +13764,10 @@ async function searchDeeper() {
                 return score >= ABSOLUTE_RELEVANCE_FLOOR || (direct >= 0.80 && score >= 0.14);
             });
 
-            lastSearchResults = [...lastSearchResults, ...qualified]
-                .sort((a, b) => (b[context.scoreKey] || 0) - (a[context.scoreKey] || 0));
+            lastSearchResults = applyResultOrdering(
+                [...lastSearchResults, ...qualified],
+                context.orderCriteria || 'overall'
+            );
             if (Number.isFinite(lastSearchCandidateCount)) lastSearchCandidateCount += qualified.length;
             renderResults(lastSearchResults);
             updateResultsSummary();
@@ -13538,14 +13795,100 @@ async function searchDeeper() {
     }
 }
 
+function getRankingScoreForCriteria(card, criteria) {
+    if (!card) return 0;
+    switch (criteria) {
+        case 'functional': return Number(card.functionScore) || 0;
+        case 'semantic': return Number(card.contextScore) || 0;
+        case 'role': return Number(card.roleScore) || 0;
+        case 'balanced': {
+            const mechanical = Number(card.mechanicalScore) || 0;
+            const functional = Number(card.functionScore) || 0;
+            return (mechanical * 0.65) + (functional * 0.35);
+        }
+        case 'mechanical': return Number(card.mechanicalScore) || 0;
+        case 'synergy': return Number(card.synergyScore) || 0;
+        case 'exactness': return Number(card.exactnessScore) || 0;
+        case 'category': return Number(card.categoryScore) || 0;
+        case 'overall':
+        default: return Number(card.similarityScore) || 0;
+    }
+}
+
+function buildMatrixSweepOrder(cards) {
+    const groups = new Map();
+    (cards || []).forEach(card => {
+        const cmc = Number.isFinite(Number(card?.cmc)) ? Math.floor(Number(card.cmc)) : 'X';
+        const typeLine = String(card?.type_line || '').toLowerCase();
+        const type = ['creature', 'instant', 'sorcery', 'enchantment', 'artifact', 'planeswalker', 'land']
+            .find(t => typeLine.includes(t)) || 'other';
+        const key = `${cmc}-${type}`;
+        if (!groups.has(key)) groups.set(key, []);
+        groups.get(key).push(card);
+    });
+    const orderedGroups = Array.from(groups.values()).map(group =>
+        group.slice().sort((a, b) => (Number(b.similarityScore) || 0) - (Number(a.similarityScore) || 0))
+    );
+    const output = [];
+    const maxLength = orderedGroups.reduce((m, group) => Math.max(m, group.length), 0);
+    for (let round = 0; round < maxLength; round++) {
+        const roundCards = orderedGroups.filter(group => group[round]).map(group => group[round]);
+        roundCards.sort((a, b) => (Number(b.similarityScore) || 0) - (Number(a.similarityScore) || 0));
+        output.push(...roundCards);
+    }
+    return output;
+}
+
+function buildDiverseOrder(cards) {
+    const input = Array.isArray(cards) ? cards.slice() : [];
+    if (input.length < 3) return input;
+    const pool = input.slice(0, 80);
+    const rest = input.slice(80);
+    const vectorOf = card => {
+        const functionText = card?._parsedEffects ? canonicalFunctionToText(getCanonicalFunctions(card._parsedEffects)) : null;
+        if (functionText && embeddingCache.has(functionText)) return embeddingCache.get(functionText);
+        const oracleText = card?.oracle_text || (card?.card_faces ? card.card_faces.map(f => f.oracle_text || '').join(' ') : '');
+        const normalized = oracleText ? normalizeOracleForEmbedding(oracleText, card?.name) : '';
+        return normalized && embeddingCache.has(normalized) ? embeddingCache.get(normalized) : null;
+    };
+    const entries = pool.map(card => ({ card, vector: vectorOf(card) }));
+    const bestScore = Math.max(0.0001, ...entries.map(e => Number(e.card?.similarityScore) || 0));
+    const selected = [];
+    const remaining = entries.slice();
+    const lambda = 0.62;
+    const unknownSimilarity = 0.5;
+    while (remaining.length) {
+        let bestIndex = 0;
+        let bestValue = -Infinity;
+        for (let i = 0; i < remaining.length; i++) {
+            const item = remaining[i];
+            const relevance = (Number(item.card?.similarityScore) || 0) / bestScore;
+            let redundancy = 0;
+            for (const picked of selected) {
+                const sim = item.vector && picked.vector
+                    ? Math.max(0, cosineSimilarity(item.vector, picked.vector))
+                    : unknownSimilarity;
+                redundancy = Math.max(redundancy, sim);
+            }
+            const value = lambda * relevance - (1 - lambda) * redundancy;
+            if (value > bestValue) { bestValue = value; bestIndex = i; }
+        }
+        selected.push(remaining.splice(bestIndex, 1)[0]);
+    }
+    return [...selected.map(x => x.card), ...rest];
+}
+
+function applyResultOrdering(cards, criteria) {
+    const input = Array.isArray(cards) ? cards.slice() : [];
+    if (criteria === 'matrix') return buildMatrixSweepOrder(input);
+    if (criteria === 'diverse') return buildDiverseOrder(input);
+    return input.sort((a, b) => getRankingScoreForCriteria(b, criteria) - getRankingScoreForCriteria(a, criteria));
+}
+
 function reorderResults() {
     if (!lastSearchResults || lastSearchResults.length === 0) return;
     const criteria = document.getElementById('sort-results')?.value || 'overall';
-    const scoreKey = getScoreKeyByCriteria(criteria);
-    
-    lastSearchResults.sort((a, b) => {
-        return (b[scoreKey] || 0) - (a[scoreKey] || 0); 
-    });
+    lastSearchResults = applyResultOrdering(lastSearchResults, criteria);
 }
 
 async function copyCardNameToClipboard(cardName, button = null) {
@@ -13792,6 +14135,21 @@ function renderResults(cards) {
         actions.className = 'card-actions';
         actions.style.cssText = 'display: flex; gap: 8px; margin-top: 8px;';
 
+        const favoriteCandidateBtn = document.createElement('button');
+        favoriteCandidateBtn.type = 'button';
+        favoriteCandidateBtn.className = 'result-favorite-btn';
+        favoriteCandidateBtn.dataset.favoriteCardName = card.name;
+        const candidateIsFavorite = getStoredArray(FAVORITES_KEY).some(name => String(name).toLowerCase() === String(card.name).toLowerCase());
+        favoriteCandidateBtn.textContent = candidateIsFavorite ? '★' : '☆';
+        favoriteCandidateBtn.title = candidateIsFavorite ? `Remove ${card.name} from favorites` : `Add ${card.name} to favorites`;
+        favoriteCandidateBtn.setAttribute('aria-label', favoriteCandidateBtn.title);
+        favoriteCandidateBtn.classList.toggle('is-favorited', candidateIsFavorite);
+        favoriteCandidateBtn.addEventListener('click', event => {
+            event.preventDefault();
+            event.stopPropagation();
+            toggleFavoriteCard(card);
+        });
+
         const compareBtn = document.createElement('button');
         compareBtn.className = 'compare-btn';
         compareBtn.dataset.index = String(index);
@@ -13807,6 +14165,7 @@ function renderResults(cards) {
         selectLabel.appendChild(selectCheckbox);
         selectLabel.appendChild(document.createTextNode(' Select'));
 
+        actions.appendChild(favoriteCandidateBtn);
         actions.appendChild(compareBtn);
         actions.appendChild(selectLabel);
 

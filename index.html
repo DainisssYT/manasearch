@@ -114,7 +114,7 @@
                             <span class="section-kicker">SEARCH WORKSPACE</span>
                             <h2>Configure Search</h2>
                         </div>
-                        <p class="section-description">Use optional methods and hard filters to shape the candidate pool. Ranking is handled automatically.</p>
+                        <p class="section-description">Use retrieval methods to change how cards are found, then choose how the scored results are ordered.</p>
                     </div>
                     <div class="trigger-buttons-group">
                         <button type="button" id="toggle-search-methods-btn" class="methods-trigger-btn">
@@ -125,10 +125,15 @@
                             <select id="sort-results" aria-label="Order results">
                                 <option value="overall">Overall Match</option>
                                 <option value="mechanical">Mechanical</option>
+                                <option value="functional">Functional</option>
+                                <option value="semantic">Semantic</option>
+                                <option value="role">Strategic Role</option>
+                                <option value="balanced">Mechanical + Functional</option>
                                 <option value="synergy">Synergy</option>
-                                <option value="context">Context</option>
                                 <option value="exactness">Exactness</option>
                                 <option value="category">Category</option>
+                                <option value="matrix">Matrix Sweep</option>
+                                <option value="diverse">Diverse Spread</option>
                             </select>
                         </div>
                         <button type="button" id="toggle-card-constraints-btn" class="methods-trigger-btn">
@@ -183,21 +188,64 @@
                         <input type="checkbox" id="broad-search">
                         <div class="method-text">
                             <strong>Broad Search</strong>
-                            <span>Loosens rule constraints to uncover a broader range of mechanically related cards.</span>
+                            <span>Widen retrieval when the normal search is too narrow. Keeps your explicit constraints, but explores more loosely related Oracle text.</span>
+                            <small>Best for: unusual wording, sparse result sets, or hard-to-parse cards.</small>
                         </div>
                     </label>
                     <label class="method-card">
                         <input type="checkbox" id="divergent-search">
                         <div class="method-text">
                             <strong>Divergent Search</strong>
-                            <span>Performs multi-step branch exploration to find unexpected combinations and synergies.</span>
+                            <span>Find a wider spread of good matches instead of many near-duplicates.</span>
+                            <small>Best for: discovering alternatives when the normal top results all look alike.</small>
                         </div>
                     </label>
                     <label class="method-card">
-                        <input type="checkbox" id="matrix-sweep">
+                        <input type="checkbox" id="wording-search">
                         <div class="method-text">
-                            <strong>Matrix Sweep (Top 3 by CMC/Type)</strong>
-                            <span>Groups results by Mana Value and Type to prevent similar-cost clutter.</span>
+                            <strong>Wording Search</strong>
+                            <span>Looks for cards that use similar Oracle wording, phrases, and terminology.</span>
+                            <small>Best for: templated effects, reprints, and wording-specific searches.</small>
+                        </div>
+                    </label>
+                    <label class="method-card">
+                        <input type="checkbox" id="functional-search">
+                        <div class="method-text">
+                            <strong>Functional Search</strong>
+                            <span>Gives extra weight to doing the same job, even when the wording is substantially different.</span>
+                            <small>Best for: true functional substitutes and differently worded versions of an effect.</small>
+                        </div>
+                    </label>
+                    <label class="method-card">
+                        <input type="checkbox" id="target-search">
+                        <div class="method-text">
+                            <strong>Target Search</strong>
+                            <span>Finds cards that care about the same kinds of objects, targets, zones, or restrictions.</span>
+                            <small>Best for: finding other answers to the same problem without requiring the same mechanic.</small>
+                        </div>
+                    </label>
+                    <label class="method-card">
+                        <input type="checkbox" id="role-search">
+                        <div class="method-text">
+                            <strong>Role Search</strong>
+                            <span>Looks for cards that fill the same strategic role, such as ramp, removal, counterspell, recursion, or card advantage.</span>
+                            <small>Best for: deck-building and replacing a card's job rather than copying its text.</small>
+                        </div>
+                    </label>
+                    <label class="method-card">
+                        <input type="checkbox" id="alternate-search">
+                        <div class="method-text">
+                            <strong>Alternative Search</strong>
+                            <span>Prefers different mechanics that still pursue a similar outcome.</span>
+                            <small>Best for: finding replacements that solve the same problem in a different way.</small>
+                        </div>
+                    </label>
+                    <label class="method-card">
+                        <input type="checkbox" id="synergy-search">
+                        <div class="method-text">
+                            <strong>Synergy Search</strong>
+                            <span>Searches for cards that interact with the source's type, subtype, keywords, or strategic context.</span>
+                            <small>Best for: tribal cards, build-arounds, combo pieces, and cards that support the source rather than copy it.</small>
                         </div>
                     </label>
                     <div class="method-setting-row search-depth-control">

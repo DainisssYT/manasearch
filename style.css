@@ -1412,8 +1412,18 @@ body.light-theme {
 }
 
 .method-text span {
+    display: block;
     font-size: 12px;
+    line-height: 1.45;
     color: var(--text-muted);
+}
+
+.method-text small {
+    display: block;
+    margin-top: 5px;
+    font-size: 11px;
+    line-height: 1.4;
+    color: var(--text-secondary, var(--text-muted));
 }
 
 .method-setting-row {
@@ -1768,8 +1778,18 @@ section {
 }
 
 .method-text span {
+    display: block;
     font-size: 12px;
+    line-height: 1.45;
     color: var(--text-muted);
+}
+
+.method-text small {
+    display: block;
+    margin-top: 5px;
+    font-size: 11px;
+    line-height: 1.4;
+    color: var(--text-secondary, var(--text-muted));
 }
 
 /* Floating Action Bar for Selected Cards */
@@ -4281,3 +4301,37 @@ body:not(.light-theme) #theme-toggle { color: var(--text-main) !important; }
 }
 
 .results-summary.hidden { display: none; }
+
+
+/* Favorite controls on candidate/result cards */
+.result-favorite-btn {
+    width: 34px;
+    min-width: 34px;
+    height: 30px;
+    padding: 0;
+    border: 1px solid var(--border-color);
+    border-radius: 7px;
+    background: var(--bg-primary);
+    color: var(--text-main);
+    font-size: 18px;
+    line-height: 1;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.result-favorite-btn:hover {
+    border-color: var(--accent-color);
+    color: var(--accent-color);
+    background: var(--bg-accent);
+}
+
+.result-favorite-btn.is-favorited {
+    color: var(--accent-color);
+}
+
+.result-favorite-btn:focus-visible {
+    outline: 2px solid var(--accent-color);
+    outline-offset: 2px;
+}
