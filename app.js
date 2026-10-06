@@ -12546,6 +12546,11 @@ async function findSimilarCards() {
 
     const hasHighlight = Boolean(manualHighlights && manualHighlights.length > 0);
 
+    // Initialize before any retrieval/checklist code can touch the binding. `functionalRetrievalPlans`
+    // is populated later, but keeping the binding initialized from the start prevents a Temporal
+    // Dead Zone error when a progress/render callback runs while the search function is awaiting.
+    let functionalRetrievalPlans = [];
+
     // Joined with ". " rather than a bare space: multiple highlights are very often disjoint
     // spans pulled from separate sentences/clauses on the card (e.g. one highlight from an ETB
     // ability, another from a separate activated ability further down). A bare-space join
@@ -12634,24 +12639,6 @@ async function findSimilarCards() {
         ? `${activeTags.map(tag => `(otag:"${tag}" OR oracle:"${tag}")`).join(' OR ')} ${filterParts.join(' ')} ${excludeSelf}`.trim()
         : null;
 
-    // Show the detailed process immediately, before any slow network/model work begins. Search F
-    // and Search H can each contain multiple independent queries, so every underlying query gets
-    // its own checklist row. This keeps each page denominator attached to the query that owns it.
-    const functionalStreamLabels = functionalQueries.map((_, idx) => `Search F #${idx + 1} (Functional Match)`);
-    const exactHighlightStreamLabels = exactHighlightQueries.map((_, idx) => `Search H #${idx + 1} (Exact Highlight)`);
-    const plannedStreamLabels = [
-        'Exact Phrase', 'Oracle Terms', 'Mechanics/Tags', 'Card2Vec', 'Broader Mechanical',
-        ...functionalStreamLabels, ...exactHighlightStreamLabels
-    ];
-    if (isBroadSearch) plannedStreamLabels.push('Broad Retrieval');
-    if (sharedSourceTextQuery) plannedStreamLabels.push('Shared Source Text');
-    if (activeSearchMethodFlags.wording) plannedStreamLabels.push('Wording Search');
-    if (activeSearchMethodFlags.functional) plannedStreamLabels.push('Functional Search');
-    if (activeSearchMethodFlags.target) plannedStreamLabels.push('Target Search');
-    if (activeSearchMethodFlags.role) plannedStreamLabels.push('Role Search');
-    if (activeSearchMethodFlags.alternate) plannedStreamLabels.push('Alternative Search');
-    if (activeSearchMethodFlags.synergy) plannedStreamLabels.push('Synergy Search');
-
     const card2vecRecs = typeof getCard2VecRecommendations === 'function' 
         ? await getCard2VecRecommendations(currentSourceCard.name) 
         : [];
@@ -12700,7 +12687,7 @@ async function findSimilarCards() {
         }
     }
 
-    const functionalQueries = buildFunctionalRetrievalQueries(
+    functionalRetrievalPlans = buildFunctionalRetrievalQueries(
         currentSourceCard, sourceParsedEffects, excludeSelf,
         activeSearchMethodFlags.functional ? 3 : 2
     );
@@ -12716,13 +12703,31 @@ async function findSimilarCards() {
             .filter(w => !mtgStopWords.has(w) && !stopWords.has(w))
             .slice(0, 6);
         if (highlightWords.length > 0) {
-            functionalQueries.push({
+            functionalRetrievalPlans.push({
                 query: `(${highlightWords.map(w => `oracle:${w}`).join(' OR ')}) ${excludeSelf}`.trim(),
                 narrow: false,
                 source: 'highlight-intent'
             });
         }
     }
+
+    // Show the detailed process immediately after all stream plans are known. Search F
+    // and Search H can each contain multiple independent queries, so every underlying query gets
+    // its own checklist row. This keeps each page denominator attached to the query that owns it.
+    const functionalStreamLabels = functionalRetrievalPlans.map((_, idx) => `Search F #${idx + 1} (Functional Match)`);
+    const exactHighlightStreamLabels = exactHighlightQueries.map((_, idx) => `Search H #${idx + 1} (Exact Highlight)`);
+    const plannedStreamLabels = [
+        'Exact Phrase', 'Oracle Terms', 'Mechanics/Tags', 'Card2Vec', 'Broader Mechanical',
+        ...functionalStreamLabels, ...exactHighlightStreamLabels
+    ];
+    if (isBroadSearch) plannedStreamLabels.push('Broad Retrieval');
+    if (sharedSourceTextQuery) plannedStreamLabels.push('Shared Source Text');
+    if (activeSearchMethodFlags.wording) plannedStreamLabels.push('Wording Search');
+    if (activeSearchMethodFlags.functional) plannedStreamLabels.push('Functional Search');
+    if (activeSearchMethodFlags.target) plannedStreamLabels.push('Target Search');
+    if (activeSearchMethodFlags.role) plannedStreamLabels.push('Role Search');
+    if (activeSearchMethodFlags.alternate) plannedStreamLabels.push('Alternative Search');
+    if (activeSearchMethodFlags.synergy) plannedStreamLabels.push('Synergy Search');
 
     // Confidence-aware retrieval depth for Search B specifically: known synchronously, before any
     // network call, from how cleanly the source card's own text parsed - no need to wait on
@@ -12986,7 +12991,7 @@ async function findSimilarCards() {
         // lands, not only once the whole Search F batch is done.
         const uniqueFunctionalQueries = [];
         const seenFunctionalQueries = new Set();
-        functionalQueries.forEach(q => {
+        functionalRetrievalPlans.forEach(q => {
             if (!q?.query || seenFunctionalQueries.has(q.query)) return;
             seenFunctionalQueries.add(q.query);
             uniqueFunctionalQueries.push(q);
@@ -13198,7 +13203,7 @@ async function findSimilarCards() {
         // parameterized, tag-based) actually retrieved anything, and how thoroughly, rather than
         // one merged "Search F: 163 cards" number that hides which query did the work
         // (review Priority 8).
-        const searchFQueryDetail = functionalQueries.map((q, i) => ({
+        const searchFQueryDetail = functionalRetrievalPlans.map((q, i) => ({
             query: q.query,
             narrow: q.narrow,
             retrieved: (resultsFSets[i] || []).length,
