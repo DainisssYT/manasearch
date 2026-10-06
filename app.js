@@ -13367,13 +13367,17 @@ candidates.forEach(card => {
 // invisible side effect of the filter step (project spec Priority 7).
 const dedupedNames = new Set(candidates.map(c => (c.name || '').toLowerCase()));
 
+// Keep the target embedding alive for the entire search request. The initial scoring pass
+// computes it once; the background semantic-expansion pass runs later, outside this block, and
+// must reuse the same vector instead of referencing a block-scoped variable that no longer exists.
+let targetVector = null;
+
 if (candidates.length > 0) {
     updateProgress(2, totalSteps, "Scoring candidate pool via ManaSearch...");
     await backgroundAwareDelay(50); 
     
     const scoringStartedAt = Date.now();
     // extractor was already resolved above, concurrently with retrieval - no need to fetch it again.
-    let targetVector = null;
     if (extractor && extractor.type !== 'fallback') {
         targetVector = await getCachedEmbedding(normalizeOracleForEmbedding(targetTextForScoring, currentSourceCard.name), extractor);
     }
