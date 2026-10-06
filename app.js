@@ -7673,6 +7673,45 @@ function calculateCategoryScore(targetCard, tags, sourceCard = null, sourceEffec
 }
 
 
+function runWhenIdle(task, { timeout = 2500 } = {}) {
+    return new Promise((resolve, reject) => {
+        let settled = false;
+        const finish = (fn, value) => {
+            if (settled) return;
+            settled = true;
+            fn(value);
+        };
+        const invoke = () => {
+            Promise.resolve()
+                .then(task)
+                .then(value => finish(resolve, value), error => finish(reject, error));
+        };
+
+        if (typeof window !== 'undefined' && typeof window.requestIdleCallback === 'function') {
+            window.requestIdleCallback(invoke, { timeout: Math.max(0, Number(timeout) || 0) });
+        } else {
+            setTimeout(invoke, Math.min(Math.max(0, Number(timeout) || 0), 50));
+        }
+    });
+}
+
+async function pauseForUserIdle(initialDelayMs = 0, maxDelayMs = 2500) {
+    const initial = Math.max(0, Number(initialDelayMs) || 0);
+    const maxWait = Math.max(initial, Number(maxDelayMs) || 0);
+    if (initial > 0) await backgroundAwareDelay(initial);
+
+    // Do not make background semantic work compete with an actively visible page. A hidden tab
+    // is already deprioritized by the browser, so the small visibility check simply lets the work
+    // proceed without spinning while the user is away.
+    if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
+
+    if (typeof window !== 'undefined' && typeof window.requestIdleCallback === 'function') {
+        await new Promise(resolve => window.requestIdleCallback(() => resolve(), { timeout: maxWait }));
+    } else if (maxWait > 0) {
+        await backgroundAwareDelay(Math.min(50, maxWait));
+    }
+}
+
 function backgroundAwareDelay(ms) {
     return new Promise(resolve => {
         const id = Math.random().toString();
