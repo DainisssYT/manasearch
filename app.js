@@ -9042,7 +9042,7 @@ function parseStaticSemanticIndexBinary(buffer) {
         throw new Error('Static semantic index is too small or empty.');
     }
     const bytes = new Uint8Array(buffer);
-    const magic = String.fromCharCode(...bytes.subarray(0, 5));
+    const magic = String.fromCharCode(...bytes.subarray(0, 6));
     if (magic !== STATIC_SEMANTIC_INDEX_MAGIC) {
         throw new Error('Static semantic index has an unknown format.');
     }
@@ -9124,6 +9124,7 @@ async function loadStaticSemanticIndex() {
         index.staticUrl = url;
         index.byteLength = buffer.byteLength;
         fullSemanticIndexMemory = index;
+        console.info(`Precomputed semantic index loaded: ${index.total.toLocaleString()} cards, ${index.dim}-dimensional vectors.`);
         return index;
     })().catch(error => {
         staticSemanticIndexLoadError = error?.message || String(error);
