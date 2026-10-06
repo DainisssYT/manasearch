@@ -13,6 +13,9 @@ let pendingDeeperSearch = null;
 // every pipeline stage even on searches that plainly worked. Results data and instrumentation are
 // now separate state (review Priority 1).
 let lastSearchDiagnostics = null;
+// User-facing search totals. This counts unique candidates that survived hard filters and reached
+// the scoring/ranking stage, while lastSearchResults is the final relevance-qualified result set.
+let lastSearchCandidateCount = null;
 const searchCache = new Map();
 const sourceCardCache = new Map();
 let nlpExtractor = null;
@@ -7828,7 +7831,7 @@ function normalizeConstraintList(value) {
 }
 
 function getTypeLineParts(card) {
-    const typeLine = String(card?.type_line || '').trim().toLowerCase();
+    const typeLine = String((typeof card === 'string' ? card : card?.type_line) || '').trim().toLowerCase();
     const divider = typeLine.split(/\s*[—–-]\s*/);
     const left = divider[0] || '';
     const subtypes = divider.length > 1 ? divider.slice(1).join(' ') : '';
@@ -9063,6 +9066,13 @@ async function loadStaticSemanticIndex() {
 // the whole card pool. The fallback is started only when a real search asks for semantic retrieval.
 function preloadStaticSemanticIndex() {
     return loadStaticSemanticIndex();
+}
+
+// Compatibility helper: this used to read Scryfall bulk-card records directly.
+// The browser no longer downloads/builds the bulk corpus; this simply extracts Oracle text
+// from an ordinary Scryfall card object so retrieval/parsing code keeps one stable interface.
+function extractBulkOracleCardText(card) {
+    return getCardOracleText(card);
 }
 
 function buildSemanticRetrievalText(card, parsedEffects = null) {
@@ -10969,6 +10979,7 @@ function clearSourceCard() {
     renderAdditionalSourceCards();
     updateSourceCardMultiSearchState();
     lastSearchResults = [];
+    lastSearchCandidateCount = null;
     manualHighlights = [];
     highlightComposerOpen = false;
     selectedRelatedCards.clear();
@@ -12552,7 +12563,12 @@ async function findSimilarCards() {
             uniqueFunctionalQueries.push(q);
         });
         const functionalQueryPromises = benchmarkUseLocalOracleCorpus ? [] : uniqueFunctionalQueries.map((q, idx) => {
-            const p = fetchScryfallSearch(q.query, benchmarkPageCap, "Search F (Functional Match)").catch(() => []);
+            // Search F is a family of independent functional formulations. Each formulation can
+            // legitimately have a different Scryfall result-set size, so its page budget must be
+            // shown with a unique label. Reusing one label made the UI look as though the same
+            // stream changed from (for example) 3/7 pages to 3/8 pages mid-search.
+            const streamLabel = `Search F #${idx + 1} (Functional Match)`;
+            const p = fetchScryfallSearch(q.query, benchmarkPageCap, streamLabel).catch(() => []);
             p.then(r => mergeIntoPreview(r, `functional match ${idx + 1}`)).catch(() => {});
             return p;
         });
@@ -13114,6 +13130,9 @@ if (candidates.length > 0) {
     timings.rankingMs = Date.now() - rankingStartedAt;
 
     lastSearchResults = candidates;
+    // Count unique, hard-filtered candidates that actually reached scoring. The raw retrieved
+    // count can contain duplicates because multiple retrieval streams can surface the same card.
+    lastSearchCandidateCount = countAfterHardFilters;
 
     // Collect a resumable cursor from every stream that was deliberately capped mid-pagination
     // (see fetchScryfallSearch's `.continuation`) - Search D (Card2Vec via fetchScryfallCollection)
@@ -13224,6 +13243,7 @@ if (candidates.length > 0) {
         document.getElementById('provisional-results-banner')?.classList.add('hidden');
         const renderStartedAt = Date.now();
         renderResults(lastSearchResults);
+        updateResultsSummary();
 
         // The first useful result set is now genuinely the end of the user-facing search. The
         // full-corpus semantic index may still be downloading/embedding thousands of cards, so do
@@ -13331,6 +13351,7 @@ if (candidates.length > 0) {
 
                         if (semanticQualified.length > 0) {
                             semanticAddedCount = semanticQualified.length;
+                            if (Number.isFinite(lastSearchCandidateCount)) lastSearchCandidateCount += semanticQualified.length;
                             lastSearchResults = [...lastSearchResults, ...semanticQualified]
                                 .sort((a, b) => (Number(b[scoreKey]) || 0) - (Number(a[scoreKey]) || 0));
                             renderResults(lastSearchResults);
@@ -13490,7 +13511,9 @@ async function searchDeeper() {
 
             lastSearchResults = [...lastSearchResults, ...qualified]
                 .sort((a, b) => (b[context.scoreKey] || 0) - (a[context.scoreKey] || 0));
+            if (Number.isFinite(lastSearchCandidateCount)) lastSearchCandidateCount += qualified.length;
             renderResults(lastSearchResults);
+            updateResultsSummary();
 
             qualified.forEach(c => existingNames.add((c.name || '').toLowerCase()));
         }
@@ -13565,6 +13588,33 @@ const resultCardFaceState = new Map();
 
 function getResultCardStateKey(card) {
     return String(card?.id || card?.oracle_id || card?.name || '').toLowerCase();
+}
+
+function updateResultsSummary() {
+    const summary = document.getElementById('results-summary');
+    if (!summary) return;
+
+    const finalCount = Array.isArray(lastSearchResults) ? lastSearchResults.length : 0;
+    const candidateCount = Number.isFinite(lastSearchCandidateCount) ? lastSearchCandidateCount : null;
+    const visibleCount = Math.min(finalCount, 50);
+
+    if (candidateCount === null) {
+        summary.textContent = '';
+        summary.classList.add('hidden');
+        return;
+    }
+
+    const resultWord = finalCount === 1 ? 'result' : 'results';
+    const candidateWord = candidateCount === 1 ? 'candidate' : 'candidates';
+
+    if (finalCount === 0) {
+        summary.textContent = `No final results matched. ${candidateCount} ${candidateWord} were evaluated.`;
+    } else if (finalCount > visibleCount) {
+        summary.textContent = `Found ${finalCount} ${resultWord} from ${candidateCount} ${candidateWord} evaluated. Showing the top ${visibleCount}.`;
+    } else {
+        summary.textContent = `Found ${finalCount} ${resultWord} from ${candidateCount} ${candidateWord} evaluated.`;
+    }
+    summary.classList.remove('hidden');
 }
 
 function renderResults(cards) {
@@ -14157,8 +14207,29 @@ function compareEffectCore(cf) {
     };
 }
 
+function normalizeCompareListValues(values) {
+    if (values == null) return [];
+    if (Array.isArray(values)) return values;
+    if (values instanceof Set) return Array.from(values);
+    if (typeof values === 'string' || typeof values === 'number') return [values];
+
+    // Some parser fields are structured records rather than arrays (for example activation
+    // costs or condition metadata). Never call Array#filter directly on those objects. Prefer
+    // their list-bearing properties, then fall back to their scalar values.
+    if (typeof values === 'object') {
+        for (const key of ['parts', 'values', 'items', 'options', 'conditions', 'restriction', 'restrictions']) {
+            if (Array.isArray(values[key])) return values[key];
+        }
+        for (const key of ['text', 'phrase', 'description', 'label', 'value', 'name', 'event', 'detail']) {
+            if (typeof values[key] === 'string' || typeof values[key] === 'number') return [values[key]];
+        }
+        return Object.values(values).filter(v => v != null && (typeof v === 'string' || typeof v === 'number'));
+    }
+    return [values];
+}
+
 function compareFormatList(values) {
-    const clean = Array.from(new Set((values || []).filter(Boolean).map(v => compareClean(v))));
+    const clean = Array.from(new Set(normalizeCompareListValues(values).filter(Boolean).map(v => compareClean(v)).filter(Boolean)));
     if (!clean.length) return '';
     if (clean.length === 1) return clean[0];
     if (clean.length === 2) return `${clean[0]} and ${clean[1]}`;
@@ -14459,7 +14530,7 @@ function compareModalModeGroups(parsedCard) {
 }
 
 function compareFormatOrList(values) {
-    const clean = Array.from(new Set((values || []).filter(Boolean).map(v => compareClean(v))));
+    const clean = Array.from(new Set(normalizeCompareListValues(values).filter(Boolean).map(v => compareClean(v)).filter(Boolean)));
     if (!clean.length) return '';
     if (clean.length === 1) return clean[0];
     if (clean.length === 2) return `${clean[0]} or ${clean[1]}`;

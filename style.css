@@ -4270,3 +4270,14 @@ body:not(.light-theme) #theme-toggle { color: var(--text-main) !important; }
         margin-top: 6px;
     }
 }
+
+/* Search completion summary: keeps the result/candidate totals visible without competing with
+   the results heading or Export control. */
+.results-summary {
+    margin: 4px 0 0;
+    color: var(--text-muted);
+    font-size: 12px;
+    line-height: 1.45;
+}
+
+.results-summary.hidden { display: none; }
