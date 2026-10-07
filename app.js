@@ -1,4 +1,4 @@
-/* ManaSearch build 20261007-9 */
+/* ManaSearch build 20261007-11 */
 // ManaSearch deployment build marker. Bump this whenever app.js changes so cached-module issues are easy to diagnose.
 const MANASEARCH_APP_BUILD = '20261007-9';
 console.info(`[ManaSearch] app.js build ${MANASEARCH_APP_BUILD}`);
@@ -10614,7 +10614,12 @@ function sanitizeRelatedOraclePattern(pattern) {
 }
 
 function buildRelatedSearchQueries(sourceCard, selectedCards, repeatingPatterns, filterParts) {
+    // Related Search is driven first by the cards the user explicitly selected. The original
+    // implementation let the source card and a few lossy repeating-text queries consume the
+    // retrieval budget, which meant a selected pair such as Thran Dynamo + Basalt Monolith could
+    // produce no useful Scryfall candidates even though both have a clear mana-production role.
     const allCards = [sourceCard, ...selectedCards];
+    const priorityCards = [...selectedCards, sourceCard].filter(Boolean);
     const excludedNames = allCards
         .map(c => escapeScryfallQuotedValue(c?.name || ''))
         .filter(Boolean)
@@ -10623,34 +10628,66 @@ function buildRelatedSearchQueries(sourceCard, selectedCards, repeatingPatterns,
     const filters = Array.isArray(filterParts) ? filterParts.filter(Boolean).join(' ') : '';
     const patterns = [...new Set((repeatingPatterns || []).map(sanitizeRelatedOraclePattern).filter(Boolean))].slice(0, 5);
     const queries = [];
+    const seen = new Set();
+    const add = (query, kind = 'generic', priority = 50) => {
+        const q = String(query || '').replace(/\s+/g, ' ').trim();
+        if (!q || seen.has(q)) return;
+        seen.add(q);
+        queries.push({ query: q, kind, priority });
+    };
 
-    // Primary form: one grouped OR expression.  Each alternative keeps its own o: operator;
-    // Scryfall's parser does not allow a shared operator to be placed outside an OR group.
+    // Shared text remains a supporting lane. Its normalized text can lose mana symbols, dynamic
+    // values, reminder punctuation, and other MTG-specific structure, so it must never be the only
+    // way a mechanically related pair can be retrieved.
     if (patterns.length) {
         const oracleGroup = `(${patterns.map(p => `o:"${escapeScryfallQuotedValue(p)}"`).join(' or ')})`;
-        queries.push(`${oracleGroup} ${excludedNames} ${filters}`.replace(/\s+/g, ' ').trim());
-    }
-
-    // Fallback forms are intentionally single-clause queries.  If a future Scryfall parser change
-    // rejects the grouped form, Related Search can still retrieve useful candidates without failing
-    // the entire feature.  The shared Scryfall request queue prevents these from bursting.
-    for (const pattern of patterns) {
-        queries.push(`o:"${escapeScryfallQuotedValue(pattern)}" ${excludedNames} ${filters}`.replace(/\s+/g, ' ').trim());
-    }
-
-    // No shared textual phrase: use a small functional fallback instead of the old invalid/weak
-    // `o:"<card name>"` query.  This gives Related Search a real Oracle concept to retrieve.
-    if (!patterns.length) {
-        const sourceText = getCurrentSourceOracleText(sourceCard);
-        const parsed = parseMTGEffect(sourceText);
-        const functionalQueries = buildFunctionalRetrievalQueries(sourceCard, parsed, excludedNames, 3);
-        functionalQueries.slice(0, 3).forEach(item => {
-            const q = String(item?.query || '').trim();
-            if (q) queries.push(`${q} ${filters}`.replace(/\s+/g, ' ').trim());
+        add(`${oracleGroup} ${excludedNames} ${filters}`, 'shared-text', 70);
+        patterns.slice(0, 2).forEach(pattern => {
+            add(`o:"${escapeScryfallQuotedValue(pattern)}" ${excludedNames} ${filters}`, 'shared-text-fallback', 75);
         });
     }
 
-    return [...new Set(queries.filter(Boolean))];
+    // Build a small, explicitly ordered retrieval pool from every selected reference. Prefer
+    // Scryfall oracle-tags (when available), then canonical phrases/parameterized queries, then
+    // broader role/alternate forms. This preserves the engine's query budget while ensuring each
+    // selected card contributes at least one real mechanical retrieval opportunity.
+    const referencePlans = [];
+    for (let cardIndex = 0; cardIndex < priorityCards.length; cardIndex++) {
+        const referenceCard = priorityCards[cardIndex];
+        const referenceText = getCurrentSourceOracleText(referenceCard);
+        const parsed = getCachedParsedEffects(referenceCard, referenceText);
+        const functional = buildFunctionalRetrievalQueries(referenceCard, parsed, excludedNames, 2);
+        const orderedFunctional = functional.slice().sort((a, b) => {
+            const score = item => {
+                const q = String(item?.query || '');
+                if (/\botag:/i.test(q)) return 0;
+                if (/search your library|add |destroy |exile |counter |return |create |draw |damage|gain life|lose life|tap |untap /i.test(q)) return 1;
+                return 2;
+            };
+            return score(a) - score(b);
+        });
+
+        orderedFunctional.forEach(item => {
+            if (item?.query) referencePlans.push({ query: `${item.query} ${filters}`, kind: 'functional', priority: 10 + cardIndex });
+        });
+
+        const roleQuery = buildRoleFocusedRetrievalQuery(referenceCard, parsed, excludedNames);
+        if (roleQuery) referencePlans.push({ query: `${roleQuery} ${filters}`, kind: 'role', priority: 30 + cardIndex });
+
+        const alternateQuery = buildAlternateMechanicRetrievalQuery(referenceCard, parsed, excludedNames);
+        if (alternateQuery) referencePlans.push({ query: `${alternateQuery} ${filters}`, kind: 'alternate', priority: 40 + cardIndex });
+    }
+
+    // Sort explicitly so the selected-card functional lanes occupy the first retrieval slots,
+    // followed by role/alternate context.
+    referencePlans.sort((a, b) => a.priority - b.priority);
+    referencePlans.forEach(plan => add(plan.query, plan.kind, plan.priority));
+
+    // A very common case is a pair of cards sharing a function but not wording. Make sure each
+    // selected reference can contribute its first functional query before the source card's lower
+    // priority lanes consume the eight-query network budget.
+    const orderedQueries = queries.slice().sort((a, b) => a.priority - b.priority);
+    return orderedQueries.slice(0, 8);
 }
 
 function extractRepeatingPatterns(cards) {
@@ -12627,8 +12664,23 @@ async function executeRelatedCardSearch() {
         currentSourceCard === sourceCardAtStart;
 
     showLoading(true);
-    resultsSection.classList.add('hidden');
-    resultsGrid.innerHTML = '';
+    // Keep the Results section visible while Related Search runs. Hiding the section made a
+    // successful related search look like it had returned nothing during the retrieval/scoring
+    // window. Replace only the grid contents with the same lightweight in-search state used by the
+    // normal search; the final related results replace it when scoring finishes.
+    if (resultsSection) resultsSection.classList.remove('hidden');
+    if (resultsGrid) {
+        resultsGrid.innerHTML = '';
+        const relatedInitialState = document.createElement('div');
+        relatedInitialState.className = 'search-initial-state';
+        relatedInitialState.setAttribute('aria-live', 'polite');
+        const relatedTitle = document.createElement('strong');
+        relatedTitle.textContent = 'Finding related cards…';
+        const relatedDetail = document.createElement('span');
+        relatedDetail.textContent = 'Using the selected cards as shared and individual references.';
+        relatedInitialState.append(relatedTitle, relatedDetail);
+        resultsGrid.appendChild(relatedInitialState);
+    }
 
     const allCardsInSet = [sourceCardAtStart, ...Array.from(selectedCardsAtStart.values())];
     const repeatingPatterns = extractRepeatingPatterns(allCardsInSet);
@@ -12658,12 +12710,14 @@ async function executeRelatedCardSearch() {
         // related retrieval formulation to try.
         const queryAttempts = relatedSearchQueries;
         for (let qi = 0; qi < queryAttempts.length; qi++) {
-            const candidateQuery = queryAttempts[qi];
+            const attempt = queryAttempts[qi];
+            const candidateQuery = typeof attempt === 'string' ? attempt : attempt?.query;
+            const kind = typeof attempt === 'string' ? 'related' : (attempt?.kind || 'related');
             try {
                 const attemptResults = await fetchScryfallSearch(
                     candidateQuery,
-                    5,
-                    qi === 0 ? "Pattern Search" : "Pattern Fallback"
+                    2,
+                    `Related ${kind}`
                 );
                 if (attemptResults.length > 0) {
                     results.push(...attemptResults);
@@ -12678,7 +12732,75 @@ async function executeRelatedCardSearch() {
             }
             if (!isCurrentRelatedSearch()) return;
         }
-        if (lastRelatedQueryError && !results.length) throw lastRelatedQueryError;
+
+        // The semantic index is a second, first-class Related Search retrieval lane. It is essential
+        // when the selected cards have differently worded mechanics, and it also rescues cases where
+        // Scryfall's phrase retrieval is too brittle. Each selected/reference card gets its own query
+        // vector; a centroid vector then adds the "common concept" view required by multi-card Related
+        // Search.
+        const semanticIndex = await ensureFullSemanticIndex();
+        const relatedExtractor = await getNLPModel();
+        let semanticMatches = [];
+        let relatedTargetVectors = [];
+        if (semanticIndex && relatedExtractor?.type !== 'fallback' && isCurrentRelatedSearch()) {
+            const referenceVectors = [];
+            const vectorJobs = allCardsInSet.map(async referenceCard => {
+                const oracleText = getCurrentSourceOracleText(referenceCard);
+                if (!oracleText) return;
+                const oracleVector = await getCachedEmbedding(normalizeOracleForEmbedding(oracleText, referenceCard.name), relatedExtractor);
+                if (oracleVector) referenceVectors.push(oracleVector);
+            });
+            await Promise.all(vectorJobs);
+            if (!isCurrentRelatedSearch()) return;
+
+            if (referenceVectors.length) {
+                relatedTargetVectors = referenceVectors;
+                const dim = referenceVectors[0].length;
+                const centroid = new Float32Array(dim);
+                for (const vector of referenceVectors) {
+                    for (let i = 0; i < dim; i++) centroid[i] += Number(vector[i]) || 0;
+                }
+                for (let i = 0; i < dim; i++) centroid[i] /= referenceVectors.length;
+                relatedTargetVectors.push(centroid);
+
+                const semanticQuerySets = await Promise.all(relatedTargetVectors.map((vector, index) =>
+                    findFullSemanticMatches(
+                        semanticIndex,
+                        vector,
+                        sourceCardAtStart.name,
+                        index === relatedTargetVectors.length - 1 ? 72 : 48,
+                        index === relatedTargetVectors.length - 1 ? 0.40 : 0.42
+                    )
+                ));
+
+                const semanticByName = new Map();
+                semanticQuerySets.forEach(set => (set || []).forEach(item => {
+                    const key = normalizeCardNameForIdentity(item.name);
+                    if (!key) return;
+                    const prev = semanticByName.get(key);
+                    semanticByName.set(key, prev
+                        ? { ...prev, similarity: Math.max(prev.similarity || 0, item.similarity || 0) }
+                        : item);
+                }));
+
+                if (semanticByName.size) {
+                    const hydrated = await fetchScryfallCollection(
+                        Array.from(semanticByName.values()).map(x => ({ name: x.name }))
+                    );
+                    const scoreByName = new Map(
+                        Array.from(semanticByName.values()).map(x => [normalizeCardNameForIdentity(x.name), x.similarity || 0])
+                    );
+                    semanticMatches = (hydrated || []).map(card => ({
+                        ...card,
+                        _semanticRetrievalSimilarity: scoreByName.get(normalizeCardNameForIdentity(card.name)) || 0,
+                        _semanticRetrievalSource: 'related-semantic-index'
+                    }));
+                    results.push(...semanticMatches);
+                }
+            }
+        }
+
+        if (lastRelatedQueryError && !results.length && !semanticMatches.length) throw lastRelatedQueryError;
 
         // Multiple related retrieval formulations can legitimately return overlapping cards.
         // Deduplicate them before the normal related-card filtering/scoring stage.
@@ -12721,9 +12843,30 @@ async function executeRelatedCardSearch() {
         const finalCardPool = [...Array.from(selectedCardsAtStart.values()), ...Array.from(candidateMap.values())];
 
         updateProgress(2, 3, "Scoring candidates against target patterns...");
-        const extractor = await getNLPModel();
+        const extractor = relatedExtractor || await getNLPModel();
         if (!isCurrentRelatedSearch()) return;
-        const combinedTargetText = repeatingPatterns.length > 0 ? repeatingPatterns.join('. ') : getCurrentSourceOracleText(sourceCardAtStart);
+
+        // Build a semantic/common target from the selected set. Shared literal patterns are useful
+        // retrieval evidence, but they can be too lossy (mana symbols, punctuation, dynamic values).
+        // The canonical-function view therefore leads when available, with shared wording retained as
+        // supporting context.
+        const referenceCanonicalFunctions = allCardsInSet.flatMap(card => {
+            const text = getCurrentSourceOracleText(card);
+            const parsed = getCachedParsedEffects(card, text);
+            return getCanonicalFunctions(parsed);
+        });
+        const uniqueCanonicalKeys = new Set();
+        const uniqueCanonicalFunctions = [];
+        for (const fn of referenceCanonicalFunctions) {
+            const key = JSON.stringify({ function: fn?.function || '', params: fn?.params || {} });
+            if (uniqueCanonicalKeys.has(key)) continue;
+            uniqueCanonicalKeys.add(key);
+            uniqueCanonicalFunctions.push(fn);
+        }
+        const canonicalTargetText = canonicalFunctionToText(uniqueCanonicalFunctions.slice(0, 6));
+        const combinedTargetText = canonicalTargetText
+            ? [canonicalTargetText, repeatingPatterns.length ? repeatingPatterns.slice(0, 3).join('. ') : ''].filter(Boolean).join('. ')
+            : (repeatingPatterns.length > 0 ? repeatingPatterns.join('. ') : getCurrentSourceOracleText(sourceCardAtStart));
 
         // Related search is an ensemble query: a candidate is mechanically related when it
         // matches a meaningful effect from ANY selected card, not only the original source card.
@@ -12750,8 +12893,15 @@ async function executeRelatedCardSearch() {
             : (relatedReferenceParsedEffects[0] || []);
         
         let targetVector = null;
+        let sourceFunctionVector = null;
         if (extractor.type !== 'fallback') {
-            targetVector = await getCachedEmbedding(normalizeOracleForEmbedding(combinedTargetText, sourceCardAtStart.name), extractor);
+            targetVector = relatedTargetVectors.length
+                ? relatedTargetVectors[relatedTargetVectors.length - 1]
+                : await getCachedEmbedding(normalizeOracleForEmbedding(combinedTargetText, sourceCardAtStart.name), extractor);
+            const combinedFunctionText = canonicalFunctionToText(uniqueCanonicalFunctions.slice(0, 6));
+            if (combinedFunctionText) {
+                sourceFunctionVector = await getCachedEmbedding(combinedFunctionText, extractor);
+            }
         }
 
         // Related-card search now keeps a genuine, nonzero mechanical weight (project spec
@@ -12771,6 +12921,9 @@ async function executeRelatedCardSearch() {
             sourceParsedEffectsOverride: relatedPrimaryParsedEffects,
             sourceReferenceParsedEffects: relatedReferenceParsedEffects,
             targetVector,
+            targetVectors: { oracle: targetVector, semanticRetrieval: targetVector },
+            sourceFunctionVector,
+            isCancelled: () => !isCurrentRelatedSearch(),
             extractor,
             weights: { mechanical: wM, synergy: wS, context: wC, exactness: wE, category: wCa },
             tags: activeTags,
