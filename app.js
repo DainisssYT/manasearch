@@ -1,5 +1,5 @@
 // ManaSearch deployment build marker. Bump this whenever app.js changes so cached-module issues are easy to diagnose.
-const MANASEARCH_APP_BUILD = '20261007-6';
+const MANASEARCH_APP_BUILD = '20261007-7';
 console.info(`[ManaSearch] app.js build ${MANASEARCH_APP_BUILD}`);
 
 // State Management
@@ -10563,6 +10563,65 @@ function calculateSynergyScore(sourceCard, targetCard, activeFilters = {}) {
 }
 
 // --- PATTERN EXTRACTION FOR RELATED CARDS ---
+function escapeScryfallQuotedValue(value) {
+    // Scryfall quoted search terms use backslash escaping.  Related Search previously only
+    // escaped double quotes in card names, so a name/text containing a backslash could produce
+    // an invalid query.  Keep this helper deliberately narrow: it is for values inside "...".
+    return String(value ?? '').replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/[\r\n\t]/g, ' ').trim();
+}
+
+function sanitizeRelatedOraclePattern(pattern) {
+    // extractRepeatingPatterns already removes punctuation, but keep the query boundary defensive
+    // because patterns may later come from another source (or future editor functionality).
+    const cleaned = String(pattern ?? '')
+        .replace(/[\u0000-\u001F\u007F]/g, ' ')
+        .replace(/[\"\\]/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+    if (!cleaned || cleaned.length < 2) return '';
+    return cleaned.slice(0, 80);
+}
+
+function buildRelatedSearchQueries(sourceCard, selectedCards, repeatingPatterns, filterParts) {
+    const allCards = [sourceCard, ...selectedCards];
+    const excludedNames = allCards
+        .map(c => escapeScryfallQuotedValue(c?.name || ''))
+        .filter(Boolean)
+        .map(name => `-name:"${name}"`)
+        .join(' ');
+    const filters = Array.isArray(filterParts) ? filterParts.filter(Boolean).join(' ') : '';
+    const patterns = [...new Set((repeatingPatterns || []).map(sanitizeRelatedOraclePattern).filter(Boolean))].slice(0, 5);
+    const queries = [];
+
+    // Primary form: one grouped OR expression.  Each alternative keeps its own o: operator;
+    // Scryfall's parser does not allow a shared operator to be placed outside an OR group.
+    if (patterns.length) {
+        const oracleGroup = `(${patterns.map(p => `o:"${escapeScryfallQuotedValue(p)}"`).join(' or ')})`;
+        queries.push(`${oracleGroup} ${excludedNames} ${filters}`.replace(/\s+/g, ' ').trim());
+    }
+
+    // Fallback forms are intentionally single-clause queries.  If a future Scryfall parser change
+    // rejects the grouped form, Related Search can still retrieve useful candidates without failing
+    // the entire feature.  The shared Scryfall request queue prevents these from bursting.
+    for (const pattern of patterns) {
+        queries.push(`o:"${escapeScryfallQuotedValue(pattern)}" ${excludedNames} ${filters}`.replace(/\s+/g, ' ').trim());
+    }
+
+    // No shared textual phrase: use a small functional fallback instead of the old invalid/weak
+    // `o:"<card name>"` query.  This gives Related Search a real Oracle concept to retrieve.
+    if (!patterns.length) {
+        const sourceText = getCurrentSourceOracleText(sourceCard);
+        const parsed = parseMTGEffect(sourceText);
+        const functionalQueries = buildFunctionalRetrievalQueries(sourceCard, parsed, excludedNames, 3);
+        functionalQueries.slice(0, 3).forEach(item => {
+            const q = String(item?.query || '').trim();
+            if (q) queries.push(`${q} ${filters}`.replace(/\s+/g, ' ').trim());
+        });
+    }
+
+    return [...new Set(queries.filter(Boolean))];
+}
+
 function extractRepeatingPatterns(cards) {
     const stopWords = new Set([
         'the','of','and','a','to','in','is','that','it','for','on','are','as','with','they','at','be','this','have','from','or','by','but','not','what','all','were','we','when','your','can','there','an','which','do','their','if','will','up','about','out','then','them','these','so','some','would','make','like','into','has','more','no','could','my','than','first','been','who','its','now','down','may','you','control','put','target','onto','battlefield'
@@ -12540,16 +12599,37 @@ async function executeRelatedCardSearch() {
 
     const filterParts = buildScryfallConstraintParts(filters);
 
-    const excludedNames = allCardsInSet.map(c => `-name:"${c.name.replace(/"/g, '\\"')}"`).join(' ');
-
-    let oracleClauses = repeatingPatterns.map(p => `o:"${p}"`).join(' OR ');
-    if (!oracleClauses) oracleClauses = `o:"${sourceCardAtStart.name}"`;
-
-    const searchQuery = `(${oracleClauses}) ${excludedNames} ${filterParts.join(' ')}`.trim();
+    const relatedSearchQueries = buildRelatedSearchQueries(
+        sourceCardAtStart,
+        Array.from(selectedCardsAtStart.values()),
+        repeatingPatterns,
+        filterParts
+    );
 
     try {
         // 1. RETRIEVAL
-        const results = await fetchScryfallSearch(searchQuery, 5, "Pattern Search");
+        // Try the efficient grouped query first.  If Scryfall rejects that syntax (or a future
+        // pattern introduces a parser edge case), fall back to individually valid o:"phrase"
+        // queries rather than surfacing "invalid Scryfall query" to the user.
+        let results = [];
+        let lastRelatedQueryError = null;
+        const queryAttempts = relatedSearchQueries.length ? relatedSearchQueries : ['o:*'];
+        for (let qi = 0; qi < queryAttempts.length; qi++) {
+            const candidateQuery = queryAttempts[qi];
+            try {
+                results = await fetchScryfallSearch(candidateQuery, 5, qi === 0 ? "Pattern Search" : "Pattern Fallback");
+                lastRelatedQueryError = null;
+                if (results.length > 0 || qi === queryAttempts.length - 1) break;
+            } catch (error) {
+                lastRelatedQueryError = error;
+                // A 404 from Scryfall means the query parser rejected this formulation.  Retry
+                // another independently-valid formulation.  Network/rate-limit failures should
+                // not be transformed into query-syntax retries.
+                if (error?.status !== 404) throw error;
+            }
+            if (requestId !== searchRequestId || currentSourceCard !== sourceCardAtStart) return;
+        }
+        if (lastRelatedQueryError && !results.length) throw lastRelatedQueryError;
         if (requestId !== searchRequestId || currentSourceCard !== sourceCardAtStart) return;
         
         // 2. REMOVE SOURCE/SELECTED CARDS & 3. APPLY USER FILTERS
