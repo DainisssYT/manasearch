@@ -110,6 +110,45 @@ const HISTORY_KEY = 'manamatch_history';
 const HISTORY_CARD_PREVIEWS_KEY = 'manamatch_history_card_previews';
 const FAVORITES_KEY = 'manamatch_favorites';
 const THEME_KEY = 'manamatch_theme';
+const DISPLAY_PREFERENCES_KEY = 'manasearch_display_preferences_v1';
+const DEFAULT_DISPLAY_PREFERENCES = Object.freeze({
+    maxResults: 50,
+    showScoreBreakdown: true
+});
+let displayPreferences = { ...DEFAULT_DISPLAY_PREFERENCES };
+
+function clampDisplayResultLimit(value) {
+    const parsed = Number(value);
+    if (!Number.isFinite(parsed)) return DEFAULT_DISPLAY_PREFERENCES.maxResults;
+    return Math.max(1, Math.min(200, Math.round(parsed)));
+}
+
+function loadDisplayPreferences() {
+    let stored = null;
+    try {
+        stored = JSON.parse(localStorage.getItem(DISPLAY_PREFERENCES_KEY) || 'null');
+    } catch (error) {
+        stored = null;
+    }
+    displayPreferences = {
+        maxResults: clampDisplayResultLimit(stored?.maxResults ?? DEFAULT_DISPLAY_PREFERENCES.maxResults),
+        showScoreBreakdown: stored?.showScoreBreakdown !== false
+    };
+    return displayPreferences;
+}
+
+function saveDisplayPreferences() {
+    try {
+        localStorage.setItem(DISPLAY_PREFERENCES_KEY, JSON.stringify(displayPreferences));
+    } catch (error) {
+        // Persistence is optional; the live preference still applies for this session.
+    }
+}
+
+function getDisplayedResultLimit() {
+    return clampDisplayResultLimit(displayPreferences?.maxResults);
+}
+
 
 // UI Elements 
 let cardSearchInput, searchBtn, sourceCardSection, sourceCardOracle, findSimilarBtn;
@@ -10257,6 +10296,53 @@ function initApp() {
     resultsSection = document.getElementById('results-section');
     resultsGrid = document.getElementById('results-grid');
     themeToggle = document.getElementById('theme-toggle');
+    loadDisplayPreferences();
+
+    // --- PREFERENCES PANEL ---
+    const preferencesBtn = document.getElementById('preferences-btn');
+    const preferencesModal = document.getElementById('preferences-modal');
+    const closePreferencesBtn = document.getElementById('close-preferences-modal');
+    const savePreferencesBtn = document.getElementById('save-preferences-btn');
+    const resetPreferencesBtn = document.getElementById('reset-preferences-btn');
+    const preferenceResultLimit = document.getElementById('preference-result-limit');
+    const preferenceScoreBreakdown = document.getElementById('preference-score-breakdown');
+
+    function syncPreferencesControls() {
+        if (preferenceResultLimit) preferenceResultLimit.value = String(getDisplayedResultLimit());
+        if (preferenceScoreBreakdown) preferenceScoreBreakdown.checked = Boolean(displayPreferences.showScoreBreakdown);
+    }
+
+    function commitPreferences() {
+        displayPreferences.maxResults = clampDisplayResultLimit(preferenceResultLimit?.value);
+        displayPreferences.showScoreBreakdown = preferenceScoreBreakdown?.checked !== false;
+        saveDisplayPreferences();
+        if (resultsSection && !resultsSection.classList.contains('hidden') && Array.isArray(lastSearchResults)) {
+            renderResults(lastSearchResults);
+        }
+    }
+
+    if (preferencesBtn) preferencesBtn.addEventListener('click', () => {
+        syncPreferencesControls();
+        preferencesModal?.classList.remove('hidden');
+        preferenceResultLimit?.focus();
+    });
+    if (closePreferencesBtn) closePreferencesBtn.addEventListener('click', () => {
+        syncPreferencesControls();
+        preferencesModal?.classList.add('hidden');
+    });
+    if (savePreferencesBtn) savePreferencesBtn.addEventListener('click', () => {
+        commitPreferences();
+        preferencesModal?.classList.add('hidden');
+    });
+    if (resetPreferencesBtn) resetPreferencesBtn.addEventListener('click', () => {
+        displayPreferences = { ...DEFAULT_DISPLAY_PREFERENCES };
+        syncPreferencesControls();
+        commitPreferences();
+    });
+    preferenceResultLimit?.addEventListener('change', () => {
+        preferenceResultLimit.value = String(clampDisplayResultLimit(preferenceResultLimit.value));
+    });
+
     historyList = document.getElementById('history-list');
     favoritesList = document.getElementById('favorites-list');
     favoriteBtn = document.getElementById('favorite-btn');
@@ -10424,6 +10510,10 @@ function initApp() {
     ['broad-search', 'divergent-search', 'wording-search', 'functional-search', 'target-search', 'role-search', 'alternate-search', 'synergy-search'].forEach(id => {
         const el = document.getElementById(id);
         if (el) el.addEventListener('change', updateMethodsBadge);
+    });
+
+    if (preferencesModal) preferencesModal.addEventListener('click', (event) => {
+        if (event.target === preferencesModal) preferencesModal.classList.add('hidden');
     });
 
     loadTheme();
@@ -14315,7 +14405,7 @@ function updateResultsSummary() {
 
     const finalCount = Array.isArray(lastSearchResults) ? lastSearchResults.length : 0;
     const candidateCount = Number.isFinite(lastSearchCandidateCount) ? lastSearchCandidateCount : null;
-    const visibleCount = Math.min(finalCount, 50);
+    const visibleCount = Math.min(finalCount, getDisplayedResultLimit());
 
     if (candidateCount === null) {
         summary.textContent = '';
@@ -14373,7 +14463,7 @@ function renderResults(cards) {
 
     exportBtn.style.display = 'block';
     resultsGrid.innerHTML = '';
-    const topCards = displayCards.slice(0, 50);
+    const topCards = displayCards.slice(0, getDisplayedResultLimit());
 
     const hasHighlight = Boolean(manualHighlights && manualHighlights.length > 0);
     const exactnessLabel = hasHighlight ? "Mechanical" : "Exactness";
@@ -14513,6 +14603,7 @@ function renderResults(cards) {
         priceLabel.textContent = fullPriceLabel;
         priceLabel.title = fullPriceLabel;
         scoreBreakdown.appendChild(priceLabel);
+        scoreBreakdown.style.display = displayPreferences.showScoreBreakdown ? '' : 'none';
 
         const actions = document.createElement('div');
         actions.className = 'card-actions';

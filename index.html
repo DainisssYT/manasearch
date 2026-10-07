@@ -14,7 +14,10 @@
                 <h1>ManaSearch</h1>
                 <p class="brand-subtitle">MTG similarity search by mechanics, function, and context</p>
             </div>
-            <button type="button" id="theme-toggle" aria-label="Toggle light and dark theme">Light mode</button>
+            <div class="header-actions">
+                <button type="button" id="preferences-btn" class="header-action-btn" aria-haspopup="dialog">Preferences</button>
+                <button type="button" id="theme-toggle" aria-label="Toggle light and dark theme">Light mode</button>
+            </div>
         </div>
         <div id="legacy-source-search" hidden aria-hidden="true">
             <input type="text" id="card-search-input" autocomplete="off">
@@ -559,6 +562,55 @@
             <div id="selected-related-modal-grid" class="selected-related-modal-grid"></div>
         </div>
     </div>
+
+    <!-- PREFERENCES PANEL -->
+    <div id="preferences-modal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="preferences-title">
+        <div class="modal-card preferences-modal-card">
+            <div class="modal-header">
+                <div>
+                    <span class="section-kicker">PREFERENCES</span>
+                    <h3 id="preferences-title">Display & Search Preferences</h3>
+                </div>
+                <button type="button" id="close-preferences-modal" class="close-btn" aria-label="Close preferences">&times;</button>
+            </div>
+            <div class="modal-body preferences-body">
+                <p class="modal-intro">These settings affect how ManaSearch presents results on this device. They do not reduce the candidate pool used by the search engine.</p>
+
+                <div class="preference-setting">
+                    <div class="preference-setting-copy">
+                        <label for="preference-result-limit"><strong>Maximum results displayed</strong></label>
+                        <span>Controls how many of the ranked results are shown at once. Searching, ranking, and Search Deeper can still keep more candidates internally.</span>
+                    </div>
+                    <div class="preference-control preference-number-control">
+                        <input type="number" id="preference-result-limit" min="1" max="200" step="1" inputmode="numeric" aria-describedby="preference-result-limit-help">
+                        <span>results</span>
+                    </div>
+                </div>
+                <p id="preference-result-limit-help" class="preference-help">Recommended: 30–50 for a good balance between comparison depth and page performance.</p>
+
+                <div class="preference-setting preference-toggle-setting">
+                    <div class="preference-setting-copy">
+                        <label for="preference-score-breakdown"><strong>Show score breakdown</strong></label>
+                        <span>Keep Mechanical, Context, Synergy, Exactness, and Category scores visible on each result card.</span>
+                    </div>
+                    <label class="preference-switch">
+                        <input type="checkbox" id="preference-score-breakdown">
+                        <span class="preference-switch-track" aria-hidden="true"></span>
+                    </label>
+                </div>
+
+                <div class="preference-info-row">
+                    <strong>Saved automatically</strong>
+                    <span>Preferences are stored locally in this browser and do not affect other users.</span>
+                </div>
+            </div>
+            <div class="modal-footer preferences-footer">
+                <button type="button" id="reset-preferences-btn" class="secondary-preference-btn">Reset to defaults</button>
+                <button type="button" id="save-preferences-btn">Done</button>
+            </div>
+        </div>
+    </div>
+
     <!-- CARD COMPARISON MODAL -->
     <div id="compare-modal" class="hidden" role="dialog" aria-modal="true" aria-labelledby="compare-modal-title">
         <div class="modal-content">
@@ -576,6 +628,6 @@
         import * as transformers from "https://cdn.jsdelivr.net/npm/@xenova/transformers@2.16.0";
         window.transformers = transformers;
     </script>
-    <script type="module" src="app.js?v=20261007-3"></script>
+    <script type="module" src="app.js?v=20261007-4"></script>
 </body>
 </html>
