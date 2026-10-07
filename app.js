@@ -1,5 +1,6 @@
+/* ManaSearch build 20261007-9 */
 // ManaSearch deployment build marker. Bump this whenever app.js changes so cached-module issues are easy to diagnose.
-const MANASEARCH_APP_BUILD = '20261007-8';
+const MANASEARCH_APP_BUILD = '20261007-9';
 console.info(`[ManaSearch] app.js build ${MANASEARCH_APP_BUILD}`);
 
 // State Management
@@ -9168,10 +9169,37 @@ async function fetchScryfallSearch(query, maxPagesOverride = MIN_SEARCH_PAGES, s
             showScryfallCooldownNotice(`[${searchLabel}] Scryfall rate limit (429). Stream stopped; no retry will be sent.`);
             break;
 
-        // 404 -> Invalid Search / Query
+        // 404 -> No matches is a normal Scryfall search outcome.  The search endpoint uses
+        // 404 for a query that produces no cards, so treating every 404 as a syntax error made
+        // Related Search report "invalid Scryfall query" whenever a perfectly valid narrow
+        // phrase simply had no matches.  Only a 400-class parser/request error should be surfaced
+        // as invalid syntax.
         } else if (response.status === 404) {
-            const err = new Error("invalid Scryfall query");
-            err.status = 404;
+            if (pagesFetched === 0) {
+                hasMore = false;
+                url = null;
+                totalCardsForQuery = 0;
+                break;
+            }
+            // A 404 after successful pagination is unusual. Preserve the valid pages already
+            // retrieved rather than discarding them or mislabeling the search as invalid.
+            hasMore = false;
+            url = null;
+            bailedAfterRetries = false;
+            break;
+
+        // 400 -> Malformed / invalid Scryfall query. Unlike a 404 no-match response, this is a
+        // genuine query-construction problem and should be surfaced to the caller with the API's
+        // own details when available.
+        } else if (response.status === 400) {
+            let details = '';
+            try {
+                const data = await response.json();
+                details = typeof data?.details === 'string' ? data.details : '';
+            } catch (_) {}
+            const err = new Error(details || 'invalid Scryfall query');
+            err.status = 400;
+            err.scryfallDetails = details;
             throw err;
 
         // Other -> Network / API Error (5xx etc.) - retry with the same bounded backoff, then
@@ -12625,23 +12653,43 @@ async function executeRelatedCardSearch() {
         // queries rather than surfacing "invalid Scryfall query" to the user.
         let results = [];
         let lastRelatedQueryError = null;
-        const queryAttempts = relatedSearchQueries.length ? relatedSearchQueries : ['o:*'];
+        // 404/no-match is handled as an ordinary empty result by fetchScryfallSearch.  We only
+        // retry genuine 400 parser errors here; no-match queries should simply allow the next
+        // related retrieval formulation to try.
+        const queryAttempts = relatedSearchQueries;
         for (let qi = 0; qi < queryAttempts.length; qi++) {
             const candidateQuery = queryAttempts[qi];
             try {
-                results = await fetchScryfallSearch(candidateQuery, 5, qi === 0 ? "Pattern Search" : "Pattern Fallback");
+                const attemptResults = await fetchScryfallSearch(
+                    candidateQuery,
+                    5,
+                    qi === 0 ? "Pattern Search" : "Pattern Fallback"
+                );
+                if (attemptResults.length > 0) {
+                    results.push(...attemptResults);
+                }
                 lastRelatedQueryError = null;
-                if (results.length > 0 || qi === queryAttempts.length - 1) break;
             } catch (error) {
                 lastRelatedQueryError = error;
-                // A 404 from Scryfall means the query parser rejected this formulation.  Retry
-                // another independently-valid formulation.  Network/rate-limit failures should
-                // not be transformed into query-syntax retries.
-                if (error?.status !== 404) throw error;
+                // Only malformed-query errors are safe to retry with another formulation.
+                // Network, rate-limit, and cancellation errors must propagate instead of being
+                // hidden behind a misleading "invalid query" message.
+                if (error?.status !== 400) throw error;
             }
             if (!isCurrentRelatedSearch()) return;
         }
         if (lastRelatedQueryError && !results.length) throw lastRelatedQueryError;
+
+        // Multiple related retrieval formulations can legitimately return overlapping cards.
+        // Deduplicate them before the normal related-card filtering/scoring stage.
+        if (results.length > 1) {
+            const unique = new Map();
+            for (const card of results) {
+                if (!card?.id) continue;
+                unique.set(card.id, card);
+            }
+            results = [...unique.values()];
+        }
         if (!isCurrentRelatedSearch()) return;
         
         // 2. REMOVE SOURCE/SELECTED CARDS & 3. APPLY USER FILTERS
