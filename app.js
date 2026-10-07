@@ -1,6 +1,6 @@
-/* ManaSearch build 20261007-11 */
+/* ManaSearch build 20261007-13 */
 // ManaSearch deployment build marker. Bump this whenever app.js changes so cached-module issues are easy to diagnose.
-const MANASEARCH_APP_BUILD = '20261007-9';
+const MANASEARCH_APP_BUILD = '20261007-13';
 console.info(`[ManaSearch] app.js build ${MANASEARCH_APP_BUILD}`);
 
 // State Management
@@ -77,6 +77,10 @@ let searchRequestId = 0;
 // Related-card searches have their own generation so selecting/unselecting a result while the
 // normal search is still progressively scoring cannot invalidate that main search.
 let relatedSearchRequestId = 0;
+// Only the current result-producing mode may paint into the Results grid. A Related Search can
+// intentionally run while the main search continues in the background; stale main-search renders
+// must not overwrite the Related Search results.
+let activeResultView = { mode: 'main', requestId: 0 };
 // Benchmark mode deliberately bypasses the app's persistent/browser-level GET cache so every
 // benchmark test starts with no candidates inherited from a previous test or previous run.
 let benchmarkColdMode = false;
@@ -101,6 +105,9 @@ let activeOrderFeatureFlags = {
 
 // Selected Related Cards State (Persistent across infinite searches)
 const selectedRelatedCards = new Map();
+// Stable result-card DOM cache. Progressive scoring frequently reorders the same cards; keeping
+// their DOM nodes alive prevents image reload/flicker while still allowing scores/order to update.
+const visibleResultCardData = new Map();
 
 // Multi-source search context. The first card is the primary source shown in the existing inspector;
 // additional cards participate in the shared-text retrieval lane.
@@ -10636,6 +10643,34 @@ function buildRelatedSearchQueries(sourceCard, selectedCards, repeatingPatterns,
         queries.push({ query: q, kind, priority });
     };
 
+    // Reserve the earliest retrieval slots for robust Scryfall oracle-tags and broad strategic
+    // role phrases. These are much less brittle than quoting normalized text and ensure each
+    // explicitly selected card can seed a useful related-card family.
+    const seenTags = new Set();
+    const seenRolePhrases = new Set();
+    for (const referenceCard of priorityCards) {
+        const referenceText = getCurrentSourceOracleText(referenceCard);
+        const parsed = getCachedParsedEffects(referenceCard, referenceText);
+        for (const cf of getCanonicalFunctions(parsed).slice(0, 4)) {
+            const tag = FUNCTION_RETRIEVAL_VOCAB[cf?.function]?.otag;
+            if (tag && !seenTags.has(tag)) {
+                seenTags.add(tag);
+                add(`otag:${tag} ${excludedNames} ${filters}`, 'oracle-tag', 5 + seenTags.size);
+            }
+        }
+        const roles = inferStrategicRoleProfile(referenceCard, parsed, referenceText) || [];
+        for (const roleRecord of roles.slice(0, 2)) {
+            for (const phrase of (ROLE_RETRIEVAL_PHRASES[roleRecord.role] || []).slice(0, 2)) {
+                const clean = String(phrase).replace(/["\\]/g, '').replace(/\s+/g, ' ').trim();
+                const roleKey = clean.toLowerCase();
+                if (clean.length >= 5 && !seenRolePhrases.has(roleKey)) {
+                    seenRolePhrases.add(roleKey);
+                    add(`o:"${escapeScryfallQuotedValue(clean)}" ${excludedNames} ${filters}`, 'role', 15 + seenRolePhrases.size);
+                }
+            }
+        }
+    }
+
     // Shared text remains a supporting lane. Its normalized text can lose mana symbols, dynamic
     // values, reminder punctuation, and other MTG-specific structure, so it must never be the only
     // way a mechanically related pair can be retrieved.
@@ -10668,14 +10703,14 @@ function buildRelatedSearchQueries(sourceCard, selectedCards, repeatingPatterns,
         });
 
         orderedFunctional.forEach(item => {
-            if (item?.query) referencePlans.push({ query: `${item.query} ${filters}`, kind: 'functional', priority: 10 + cardIndex });
+            if (item?.query) referencePlans.push({ query: `${item.query} ${filters}`, kind: 'functional', priority: 30 + cardIndex });
         });
 
         const roleQuery = buildRoleFocusedRetrievalQuery(referenceCard, parsed, excludedNames);
-        if (roleQuery) referencePlans.push({ query: `${roleQuery} ${filters}`, kind: 'role', priority: 30 + cardIndex });
+        if (roleQuery) referencePlans.push({ query: `${roleQuery} ${filters}`, kind: 'role', priority: 45 + cardIndex });
 
         const alternateQuery = buildAlternateMechanicRetrievalQuery(referenceCard, parsed, excludedNames);
-        if (alternateQuery) referencePlans.push({ query: `${alternateQuery} ${filters}`, kind: 'alternate', priority: 40 + cardIndex });
+        if (alternateQuery) referencePlans.push({ query: `${alternateQuery} ${filters}`, kind: 'alternate', priority: 55 + cardIndex });
     }
 
     // Sort explicitly so the selected-card functional lanes occupy the first retrieval slots,
@@ -12655,6 +12690,7 @@ async function executeRelatedCardSearch() {
     if (!currentSourceCard || selectedRelatedCards.size === 0) return;
 
     const requestId = ++relatedSearchRequestId;
+    activeResultView = { mode: 'related', requestId };
     const sourceSearchRequestId = searchRequestId;
     const sourceCardAtStart = currentSourceCard;
     const selectedCardsAtStart = new Map(selectedRelatedCards);
@@ -12797,6 +12833,28 @@ async function executeRelatedCardSearch() {
                     }));
                     results.push(...semanticMatches);
                 }
+            }
+        }
+
+        // Existing search results are a safe local fallback/recall lane. They were already
+        // hydrated by Scryfall and scored by ManaSearch, so Related Search can re-evaluate them
+        // against the selected-card reference set without another network dependency. This is
+        // especially important when a narrow Scryfall formulation happens to return zero matches.
+        // Keep the pool bounded so a huge previous Search Deeper session cannot turn Related Search
+        // into an accidental full-history rescore.
+        const existingRelatedCandidates = Array.isArray(lastSearchResults)
+            ? lastSearchResults.slice(0, 200).filter(card =>
+                card && card.name &&
+                !allCardsInSet.some(ref => isSameCardName(card.name, ref.name))
+            )
+            : [];
+        if (existingRelatedCandidates.length) {
+            const seenExisting = new Set(results.map(c => normalizeCardNameForIdentity(c?.name)));
+            for (const card of existingRelatedCandidates) {
+                const key = normalizeCardNameForIdentity(card.name);
+                if (!key || seenExisting.has(key)) continue;
+                seenExisting.add(key);
+                results.push({ ...card, _relatedRetrievalSource: 'existing-search-pool' });
             }
         }
 
@@ -13458,6 +13516,7 @@ async function findSimilarCards() {
     if (!currentSourceCard) return;
 
     const requestId = ++searchRequestId;
+    activeResultView = { mode: 'main', requestId };
 
     // Phase timing, surfaced through diagnostics so the benchmark can report where a search
     // actually spends its time (retrieval vs. scoring vs. ranking vs. render) instead of only a
@@ -13862,7 +13921,7 @@ async function findSimilarCards() {
                 .slice(0, PREVIEW_RENDER_CAP);
             sorted.forEach(c => { c._isNewlyAdded = !previouslyRenderedNames.has(c.name.toLowerCase()); });
             sorted.forEach(c => previouslyRenderedNames.add(c.name.toLowerCase()));
-            if (requestId !== searchRequestId) return;
+            if (requestId !== searchRequestId || activeResultView.mode !== 'main' || activeResultView.requestId !== requestId) return;
             updateProgress(1, totalSteps, `First look: ${sorted.length} match${sorted.length === 1 ? '' : 'es'} found so far (just updated by ${previewRenderLabel || 'another search stage'}) - still searching further sources...`);
             document.getElementById('provisional-results-banner')?.classList.remove('hidden');
             renderResults(sorted);
@@ -13915,7 +13974,7 @@ async function findSimilarCards() {
         // this once it completes, exactly as if the timeout had never fired.
         const SEARCH_TIMEOUT_MS = 20000;
         searchTimeoutId = setTimeout(() => {
-            if (pipelineCompleted || requestId !== searchRequestId) return;
+            if (pipelineCompleted || requestId !== searchRequestId || activeResultView.mode !== 'main' || activeResultView.requestId !== requestId) return;
             const partial = Array.from(previewPool.values()).sort((a, b) => (b._previewScore || 0) - (a._previewScore || 0));
             if (partial.length > 0) {
                 updateProgress(1, totalSteps, `Still searching - this one's taking a while. Showing ${partial.length} match${partial.length === 1 ? '' : 'es'} found so far while the rest of the search keeps running...`);
@@ -14169,6 +14228,9 @@ async function findSimilarCards() {
                     });
                     if (requestId !== searchRequestId) break;
                     batch.forEach(card=>{card._progressivelyRanked=true;});
+                    // Related Search may intentionally own the Results grid while this main
+                    // search continues in the background. Do not repaint the user's active view.
+                    if (activeResultView.mode !== 'main' || activeResultView.requestId !== requestId) break;
                     const ranked=Array.from(previewPool.values()).sort((a,b)=>{
                         const as=Number.isFinite(a.similarityScore)?a.similarityScore:(a._previewScore||0);
                         const bs=Number.isFinite(b.similarityScore)?b.similarityScore:(b._previewScore||0); return bs-as;
@@ -14739,9 +14801,9 @@ if (candidates.length > 0) {
     };
 }
 
-        // A newer search (or a fresh source-card load) started after this one - don't
-        // let a slow, now-stale search overwrite the current results.
-        if (requestId !== searchRequestId) return;
+        // A newer search or an active Related Search owns the Results grid. Never let a slow
+        // background main-search completion overwrite the active result view.
+        if (requestId !== searchRequestId || activeResultView.mode !== 'main' || activeResultView.requestId !== requestId) return;
 
         pipelineCompleted = true;
         activeSearchStreamProgressReporter = null;
@@ -14784,7 +14846,7 @@ if (candidates.length > 0) {
     } finally {
         if (requestId === searchRequestId) activeSearchStreamProgressReporter = null;
         clearTimeout(searchTimeoutId);
-        if (requestId === searchRequestId) {
+        if (requestId === searchRequestId && activeResultView.mode === 'main' && activeResultView.requestId === requestId) {
             updateProgress(null, null, "All done! Candidates retrieved and ranked purely by similarity.");
             showLoading(false);
         }
@@ -15098,248 +15160,274 @@ function updateResultsSummary() {
 function renderResults(cards) {
     resultsSection.classList.remove('hidden');
 
-    // Final safety-net filtering, right before anything touches the DOM. Every known upstream
-    // path already (a) dedupes candidates by name and (b) excludes the source card by id/name -
-    // this guarantees neither bug can resurface from some other caller, future code path, or a
-    // name-formatting mismatch (whitespace, double-faced card naming) between whatever excluded
-    // the source card upstream and how it's compared here. A real report showed the source card
-    // appearing as its own top "similar" result despite the upstream exclusion looking correct on
-    // its own, which is exactly the kind of failure a defense-in-depth check like this is for.
-    //
-    // This list is LOCAL to rendering. renderResults no longer reassigns lastSearchResults: the
-    // presentation layer has no business rewriting the search engine's state, and doing so is
-    // what destroyed the diagnostics object (review Priority 2). Callers own that state and set
-    // it themselves before calling here.
+    // Final safety-net filtering, right before anything touches the DOM. Keep this local to the
+    // presentation layer; callers retain ownership of lastSearchResults/diagnostics.
     let displayCards = cards;
     if (Array.isArray(cards)) {
         const seenNames = new Set();
         const deduped = [];
         for (const card of cards) {
-            const key = (card?.name || '').toLowerCase();
-            if (key && seenNames.has(key)) continue;
+            const key = normalizeCardNameForIdentity(card?.name || '');
+            if (!key || seenNames.has(key)) continue;
             if (currentSourceCard && card?.name && isSameCardName(card.name, currentSourceCard.name)) continue;
-            if (key) seenNames.add(key);
+            seenNames.add(key);
             deduped.push(card);
         }
         displayCards = deduped;
     }
 
     if (!displayCards || displayCards.length === 0) {
-        resultsGrid.innerHTML = '<p class="instruction-note" style="grid-column: 1 / -1;">No matching cards found. Try loosening your filters.</p>';
+        visibleResultCardData.clear();
+        resultsGrid.replaceChildren();
+        const note = document.createElement('p');
+        note.className = 'instruction-note';
+        note.style.gridColumn = '1 / -1';
+        note.textContent = 'No matching cards found. Try loosening your filters.';
+        resultsGrid.appendChild(note);
         exportBtn.style.display = 'none';
         return;
     }
 
     exportBtn.style.display = 'block';
-    resultsGrid.innerHTML = '';
     const topCards = displayCards.slice(0, getDisplayedResultLimit());
+    visibleResultCardData.clear();
+    topCards.forEach(card => visibleResultCardData.set(getResultCardStateKey(card), card));
 
-    const hasHighlight = Boolean(manualHighlights && manualHighlights.length > 0);
-    const exactnessLabel = hasHighlight ? "Mechanical" : "Exactness";
+    // Result identity is by Oracle/card name for DOM stability. Different printings of the same
+    // card are already deduplicated before display, and using the name here keeps the existing DOM
+    // node (especially its image) alive if a later stream replaces the printing object.
+    const getCardKey = card => normalizeCardNameForIdentity(card?.name || '') || getResultCardStateKey(card);
+    const existingNodes = new Map();
+    resultsGrid.querySelectorAll('.card-item[data-card-key]').forEach(node => existingNodes.set(node.dataset.cardKey, node));
+    const fragment = document.createDocumentFragment();
 
-    // Cards are built into a fragment and appended once, rather than one appendChild per card -
-    // appending to a detached fragment doesn't touch the live DOM/layout at all until the single
-    // final append, instead of triggering a layout pass on resultsGrid up to 50 times.
-    const resultsFragment = document.createDocumentFragment();
-
-    topCards.forEach((card, index) => {
+    const updateResultCard = (cardElement, card) => {
+        const isSelected = selectedRelatedCards.has(card.id);
         const cardImg = card.image_uris?.normal || card.card_faces?.[0]?.image_uris?.normal || 'https://placeholder.pics/svg/220x310/EAEAEA/999999/No%20Image';
-        // Progressive results arrive before the authoritative scorer has finished. During that
-        // window `_previewScore` is the best available overall estimate, so never display a false
-        // 0% Overall Match just because `similarityScore` has not been populated yet. The final
-        // scoring pass overwrites `similarityScore` with the authoritative value.
         const displaySimilarityScore = Number.isFinite(Number(card.similarityScore))
             ? Number(card.similarityScore)
             : (Number.isFinite(Number(card._previewScore)) ? Number(card._previewScore) : 0);
         const matchPercentage = Math.round(Math.max(0, Math.min(1, displaySimilarityScore)) * 100);
-        
-        // Fix: Define isSelected, priceUsd, and priceEur variables
-        const isSelected = selectedRelatedCards.has(card.id);
         const priceUsd = card.prices?.usd ? '$' + card.prices.usd : 'N/A';
         const priceEur = card.prices?.eur ? '€' + card.prices.eur : 'N/A';
+        const scores = {
+            Mechanical: card.mechanicalScore ? Math.round(card.mechanicalScore * 100) : 0,
+            Context: card.contextScore ? Math.round(card.contextScore * 100) : 0,
+            Synergy: card.synergyScore ? Math.round(card.synergyScore * 100) : 0,
+            Exactness: card.exactnessScore ? Math.round(card.exactnessScore * 100) : 0,
+            Category: card.categoryScore ? Math.round(card.categoryScore * 100) : 0
+        };
 
-        const mechScore = card.mechanicalScore ? Math.round(card.mechanicalScore * 100) : 0;
-        const synScore  = card.synergyScore ? Math.round(card.synergyScore * 100) : 0;
-        const conScore  = card.contextScore ? Math.round(card.contextScore * 100) : 0;
-        const exaScore  = card.exactnessScore ? Math.round(card.exactnessScore * 100) : 0;
-        const catScore  = card.categoryScore ? Math.round(card.categoryScore * 100) : 0;
+        cardElement.classList.toggle('selected-card', isSelected);
+        cardElement.classList.toggle('newly-added', Boolean(card._isNewlyAdded));
+        cardElement.dataset.cardKey = getCardKey(card);
 
-        // Build the card safely via DOM APIs rather than innerHTML: card fields (name,
-        // type_line, etc.) come straight from the Scryfall API and must not be treated
-        // as trusted HTML.
-        const cardElement = document.createElement('div');
-        cardElement.className = `card-item ${isSelected ? 'selected-card' : ''}${card._isNewlyAdded ? ' newly-added' : ''}`;
-
-        const faceImages = Array.isArray(card.card_faces)
-            ? card.card_faces.filter(face => face?.image_uris?.normal)
-            : [];
+        const img = cardElement.querySelector('.card-art-wrap img');
+        const faceImages = Array.isArray(card.card_faces) ? card.card_faces.filter(face => face?.image_uris?.normal) : [];
         const hasMultipleFaces = faceImages.length > 1;
         const stateKey = getResultCardStateKey(card);
-        let faceIndex = hasMultipleFaces
+        const faceIndex = hasMultipleFaces
             ? Math.max(0, Math.min(faceImages.length - 1, Number(resultCardFaceState.get(stateKey)) || 0))
             : 0;
+        const desiredSrc = hasMultipleFaces ? faceImages[faceIndex].image_uris.normal : cardImg;
+        if (img && img.getAttribute('src') !== desiredSrc) img.src = desiredSrc;
+        if (img) img.alt = hasMultipleFaces ? (faceImages[faceIndex].name || card.name) : card.name;
+
+        const flipBtn = cardElement.querySelector('.card-flip-btn');
+        if (flipBtn) flipBtn.hidden = !hasMultipleFaces;
+
+        const title = cardElement.querySelector('.card-item-title');
+        if (title) title.textContent = card.name;
+        const typeLine = cardElement.querySelector('.result-type-line');
+        if (typeLine) typeLine.textContent = card.type_line || '';
+        const matchLine = cardElement.querySelector('.card-match-line');
+        if (matchLine) matchLine.textContent = `Overall Match: ${matchPercentage}%`;
+
+        const badge = cardElement.querySelector('.weak-match-badge');
+        if (card._weakBackfillMatch) {
+            if (badge) {
+                badge.hidden = false;
+            } else {
+                const b = document.createElement('p');
+                b.className = 'weak-match-badge';
+                b.textContent = 'Weak match - shown to fill out the list';
+                b.title = 'This result didn\'t clear the usual relevance bar. It\'s shown because too few stronger matches were found, not because it\'s a confident recommendation.';
+                const info = cardElement.querySelector('.card-item-info');
+                const scoreBreakdown = cardElement.querySelector('.result-score-breakdown');
+                if (info) info.insertBefore(b, scoreBreakdown || null);
+            }
+        } else if (badge) {
+            badge.remove();
+        }
+
+        const breakdown = cardElement.querySelector('.result-score-breakdown');
+        if (breakdown) {
+            const lines = Array.from(breakdown.querySelectorAll('.score-line'));
+            ['Mechanical','Context','Synergy','Exactness','Category'].forEach((label, i) => {
+                if (lines[i]) lines[i].textContent = `${label}: ${scores[label]}%`;
+            });
+            const priceLabel = breakdown.querySelector('.card-price-label');
+            const fullPriceLabel = `Price: ${priceUsd} / ${priceEur}`;
+            if (priceLabel) { priceLabel.textContent = fullPriceLabel; priceLabel.title = fullPriceLabel; }
+            breakdown.style.display = displayPreferences.showScoreBreakdown ? '' : 'none';
+        }
+
+        const favoriteBtn = cardElement.querySelector('.result-favorite-btn');
+        if (favoriteBtn) {
+            const isFav = getStoredArray(FAVORITES_KEY).some(name => String(name).toLowerCase() === String(card.name).toLowerCase());
+            favoriteBtn.textContent = isFav ? '★' : '☆';
+            favoriteBtn.classList.toggle('is-favorited', isFav);
+            favoriteBtn.title = isFav ? `Remove ${card.name} from favorites` : `Add ${card.name} to favorites`;
+            favoriteBtn.setAttribute('aria-label', favoriteBtn.title);
+        }
+        const checkbox = cardElement.querySelector('.related-checkbox');
+        if (checkbox) checkbox.checked = isSelected;
+    };
+
+    const createResultCard = card => {
+        const el = document.createElement('div');
+        el.className = 'card-item';
+        el.dataset.cardKey = getCardKey(card);
 
         const artWrap = document.createElement('div');
         artWrap.className = 'card-art-wrap';
-
         const img = document.createElement('img');
-        img.src = hasMultipleFaces
-            ? faceImages[faceIndex].image_uris.normal
-            : cardImg;
-        img.alt = hasMultipleFaces
-            ? (faceImages[faceIndex].name || card.name)
-            : card.name;
         img.loading = 'lazy';
         artWrap.appendChild(img);
-
-        if (hasMultipleFaces) {
-            // Keep the flip control transparent and position it beneath the mana-cost area of
-            // the card image, rather than covering the card name/art. It intentionally lives in
-            // the art wrapper so it stays attached to the image at every responsive width.
-            const flipBtn = document.createElement('button');
-            flipBtn.type = 'button';
-            flipBtn.className = 'card-flip-btn';
-            flipBtn.textContent = 'Flip';
-            flipBtn.title = 'Flip card face';
-            flipBtn.setAttribute('aria-label', `Flip ${card.name}`);
-            flipBtn.addEventListener('click', event => {
-                event.preventDefault();
-                event.stopPropagation();
-                faceIndex = (faceIndex + 1) % faceImages.length;
-                resultCardFaceState.set(stateKey, faceIndex);
-                const face = faceImages[faceIndex];
-                img.src = face.image_uris.normal;
-                img.alt = face.name || card.name;
-            });
-            artWrap.appendChild(flipBtn);
-        }
+        const flipBtn = document.createElement('button');
+        flipBtn.type = 'button';
+        flipBtn.className = 'card-flip-btn';
+        flipBtn.textContent = 'Flip';
+        flipBtn.title = 'Flip card face';
+        flipBtn.setAttribute('aria-label', `Flip ${card.name}`);
+        flipBtn.hidden = true;
+        artWrap.appendChild(flipBtn);
 
         const info = document.createElement('div');
         info.className = 'card-item-info';
-
         const titleRow = document.createElement('div');
         titleRow.className = 'card-item-title-row';
         const title = document.createElement('h4');
         title.className = 'card-item-title';
-        title.textContent = card.name;
-        const copyNameBtn = document.createElement('button');
-        copyNameBtn.type = 'button';
-        copyNameBtn.className = 'copy-card-name-btn';
-        copyNameBtn.textContent = 'Copy';
-        copyNameBtn.title = `Copy ${card.name}`;
-        copyNameBtn.setAttribute('aria-label', `Copy ${card.name} to clipboard`);
-        copyNameBtn.addEventListener('click', event => {
-            event.preventDefault();
-            event.stopPropagation();
-            copyCardNameToClipboard(card.name, copyNameBtn);
-        });
-        titleRow.append(title, copyNameBtn);
+        const copyBtn = document.createElement('button');
+        copyBtn.type = 'button';
+        copyBtn.className = 'copy-card-name-btn';
+        copyBtn.textContent = 'Copy';
+        copyBtn.title = `Copy ${card.name}`;
+        copyBtn.setAttribute('aria-label', `Copy ${card.name} to clipboard`);
+        titleRow.append(title, copyBtn);
 
         const typeLine = document.createElement('p');
+        typeLine.className = 'result-type-line';
         typeLine.style.cssText = 'font-size: 12px; color: var(--text-muted); margin: 0;';
-        typeLine.textContent = card.type_line;
-
         const matchLine = document.createElement('p');
+        matchLine.className = 'card-match-line';
         matchLine.style.cssText = 'font-size: 11px; color: var(--accent-color); font-weight: bold; margin: 4px 0;';
-        matchLine.textContent = `Overall Match: ${matchPercentage}%`;
 
-        let weakMatchBadge = null;
-        if (card._weakBackfillMatch) {
-            weakMatchBadge = document.createElement('p');
-            weakMatchBadge.className = 'weak-match-badge';
-            weakMatchBadge.textContent = 'Weak match - shown to fill out the list';
-            weakMatchBadge.title = 'This result didn\'t clear the usual relevance bar. It\'s shown because too few stronger matches were found, not because it\'s a confident recommendation.';
-        }
-
-        const scoreBreakdown = document.createElement('div');
-        scoreBreakdown.className = 'result-score-breakdown';
-        const addScoreLine = (label, value, bold = false) => {
+        const breakdown = document.createElement('div');
+        breakdown.className = 'result-score-breakdown';
+        for (const label of ['Mechanical','Context','Synergy','Exactness','Category']) {
             const line = document.createElement('span');
-            line.className = bold ? 'score-line score-line-primary' : 'score-line';
-            line.textContent = `${label}: ${value}%`;
-            scoreBreakdown.appendChild(line);
-        };
-
-        addScoreLine('Mechanical', mechScore);
-        addScoreLine('Context', conScore);
-        addScoreLine('Synergy', synScore);
-        addScoreLine('Exactness', exaScore);
-        addScoreLine('Category', catScore);
-
+            line.className = 'score-line';
+            line.dataset.scoreLabel = label;
+            breakdown.appendChild(line);
+        }
         const priceLabel = document.createElement('div');
         priceLabel.className = 'card-price-label';
-        const fullPriceLabel = `Price: ${priceUsd} / ${priceEur}`;
-        priceLabel.textContent = fullPriceLabel;
-        priceLabel.title = fullPriceLabel;
-        scoreBreakdown.appendChild(priceLabel);
-        scoreBreakdown.style.display = displayPreferences.showScoreBreakdown ? '' : 'none';
+        breakdown.appendChild(priceLabel);
 
         const actions = document.createElement('div');
         actions.className = 'card-actions';
-        // Keep Favorite and Compare on the same visual baseline. The CSS turns this into a
-        // three-column action row: Favorite | Compare | Select, so the small star is centered
-        // vertically with the main Compare button rather than floating above/below it.
         actions.style.cssText = 'display: grid; grid-template-columns: 40px minmax(110px, 1fr) auto; align-items: center; gap: 8px; margin-top: 8px;';
-
-        const favoriteCandidateBtn = document.createElement('button');
-        favoriteCandidateBtn.type = 'button';
-        favoriteCandidateBtn.className = 'result-favorite-btn';
-        favoriteCandidateBtn.style.alignSelf = 'center';
-        favoriteCandidateBtn.dataset.favoriteCardName = card.name;
-        const candidateIsFavorite = getStoredArray(FAVORITES_KEY).some(name => String(name).toLowerCase() === String(card.name).toLowerCase());
-        favoriteCandidateBtn.textContent = candidateIsFavorite ? '★' : '☆';
-        favoriteCandidateBtn.title = candidateIsFavorite ? `Remove ${card.name} from favorites` : `Add ${card.name} to favorites`;
-        favoriteCandidateBtn.setAttribute('aria-label', favoriteCandidateBtn.title);
-        favoriteCandidateBtn.classList.toggle('is-favorited', candidateIsFavorite);
-        favoriteCandidateBtn.addEventListener('click', event => {
-            event.preventDefault();
-            event.stopPropagation();
-            toggleFavoriteCard(card);
-        });
-
+        const favoriteBtn = document.createElement('button');
+        favoriteBtn.type = 'button';
+        favoriteBtn.className = 'result-favorite-btn';
+        favoriteBtn.style.alignSelf = 'center';
+        favoriteBtn.dataset.role = 'favorite';
         const compareBtn = document.createElement('button');
+        compareBtn.type = 'button';
         compareBtn.className = 'compare-btn';
-        compareBtn.dataset.index = String(index);
+        compareBtn.dataset.role = 'compare';
         compareBtn.textContent = 'Compare';
-
         const selectLabel = document.createElement('label');
         selectLabel.className = 'result-select-label';
         selectLabel.style.cssText = 'font-size: 11px; display: flex; align-items: center; justify-content: center; gap: 4px; cursor: pointer; white-space: nowrap;';
-        const selectCheckbox = document.createElement('input');
-        selectCheckbox.type = 'checkbox';
-        selectCheckbox.className = 'related-checkbox';
-        selectCheckbox.dataset.index = String(index);
-        selectCheckbox.checked = isSelected;
-        selectLabel.appendChild(selectCheckbox);
-        selectLabel.appendChild(document.createTextNode(' Select'));
+        const checkbox = document.createElement('input');
+        checkbox.type = 'checkbox';
+        checkbox.className = 'related-checkbox';
+        selectLabel.append(checkbox, document.createTextNode(' Select'));
+        actions.append(favoriteBtn, compareBtn, selectLabel);
+        info.append(titleRow, typeLine, matchLine, breakdown, actions);
+        el.append(artWrap, info);
+        return el;
+    };
 
-        actions.appendChild(favoriteCandidateBtn);
-        actions.appendChild(compareBtn);
-        actions.appendChild(selectLabel);
+    for (const card of topCards) {
+        const key = getCardKey(card);
+        let node = existingNodes.get(key);
+        if (!node) node = createResultCard(card);
+        updateResultCard(node, card);
+        fragment.appendChild(node);
+    }
+    resultsGrid.replaceChildren(fragment);
 
-        info.appendChild(titleRow);
-        info.appendChild(typeLine);
-        info.appendChild(matchLine);
-        if (weakMatchBadge) info.appendChild(weakMatchBadge);
-        info.appendChild(scoreBreakdown);
-        info.appendChild(actions);
-
-        cardElement.appendChild(artWrap);
-        cardElement.appendChild(info);
-        resultsFragment.appendChild(cardElement);
-    });
-    resultsGrid.appendChild(resultsFragment);
-
-    document.querySelectorAll('.compare-btn').forEach(btn => {
-        btn.addEventListener('click', (e) => addToCompare(topCards[e.target.dataset.index]));
-    });
-
-    document.querySelectorAll('.related-checkbox').forEach(chk => {
-        chk.addEventListener('change', (e) => {
-            const cardObj = topCards[e.target.dataset.index];
-            toggleSelectRelatedCard(cardObj);
+    // One delegated listener set handles both stable/reused nodes and newly-created nodes. This
+    // avoids index-based closures becoming stale when progressive ranking reorders the grid.
+    if (!resultsGrid.dataset.resultEventsBound) {
+        resultsGrid.dataset.resultEventsBound = 'true';
+        resultsGrid.addEventListener('click', event => {
+            const cardEl = event.target.closest('.card-item[data-card-key]');
+            if (!cardEl) return;
+            const card = visibleResultCardData.get(cardEl.dataset.cardKey);
+            if (!card) return;
+            if (event.target.closest('.compare-btn')) {
+                event.preventDefault();
+                event.stopPropagation();
+                addToCompare(card);
+                return;
+            }
+            if (event.target.closest('.result-favorite-btn')) {
+                event.preventDefault();
+                event.stopPropagation();
+                toggleFavoriteCard(card);
+                return;
+            }
+            const flip = event.target.closest('.card-flip-btn');
+            if (flip) {
+                event.preventDefault();
+                event.stopPropagation();
+                const faces = Array.isArray(card.card_faces) ? card.card_faces.filter(face => face?.image_uris?.normal) : [];
+                if (faces.length > 1) {
+                    const key = getResultCardStateKey(card);
+                    const next = (Number(resultCardFaceState.get(key)) + 1) % faces.length;
+                    resultCardFaceState.set(key, next);
+                    const img = cardEl.querySelector('.card-art-wrap img');
+                    if (img) {
+                        img.src = faces[next].image_uris.normal;
+                        img.alt = faces[next].name || card.name;
+                    }
+                }
+            }
         });
-    });
+        resultsGrid.addEventListener('change', event => {
+            const checkbox = event.target.closest('.related-checkbox');
+            if (!checkbox) return;
+            const cardEl = checkbox.closest('.card-item[data-card-key]');
+            const card = cardEl ? visibleResultCardData.get(cardEl.dataset.cardKey) : null;
+            if (!card) return;
+            toggleSelectRelatedCard(card);
+        });
+        resultsGrid.addEventListener('click', event => {
+            const copyBtn = event.target.closest('.copy-card-name-btn');
+            if (!copyBtn) return;
+            const cardEl = copyBtn.closest('.card-item[data-card-key]');
+            const card = cardEl ? visibleResultCardData.get(cardEl.dataset.cardKey) : null;
+            if (!card) return;
+            event.preventDefault();
+            event.stopPropagation();
+            copyCardNameToClipboard(card.name, copyBtn);
+        });
+    }
 }
 
 // --- COMPARISON PRESENTATION & EXPLANATION HELPERS ---
