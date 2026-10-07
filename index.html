@@ -16,7 +16,6 @@
             </div>
             <div class="header-actions">
                 <button type="button" id="preferences-btn" class="header-action-btn" aria-haspopup="dialog">Preferences</button>
-                <button type="button" id="theme-toggle" aria-label="Toggle light and dark theme">Light mode</button>
             </div>
         </div>
         <div id="legacy-source-search" hidden aria-hidden="true">
@@ -73,7 +72,7 @@
                             <p><strong>Type:</strong> <span id="source-card-type"></span></p>
                             <div class="oracle-container">
                                 <strong>Oracle Text</strong>
-                                <span class="oracle-help">Highlight one or more spans to define what matters most.</span>
+                                <span class="oracle-help">Highlight one or more spans to define what matters most. Use Edit to refine a highlight or connect an additional search detail to it.</span>
                                 <div id="source-card-oracle" class="selectable-text"></div>
                                 <div id="highlight-chips-list" class="highlight-chip-panel"></div>
                             </div>
@@ -574,12 +573,26 @@
                 <button type="button" id="close-preferences-modal" class="close-btn" aria-label="Close preferences">&times;</button>
             </div>
             <div class="modal-body preferences-body">
-                <p class="modal-intro">These settings affect how ManaSearch presents results on this device. They do not reduce the candidate pool used by the search engine.</p>
+                <p class="modal-intro">Customize how ManaSearch looks and how much information it shows. Search quality and the internal candidate pool are not reduced by these display settings.</p>
+
+                <div class="preference-setting">
+                    <div class="preference-setting-copy">
+                        <label for="preference-theme"><strong>Theme</strong></label>
+                        <span>Choose a fixed theme or follow your operating system preference.</span>
+                    </div>
+                    <div class="preference-control">
+                        <select id="preference-theme" class="preference-select" aria-label="Theme">
+                            <option value="system">System</option>
+                            <option value="dark">Dark</option>
+                            <option value="light">Light</option>
+                        </select>
+                    </div>
+                </div>
 
                 <div class="preference-setting">
                     <div class="preference-setting-copy">
                         <label for="preference-result-limit"><strong>Maximum results displayed</strong></label>
-                        <span>Controls how many of the ranked results are shown at once. Searching, ranking, and Search Deeper can still keep more candidates internally.</span>
+                        <span>Controls how many ranked cards are shown at once. Search and Search Deeper still keep their full internal candidate pools.</span>
                     </div>
                     <div class="preference-control preference-number-control">
                         <input type="number" id="preference-result-limit" min="1" max="200" step="1" inputmode="numeric" aria-describedby="preference-result-limit-help">
@@ -599,9 +612,44 @@
                     </label>
                 </div>
 
+                <div class="preference-setting">
+                    <div class="preference-setting-copy">
+                        <label for="preference-result-density"><strong>Result card density</strong></label>
+                        <span>Compact reduces spacing and information padding when you want to scan more cards quickly.</span>
+                    </div>
+                    <div class="preference-control">
+                        <select id="preference-result-density" class="preference-select" aria-label="Result card density">
+                            <option value="comfortable">Comfortable</option>
+                            <option value="compact">Compact</option>
+                        </select>
+                    </div>
+                </div>
+
+                <div class="preference-setting preference-toggle-setting">
+                    <div class="preference-setting-copy">
+                        <label for="preference-reduce-motion"><strong>Reduce interface motion</strong></label>
+                        <span>Minimizes decorative transitions and hover movement. Useful for a calmer interface or accessibility.</span>
+                    </div>
+                    <label class="preference-switch">
+                        <input type="checkbox" id="preference-reduce-motion">
+                        <span class="preference-switch-track" aria-hidden="true"></span>
+                    </label>
+                </div>
+
+                <div class="preference-setting preference-toggle-setting">
+                    <div class="preference-setting-copy">
+                        <label for="preference-show-stream-progress"><strong>Show search stream details</strong></label>
+                        <span>Show the retrieval/scoring stream checklist while a search is running.</span>
+                    </div>
+                    <label class="preference-switch">
+                        <input type="checkbox" id="preference-show-stream-progress">
+                        <span class="preference-switch-track" aria-hidden="true"></span>
+                    </label>
+                </div>
+
                 <div class="preference-info-row">
-                    <strong>Saved automatically</strong>
-                    <span>Preferences are stored locally in this browser and do not affect other users.</span>
+                    <strong>Saved locally</strong>
+                    <span>These preferences are stored in this browser and do not affect other ManaSearch users.</span>
                 </div>
             </div>
             <div class="modal-footer preferences-footer">
@@ -628,6 +676,6 @@
         import * as transformers from "https://cdn.jsdelivr.net/npm/@xenova/transformers@2.16.0";
         window.transformers = transformers;
     </script>
-    <script type="module" src="app.js?v=20261007-4"></script>
+    <script type="module" src="app.js?v=20261007-6"></script>
 </body>
 </html>

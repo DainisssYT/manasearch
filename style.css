@@ -2947,12 +2947,11 @@ select option {
     color: var(--text-main) !important;
 }
 
-button:not(.color-pip):not(.clear-btn):not(#theme-toggle) {
+button:not(.color-pip):not(.clear-btn) {
     color: var(--text-on-accent);
 }
 
 button.clear-btn,
-button#theme-toggle,
 .methods-trigger-btn,
 .order-control,
 .order-control select,
@@ -3184,8 +3183,6 @@ html::-webkit-scrollbar-thumb:hover {
 
 /* History/source-card robustness + theme polish. */
 body.light-theme .search-hint { color: var(--text-muted); }
-body.light-theme #theme-toggle { color: var(--text-main) !important; background: var(--bg-accent) !important; border-color: var(--border-color) !important; }
-body:not(.light-theme) #theme-toggle { color: var(--text-main) !important; }
 
 /* Keep the empty-state instruction centered beneath the site tagline. */
 .site-header .search-hint { max-width: 900px; }
@@ -3836,10 +3833,6 @@ body:not(.light-theme) #theme-toggle { color: var(--text-main) !important; }
         min-width: 0;
     }
 
-    #theme-toggle {
-        flex: 0 0 auto;
-        white-space: nowrap;
-    }
 
     .site-header .search-hint {
         width: 100%;
@@ -4684,8 +4677,7 @@ body:not(.light-theme) #theme-toggle { color: var(--text-main) !important; }
         gap: 6px;
     }
 
-    .header-action-btn,
-    #theme-toggle {
+    .header-action-btn {
         min-height: 38px;
         padding: 7px 11px;
         font-size: 13px;
@@ -4713,4 +4705,179 @@ body:not(.light-theme) #theme-toggle { color: var(--text-main) !important; }
     .preferences-footer button {
         width: 100%;
     }
+}
+
+
+/* Preferences presentation controls. These only alter density/motion/visibility; the visual
+   palette itself remains the existing ManaSearch black/gray/purple/orange aesthetic. */
+.preference-select {
+    min-width: 150px;
+    min-height: 39px;
+    padding: 7px 10px;
+    border-radius: 8px;
+    box-sizing: border-box;
+}
+
+body.compact-results .results-grid {
+    gap: 11px;
+}
+
+body.compact-results .card-item-info {
+    padding: 9px;
+}
+
+body.compact-results .card-item-title {
+    font-size: 14px;
+}
+
+body.compact-results .result-score-breakdown {
+    gap: 4px 7px;
+    margin-top: 5px;
+    margin-bottom: 5px;
+}
+
+body.compact-results .card-actions {
+    margin-top: 5px !important;
+}
+
+body.hide-stream-progress #stream-checklist {
+    display: none !important;
+}
+
+body.reduce-motion *,
+body.reduce-motion *::before,
+body.reduce-motion *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+}
+
+@media (max-width: 700px) {
+    .preference-select {
+        width: 100%;
+        min-width: 0;
+    }
+}
+
+/* Highlight editor / connected-intent controls. These extend the existing chip language without
+   changing the overall ManaSearch visual style. */
+.highlight-edit-btn {
+    appearance: none;
+    border: 1px solid transparent;
+    background: transparent;
+    color: var(--text-muted);
+    border-radius: 999px;
+    padding: 2px 7px;
+    font: inherit;
+    font-size: 10px;
+    font-weight: 600;
+    line-height: 1.2;
+    cursor: pointer;
+}
+
+.highlight-edit-btn:hover,
+.highlight-edit-btn:focus-visible {
+    color: var(--text-main);
+    border-color: var(--accent-color);
+    outline: none;
+}
+
+.highlight-linked-chip {
+    border-color: color-mix(in srgb, var(--accent-color) 28%, var(--border-color));
+}
+
+.highlight-linked-marker {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 13px;
+    color: var(--accent-color);
+    font-size: 14px;
+    line-height: 1;
+    margin-right: 1px;
+}
+
+.highlight-edit-composer {
+    width: min(720px, 100%);
+    margin: 8px auto 0;
+    padding: 13px;
+    border: 1px solid var(--border-color);
+    border-left: 2px solid var(--accent-color);
+    border-radius: 9px;
+    background: var(--bg-accent);
+}
+
+.highlight-edit-title {
+    margin-bottom: 8px;
+    color: var(--text-main);
+    font-size: 12px;
+    font-weight: 700;
+}
+
+.highlight-edit-label,
+.highlight-add-help,
+.highlight-edit-help {
+    color: var(--text-muted);
+    font-size: 11px;
+}
+
+.highlight-edit-input {
+    width: 100%;
+    margin-top: 6px;
+    min-height: 58px;
+    padding: 9px 10px;
+    border: 1px solid var(--border-color);
+    border-radius: 7px;
+    background: var(--bg-primary);
+    color: var(--text-main);
+    font: inherit;
+    font-size: 12px;
+    resize: vertical;
+}
+
+.highlight-edit-input:focus,
+.highlight-edit-select:focus,
+.highlight-add-input:focus {
+    outline: none;
+    border-color: var(--accent-color);
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent-color) 16%, transparent);
+}
+
+.highlight-edit-row,
+.highlight-add-connection-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: 9px;
+    flex-wrap: wrap;
+}
+
+.highlight-edit-label-inline,
+.highlight-add-mode-label {
+    color: var(--text-muted);
+    font-size: 11px;
+    font-weight: 600;
+}
+
+.highlight-edit-select {
+    min-width: 190px;
+    max-width: 100%;
+    padding: 6px 9px;
+    border: 1px solid var(--border-color);
+    border-radius: 7px;
+    background: var(--bg-primary);
+    color: var(--text-main);
+    font: inherit;
+    font-size: 11px;
+}
+
+.highlight-edit-help,
+.highlight-add-help {
+    margin-top: 8px;
+    line-height: 1.45;
+}
+
+.highlight-edit-composer .highlight-add-actions {
+    margin-top: 10px;
 }

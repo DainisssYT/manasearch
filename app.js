@@ -1,5 +1,5 @@
 // ManaSearch deployment build marker. Bump this whenever app.js changes so cached-module issues are easy to diagnose.
-const MANASEARCH_APP_BUILD = '20261007-3';
+const MANASEARCH_APP_BUILD = '20261007-6';
 console.info(`[ManaSearch] app.js build ${MANASEARCH_APP_BUILD}`);
 
 // State Management
@@ -68,6 +68,7 @@ const SESSION_SEMANTIC_CORPUS_LIMIT = 4000;
 // informs mechanical/semantic parsing.
 let manualHighlights = [];
 let highlightComposerOpen = false;
+let highlightEditIndex = null;
 let sortSelect;
 // Incremented on every new source-card load or similarity search so that a slower,
 // stale request can detect it's been superseded and avoid clobbering newer state.
@@ -113,7 +114,11 @@ const THEME_KEY = 'manamatch_theme';
 const DISPLAY_PREFERENCES_KEY = 'manasearch_display_preferences_v1';
 const DEFAULT_DISPLAY_PREFERENCES = Object.freeze({
     maxResults: 50,
-    showScoreBreakdown: true
+    showScoreBreakdown: true,
+    theme: 'dark',
+    resultDensity: 'comfortable',
+    reduceMotion: false,
+    showStreamProgress: true
 });
 let displayPreferences = { ...DEFAULT_DISPLAY_PREFERENCES };
 
@@ -121,6 +126,15 @@ function clampDisplayResultLimit(value) {
     const parsed = Number(value);
     if (!Number.isFinite(parsed)) return DEFAULT_DISPLAY_PREFERENCES.maxResults;
     return Math.max(1, Math.min(200, Math.round(parsed)));
+}
+
+function loadLegacyThemePreference() {
+    try {
+        const legacy = localStorage.getItem(THEME_KEY);
+        return legacy === 'light' || legacy === 'dark' ? legacy : null;
+    } catch (error) {
+        return null;
+    }
 }
 
 function loadDisplayPreferences() {
@@ -132,7 +146,11 @@ function loadDisplayPreferences() {
     }
     displayPreferences = {
         maxResults: clampDisplayResultLimit(stored?.maxResults ?? DEFAULT_DISPLAY_PREFERENCES.maxResults),
-        showScoreBreakdown: stored?.showScoreBreakdown !== false
+        showScoreBreakdown: stored?.showScoreBreakdown !== false,
+        theme: ['dark', 'light', 'system'].includes(stored?.theme) ? stored.theme : (loadLegacyThemePreference() || DEFAULT_DISPLAY_PREFERENCES.theme),
+        resultDensity: ['comfortable', 'compact'].includes(stored?.resultDensity) ? stored.resultDensity : DEFAULT_DISPLAY_PREFERENCES.resultDensity,
+        reduceMotion: Boolean(stored?.reduceMotion),
+        showStreamProgress: stored?.showStreamProgress !== false
     };
     return displayPreferences;
 }
@@ -149,10 +167,28 @@ function getDisplayedResultLimit() {
     return clampDisplayResultLimit(displayPreferences?.maxResults);
 }
 
+function resolveTheme(theme = displayPreferences?.theme) {
+    if (theme === 'light' || theme === 'dark') return theme;
+    try {
+        return window.matchMedia?.('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+    } catch (_) {
+        return 'dark';
+    }
+}
+
+function applyPresentationPreferences() {
+    const resolvedTheme = resolveTheme();
+    document.body.classList.toggle('light-theme', resolvedTheme === 'light');
+    document.body.classList.toggle('compact-results', displayPreferences.resultDensity === 'compact');
+    document.body.classList.toggle('reduce-motion', Boolean(displayPreferences.reduceMotion));
+    document.body.classList.toggle('hide-stream-progress', displayPreferences.showStreamProgress === false);
+}
+
 
 // UI Elements 
 let cardSearchInput, searchBtn, sourceCardSection, sourceCardOracle, findSimilarBtn;
 let loadingIndicator, resultsSection, resultsGrid, themeToggle, historyList;
+let systemThemeMediaQuery = null;
 let favoritesList, favoriteBtn, exportBtn, compareModal, compareContainer, compareStatus;
 let sourceCardEmpty, sourceCardLoaded, sourceCardAddBtn, sourceCardPickerModal, sourceCardPickerInput, sourceCardPickerResults, sourceCardPickerStatus, closeSourceCardPickerBtn;
 let sourceCardPickerRequestId = 0;
@@ -3479,8 +3515,10 @@ function handleOracleTextSelection() {
         manualHighlights.push({
             text: trimmedSelection.text,
             mode: 'exact',
+            origin: 'source',
             start: trimmedSelection.start,
-            end: trimmedSelection.end
+            end: trimmedSelection.end,
+            attachedTo: null
         });
         reapplyOracleHighlights();
         renderHighlightChips();
@@ -3494,6 +3532,199 @@ function handleOracleTextSelection() {
  * with a mode-toggle button (exact/required vs. variable/flexible) and a remove button, mirroring
  * the existing tag-chip pattern (renderTags/removeTag above).
  */
+function findHighlightRangeInSource(text, preferredStart = null) {
+    const sourceText = getCurrentSourceOracleText();
+    const needle = String(text || '').trim();
+    if (!sourceText || !needle) return null;
+    const hay = sourceText.toLowerCase();
+    const lowNeedle = needle.toLowerCase();
+    const matches = [];
+    let from = 0;
+    while (from < hay.length) {
+        const idx = hay.indexOf(lowNeedle, from);
+        if (idx < 0) break;
+        matches.push({ start: idx, end: idx + needle.length });
+        from = idx + Math.max(1, needle.length);
+    }
+    if (!matches.length) return null;
+    if (!Number.isFinite(preferredStart)) return matches[0];
+    return matches.reduce((best, item) =>
+        Math.abs(item.start - preferredStart) < Math.abs(best.start - preferredStart) ? item : best,
+        matches[0]
+    );
+}
+
+function highlightParentOptions(excludeIndex = null) {
+    return manualHighlights
+        .map((h, idx) => ({ h, idx }))
+        .filter(({ h, idx }) => idx !== excludeIndex && h && h.origin !== 'user' && typeof h.text === 'string' && h.text.trim());
+}
+
+function getHighlightParentLabel(index) {
+    const parent = manualHighlights[index];
+    if (!parent) return 'Independent';
+    const text = String(parent.text || '').trim();
+    return text.length > 34 ? text.slice(0, 31) + '\u2026' : text;
+}
+
+function renderHighlightEditor(idx) {
+    if (highlightEditIndex !== idx || !manualHighlights[idx]) return null;
+    const h = manualHighlights[idx];
+    const editor = document.createElement('div');
+    editor.className = 'highlight-edit-composer';
+    editor.setAttribute('role', 'group');
+    editor.setAttribute('aria-label', 'Edit highlighted search detail');
+
+    const title = document.createElement('div');
+    title.className = 'highlight-edit-title';
+    title.textContent = h.origin === 'user' ? 'Edit search detail' : 'Edit highlight';
+
+    const textLabel = document.createElement('label');
+    textLabel.className = 'highlight-edit-label';
+    textLabel.textContent = h.origin === 'user' ? 'Search detail' : 'Highlighted text';
+
+    const input = document.createElement('textarea');
+    input.className = 'highlight-edit-input';
+    input.rows = 2;
+    input.maxLength = 300;
+    input.value = String(h.text || '');
+    input.setAttribute('aria-label', textLabel.textContent);
+
+    const modeRow = document.createElement('div');
+    modeRow.className = 'highlight-edit-row';
+    const modeLabel = document.createElement('span');
+    modeLabel.className = 'highlight-edit-label-inline';
+    modeLabel.textContent = 'Match:';
+    modeRow.appendChild(modeLabel);
+
+    let selectedMode = h.mode === 'variable' ? 'variable' : 'exact';
+    const makeModeButton = (mode, label, titleText) => {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = `highlight-composer-mode ${mode === selectedMode ? 'selected' : ''}`;
+        btn.textContent = label;
+        btn.title = titleText;
+        btn.addEventListener('click', () => {
+            selectedMode = mode;
+            modeRow.querySelectorAll('.highlight-composer-mode').forEach(b => b.classList.remove('selected'));
+            btn.classList.add('selected');
+        });
+        return btn;
+    };
+    modeRow.appendChild(makeModeButton('variable', '\u2248 Flexible', 'Match the underlying mechanic/intent; values and wording may differ.'));
+    modeRow.appendChild(makeModeButton('exact', '= Exact', 'Require the text/value to occur literally in a matching card.'));
+
+    const connectRow = document.createElement('div');
+    connectRow.className = 'highlight-edit-row';
+    const connectLabel = document.createElement('label');
+    connectLabel.className = 'highlight-edit-label-inline';
+    connectLabel.textContent = 'Connected to:';
+    const connectSelect = document.createElement('select');
+    connectSelect.className = 'highlight-edit-select';
+    connectSelect.setAttribute('aria-label', 'Connect this search detail to a highlight');
+
+    const independent = document.createElement('option');
+    independent.value = '';
+    independent.textContent = 'Independent';
+    connectSelect.appendChild(independent);
+    highlightParentOptions(idx).forEach(({ h: parent, idx: parentIdx }) => {
+        const option = document.createElement('option');
+        option.value = String(parentIdx);
+        option.textContent = getHighlightParentLabel(parentIdx);
+        connectSelect.appendChild(option);
+    });
+    if (Number.isInteger(h.attachedTo) && manualHighlights[h.attachedTo]) {
+        connectSelect.value = String(h.attachedTo);
+    } else {
+        connectSelect.value = '';
+    }
+    connectLabel.htmlFor = `highlight-edit-connect-${idx}`;
+    connectSelect.id = connectLabel.htmlFor;
+    connectRow.appendChild(connectLabel);
+    connectRow.appendChild(connectSelect);
+
+    const help = document.createElement('div');
+    help.className = 'highlight-edit-help';
+    help.textContent = h.origin === 'user'
+        ? 'Connected details become part of the same search intent without pretending the wording exists on the source card.'
+        : 'Changing this to text that exists on the source card moves the visual highlight. New wording becomes a search-only detail.';
+
+    const actions = document.createElement('div');
+    actions.className = 'highlight-add-actions';
+    const cancel = document.createElement('button');
+    cancel.type = 'button';
+    cancel.className = 'highlight-add-cancel';
+    cancel.textContent = 'Cancel';
+    cancel.addEventListener('click', () => {
+        highlightEditIndex = null;
+        renderHighlightChips();
+    });
+
+    const save = document.createElement('button');
+    save.type = 'button';
+    save.className = 'highlight-add-submit';
+    save.textContent = 'Save';
+
+    const commit = () => {
+        const nextText = input.value.trim();
+        if (!nextText) {
+            input.focus();
+            return;
+        }
+        const target = manualHighlights[idx];
+        if (!target) return;
+        const parentValue = connectSelect.value;
+        const nextAttachedTo = /^\d+$/.test(parentValue) ? Number(parentValue) : null;
+
+        const textChanged = nextText.toLowerCase() !== String(target.text || '').trim().toLowerCase();
+        target.text = nextText;
+        target.mode = selectedMode;
+        target.attachedTo = Number.isInteger(nextAttachedTo) && nextAttachedTo !== idx ? nextAttachedTo : null;
+
+        // Keep source-backed highlights visually anchored to a real occurrence. If the user
+        // intentionally edits one into new wording, convert it to a search-only detail rather than
+        // rendering a fake highlight that does not exist on the card.
+        if (target.origin !== 'user' && (textChanged || !Number.isFinite(target.start) || !Number.isFinite(target.end))) {
+            const found = findHighlightRangeInSource(nextText, target.start);
+            if (found) {
+                target.start = found.start;
+                target.end = found.end;
+                target.origin = target.origin === 'benchmark' ? 'benchmark' : 'source';
+            } else {
+                target.start = null;
+                target.end = null;
+                target.origin = 'user';
+            }
+        }
+
+        highlightEditIndex = null;
+        reapplyOracleHighlights();
+        renderHighlightChips();
+    };
+    save.addEventListener('click', commit);
+    input.addEventListener('keydown', (event) => {
+        if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') {
+            event.preventDefault();
+            commit();
+        } else if (event.key === 'Escape') {
+            event.preventDefault();
+            highlightEditIndex = null;
+            renderHighlightChips();
+        }
+    });
+
+    actions.appendChild(cancel);
+    actions.appendChild(save);
+    editor.appendChild(title);
+    editor.appendChild(textLabel);
+    editor.appendChild(input);
+    editor.appendChild(modeRow);
+    editor.appendChild(connectRow);
+    editor.appendChild(help);
+    editor.appendChild(actions);
+    return editor;
+}
+
 function renderHighlightChips() {
     const container = document.getElementById('highlight-chips-list');
     if (!container) return;
@@ -3504,28 +3735,51 @@ function renderHighlightChips() {
 
     manualHighlights.forEach((h, idx) => {
         const chip = document.createElement('div');
-        chip.className = `card-chip highlight-chip ${h.origin === 'user' ? 'highlight-user-chip' : 'highlight-source-chip'}`;
+        chip.className = `card-chip highlight-chip ${h.origin === 'user' ? 'highlight-user-chip' : 'highlight-source-chip'} ${Number.isInteger(h.attachedTo) ? 'highlight-linked-chip' : ''}`;
+
+        if (Number.isInteger(h.attachedTo) && manualHighlights[h.attachedTo]) {
+            const linked = document.createElement('span');
+            linked.className = 'highlight-linked-marker';
+            linked.textContent = '\u21b3';
+            linked.title = `Connected to: ${manualHighlights[h.attachedTo].text || 'highlight'}`;
+            chip.appendChild(linked);
+        }
+
+        const origin = document.createElement('span');
+        origin.className = 'highlight-origin-label';
+        origin.textContent = h.origin === 'user' ? '+' : 'Highlight';
+        origin.title = h.origin === 'user'
+            ? (Number.isInteger(h.attachedTo) ? `User-added search detail connected to: ${getHighlightParentLabel(h.attachedTo)}` : 'Independent user-added search detail')
+            : 'Selected from this card\'s Oracle text';
 
         const modeBtn = document.createElement('button');
         modeBtn.type = 'button';
         modeBtn.className = `highlight-mode-btn ${h.mode === 'variable' ? 'mode-variable' : 'mode-exact'}`;
         modeBtn.textContent = h.mode === 'variable' ? '\u2248 Flexible' : '= Exact';
         modeBtn.title = h.mode === 'variable'
-            ? 'Flexible: the wording/value can differ while the underlying intent should remain similar. Click to require the exact text instead.'
+            ? 'Flexible: wording/value can differ while the underlying intent should remain similar. Click to require exact text instead.'
             : 'Exact: the matching card must contain this text/value. Click to make it flexible instead.';
         modeBtn.addEventListener('click', () => toggleHighlightMode(idx));
-
-        const origin = document.createElement('span');
-        origin.className = 'highlight-origin-label';
-        origin.textContent = h.origin === 'user' ? '+' : 'Highlight';
-        origin.title = h.origin === 'user'
-            ? 'User-added search detail'
-            : 'Selected from this card\'s Oracle text';
 
         const label = document.createElement('span');
         label.className = 'highlight-chip-text';
         label.textContent = h.text.length > 55 ? h.text.slice(0, 52) + '\u2026' : h.text;
         label.title = h.text;
+
+        const editBtn = document.createElement('button');
+        editBtn.type = 'button';
+        editBtn.className = 'highlight-edit-btn';
+        editBtn.textContent = 'Edit';
+        editBtn.title = 'Edit text, match mode, or connection';
+        editBtn.setAttribute('aria-label', `Edit ${h.text}`);
+        editBtn.addEventListener('click', () => {
+            highlightEditIndex = highlightEditIndex === idx ? null : idx;
+            highlightComposerOpen = false;
+            renderHighlightChips();
+            if (highlightEditIndex === idx) {
+                requestAnimationFrame(() => document.querySelector('.highlight-edit-input')?.focus());
+            }
+        });
 
         const removeBtn = document.createElement('button');
         removeBtn.type = 'button';
@@ -3538,14 +3792,16 @@ function renderHighlightChips() {
         chip.appendChild(origin);
         chip.appendChild(modeBtn);
         chip.appendChild(label);
+        chip.appendChild(editBtn);
         chip.appendChild(removeBtn);
         chipsRow.appendChild(chip);
+
+        const editor = renderHighlightEditor(idx);
+        if (editor) container.appendChild(editor);
     });
 
     container.appendChild(chipsRow);
 
-    // The plus button is deliberately beneath the chips. It is a small, discoverable way to
-    // add an independent search requirement without forcing the user to edit Oracle text.
     const addButton = document.createElement('button');
     addButton.type = 'button';
     addButton.className = 'highlight-add-btn';
@@ -3555,6 +3811,7 @@ function renderHighlightChips() {
     addButton.setAttribute('aria-expanded', highlightComposerOpen ? 'true' : 'false');
     addButton.addEventListener('click', () => {
         highlightComposerOpen = !highlightComposerOpen;
+        highlightEditIndex = null;
         renderHighlightChips();
         if (highlightComposerOpen) {
             requestAnimationFrame(() => document.getElementById('highlight-add-text')?.focus());
@@ -3577,7 +3834,7 @@ function renderHighlightChips() {
         input.id = 'highlight-add-text';
         input.className = 'highlight-add-input';
         input.rows = 2;
-        input.placeholder = 'e.g. can target creatures, instant, costs 2 or less';
+        input.placeholder = 'e.g. produces 3 colorless mana, can target creatures, costs 2 or less';
         input.maxLength = 300;
         input.setAttribute('aria-label', 'Search detail');
 
@@ -3605,6 +3862,32 @@ function renderHighlightChips() {
         modeRow.appendChild(makeModeButton('variable', '\u2248 Flexible', 'Match the underlying meaning/mechanics; wording and exact values may differ.'));
         modeRow.appendChild(makeModeButton('exact', '= Exact', 'Require the added wording/value to occur in the candidate Oracle text.'));
 
+        const connectRow = document.createElement('div');
+        connectRow.className = 'highlight-add-connection-row';
+        const connectLabel = document.createElement('label');
+        connectLabel.className = 'highlight-add-mode-label';
+        connectLabel.textContent = 'Connect to:';
+        const connectSelect = document.createElement('select');
+        connectSelect.className = 'highlight-edit-select';
+        connectSelect.setAttribute('aria-label', 'Connect added search detail to a highlight');
+        const independent = document.createElement('option');
+        independent.value = '';
+        independent.textContent = 'Independent';
+        connectSelect.appendChild(independent);
+        const parents = highlightParentOptions(null);
+        parents.forEach(({ idx }) => {
+            const option = document.createElement('option');
+            option.value = String(idx);
+            option.textContent = getHighlightParentLabel(idx);
+            connectSelect.appendChild(option);
+        });
+        connectRow.appendChild(connectLabel);
+        connectRow.appendChild(connectSelect);
+
+        const help = document.createElement('div');
+        help.className = 'highlight-add-help';
+        help.textContent = 'Connect a search-only detail to a highlighted Oracle effect when it describes a property of that effect rather than a separate requirement.';
+
         const actionRow = document.createElement('div');
         actionRow.className = 'highlight-add-actions';
         const cancelBtn = document.createElement('button');
@@ -3625,7 +3908,8 @@ function renderHighlightChips() {
             const text = input.value.trim();
             if (!text) return;
             const duplicate = manualHighlights.some(h =>
-                h.origin === 'user' && h.text.trim().toLowerCase() === text.toLowerCase() && h.mode === selectedMode
+                h.origin === 'user' && h.text.trim().toLowerCase() === text.toLowerCase() &&
+                h.mode === selectedMode && h.attachedTo === (connectSelect.value === '' ? null : Number(connectSelect.value))
             );
             if (!duplicate) {
                 manualHighlights.push({
@@ -3633,7 +3917,8 @@ function renderHighlightChips() {
                     mode: selectedMode,
                     origin: 'user',
                     start: null,
-                    end: null
+                    end: null,
+                    attachedTo: /^\d+$/.test(connectSelect.value) ? Number(connectSelect.value) : null
                 });
             }
             input.value = '';
@@ -3657,6 +3942,8 @@ function renderHighlightChips() {
         composer.appendChild(label);
         composer.appendChild(input);
         composer.appendChild(modeRow);
+        composer.appendChild(connectRow);
+        composer.appendChild(help);
         composer.appendChild(actionRow);
         container.appendChild(composer);
     }
@@ -3671,6 +3958,15 @@ function toggleHighlightMode(idx) {
 
 function removeHighlight(idx) {
     manualHighlights.splice(idx, 1);
+    // Keep explicit connection references valid after a removal. A child attached to the removed
+    // highlight becomes independent; references after the removed index shift down by one.
+    manualHighlights.forEach(h => {
+        if (!Number.isInteger(h.attachedTo)) return;
+        if (h.attachedTo === idx) h.attachedTo = null;
+        else if (h.attachedTo > idx) h.attachedTo -= 1;
+    });
+    if (highlightEditIndex === idx) highlightEditIndex = null;
+    else if (Number.isInteger(highlightEditIndex) && highlightEditIndex > idx) highlightEditIndex -= 1;
     renderHighlightChips();
     reapplyOracleHighlights();
 }
@@ -5965,42 +6261,24 @@ function trimHighlightRangeText(text, start, end) {
 
 function buildHighlightScoringText(highlights, sourceText = getCurrentSourceOracleText()) {
     const hs = (highlights || [])
-        .filter(h => h && typeof h.text === 'string' && h.text.trim())
-        .map((h, index) => ({ ...h, _index: index }))
-        .sort((a, b) => {
-            const as = Number.isFinite(a.start) ? a.start : Number.POSITIVE_INFINITY;
-            const bs = Number.isFinite(b.start) ? b.start : Number.POSITIVE_INFINITY;
-            return as - bs || a._index - b._index;
-        });
+        .filter(h => h && typeof h.text === 'string' && h.text.trim());
     if (!hs.length) return '';
 
-    const positioned = hs.filter(h => Number.isFinite(h.start) && Number.isFinite(h.end) && h.end > h.start);
-    if (!positioned.length) return hs.map(h => h.text.trim()).join('. ');
-
-    const groups = [];
-    let current = [positioned[0]];
-    for (let i = 1; i < positioned.length; i++) {
-        const prev = current[current.length - 1];
-        const next = positioned[i];
-        const gap = String(sourceText || '').slice(prev.end, next.start);
-        // Keep selections in the same grammatical sentence/effect together. Sentence-ending
-        // punctuation or a large gap still marks a genuine clause boundary; simple whitespace,
-        // punctuation, and short connectors are part of the original syntax and must be retained.
-        const sameEffect = !/[.!?\n]/.test(gap) && gap.length <= 96;
-        if (sameEffect) current.push(next);
-        else {
-            groups.push(current);
-            current = [next];
-        }
-    }
-    groups.push(current);
+    // Use the same explicit grouping logic as the mechanical highlight-intent layer. This means
+    // a user-added search detail can be attached to an actual source selection and contribute to
+    // the semantic target without being mistaken for literal Oracle grammar.
+    const groups = annotateHighlightGroups(hs, sourceText);
+    if (!groups.length) return '';
 
     return groups.map(group => {
-        const start = group[0].start;
-        const end = group[group.length - 1].end;
-        return String(sourceText || '').slice(start, end).trim();
+        const sourceContext = String(group.contextText || '').trim();
+        const intentHints = (group.connectedIntentTexts || []).filter(Boolean).map(v => String(v).trim());
+        return [sourceContext, ...intentHints]
+            .filter(Boolean)
+            .join(' ');
     }).filter(Boolean).join('. ');
 }
+
 
 // HIGHLIGHT INTENT LAYER
 // ---------------------------------------------------------------------------
@@ -6123,38 +6401,89 @@ function maxOneToOneHighlightAssignment(sourceEffects, candidateEffects, mode) {
 // Group multiple UI selections that belong to one grammatical effect. The source text between
 // the selections is preserved, because the connective words often carry the actual rules syntax.
 function annotateHighlightGroups(highlights, sourceText = getCurrentSourceOracleText()) {
-    const hs = (highlights || [])
+    const original = Array.isArray(highlights) ? highlights : [];
+    const hs = original
         .filter(h => h && typeof h.text === 'string' && h.text.trim())
-        .map((h, index) => ({ ...h, _highlightIndex: index }))
-        .sort((a,b) => {
+        .map((h, index) => ({ ...h, _highlightIndex: index }));
+    if (!hs.length) return [];
+
+    // Start with the normal position-based grouping. This keeps nearby selections from the same
+    // Oracle sentence/effect together without requiring the user to perfectly select the whole
+    // sentence in one drag.
+    const parent = hs.map((_, i) => i);
+    const find = (x) => {
+        let root = x;
+        while (parent[root] !== root) root = parent[root];
+        while (parent[x] !== x) {
+            const next = parent[x];
+            parent[x] = root;
+            x = next;
+        }
+        return root;
+    };
+    const union = (a, b) => {
+        const ra = find(a), rb = find(b);
+        if (ra !== rb) parent[rb] = ra;
+    };
+
+    const positioned = hs
+        .filter(h => Number.isFinite(h.start) && Number.isFinite(h.end) && h.end > h.start)
+        .sort((a, b) => a.start - b.start || a._highlightIndex - b._highlightIndex);
+    for (let i = 1; i < positioned.length; i++) {
+        const prev = positioned[i - 1];
+        const next = positioned[i];
+        const gap = String(sourceText || '').slice(prev.end, next.start);
+        if (!/[.!?\n]/.test(gap) && gap.length <= 96) {
+            union(hs.indexOf(prev), hs.indexOf(next));
+        }
+    }
+
+    // Explicit user connections override physical proximity. This is the important part for
+    // cases such as: highlight "{T}: Add {C}{C}" and then attach an intent like "produces 3
+    // colorless mana". The attached intent belongs to that effect even though it does not exist
+    // literally in the source Oracle text.
+    const indexByOriginal = new Map(hs.map((h, i) => [h._highlightIndex, i]));
+    hs.forEach((h, localIndex) => {
+        const targetOriginalIndex = Number.isInteger(h.attachedTo) ? h.attachedTo : null;
+        if (targetOriginalIndex === null || targetOriginalIndex === h._highlightIndex) return;
+        const targetLocalIndex = indexByOriginal.get(targetOriginalIndex);
+        if (targetLocalIndex == null) return;
+        union(localIndex, targetLocalIndex);
+    });
+
+    const buckets = new Map();
+    hs.forEach((h, localIndex) => {
+        const root = find(localIndex);
+        if (!buckets.has(root)) buckets.set(root, []);
+        buckets.get(root).push(h);
+    });
+
+    const groups = Array.from(buckets.values())
+        .map(group => group.sort((a, b) => {
             const as = Number.isFinite(a.start) ? a.start : Number.POSITIVE_INFINITY;
             const bs = Number.isFinite(b.start) ? b.start : Number.POSITIVE_INFINITY;
             return as - bs || a._highlightIndex - b._highlightIndex;
+        }))
+        .sort((a, b) => {
+            const as = Number.isFinite(a[0]?.start) ? a[0].start : Number.POSITIVE_INFINITY;
+            const bs = Number.isFinite(b[0]?.start) ? b[0].start : Number.POSITIVE_INFINITY;
+            return as - bs || (a[0]?._highlightIndex || 0) - (b[0]?._highlightIndex || 0);
         });
-    if (!hs.length) return [];
-
-    const groups = [];
-    let current = [hs[0]];
-    for (let i = 1; i < hs.length; i++) {
-        const prev = current[current.length - 1];
-        const next = hs[i];
-        const positioned = Number.isFinite(prev.start) && Number.isFinite(prev.end) &&
-            Number.isFinite(next.start) && Number.isFinite(next.end);
-        const gap = positioned ? String(sourceText || '').slice(prev.end, next.start) : '';
-        // No sentence boundary and a modest distance means the selections belong to the same
-        // grammatical line/effect. This intentionally mirrors buildHighlightScoringText().
-        if (positioned && !/[.!?\n]/.test(gap) && gap.length <= 96) current.push(next);
-        else { groups.push(current); current = [next]; }
-    }
-    groups.push(current);
 
     groups.forEach((group, groupId) => {
-        const positioned = group.filter(h => Number.isFinite(h.start) && Number.isFinite(h.end) && h.end > h.start);
-        const start = positioned.length ? Math.min(...positioned.map(h => h.start)) : null;
-        const end = positioned.length ? Math.max(...positioned.map(h => h.end)) : null;
+        const positionedMembers = group.filter(h => Number.isFinite(h.start) && Number.isFinite(h.end) && h.end > h.start);
+        const start = positionedMembers.length ? Math.min(...positionedMembers.map(h => h.start)) : null;
+        const end = positionedMembers.length ? Math.max(...positionedMembers.map(h => h.end)) : null;
+        // Only text that actually occurs in the source card belongs in the parser context.
+        // User-added/attached text is kept separately as search intent so it cannot corrupt the
+        // MTG rule parser while still influencing retrieval and ranking.
         const contextText = start !== null && end !== null
             ? String(sourceText || '').slice(start, end).trim()
-            : group.map(h => h.text.trim()).join(' ');
+            : '';
+        const connectedIntentTexts = group
+            .filter(h => h.origin === 'user' || !Number.isFinite(h.start) || !Number.isFinite(h.end))
+            .map(h => String(h.text || '').trim())
+            .filter(Boolean);
         const hasExact = group.some(h => h.mode !== 'variable');
         const hasVariable = group.some(h => h.mode === 'variable');
         const groupMode = hasExact && hasVariable ? 'mixed' : (hasVariable ? 'variable' : 'exact');
@@ -6162,12 +6491,20 @@ function annotateHighlightGroups(highlights, sourceText = getCurrentSourceOracle
         const exactTexts = group.filter(h => h.mode !== 'variable').map(h => h.text.trim());
         const variableTexts = group.filter(h => h.mode === 'variable').map(h => h.text.trim());
         const modes = group.map(h => h.mode === 'variable' ? 'variable' : 'exact');
-        group.contextText = contextText;
+        group.contextText = contextText || group.filter(h => Number.isFinite(h.start)).map(h => h.text.trim()).join(' ');
+        group.connectedIntentTexts = connectedIntentTexts;
+        group.searchIntentText = [group.contextText, ...connectedIntentTexts].filter(Boolean).join(' ');
         group.sourceStart = start;
         group.sourceEnd = end;
         group.mode = groupMode;
         group.modes = modes;
-        group.selections = group.map(h => ({ text: h.text.trim(), mode: h.mode === 'variable' ? 'variable' : 'exact', intent: h.intent || '' }));
+        group.selections = group.map(h => ({
+            text: h.text.trim(),
+            mode: h.mode === 'variable' ? 'variable' : 'exact',
+            intent: h.intent || '',
+            origin: h.origin || 'user',
+            attachedTo: Number.isInteger(h.attachedTo) ? h.attachedTo : null
+        }));
         group.exactTexts = exactTexts;
         group.variableTexts = variableTexts;
         group.benchmarkIntentOnly = benchmarkIntentOnly;
@@ -6176,7 +6513,7 @@ function annotateHighlightGroups(highlights, sourceText = getCurrentSourceOracle
             h.groupId = groupId;
             h.groupStart = start;
             h.groupEnd = end;
-            h.groupContextText = contextText;
+            h.groupContextText = group.contextText;
             h.groupMode = groupMode;
             h.benchmarkIntentOnly = benchmarkIntentOnly;
         });
@@ -6187,16 +6524,14 @@ function annotateHighlightGroups(highlights, sourceText = getCurrentSourceOracle
 function buildHighlightIntentProfiles(highlights) {
     const groups = annotateHighlightGroups(highlights, getCurrentSourceOracleText());
     return groups.map((group, index) => {
-        // Parse the complete excerpt. For Test #11 this turns three UI selections into the actual
-        // rules sentence "White spells you cast cost {1} less to cast.", allowing parseCostReductionEffect
-        // to see the whole pattern. The Variable selection is then applied only to the parameter
-        // matching behavior, not used as a literal requirement.
-        let parsedEffects = parseMTGEffect(group.map(h => h.text).join(' '));
-        if (group.length && Number.isFinite(group[0].start) && Number.isFinite(group[0].end)) {
+        // Parse only text that actually exists on the source card. Attached search details are
+        // intentionally NOT injected into the rules parser because phrases like "produces 3
+        // colorless mana" can be useful search intent but are not necessarily valid Oracle grammar.
+        // They are carried separately as semantic/retrieval hints below.
+        let parsedEffects = parseMTGEffect(group.contextText || group.map(h => h.text).filter(Boolean).join(' '));
+        if (group.length && Number.isFinite(group.sourceStart) && Number.isFinite(group.sourceEnd)) {
             const sourceText = getCurrentSourceOracleText();
-            const first = Math.min(...group.map(h => h.start));
-            const last = Math.max(...group.map(h => h.end));
-            const contextual = String(sourceText || '').slice(first, last).trim();
+            const contextual = String(sourceText || '').slice(group.sourceStart, group.sourceEnd).trim();
             if (contextual) parsedEffects = parseMTGEffect(contextual);
         }
         let canonicalFunctions = getCanonicalFunctions(parsedEffects);
@@ -6225,6 +6560,8 @@ function buildHighlightIntentProfiles(highlights) {
             groupId: index,
             text: group.contextText,
             contextText: group.contextText,
+            searchIntentText: group.searchIntentText,
+            connectedIntentTexts: group.connectedIntentTexts || [],
             selections: group.selections,
             modes: group.modes,
             mode: group.mode,
@@ -6271,8 +6608,9 @@ function calculateHighlightIntentRetrievalText(profiles) {
     if (!profiles || profiles.length === 0) return '';
     const canonical = profiles.flatMap(p => p.canonicalFunctions || []);
     const canonicalText = canonicalFunctionToText(canonical);
-    const groupedText = profiles.map(p => p.contextText || p.text).filter(Boolean);
-    return [canonicalText, ...groupedText].filter(Boolean).join('. ');
+    const groupedText = profiles.map(p => p.searchIntentText || p.contextText || p.text).filter(Boolean);
+    const connected = profiles.flatMap(p => p.connectedIntentTexts || []).filter(Boolean);
+    return [...new Set([canonicalText, ...groupedText, ...connected].filter(Boolean))].join('. ');
 }
 
 /**
@@ -10295,8 +10633,9 @@ function initApp() {
     loadingIndicator = document.getElementById('loading-indicator');
     resultsSection = document.getElementById('results-section');
     resultsGrid = document.getElementById('results-grid');
-    themeToggle = document.getElementById('theme-toggle');
+    themeToggle = null;
     loadDisplayPreferences();
+    applyPresentationPreferences();
 
     // --- PREFERENCES PANEL ---
     const preferencesBtn = document.getElementById('preferences-btn');
@@ -10306,16 +10645,32 @@ function initApp() {
     const resetPreferencesBtn = document.getElementById('reset-preferences-btn');
     const preferenceResultLimit = document.getElementById('preference-result-limit');
     const preferenceScoreBreakdown = document.getElementById('preference-score-breakdown');
+    const preferenceTheme = document.getElementById('preference-theme');
+    const preferenceDensity = document.getElementById('preference-result-density');
+    const preferenceReduceMotion = document.getElementById('preference-reduce-motion');
+    const preferenceShowStreamProgress = document.getElementById('preference-show-stream-progress');
 
     function syncPreferencesControls() {
         if (preferenceResultLimit) preferenceResultLimit.value = String(getDisplayedResultLimit());
         if (preferenceScoreBreakdown) preferenceScoreBreakdown.checked = Boolean(displayPreferences.showScoreBreakdown);
+        if (preferenceTheme) preferenceTheme.value = displayPreferences.theme || 'system';
+        if (preferenceDensity) preferenceDensity.value = displayPreferences.resultDensity || 'comfortable';
+        if (preferenceReduceMotion) preferenceReduceMotion.checked = Boolean(displayPreferences.reduceMotion);
+        if (preferenceShowStreamProgress) preferenceShowStreamProgress.checked = displayPreferences.showStreamProgress !== false;
     }
 
     function commitPreferences() {
         displayPreferences.maxResults = clampDisplayResultLimit(preferenceResultLimit?.value);
         displayPreferences.showScoreBreakdown = preferenceScoreBreakdown?.checked !== false;
+        displayPreferences.theme = ['dark', 'light', 'system'].includes(preferenceTheme?.value) ? preferenceTheme.value : DEFAULT_DISPLAY_PREFERENCES.theme;
+        displayPreferences.resultDensity = ['comfortable', 'compact'].includes(preferenceDensity?.value) ? preferenceDensity.value : DEFAULT_DISPLAY_PREFERENCES.resultDensity;
+        displayPreferences.reduceMotion = Boolean(preferenceReduceMotion?.checked);
+        displayPreferences.showStreamProgress = preferenceShowStreamProgress?.checked !== false;
         saveDisplayPreferences();
+        try {
+            localStorage.setItem(THEME_KEY, displayPreferences.theme === 'system' ? resolveTheme('system') : displayPreferences.theme);
+        } catch (_) {}
+        applyPresentationPreferences();
         if (resultsSection && !resultsSection.classList.contains('hidden') && Array.isArray(lastSearchResults)) {
             renderResults(lastSearchResults);
         }
@@ -10516,15 +10871,23 @@ function initApp() {
         if (event.target === preferencesModal) preferencesModal.classList.add('hidden');
     });
 
-    loadTheme();
     renderSidebarLists();
+    systemThemeMediaQuery = window.matchMedia?.('(prefers-color-scheme: light)') || null;
+    if (systemThemeMediaQuery?.addEventListener) {
+        systemThemeMediaQuery.addEventListener('change', () => {
+            if (displayPreferences.theme === 'system') applyPresentationPreferences();
+        });
+    } else if (systemThemeMediaQuery?.addListener) {
+        systemThemeMediaQuery.addListener(() => {
+            if (displayPreferences.theme === 'system') applyPresentationPreferences();
+        });
+    }
     
     if (searchBtn) searchBtn.addEventListener('click', () => loadSourceCard(cardSearchInput.value.trim()));
     if (cardSearchInput) cardSearchInput.addEventListener('keypress', (e) => { if (e.key === 'Enter') loadSourceCard(cardSearchInput.value.trim()); });
     if (findSimilarBtn) findSimilarBtn.addEventListener('click', findSimilarCards);
     const searchDeeperBtnInit = document.getElementById('search-deeper-btn');
     if (searchDeeperBtnInit) searchDeeperBtnInit.addEventListener('click', searchDeeper);
-    if (themeToggle) themeToggle.addEventListener('click', toggleTheme);
     if (favoriteBtn) favoriteBtn.addEventListener('click', toggleFavorite);
     const discardSourceCardBtn = document.getElementById('discard-source-card-btn');
     if (discardSourceCardBtn) {
@@ -10778,25 +11141,18 @@ if (document.readyState === 'loading') {
 }
 
 // --- THEME & STORAGE MANAGEMENT ---
+// Theme is controlled from Preferences. These compatibility helpers remain available for
+// older integrations/benchmarks that may call them directly.
 function toggleTheme() {
-    const isLight = document.body.classList.toggle('light-theme');
-    themeToggle.textContent = isLight ? 'Dark mode' : 'Light mode';
-    try {
-        localStorage.setItem(THEME_KEY, isLight ? 'light' : 'dark');
-    } catch (err) {
-        console.warn("Theme preference could not be saved:", err.message);
-    }
+    const current = resolveTheme(displayPreferences?.theme);
+    displayPreferences.theme = current === 'light' ? 'dark' : 'light';
+    saveDisplayPreferences();
+    applyPresentationPreferences();
+    try { localStorage.setItem(THEME_KEY, displayPreferences.theme); } catch (_) {}
 }
 
 function loadTheme() {
-    try {
-        if (localStorage.getItem(THEME_KEY) === 'light') {
-            document.body.classList.add('light-theme');
-            if (themeToggle) themeToggle.textContent = 'Dark mode';
-        }
-    } catch (err) {
-        console.warn('Theme preference could not be loaded:', err.message);
-    }
+    applyPresentationPreferences();
 }
 
 function getStoredArray(key) { 
@@ -12749,7 +13105,12 @@ function buildNoHighlightSemanticIntentText(sourceCard, sourceText, parsedEffect
 function getSearchIntent(sourceCard, highlights = []) {
     const sourceText = getCurrentSourceOracleText(sourceCard) || '';
     const signature = JSON.stringify((highlights || []).map(h => ({
-        text: String(h?.text || ''), mode: h?.mode === 'variable' ? 'variable' : 'exact', benchmarkIntentOnly: Boolean(h?.benchmarkIntentOnly)
+        text: String(h?.text || ''),
+        mode: h?.mode === 'variable' ? 'variable' : 'exact',
+        origin: h?.origin || 'user',
+        attachedTo: Number.isInteger(h?.attachedTo) ? h.attachedTo : null,
+        intent: String(h?.intent || ''),
+        benchmarkIntentOnly: Boolean(h?.benchmarkIntentOnly)
     })));
     const key = `${normalizeCardNameForIdentity(sourceCard?.name || '')}|${sourceText}|${signature}`;
     const searchIntentCache = getSearchIntentRuntimeCache();
@@ -12759,11 +13120,26 @@ function getSearchIntent(sourceCard, highlights = []) {
         searchIntentCache.set(key, cached);
         return cached;
     }
+
     const hasHighlight = Array.isArray(highlights) && highlights.length > 0;
     const targetText = hasHighlight
         ? buildHighlightScoringText(highlights, sourceText)
         : sourceText;
-    const parsedEffects = hasHighlight ? parseMTGEffect(targetText) : getCachedParsedEffects(sourceCard, sourceText);
+
+    let parsedEffects;
+    if (hasHighlight) {
+        // Parse only the source-card Oracle excerpts, never the attached search-only wording.
+        // The latter is semantic/retrieval intent and may not be valid MTG grammar.
+        const profiles = buildHighlightIntentProfiles(highlights);
+        parsedEffects = profiles.flatMap(p => p.recognizedEffects?.length ? p.recognizedEffects : (p.parsedEffects || []));
+        if (!parsedEffects.length) {
+            const sourceOnlyText = (profiles.map(p => p.contextText).filter(Boolean).join('. ') || targetText);
+            parsedEffects = parseMTGEffect(sourceOnlyText);
+        }
+    } else {
+        parsedEffects = getCachedParsedEffects(sourceCard, sourceText);
+    }
+
     const semanticText = hasHighlight
         ? normalizeOracleForEmbedding(targetText, sourceCard?.name || '')
         : buildNoHighlightSemanticIntentText(sourceCard, sourceText, parsedEffects);
