@@ -18,6 +18,9 @@ let lastSearchDiagnostics = null;
 let lastSearchCandidateCount = null;
 const searchCache = new Map();
 const sourceCardCache = new Map();
+// Bounded LRU cache for the immutable search intent derived from the current source card + highlights.
+// This must live at module scope because getSearchIntent() is called by the search handlers.
+const searchIntentCache = new Map();
 let nlpExtractor = null;
 // Embedding cache, keyed by the exact text string that was embedded (oracle text or a canonical
 // function string). The MiniLM embedding of a given string is deterministic and never changes
