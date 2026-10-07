@@ -1,6 +1,6 @@
-/* ManaSearch build 20261007-13 */
+/* ManaSearch build 20261007-16 */
 // ManaSearch deployment build marker. Bump this whenever app.js changes so cached-module issues are easy to diagnose.
-const MANASEARCH_APP_BUILD = '20261007-13';
+const MANASEARCH_APP_BUILD = '20261007-16';
 console.info(`[ManaSearch] app.js build ${MANASEARCH_APP_BUILD}`);
 
 // State Management
@@ -10620,7 +10620,250 @@ function sanitizeRelatedOraclePattern(pattern) {
     return cleaned.slice(0, 80);
 }
 
-function buildRelatedSearchQueries(sourceCard, selectedCards, repeatingPatterns, filterParts) {
+
+/**
+ * Builds a consensus intent for Related Search instead of treating the selected cards as an
+ * unordered bag of independent references. This is deliberately parameter-aware: when several
+ * selected cards share a canonical function and most of them agree on a quantity (for example,
+ * four mana rocks that add {C}{C}{C} and one that adds {C}{C}), the majority quantity becomes a
+ * soft target for retrieval and ranking. The system remains tolerant when the selection is truly
+ * diverse by reducing the strength of the consensus when support is weak.
+ */
+function buildRelatedIntentProfile(cards = [], selectedCards = []) {
+    const selectedKeys = new Set((selectedCards || []).map(c => normalizeCardNameForIdentity(c?.name || '')).filter(Boolean));
+    const refs = (cards || []).filter(c => c && c.name).map(card => {
+        const text = getCurrentSourceOracleText(card);
+        const parsed = getCachedParsedEffects(card, text);
+        const functionsByName = new Map();
+        for (const effect of (parsed || [])) {
+            const cf = effect?.canonical;
+            if (!cf?.function) continue;
+            const key = cf.function;
+            const importance = Math.max(0.05, Number(effect.importance) || FUNCTION_IMPORTANCE[key] || 0.5);
+            const existing = functionsByName.get(key);
+            if (!existing || importance > existing.importance) {
+                functionsByName.set(key, { effect, canonical: cf, importance });
+            }
+        }
+        const selected = selectedKeys.has(normalizeCardNameForIdentity(card.name));
+        return {
+            card,
+            parsed,
+            selected,
+            weight: selected ? 1.0 : 0.88,
+            functions: Array.from(functionsByName.entries()).map(([functionName, record]) => ({ functionName, ...record }))
+        };
+    });
+
+    if (!refs.length) return null;
+
+    const functionStats = new Map();
+    for (const ref of refs) {
+        for (const entry of ref.functions) {
+            const supportWeight = ref.weight * (0.72 + 0.28 * Math.min(1, entry.importance));
+            let stat = functionStats.get(entry.functionName);
+            if (!stat) {
+                stat = { functionName: entry.functionName, supportWeight: 0, cardCount: 0, paramSamples: [], cards: [] };
+                functionStats.set(entry.functionName, stat);
+            }
+            stat.supportWeight += supportWeight;
+            stat.cardCount += 1;
+            stat.cards.push(ref.card.name);
+
+            const cfParams = entry.canonical?.params || {};
+            const q = cfParams.quantity ?? entry.effect?.quantity ?? entry.effect?.amount ?? null;
+            if (Number.isFinite(Number(q))) {
+                stat.paramSamples.push({ value: Number(q), weight: supportWeight, cardName: ref.card.name });
+            }
+        }
+    }
+
+    const totalRefWeight = refs.reduce((sum, ref) => sum + ref.weight, 0) || 1;
+    const rankedFunctions = Array.from(functionStats.values()).sort((a, b) => {
+        if (b.supportWeight !== a.supportWeight) return b.supportWeight - a.supportWeight;
+        return b.cardCount - a.cardCount;
+    });
+    const dominant = rankedFunctions[0] || null;
+    if (!dominant) return { references: refs, functions: [], confidence: 0 };
+
+    dominant.supportRatio = Math.min(1, dominant.supportWeight / totalRefWeight);
+    dominant.cardRatio = Math.min(1, dominant.cardCount / refs.length);
+
+    // Numeric parameter consensus uses a weighted mode for integer quantities. Exact repeated
+    // values are preferable to an arithmetic average because 2 and 3 mana is not "2.5 mana" for
+    // retrieval or gameplay relevance. When no exact mode dominates, the weighted median is used
+    // only as a stable fallback.
+    let numericTarget = null;
+    let numericConfidence = 0;
+    if (dominant.paramSamples.length) {
+        const grouped = new Map();
+        for (const sample of dominant.paramSamples) grouped.set(sample.value, (grouped.get(sample.value) || 0) + sample.weight);
+        const modes = Array.from(grouped.entries()).sort((a, b) => b[1] - a[1]);
+        numericTarget = modes[0][0];
+        const totalNumericWeight = dominant.paramSamples.reduce((sum, x) => sum + x.weight, 0) || 1;
+        numericConfidence = Math.min(1, modes[0][1] / totalNumericWeight);
+        if (numericConfidence < 0.50) {
+            const sorted = dominant.paramSamples.slice().sort((a, b) => a.value - b.value);
+            const half = totalNumericWeight / 2;
+            let running = 0;
+            for (const sample of sorted) {
+                running += sample.weight;
+                if (running >= half) { numericTarget = sample.value; break; }
+            }
+        }
+    }
+
+    // Strategic-role consensus is intentionally secondary. It identifies that the cards are the
+    // same kind of gameplay object (for example fast-mana artifacts) without allowing role alone to
+    // erase a strong parameter target such as "three mana".
+    const roleStats = new Map();
+    for (const ref of refs) {
+        const roles = inferStrategicRoleProfile(ref.card, ref.parsed, getCurrentSourceOracleText(ref.card)) || [];
+        const top = roles[0];
+        if (!top?.role) continue;
+        const group = top.group || top.role;
+        const key = `${top.role}|${group}`;
+        const stat = roleStats.get(key) || { role: top.role, group, weight: 0, cards: 0 };
+        stat.weight += ref.weight * Math.max(0.4, top.score || 0.5);
+        stat.cards += 1;
+        roleStats.set(key, stat);
+    }
+    const dominantRole = Array.from(roleStats.values()).sort((a, b) => b.weight - a.weight)[0] || null;
+    if (dominantRole) dominantRole.supportRatio = Math.min(1, dominantRole.weight / totalRefWeight);
+
+    const artifactSupportWeight = refs.reduce((sum, ref) => {
+        const typeLine = String(ref.card?.type_line || '').toLowerCase();
+        return sum + (/\bartifact\b/.test(typeLine) && !/\bland\b/.test(typeLine) ? ref.weight : 0);
+    }, 0);
+    const artifactSupportRatio = Math.min(1, artifactSupportWeight / totalRefWeight);
+
+    // Parameter confidence is deliberately multiplied by function support. Five cards agreeing
+    // on "mana_ability" but only two providing a numeric amount should not create a hard amount
+    // constraint; four of five providing the amount is strong evidence.
+    const parameterStrength = numericTarget == null
+        ? 0
+        : Math.min(1, dominant.supportRatio * numericConfidence * Math.min(1, dominant.paramSamples.length / Math.max(1, refs.length)));
+    const consensusConfidence = Math.min(1,
+        dominant.supportRatio * 0.60 +
+        (numericTarget != null ? parameterStrength * 0.30 : 0) +
+        (dominantRole ? dominantRole.supportRatio * 0.10 : 0)
+    );
+
+    return {
+        references: refs,
+        functions: rankedFunctions,
+        dominantFunction: dominant.functionName,
+        functionSupportRatio: dominant.supportRatio,
+        functionCardRatio: dominant.cardRatio,
+        numericTarget,
+        numericConfidence,
+        numericParameterStrength: parameterStrength,
+        dominantRole,
+        artifactSupportRatio,
+        confidence: consensusConfidence,
+        selectedCount: selectedCards.length
+    };
+}
+
+function getRelatedCandidateFunctionRecords(parsedEffects = [], functionName = null) {
+    const out = [];
+    for (const effect of (parsedEffects || [])) {
+        const cf = effect?.canonical;
+        if (!cf?.function || (functionName && cf.function !== functionName)) continue;
+        out.push({
+            effect,
+            canonical: cf,
+            quantity: Number.isFinite(Number(cf.params?.quantity))
+                ? Number(cf.params.quantity)
+                : (Number.isFinite(Number(effect.quantity)) ? Number(effect.quantity) : (Number.isFinite(Number(effect.amount)) ? Number(effect.amount) : null))
+        });
+    }
+    return out;
+}
+
+function calculateRelatedConsensusFit(profile, parsedCandidate, card = null) {
+    if (!profile?.dominantFunction) return { score: 0, functionMatch: 0, quantityFit: 0, quantitySupport: 0, roleFit: 0 };
+
+    const candidateFunctions = getRelatedCandidateFunctionRecords(parsedCandidate, profile.dominantFunction);
+    const anyCandidateFunctions = getCanonicalFunctions(parsedCandidate);
+    const functionMatch = candidateFunctions.length
+        ? 1
+        : anyCandidateFunctions.some(cf => getFunctionAffinity(profile.dominantFunction, cf?.function) >= 0.70) ? 0.48 : 0;
+
+    let quantityFit = 0;
+    let quantitySupport = 0;
+    if (profile.numericTarget != null && candidateFunctions.length) {
+        const values = candidateFunctions.map(x => x.quantity).filter(v => Number.isFinite(v));
+        if (values.length) {
+            quantityFit = Math.max(...values.map(value => {
+                const diff = Math.abs(value - profile.numericTarget);
+                // Exact quantity = 1. A one-step miss is still related, but the decay is intentionally
+                // stronger for larger deviations so 1-mana and 3-mana rocks do not look equivalent.
+                return diff === 0 ? 1 : Math.max(0, Math.exp(-0.62 * diff));
+            }));
+            quantitySupport = quantityFit;
+        }
+    } else {
+        quantityFit = profile.numericTarget == null ? 0.75 : 0;
+    }
+
+    let roleFit = 0;
+    if (profile.dominantRole) {
+        const candidateRoles = inferStrategicRoleProfile(card, parsedCandidate, getCurrentSourceOracleText(card)) || [];
+        for (const role of candidateRoles) {
+            if (role.role === profile.dominantRole.role) roleFit = Math.max(roleFit, role.score || 0);
+            else if (role.group === profile.dominantRole.group) roleFit = Math.max(roleFit, 0.55 * (role.score || 0.5));
+        }
+    }
+
+    // Related Search is intentionally parameter-aware, but the parameter must remain subordinate
+    // to the shared mechanic. The weights below are normalized after all three signals are chosen so
+    // they remain stable as the profile gains more evidence fields.
+    const rawFunctionWeight = 0.42 + profile.functionSupportRatio * 0.12;
+    const rawParameterWeight = profile.numericTarget != null ? (0.38 + profile.numericParameterStrength * 0.16) : 0.14;
+    const rawRoleWeight = 0.10 + (profile.artifactSupportRatio >= 0.60 ? 0.05 : 0);
+    const rawTotal = rawFunctionWeight + rawParameterWeight + rawRoleWeight || 1;
+    const functionWeight = rawFunctionWeight / rawTotal;
+    const parameterWeight = rawParameterWeight / rawTotal;
+    const roleWeight = rawRoleWeight / rawTotal;
+    const artifactFit = profile.artifactSupportRatio >= 0.60
+        ? (/\bartifact\b/.test(String(card?.type_line || '').toLowerCase()) ? 1 : 0.55)
+        : 0.5;
+    const roleCombined = roleWeight <= 0 ? 0 : (roleFit * 0.72 + artifactFit * 0.28);
+    const base = functionMatch * functionWeight + quantityFit * parameterWeight + roleCombined * roleWeight;
+    const confidenceGate = 0.35 + 0.65 * profile.confidence;
+    return {
+        score: Math.max(0, Math.min(1, base * confidenceGate)),
+        functionMatch,
+        quantityFit,
+        quantitySupport,
+        roleFit,
+        artifactFit
+    };
+}
+
+function buildRelatedConsensusIntentText(profile) {
+    if (!profile?.dominantFunction) return '';
+    const fn = profile.dominantFunction;
+    if (fn === 'mana_ability' && profile.numericTarget != null) {
+        const dominantColorless = profile.references.filter(ref => {
+            const effects = ref.parsed || [];
+            return effects.some(e => e?.canonical?.function === 'mana_ability' &&
+                (/colorless|\{c\}/i.test(String(e.canonical?.params?.magnitude || '')) ||
+                 (Array.isArray(e.colors) && e.colors.includes('colorless'))));
+        }).length;
+        const colorWord = dominantColorless >= Math.ceil(profile.references.length * 0.60) ? ' colorless' : '';
+        return `artifact mana rock that adds ${profile.numericTarget}${colorWord} mana fast mana reusable mana production`;
+    }
+    const dominantFunctionRecord = profile.functions?.find(x => x.functionName === fn);
+    if (dominantFunctionRecord?.paramSamples?.length) {
+        const synthetic = { function: fn, outcome: FUNCTION_OUTCOMES[fn] || 'unknown', params: { quantity: profile.numericTarget } };
+        return canonicalFunctionToText([synthetic]);
+    }
+    return `${fn.replace(/_/g, ' ')} ${profile.dominantRole?.role?.replace(/_/g, ' ') || ''}`.trim();
+}
+
+function buildRelatedSearchQueries(sourceCard, selectedCards, repeatingPatterns, filterParts, relatedIntentProfile = null) {
     // Related Search is driven first by the cards the user explicitly selected. The original
     // implementation let the source card and a few lossy repeating-text queries consume the
     // retrieval budget, which meant a selected pair such as Thran Dynamo + Basalt Monolith could
@@ -10642,6 +10885,31 @@ function buildRelatedSearchQueries(sourceCard, selectedCards, repeatingPatterns,
         seen.add(q);
         queries.push({ query: q, kind, priority });
     };
+
+    // A consensus parameter is the highest-priority retrieval hint when the selected cards
+    // strongly agree on one. This turns a multi-card selection into an actual search intent instead
+    // of five independent "similar-to-this-card" lookups. Keep the exact-parameter query additive,
+    // not exclusive, because Related Search should still discover broader equivalents.
+    if (relatedIntentProfile?.dominantFunction && relatedIntentProfile.confidence >= 0.48) {
+        const fn = relatedIntentProfile.dominantFunction;
+        const qty = relatedIntentProfile.numericTarget;
+        if (fn === 'mana_ability') {
+            if (qty != null && relatedIntentProfile.numericParameterStrength >= 0.42) {
+                add(`otag:manaproduction o:"${Array.from({ length: qty }, () => '{C}').join('')}" ${excludedNames} ${filters}`, 'consensus-parameter', 1);
+                add(`otag:manaproduction o:"add" ${excludedNames} ${filters}`, 'consensus-function', 3);
+            } else {
+                add(`otag:manaproduction ${excludedNames} ${filters}`, 'consensus-function', 3);
+            }
+        } else {
+            const vocab = FUNCTION_RETRIEVAL_VOCAB[fn];
+            if (vocab?.otag) add(`otag:${vocab.otag} ${excludedNames} ${filters}`, 'consensus-function', 2);
+            if (qty != null && vocab?.paramTemplate) {
+                const syntheticParams = { quantity: qty };
+                const templated = vocab.paramTemplate(syntheticParams);
+                if (templated) add(`${templated} ${excludedNames} ${filters}`, 'consensus-parameter', 1);
+            }
+        }
+    }
 
     // Reserve the earliest retrieval slots for robust Scryfall oracle-tags and broad strategic
     // role phrases. These are much less brittle than quoting normalized text and ensure each
@@ -12091,6 +12359,9 @@ async function scoreCardBatch({
     // 0% mechanical score simply because the original source has additional unrelated effects.
     sourceParsedEffectsOverride = null,
     sourceReferenceParsedEffects = [],
+    // Related Search supplies a consensus profile so the scorer can distinguish "shares the same
+    // mechanic" from "matches the dominant parameter the selected cards agree on".
+    relatedIntentProfile = null,
     // Text to check for literal presence on a candidate (the exactness/fuzzy channel), as
     // opposed to targetText which also drives mechanical/semantic parsing. Defaults to targetText
     // for callers that don't distinguish (related-card search, searchDeeper) - only the main
@@ -12618,6 +12889,11 @@ async function scoreCardBatch({
         const primaryEffectMatch = Math.max(0, Math.min(1, card.primaryEffectMatchScore || 0));
         const functionalSimilarity = Math.max(0, Math.min(1, card.functionalSimilarityScore || 0));
         const quantitySimilarity = Math.max(0, Math.min(1, card.quantitySimilarityScore || 0));
+        const relatedConsensus = relatedIntentProfile
+            ? calculateRelatedConsensusFit(relatedIntentProfile, candidateParsedEffects, card)
+            : null;
+        card.relatedConsensusScore = relatedConsensus?.score || 0;
+        card.relatedConsensusDetails = relatedConsensus || null;
 
         // Ranking refinement: preserve the existing channel blend, then reward candidates that
         // cover the source's important effects and behave like genuine functional substitutes.
@@ -12669,13 +12945,27 @@ async function scoreCardBatch({
             (activeSearchMethodFlags.wording ? Math.min(0.050, Math.max(0, wordingSignal - 0.50) * 0.10) : 0);
         card.methodSignals = { target: targetFocusSignal, role: roleFocusSignal, alternate: alternateSignal, synergy: synergySignal, wording: wordingSignal };
 
+        // Related Search gets an additional consensus term. It is intentionally stronger than the
+        // generic quantity bonus when the selected cards exhibit a high-confidence shared parameter,
+        // because the whole point of multi-card selection is to express an intent that one reference
+        // card alone cannot express. Exact consensus is rewarded; one-step quantity drift remains
+        // related but clearly weaker; large drift becomes a real ranking penalty without becoming a
+        // hard filter.
+        const relatedConsensusDelta = relatedConsensus
+            ? Math.max(-0.055, Math.min(0.18, (relatedConsensus.score - 0.46) * (0.20 + 0.12 * (relatedIntentProfile?.confidence || 0))))
+            : 0;
+
         const rankingRefinement = compoundCoverageBonus + balancedCoverageBonus + primaryMatchBonus
-            + functionalSubstituteBonus + quantityBonus + methodBoost;
+            + functionalSubstituteBonus + quantityBonus + methodBoost + relatedConsensusDelta;
 
         card.rankingRefinementScore = rankingRefinement;
-        card.rankingEvidence = { mechanical: structural, mechanicalTrusted: structuralTrusted, mechanicalConfidence, rawSemantic, functionSemantic: functionSemanticAugmented, roleSemantic, effectCoverage, balancedCoverage, primaryEffectMatch, evidenceAgreement: agreement, retrievalSimilarity: Number(card._semanticRetrievalSimilarity) || 0, rankingIntent: rankingIntent.kind, rankingIntentConfidence: rankingIntent.confidence };
+        const relatedConsensusGate = relatedConsensus && relatedIntentProfile?.confidence >= 0.52 && relatedIntentProfile?.functionSupportRatio >= 0.62
+            ? (1 - (0.50 * (1 - relatedConsensus.score) * Math.max(0, Math.min(1, relatedIntentProfile.confidence))))
+            : 1;
+        card.relatedConsensusGate = relatedConsensusGate;
+        card.rankingEvidence = { mechanical: structural, mechanicalTrusted: structuralTrusted, mechanicalConfidence, rawSemantic, functionSemantic: functionSemanticAugmented, roleSemantic, effectCoverage, balancedCoverage, primaryEffectMatch, evidenceAgreement: agreement, retrievalSimilarity: Number(card._semanticRetrievalSimilarity) || 0, rankingIntent: rankingIntent.kind, rankingIntentConfidence: rankingIntent.confidence, relatedConsensus: relatedConsensus ? { score: relatedConsensus.score, functionMatch: relatedConsensus.functionMatch, quantityFit: relatedConsensus.quantityFit, roleFit: relatedConsensus.roleFit, artifactFit: relatedConsensus.artifactFit, dominantFunction: relatedIntentProfile?.dominantFunction || null, targetQuantity: relatedIntentProfile?.numericTarget ?? null, confidence: relatedIntentProfile?.confidence || 0 } : null };
         card.similarityScore = Math.max(0, Math.min(1,
-            (channelScore + agreementBonus + rankingRefinement) * evidenceGate * contradictionPenalty
+            (channelScore + agreementBonus + rankingRefinement) * evidenceGate * contradictionPenalty * relatedConsensusGate
         ));
 
         if (i % 100 === 0) {
@@ -12719,9 +13009,15 @@ async function executeRelatedCardSearch() {
     }
 
     const allCardsInSet = [sourceCardAtStart, ...Array.from(selectedCardsAtStart.values())];
+    const relatedIntentProfile = buildRelatedIntentProfile(
+        allCardsInSet,
+        Array.from(selectedCardsAtStart.values())
+    );
     const repeatingPatterns = extractRepeatingPatterns(allCardsInSet);
 
-    updateProgress(1, 3, `Discovered ${repeatingPatterns.length} shared patterns across selected cards...`);
+    updateProgress(1, 3, relatedIntentProfile?.dominantFunction
+        ? `Related intent: ${relatedIntentProfile.dominantFunction.replace(/_/g, ' ')}${relatedIntentProfile.numericTarget != null ? ` (${relatedIntentProfile.numericTarget})` : ''}...`
+        : `Discovered ${repeatingPatterns.length} shared patterns across selected cards...`);
 
     const filters = readConstraintFilters();
 
@@ -12731,7 +13027,8 @@ async function executeRelatedCardSearch() {
         sourceCardAtStart,
         Array.from(selectedCardsAtStart.values()),
         repeatingPatterns,
-        filterParts
+        filterParts,
+        relatedIntentProfile
     );
 
     try {
@@ -12799,13 +13096,25 @@ async function executeRelatedCardSearch() {
                 for (let i = 0; i < dim; i++) centroid[i] /= referenceVectors.length;
                 relatedTargetVectors.push(centroid);
 
+                // A centroid represents the selected set, but it can blur a repeated numeric
+                // parameter such as 2-vs-3 mana. Give the explicit consensus intent its own semantic
+                // retrieval vector and make it the final target used for candidate semantic scoring.
+                const consensusText = buildRelatedConsensusIntentText(relatedIntentProfile);
+                if (consensusText) {
+                    const consensusVector = await getCachedEmbedding(
+                        normalizeOracleForEmbedding(consensusText, sourceCardAtStart.name),
+                        relatedExtractor
+                    );
+                    if (consensusVector) relatedTargetVectors.push(consensusVector);
+                }
+
                 const semanticQuerySets = await Promise.all(relatedTargetVectors.map((vector, index) =>
                     findFullSemanticMatches(
                         semanticIndex,
                         vector,
                         sourceCardAtStart.name,
-                        index === relatedTargetVectors.length - 1 ? 72 : 48,
-                        index === relatedTargetVectors.length - 1 ? 0.40 : 0.42
+                        index === relatedTargetVectors.length - 1 ? 72 : (index === relatedTargetVectors.length - 2 ? 56 : 48),
+                        index === relatedTargetVectors.length - 1 ? 0.38 : (index === relatedTargetVectors.length - 2 ? 0.40 : 0.42)
                     )
                 ));
 
@@ -12921,9 +13230,13 @@ async function executeRelatedCardSearch() {
             uniqueCanonicalKeys.add(key);
             uniqueCanonicalFunctions.push(fn);
         }
-        const canonicalTargetText = canonicalFunctionToText(uniqueCanonicalFunctions.slice(0, 6));
+        const consensusIntentText = buildRelatedConsensusIntentText(relatedIntentProfile);
+        const canonicalTargetText = consensusIntentText || canonicalFunctionToText(uniqueCanonicalFunctions.slice(0, 6));
+        const supportingPatternText = relatedIntentProfile?.confidence >= 0.55
+            ? repeatingPatterns.slice(0, 2).join('. ')
+            : repeatingPatterns.slice(0, 3).join('. ');
         const combinedTargetText = canonicalTargetText
-            ? [canonicalTargetText, repeatingPatterns.length ? repeatingPatterns.slice(0, 3).join('. ') : ''].filter(Boolean).join('. ')
+            ? [canonicalTargetText, supportingPatternText].filter(Boolean).join('. ')
             : (repeatingPatterns.length > 0 ? repeatingPatterns.join('. ') : getCurrentSourceOracleText(sourceCardAtStart));
 
         // Related search is an ensemble query: a candidate is mechanically related when it
@@ -12956,7 +13269,7 @@ async function executeRelatedCardSearch() {
             targetVector = relatedTargetVectors.length
                 ? relatedTargetVectors[relatedTargetVectors.length - 1]
                 : await getCachedEmbedding(normalizeOracleForEmbedding(combinedTargetText, sourceCardAtStart.name), extractor);
-            const combinedFunctionText = canonicalFunctionToText(uniqueCanonicalFunctions.slice(0, 6));
+            const combinedFunctionText = buildRelatedConsensusIntentText(relatedIntentProfile) || canonicalFunctionToText(uniqueCanonicalFunctions.slice(0, 6));
             if (combinedFunctionText) {
                 sourceFunctionVector = await getCachedEmbedding(combinedFunctionText, extractor);
             }
@@ -12978,6 +13291,7 @@ async function executeRelatedCardSearch() {
             targetText: combinedTargetText,
             sourceParsedEffectsOverride: relatedPrimaryParsedEffects,
             sourceReferenceParsedEffects: relatedReferenceParsedEffects,
+            relatedIntentProfile,
             targetVector,
             targetVectors: { oracle: targetVector, semanticRetrieval: targetVector },
             sourceFunctionVector,
@@ -12997,6 +13311,16 @@ async function executeRelatedCardSearch() {
             finalCardPool.filter(c => !selectedCardsAtStart.has(c.id)),
             priorityValue
         );
+        // Overall ranking gets a deterministic related-intent tie-break. This is especially useful
+        // when the ordinary channels round several cards to 100%; the card matching the selected
+        // set's dominant mechanic/parameter remains ahead instead of being ordered arbitrarily.
+        if (priorityValue === 'overall' && relatedIntentProfile?.confidence >= 0.52) {
+            nonSelected.sort((a, b) => {
+                const overallDelta = (Number(b.similarityScore) || 0) - (Number(a.similarityScore) || 0);
+                if (Math.abs(overallDelta) > 0.0005) return overallDelta;
+                return (Number(b.relatedConsensusScore) || 0) - (Number(a.relatedConsensusScore) || 0);
+            });
+        }
         
         lastSearchResults = [...Array.from(selectedCardsAtStart.values()), ...nonSelected];
         // Related-card search runs its own pipeline and produces no stage diagnostics; clear
