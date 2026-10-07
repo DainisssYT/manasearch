@@ -1,5 +1,5 @@
 // ManaSearch deployment build marker. Bump this whenever app.js changes so cached-module issues are easy to diagnose.
-const MANASEARCH_APP_BUILD = '20261007-7';
+const MANASEARCH_APP_BUILD = '20261007-8';
 console.info(`[ManaSearch] app.js build ${MANASEARCH_APP_BUILD}`);
 
 // State Management
@@ -73,6 +73,9 @@ let sortSelect;
 // Incremented on every new source-card load or similarity search so that a slower,
 // stale request can detect it's been superseded and avoid clobbering newer state.
 let searchRequestId = 0;
+// Related-card searches have their own generation so selecting/unselecting a result while the
+// normal search is still progressively scoring cannot invalidate that main search.
+let relatedSearchRequestId = 0;
 // Benchmark mode deliberately bypasses the app's persistent/browser-level GET cache so every
 // benchmark test starts with no candidates inherited from a previous test or previous run.
 let benchmarkColdMode = false;
@@ -11491,9 +11494,12 @@ function buildSharedSourceTextSearchQuery(cards, excludeNames='') {
 
 // --- RELATED CARDS SELECTION & FLOATING BAR ---
 function invalidateInFlightRelatedSearch() {
-    // Selection changes alter the related-card query context. Invalidate any outstanding related
-    // search/deeper-search work so it cannot render results based on an obsolete selection.
-    ++searchRequestId;
+    // Selection changes alter only the related-card query context. They MUST NOT invalidate the
+    // ordinary Similar Cards search, because users are allowed to select a progressively-scored
+    // result before every retrieval stream has finished. The previous implementation incremented
+    // searchRequestId here, which made the in-flight main search think it had become stale and it
+    // subsequently cleared/withdrew its remaining candidates.
+    ++relatedSearchRequestId;
     pendingDeeperSearch = null;
     const deeperBtn = document.getElementById('search-deeper-btn');
     if (deeperBtn) deeperBtn.classList.add('hidden');
@@ -11820,6 +11826,7 @@ function clearSourceCard() {
 async function loadSourceCard(query, providedCard = null) {
     if (!query) return;
 
+    ++relatedSearchRequestId;
     const requestId = ++searchRequestId;
 
     showLoading(true);
@@ -12582,9 +12589,14 @@ async function scoreCardBatch({
 async function executeRelatedCardSearch() {
     if (!currentSourceCard || selectedRelatedCards.size === 0) return;
 
-    const requestId = ++searchRequestId;
+    const requestId = ++relatedSearchRequestId;
+    const sourceSearchRequestId = searchRequestId;
     const sourceCardAtStart = currentSourceCard;
     const selectedCardsAtStart = new Map(selectedRelatedCards);
+    const isCurrentRelatedSearch = () =>
+        requestId === relatedSearchRequestId &&
+        sourceSearchRequestId === searchRequestId &&
+        currentSourceCard === sourceCardAtStart;
 
     showLoading(true);
     resultsSection.classList.add('hidden');
@@ -12627,10 +12639,10 @@ async function executeRelatedCardSearch() {
                 // not be transformed into query-syntax retries.
                 if (error?.status !== 404) throw error;
             }
-            if (requestId !== searchRequestId || currentSourceCard !== sourceCardAtStart) return;
+            if (!isCurrentRelatedSearch()) return;
         }
         if (lastRelatedQueryError && !results.length) throw lastRelatedQueryError;
-        if (requestId !== searchRequestId || currentSourceCard !== sourceCardAtStart) return;
+        if (!isCurrentRelatedSearch()) return;
         
         // 2. REMOVE SOURCE/SELECTED CARDS & 3. APPLY USER FILTERS
         // Excludes by NAME (not just id) so a different printing of the source card or an
@@ -12662,7 +12674,7 @@ async function executeRelatedCardSearch() {
 
         updateProgress(2, 3, "Scoring candidates against target patterns...");
         const extractor = await getNLPModel();
-        if (requestId !== searchRequestId || currentSourceCard !== sourceCardAtStart) return;
+        if (!isCurrentRelatedSearch()) return;
         const combinedTargetText = repeatingPatterns.length > 0 ? repeatingPatterns.join('. ') : getCurrentSourceOracleText(sourceCardAtStart);
 
         // Related search is an ensemble query: a candidate is mechanically related when it
@@ -12718,7 +12730,7 @@ async function executeRelatedCardSearch() {
             sniperIds: new Set(),
             activeFilters: filters
         });
-        if (requestId !== searchRequestId || currentSourceCard !== sourceCardAtStart) return;
+        if (!isCurrentRelatedSearch()) return;
 
         // 7. FINAL RANKING
         const priorityValue = document.getElementById('sort-results')?.value || 'overall';
@@ -12735,9 +12747,9 @@ async function executeRelatedCardSearch() {
         renderResults(lastSearchResults);
 
     } catch (error) {
-        if (requestId === searchRequestId) alert("Related card search failed: " + error.message);
+        if (isCurrentRelatedSearch()) alert("Related card search failed: " + error.message);
     } finally {
-        if (requestId === searchRequestId) {
+        if (isCurrentRelatedSearch()) {
             updateProgress(null, null, "Related card search complete!");
             showLoading(false);
         }
