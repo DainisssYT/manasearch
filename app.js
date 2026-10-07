@@ -1,3 +1,7 @@
+// ManaSearch deployment build marker. Bump this whenever app.js changes so cached-module issues are easy to diagnose.
+const MANASEARCH_APP_BUILD = '20261007-2';
+console.info(`[ManaSearch] app.js build ${MANASEARCH_APP_BUILD}`);
+
 // State Management
 const ENABLE_LOCAL_CARD2VEC = false;
 let currentSourceCard = null;
@@ -20,7 +24,10 @@ const searchCache = new Map();
 const sourceCardCache = new Map();
 // Bounded LRU cache for the immutable search intent derived from the current source card + highlights.
 // This must live at module scope because getSearchIntent() is called by the search handlers.
-const searchIntentCache = new Map();
+const searchIntentRuntimeCache = new Map();
+function getSearchIntentRuntimeCache() {
+    return searchIntentRuntimeCache;
+}
 let nlpExtractor = null;
 // Embedding cache, keyed by the exact text string that was embedded (oracle text or a canonical
 // function string). The MiniLM embedding of a given string is deterministic and never changes
@@ -12655,6 +12662,7 @@ function getSearchIntent(sourceCard, highlights = []) {
         text: String(h?.text || ''), mode: h?.mode === 'variable' ? 'variable' : 'exact', benchmarkIntentOnly: Boolean(h?.benchmarkIntentOnly)
     })));
     const key = `${normalizeCardNameForIdentity(sourceCard?.name || '')}|${sourceText}|${signature}`;
+    const searchIntentCache = getSearchIntentRuntimeCache();
     const cached = searchIntentCache.get(key);
     if (cached) {
         searchIntentCache.delete(key);
