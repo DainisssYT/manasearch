@@ -1,5 +1,5 @@
 // ManaSearch deployment build marker. Bump this whenever app.js changes so cached-module issues are easy to diagnose.
-const MANASEARCH_APP_BUILD = '20261007-2';
+const MANASEARCH_APP_BUILD = '20261007-3';
 console.info(`[ManaSearch] app.js build ${MANASEARCH_APP_BUILD}`);
 
 // State Management
@@ -12930,23 +12930,33 @@ async function findSimilarCards() {
         }
     }
 
-    // Show the detailed process immediately after all stream plans are known. Search F
-    // and Search H can each contain multiple independent queries, so every underlying query gets
-    // its own checklist row. This keeps each page denominator attached to the query that owns it.
-    const functionalStreamLabels = functionalRetrievalPlans.map((_, idx) => `Search F #${idx + 1} (Functional Match)`);
+    // The loading checklist is intentionally a USER-FACING summary of retrieval lanes, not a
+    // one-for-one dump of every internal query. Search F can use several independent functional
+    // formulations, but visually it is one "Functional Match" lane. The individual formulations
+    // still remain separate in diagnostics and in the progressive result merge below.
+    const uniqueFunctionalQueries = [];
+    const seenFunctionalQueries = new Set();
+    functionalRetrievalPlans.forEach(q => {
+        if (!q?.query || seenFunctionalQueries.has(q.query)) return;
+        seenFunctionalQueries.add(q.query);
+        uniqueFunctionalQueries.push(q);
+    });
+    const hasFunctionalVisualStream = !benchmarkUseLocalOracleCorpus && uniqueFunctionalQueries.length > 0;
     const exactHighlightStreamLabels = exactHighlightQueries.map((_, idx) => `Search H #${idx + 1} (Exact Highlight)`);
     const plannedStreamLabels = [
         'Exact Phrase', 'Oracle Terms', 'Mechanics/Tags', 'Card2Vec', 'Broader Mechanical',
-        ...functionalStreamLabels, ...exactHighlightStreamLabels
+        'Semantic Index',
+        ...(hasFunctionalVisualStream ? ['Functional Match'] : []),
+        ...exactHighlightStreamLabels
     ];
     if (isBroadSearch) plannedStreamLabels.push('Broad Retrieval');
     if (sharedSourceTextQuery) plannedStreamLabels.push('Shared Source Text');
-    if (activeSearchMethodFlags.wording) plannedStreamLabels.push('Wording Search');
-    if (activeSearchMethodFlags.functional) plannedStreamLabels.push('Functional Search');
-    if (activeSearchMethodFlags.target) plannedStreamLabels.push('Target Search');
-    if (activeSearchMethodFlags.role) plannedStreamLabels.push('Role Search');
-    if (activeSearchMethodFlags.alternate) plannedStreamLabels.push('Alternative Search');
-    if (activeSearchMethodFlags.synergy) plannedStreamLabels.push('Synergy Search');
+    if (activeSearchMethodFlags.wording && methodQueries.wording) plannedStreamLabels.push('Wording Search');
+    if (activeSearchMethodFlags.functional && methodQueries.functional) plannedStreamLabels.push('Functional Search');
+    if (activeSearchMethodFlags.target && methodQueries.target) plannedStreamLabels.push('Target Search');
+    if (activeSearchMethodFlags.role && methodQueries.role) plannedStreamLabels.push('Role Search');
+    if (activeSearchMethodFlags.alternate && methodQueries.alternate) plannedStreamLabels.push('Alternative Search');
+    if (activeSearchMethodFlags.synergy && methodQueries.synergy) plannedStreamLabels.push('Synergy Search');
 
     // Confidence-aware retrieval depth for Search B specifically: known synchronously, before any
     // network call, from how cleanly the source card's own text parsed - no need to wait on
@@ -12993,13 +13003,18 @@ async function findSimilarCards() {
         });
     }
 
-    // Route per-query pagination/status updates into the corresponding checklist row. The global
-    // headline stays on the broad search phase, so it never flips between unrelated F-query
-    // denominators while several streams run concurrently.
+    // Route retrieval progress into the USER-FACING lane represented by the checklist. Search F
+    // has multiple internal queries, so their live page updates are collapsed into one Functional
+    // Match chip. Any unexpected label is still shown so a genuinely new stream can never remain
+    // invisible; the normal A/B/C/E labels below use the same names here, avoiding the duplicate
+    // gray chips that used to appear as "Search A (Exact Phrase)" alongside the completed chip.
     activeSearchStreamProgressReporter = ({ label, message, kind = 'progress' } = {}) => {
         if (requestId !== searchRequestId || !label) return;
-        if (!streamChecklistState.has(label)) streamChecklistState.set(label, false);
-        streamChecklistDetail.set(label, message || (kind === 'done' ? 'Done' : 'Working'));
+        const displayLabel = /^Search F #\d+ \(Functional Match\)$/.test(label)
+            ? 'Functional Match'
+            : label;
+        if (!streamChecklistState.has(displayLabel)) streamChecklistState.set(displayLabel, false);
+        streamChecklistDetail.set(displayLabel, message || (kind === 'done' ? 'Done' : 'Working'));
         renderStreamChecklist();
     };
 
@@ -13008,6 +13023,10 @@ async function findSimilarCards() {
         streamChecklistDetail.set(label, 'Starting');
         renderStreamChecklist();
         return promise.then(r => {
+            // A slow stream from an older search must never mutate the checklist belonging to a
+            // newer search. Without this guard, a late A/B/C/F completion could repaint the new
+            // search's chips or make its aggregate progress counter inaccurate.
+            if (requestId !== searchRequestId) return r;
             streamsSettled++;
             streamChecklistState.set(label, true);
             const coverage = r?.coverage;
@@ -13030,7 +13049,7 @@ async function findSimilarCards() {
     try {
         const streamAPromise = trackStream(
             benchmarkUseLocalOracleCorpus ? Promise.resolve([]) :
-            (searchA_Query ? fetchScryfallSearch(searchA_Query, benchmarkPageCap, "Search A (Exact Phrase)").catch(() => []) : Promise.resolve([])),
+            (searchA_Query ? fetchScryfallSearch(searchA_Query, benchmarkPageCap, "Exact Phrase").catch(() => []) : Promise.resolve([])),
             "Exact Phrase"
         );
 
@@ -13150,13 +13169,13 @@ async function findSimilarCards() {
 
         const streamBPromise = trackStream(
             benchmarkUseLocalOracleCorpus ? Promise.resolve([]) :
-            (searchB_Query ? fetchScryfallSearch(searchB_Query, searchBMaxPages, "Search B (Oracle Terms)").catch(() => []) : Promise.resolve([])),
+            (searchB_Query ? fetchScryfallSearch(searchB_Query, searchBMaxPages, "Oracle Terms").catch(() => []) : Promise.resolve([])),
             "Oracle Terms"
         );
         streamBPromise.then(r => mergeIntoPreview(r, "oracle terms")).catch(() => {});
         const streamCPromise = trackStream(
             benchmarkUseLocalOracleCorpus ? Promise.resolve([]) :
-            (searchC_Query ? fetchScryfallSearch(searchC_Query, benchmarkPageCap, "Search C (Mechanics/Tags)").catch(() => []) : Promise.resolve([])),
+            (searchC_Query ? fetchScryfallSearch(searchC_Query, benchmarkPageCap, "Mechanics/Tags").catch(() => []) : Promise.resolve([])),
             "Mechanics/Tags"
         );
         streamCPromise.then(r => mergeIntoPreview(r, "tags")).catch(() => {});
@@ -13168,7 +13187,7 @@ async function findSimilarCards() {
         streamDPromise.then(r => mergeIntoPreview(r, "card2vec")).catch(() => {});
         const streamEPromise = trackStream(
             benchmarkUseLocalOracleCorpus ? Promise.resolve([]) :
-            (searchE_Query ? fetchScryfallSearch(searchE_Query, benchmarkPageCap, "Search E (Broader Mechanical)").catch(() => []) : Promise.resolve([])),
+            (searchE_Query ? fetchScryfallSearch(searchE_Query, benchmarkPageCap, "Broader Mechanical").catch(() => []) : Promise.resolve([])),
             "Broader Mechanical"
         );
         streamEPromise.then(r => mergeIntoPreview(r, "broader mechanical match")).catch(() => {});
@@ -13208,22 +13227,33 @@ async function findSimilarCards() {
         // preview individually as it resolves, rather than waiting for every formulation to
         // finish - the fastest functional match contributes to what's on screen as soon as it
         // lands, not only once the whole Search F batch is done.
-        const uniqueFunctionalQueries = [];
-        const seenFunctionalQueries = new Set();
-        functionalRetrievalPlans.forEach(q => {
-            if (!q?.query || seenFunctionalQueries.has(q.query)) return;
-            seenFunctionalQueries.add(q.query);
-            uniqueFunctionalQueries.push(q);
-        });
+        // Search F is one visible stream with several internal formulations. Keep every query
+        // running independently (and keep its individual diagnostic coverage), but only mark the
+        // visible Functional Match chip complete once the whole F group has settled.
         const functionalQueryPromises = benchmarkUseLocalOracleCorpus ? [] : uniqueFunctionalQueries.map((q, idx) => {
             const streamLabel = `Search F #${idx + 1} (Functional Match)`;
-            const p = trackStream(
-                fetchScryfallSearch(q.query, benchmarkPageCap, streamLabel).catch(() => []),
-                streamLabel
-            );
+            const p = fetchScryfallSearch(q.query, benchmarkPageCap, streamLabel).catch(() => []);
             p.then(r => mergeIntoPreview(r, `functional match ${idx + 1}`)).catch(() => {});
             return p;
         });
+        const functionalResultsPromise = (async () => {
+            const sets = await Promise.all(functionalQueryPromises);
+            if (hasFunctionalVisualStream) {
+                streamsSettled++;
+                const totalQueries = functionalQueryPromises.length;
+                const totalPages = sets.reduce((sum, r) => sum + (r?.coverage?.pagesFetched || 0), 0);
+                const maxPages = sets.reduce((sum, r) => sum + (r?.coverage?.maxPages || 0), 0);
+                const totalCards = sets.reduce((sum, r) => sum + (r?.length || 0), 0);
+                streamChecklistState.set('Functional Match', true);
+                streamChecklistDetail.set(
+                    'Functional Match',
+                    `Done • ${totalQueries} queries • ${totalPages}/${maxPages || totalPages} pages • ${totalCards} cards`
+                );
+                renderStreamChecklist();
+                updateProgress(1, totalSteps, `Retrieval in progress — ${streamsSettled}/${totalTrackedStreams} search streams finished; Functional Match finished.`);
+            }
+            return sets;
+        })();
         const exactHighlightPromises = benchmarkUseLocalOracleCorpus ? [] : exactHighlightQueries.map((q, idx) => {
             const streamLabel = `Search H #${idx + 1} (Exact Highlight)`;
             const p = trackStream(
@@ -13263,7 +13293,7 @@ async function findSimilarCards() {
         // The same normalized target embedding is returned for the scoring pass, so we do not
         // embed the source text twice. For the deployed static index, the vector representation
         // is the normalized Oracle text used by semantic-index.bin.
-        const semanticRetrievalPromise = (async () => {
+        const semanticRetrievalPromise = trackStream((async () => {
             try {
                 const ex = await extractorPromise;
                 if (!ex || ex.type === 'fallback') return { index: null, queryVector: null, semanticRetrievalVector: null, matches: [], hydrated: [] };
@@ -13335,7 +13365,7 @@ async function findSimilarCards() {
                 console.info('Search G semantic retrieval unavailable; continuing with non-semantic retrieval:', error?.message || error);
                 return { index: null, queryVector: null, semanticRetrievalVector: null, matches: [], hydrated: [] };
             }
-        })();
+        })(), 'Semantic Index');
 
         // Continuous ranking: retrieve and score concurrently. As soon as a retrieval stream adds
         // candidates to previewPool, a serialized queue scores the strongest 18-card batches and
@@ -13398,7 +13428,7 @@ async function findSimilarCards() {
 
         const [resultsA, resultsB, resultsC, resultsD, resultsE, resultsBroad, resultsShared, resultsFSets, resultsExactSets, extractor, semanticRetrieval, resolvedMethodStreams] = await Promise.all([
             streamAPromise, streamBPromise, streamCPromise, streamDPromise, streamEPromise, streamBroadPromise, streamSharedPromise,
-            Promise.all(functionalQueryPromises),
+            functionalResultsPromise,
             Promise.all(exactHighlightPromises),
             extractorPromise,
             semanticRetrievalPromise,
