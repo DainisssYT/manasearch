@@ -13919,8 +13919,10 @@ async function findSimilarCards() {
             const sorted = Array.from(previewPool.values())
                 .sort((a, b) => (b._previewScore || 0) - (a._previewScore || 0))
                 .slice(0, PREVIEW_RENDER_CAP);
-            sorted.forEach(c => { c._isNewlyAdded = !previouslyRenderedNames.has(c.name.toLowerCase()); });
-            sorted.forEach(c => previouslyRenderedNames.add(c.name.toLowerCase()));
+            // Progressive rendering must not flash/recolor cards as they re-enter the visible
+            // top-N pool. The old newly-added animation caused cards to appear to flicker between
+            // the normal gray border and a purple outline whenever a score update reran this pass.
+            sorted.forEach(c => { c._isNewlyAdded = false; });
             if (requestId !== searchRequestId || activeResultView.mode !== 'main' || activeResultView.requestId !== requestId) return;
             updateProgress(1, totalSteps, `First look: ${sorted.length} match${sorted.length === 1 ? '' : 'es'} found so far (just updated by ${previewRenderLabel || 'another search stage'}) - still searching further sources...`);
             document.getElementById('provisional-results-banner')?.classList.remove('hidden');
@@ -15191,7 +15193,13 @@ function renderResults(cards) {
     exportBtn.style.display = 'block';
     const topCards = displayCards.slice(0, getDisplayedResultLimit());
     visibleResultCardData.clear();
-    topCards.forEach(card => visibleResultCardData.set(getResultCardStateKey(card), card));
+    // Event delegation identifies cards by the same stable name key stored on each result node.
+    // Keep this map keyed by getCardKey(), not getResultCardStateKey(): the latter uses the
+    // Scryfall id and was the cause of result-selection clicks resolving to no card.
+    topCards.forEach(card => visibleResultCardData.set(
+        normalizeCardNameForIdentity(card?.name || '') || getResultCardStateKey(card),
+        card
+    ));
 
     // Result identity is by Oracle/card name for DOM stability. Different printings of the same
     // card are already deduplicated before display, and using the name here keeps the existing DOM
@@ -15219,7 +15227,8 @@ function renderResults(cards) {
         };
 
         cardElement.classList.toggle('selected-card', isSelected);
-        cardElement.classList.toggle('newly-added', Boolean(card._isNewlyAdded));
+        // Do not animate/recolor cards during progressive ranking; score updates should be visually stable.
+        cardElement.classList.remove('newly-added');
         cardElement.dataset.cardKey = getCardKey(card);
 
         const img = cardElement.querySelector('.card-art-wrap img');

@@ -301,13 +301,12 @@ section {
 /* A card added to the results grid by a later progressive-preview update than the one the user
    is currently looking at - a brief highlight instead of a silent reshuffle, so a newly-arrived
    card reads as "the list grew" rather than a confusing, unexplained jump. */
+/* Progressive search deliberately keeps result cards visually stable. The legacy
+   newly-added animation caused purple/gray border flicker whenever a candidate moved in or out
+   of the visible ranking window. Keep the class for backwards compatibility, but never animate it. */
 .card-item.newly-added {
-    animation: newly-added-flash 1.6s ease-out;
-}
-
-@keyframes newly-added-flash {
-    0% { box-shadow: 0 0 0 2px var(--accent-color); }
-    100% { box-shadow: 0 0 0 0px transparent; }
+    animation: none !important;
+    box-shadow: none !important;
 }
 
 /* Add Light Theme Variables at the top of your CSS file */
