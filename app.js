@@ -1,6 +1,6 @@
-/* ManaSearch build 20261008-5 */
+/* ManaSearch build 20261008-6 */
 // ManaSearch deployment build marker. Bump this whenever app.js changes so cached-module issues are easy to diagnose.
-const MANASEARCH_APP_BUILD = '20261008-5';
+const MANASEARCH_APP_BUILD = '20261008-6';
 console.info(`[ManaSearch] app.js build ${MANASEARCH_APP_BUILD}`);
 
 // State Management
@@ -4157,16 +4157,200 @@ function splitActivationCost(clauseText) {
  * @param {string} costText
  * @returns {{raw: string, type: string, parts: string[]}}
  */
+function parseManaPaymentRange(costText) {
+    const symbols = String(costText || '').match(/\{[^}]+\}/g) || [];
+    if (!symbols.length) {
+        return { min: 0, max: 0, exact: true, variable: false, symbols: [] };
+    }
+
+    let min = 0;
+    let max = 0;
+    let variable = false;
+
+    const fixedSymbolValue = token => {
+        const t = String(token || '').trim().toUpperCase();
+        if (!t || t === 'T' || t === 'Q' || t === 'E') return { min: 0, max: 0, variable: false };
+        if (t === 'X' || t === 'Y' || t === 'Z') return { min: 0, max: null, variable: true };
+        if (/^\d+$/.test(t)) {
+            const n = Number(t);
+            return { min: n, max: n, variable: false };
+        }
+        if (t.includes('/')) {
+            const options = t.split('/').map(option => {
+                const part = option.trim();
+                if (part === 'P') return 0;
+                if (/^\d+$/.test(part)) return Number(part);
+                // Colored/snow mana and other one-symbol payments require one mana.
+                return 1;
+            });
+            return { min: Math.min(...options), max: Math.max(...options), variable: options.length > 1 };
+        }
+        // {W}{U}{B}{R}{G}{C}{S} and other one-mana symbols each require one mana.
+        return { min: 1, max: 1, variable: false };
+    };
+
+    for (const symbol of symbols) {
+        const token = symbol.slice(1, -1);
+        const value = fixedSymbolValue(token);
+        min += value.min;
+        if (value.max == null) max = null;
+        else if (max != null) max += value.max;
+        variable = variable || value.variable || value.max == null;
+    }
+
+    return {
+        min,
+        max,
+        exact: !variable && max != null && min === max,
+        variable,
+        symbols
+    };
+}
+
 function classifyActivationCost(costText) {
     const lower = costText.toLowerCase();
     const parts = [];
     if (/\{t\}|\btap\b/.test(lower)) parts.push('tap');
-    if (/\{[\dwubrgx/]+\}/.test(lower)) parts.push('mana');
+    const costSymbols = lower.match(/\{[^}]+\}/g) || [];
+    if (costSymbols.some(symbol => !/^\{t\}$/i.test(symbol))) parts.push('mana');
     if (/\bsacrifice\b/.test(lower)) parts.push('sacrifice');
     if (/\bdiscard\b/.test(lower)) parts.push('discard');
     if (/\bexile\b/.test(lower)) parts.push('exile');
     if (/\bpay\s+\d+\s+life\b/.test(lower)) parts.push('life');
-    return { raw: costText, type: parts[0] || 'other', parts };
+
+    const manaPayment = parseManaPaymentRange(costText);
+    return {
+        raw: costText,
+        type: parts[0] || 'other',
+        parts,
+        manaMin: manaPayment.min,
+        manaMax: manaPayment.max,
+        manaExact: manaPayment.exact,
+        manaVariable: manaPayment.variable,
+        manaSymbols: manaPayment.symbols
+    };
+}
+
+function analyzeManaOutput(text, amount) {
+    const raw = String(text || '');
+    const lower = raw.toLowerCase();
+    const symbols = raw.match(/\{(?:[wubrgcs]|\d+|x)\}/gi) || [];
+    const fixedColors = symbols
+        .map(symbol => symbol.slice(1, -1).toLowerCase())
+        .filter(token => ['w', 'u', 'b', 'r', 'g', 'c', 's'].includes(token));
+    const uniqueColors = [...new Set(fixedColors)];
+
+    let mode = 'unknown';
+    if (symbols.length) {
+        if (uniqueColors.length === 1) {
+            mode = uniqueColors[0] === 'c' ? 'fixed_colorless'
+                : uniqueColors[0] === 's' ? 'fixed_snow'
+                : 'fixed_single_color';
+        } else if (uniqueColors.length > 1) {
+            mode = 'fixed_multi_color';
+        } else {
+            mode = 'fixed';
+        }
+    } else if (/\b(?:in|of) any combination of (?:colors|mana types)\b/.test(lower) || /\bany combination of\b/.test(lower)) {
+        mode = 'any_combination';
+    } else if (/\bany (?:one )?(?:color|type)\b/.test(lower)) {
+        mode = 'any_one';
+    } else if (/\bany type that\b|\bany color\b[^.]{0,80}\bcould produce\b/.test(lower)) {
+        mode = 'any_land_producible';
+    } else if (/\bcolorless mana\b/.test(lower)) {
+        mode = 'fixed_colorless';
+    }
+
+    return {
+        amount: Number.isFinite(Number(amount)) ? Number(amount) : null,
+        mode,
+        colors: uniqueColors,
+        uniqueColorCount: uniqueColors.length,
+        symbolCount: symbols.length
+    };
+}
+
+function finalizeManaAbilityEffect(effect) {
+    if (!effect || effect.action !== 'add_mana') return effect;
+
+    const output = effect.manaOutput || analyzeManaOutput(effect.raw || '', effect.amount);
+    const cost = effect.activationCost || null;
+    let netAmount = null;
+    let netMin = null;
+    let netMax = null;
+
+    if (Number.isFinite(Number(output.amount))) {
+        const produced = Number(output.amount);
+        const minCost = Number.isFinite(Number(cost?.manaMin)) ? Number(cost.manaMin) : 0;
+        const maxCost = cost?.manaMax == null ? null : (Number.isFinite(Number(cost.manaMax)) ? Number(cost.manaMax) : null);
+        netMin = maxCost == null ? null : produced - maxCost;
+        netMax = produced - minCost;
+        if (netMin != null && netMin === netMax) netAmount = netMin;
+    }
+
+    effect.manaOutput = {
+        ...output,
+        netAmount,
+        netMin,
+        netMax,
+        activationManaMin: Number.isFinite(Number(cost?.manaMin)) ? Number(cost.manaMin) : 0,
+        activationManaMax: cost?.manaMax == null ? null : (Number.isFinite(Number(cost.manaMax)) ? Number(cost.manaMax) : null),
+        activationManaExact: Boolean(cost?.manaExact)
+    };
+    effect.manaOutputAmount = output.amount;
+    effect.manaNetAmount = netAmount;
+    effect.manaNetMin = netMin;
+    effect.manaNetMax = netMax;
+    effect.manaOutputMode = output.mode;
+    effect.manaOutputColors = output.colors;
+    effect.manaOutputColorCount = output.uniqueColorCount;
+    return effect;
+}
+
+function manaNumericSimilarity(a, b) {
+    const na = Number(a), nb = Number(b);
+    if (!Number.isFinite(na) || !Number.isFinite(nb)) return null;
+    if (na === nb) return 1;
+    return Math.max(0, 1 - Math.abs(na - nb) / Math.max(Math.abs(na), Math.abs(nb), 1));
+}
+
+function manaColorProfileSimilarity(a, b) {
+    if (!a || !b) return null;
+    if (a.mode === b.mode) {
+        if (a.mode.startsWith('fixed')) {
+            const sa = new Set(a.colors || []), sb = new Set(b.colors || []);
+            if (!sa.size && !sb.size) return 1;
+            if (!sa.size || !sb.size) return 0.55;
+            const union = new Set([...sa, ...sb]);
+            const inter = [...sa].filter(c => sb.has(c)).length;
+            return inter / Math.max(1, union.size);
+        }
+        return 1;
+    }
+
+    const flexible = new Set(['any_one', 'any_combination', 'any_land_producible']);
+    if (flexible.has(a.mode) && flexible.has(b.mode)) return 0.82;
+    if (a.mode === 'fixed_colorless' && b.mode === 'any_one') return 0.62;
+    if (b.mode === 'fixed_colorless' && a.mode === 'any_one') return 0.62;
+    if (a.mode === 'fixed_single_color' && b.mode === 'any_one') return 0.70;
+    if (b.mode === 'fixed_single_color' && a.mode === 'any_one') return 0.70;
+    if (a.mode === 'fixed_multi_color' && b.mode === 'any_combination') return 0.72;
+    if (b.mode === 'fixed_multi_color' && a.mode === 'any_combination') return 0.72;
+    if (a.mode === 'fixed' && flexible.has(b.mode)) return 0.58;
+    if (b.mode === 'fixed' && flexible.has(a.mode)) return 0.58;
+    return 0.20;
+}
+
+function manaActivationSimilarity(a, b) {
+    if (!a || !b) return null;
+    const amin = Number.isFinite(Number(a.manaMin)) ? Number(a.manaMin) : 0;
+    const bmin = Number.isFinite(Number(b.manaMin)) ? Number(b.manaMin) : 0;
+    const amax = a.manaMax == null ? null : Number(a.manaMax);
+    const bmax = b.manaMax == null ? null : Number(b.manaMax);
+    if (amax == null || bmax == null) return 0.55;
+    const minSim = manaNumericSimilarity(amin, bmin);
+    const maxSim = manaNumericSimilarity(amax, bmax);
+    return minSim == null || maxSim == null ? 0.55 : (0.55 * minSim + 0.45 * maxSim);
 }
 
 /**
@@ -4669,21 +4853,22 @@ function parseManaAbilityEffect(clause) {
     const text = clause.toLowerCase();
     if (!/\badd\b/i.test(text)) return null;
 
-    const manaSymbols = clause.match(/\{[wubrgc0-9x]+\}/gi) || [];
-    const readsAsManaProduction = manaSymbols.length > 0 || /\badd\b[^.]{0,40}\bmana\b/i.test(text);
+    const manaSymbols = clause.match(/\{(?:[wubrgcs]|\d+|x)\}/gi) || [];
+    const readsAsManaProduction = manaSymbols.length > 0 || /\badd\b[^.]{0,60}\bmana\b/i.test(text);
     if (!readsAsManaProduction) return null;
 
     const colors = [];
     if (/\{c\}/i.test(clause) || /\bcolorless mana\b/i.test(text)) colors.push('colorless');
+    if (/\{s\}/i.test(clause) || /\bsnow mana\b/i.test(text)) colors.push('snow');
     ['w', 'u', 'b', 'r', 'g'].forEach(c => { if (new RegExp(`\\{${c}\\}`, 'i').test(clause)) colors.push(c); });
-    if (/\bany (?:one )?color\b/i.test(text) || /\bany combination of colors\b/i.test(text)) colors.push('any');
+    if (/\bany (?:one )?(?:color|type)\b/i.test(text) || /\b(?:in|of) any combination of (?:colors|mana types)\b/i.test(text)) colors.push('any');
 
     let amount = manaSymbols.length > 0 ? manaSymbols.length : null;
     if (!amount) {
-        const wordMatch = text.match(/\badd\s+(one|two|three|four|five|x)\b/i);
+        const wordMatch = text.match(/\badd\s+(one|two|three|four|five|six|seven|eight|nine|ten|x)\b/i);
         if (wordMatch) {
-            const words = { one: 1, two: 2, three: 3, four: 4, five: 5 };
-            amount = words[wordMatch[1].toLowerCase()] || wordMatch[1].toLowerCase();
+            const words = { one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10 };
+            amount = words[wordMatch[1].toLowerCase()] ?? wordMatch[1].toLowerCase();
         }
     }
 
@@ -4692,6 +4877,7 @@ function parseManaAbilityEffect(clause) {
         object: 'mana',
         colors: colors.length > 0 ? [...new Set(colors)] : null,
         amount,
+        manaOutput: analyzeManaOutput(text, amount),
         restriction: extractMTGRestrictions(text)
     };
 }
@@ -5306,6 +5492,11 @@ function parseMTGEffect(oracleText) {
             if (!parsed.payCost) parsed.payCost = parsed.activationCost.type;
         }
 
+        // Mana production must be compared by NET mana when an activation itself costs mana.
+        // Example: Boros Signet pays {1} to add {R}{W}; output is two mana, but the net increase
+        // is one. Both values are retained so color-fixing and gross output remain visible.
+        if (parsed.action === 'add_mana') finalizeManaAbilityEffect(parsed);
+
         if (activeModeGroup && isBulletLine) {
             parsed.isMode = true;
             parsed.modeGroupId = activeModeGroup.groupId;
@@ -5537,9 +5728,14 @@ function deriveCanonicalFunction(effect) {
         magnitude = `${effect.amount} damage`;
         quantity = typeof effect.amount === 'number' ? effect.amount : null;
     } else if (fn === "mana_ability") {
+        const netPart = Number.isFinite(Number(effect.manaNetAmount)) ? ` net ${effect.manaNetAmount}` : '';
         const colorPart = effect.colors && effect.colors.length > 0 ? effect.colors.join('/') : null;
-        magnitude = [effect.amount, colorPart, 'mana'].filter(Boolean).join(' ');
-        quantity = typeof effect.amount === 'number' ? effect.amount : null;
+        magnitude = [effect.amount, colorPart, 'mana', netPart].filter(Boolean).join(' ');
+        // Quantity is the actual net mana increase when the activation cost is known. Gross
+        // production is preserved as manaOutputAmount for a separate, lower-weight comparison.
+        quantity = Number.isFinite(Number(effect.manaNetAmount))
+            ? Number(effect.manaNetAmount)
+            : (typeof effect.amount === 'number' ? effect.amount : null);
     } else if (fn === "gain_life" || fn === "lose_life") {
         magnitude = `${effect.amount} life`;
         quantity = typeof effect.amount === 'number' ? effect.amount : null;
@@ -5560,6 +5756,13 @@ function deriveCanonicalFunction(effect) {
             scope: effect.isOther === true ? "other" : (effect.isOther === false ? "all" : null),
             magnitude,
             quantity,
+            manaOutputAmount: fn === 'mana_ability' && Number.isFinite(Number(effect.manaOutputAmount)) ? Number(effect.manaOutputAmount) : null,
+            manaNetAmount: fn === 'mana_ability' && Number.isFinite(Number(effect.manaNetAmount)) ? Number(effect.manaNetAmount) : null,
+            manaNetMin: fn === 'mana_ability' && Number.isFinite(Number(effect.manaNetMin)) ? Number(effect.manaNetMin) : null,
+            manaNetMax: fn === 'mana_ability' && Number.isFinite(Number(effect.manaNetMax)) ? Number(effect.manaNetMax) : null,
+            manaOutputMode: fn === 'mana_ability' ? (effect.manaOutputMode || effect.manaOutput?.mode || null) : null,
+            manaOutputColors: fn === 'mana_ability' ? (effect.manaOutputColors || effect.manaOutput?.colors || []) : [],
+            manaOutputColorCount: fn === 'mana_ability' ? (effect.manaOutputColorCount ?? effect.manaOutput?.uniqueColorCount ?? null) : null,
             duration: effect.isStatic === true ? "static" : (effect.isStatic === false ? "temporary" : null),
             controller: effect.controller || null,
             restriction,
@@ -5747,6 +5950,12 @@ function strategicRoleMaxNumber(parsedEffects, fn) {
     let max = 0;
     for (const e of (parsedEffects || [])) {
         if (!e.canonical || e.canonical.function !== fn) continue;
+        if (fn === 'mana_ability') {
+            if (Number.isFinite(Number(e.manaNetAmount))) max = Math.max(max, Number(e.manaNetAmount));
+            else if (Number.isFinite(Number(e.canonical.params?.manaNetAmount))) max = Math.max(max, Number(e.canonical.params.manaNetAmount));
+            else if (typeof e.quantity === 'number') max = Math.max(max, e.quantity);
+            continue;
+        }
         if (typeof e.quantity === 'number') max = Math.max(max, e.quantity);
         if (typeof e.amount === 'number') max = Math.max(max, e.amount);
         if (typeof e.canonical.params?.quantity === 'number') max = Math.max(max, e.canonical.params.quantity);
@@ -5786,10 +5995,11 @@ function inferStrategicRoleProfile(card, parsedEffects = [], intentText = '') {
     // or a clearly early/efficient nonland permanent. A generic "add one mana" land is not enough.
     const maxMana = strategicRoleMaxNumber(parsedEffects, 'mana_ability');
     if (functions.has('mana_ability')) {
-        const multiManaText = /\badd\s+(?:\{[wubrgc]\}\s*){2,}|\badd\s+(?:two|three|four)\b/i.test(text);
+        // Use net mana, not the number of output symbols. A signet that spends {1} to add two
+        // mana is a net +1 mana source, even though its Oracle text contains two output symbols.
         const lowCostPermanent = permanent && Number.isFinite(card?.cmc) && card.cmc <= 2;
-        if (maxMana >= 2 || multiManaText) {
-            strategicRoleAdd(roles, 'fast_mana', 0.82, ['reusable mana production', 'multiple mana per activation'], lowCostPermanent ? 0.05 : 0);
+        if (maxMana >= 2) {
+            strategicRoleAdd(roles, 'fast_mana', 0.82, ['reusable mana production', 'multiple net mana per activation'], lowCostPermanent ? 0.05 : 0);
         } else if (lowCostPermanent && activated) {
             strategicRoleAdd(roles, 'fast_mana', 0.64, ['early permanent mana source', 'activated mana ability']);
         }
@@ -5927,12 +6137,14 @@ function buildStrategicRoleFingerprint(card, parsedEffects = [], profile = []) {
     const recurring = strategicRoleHasTrigger(parsedEffects) || /\b(?:whenever|at the beginning of|at the end of|each upkeep|each turn|every turn)\b/.test(lower);
     const permanent = /\b(?:creature|artifact|enchantment|planeswalker)\b/.test(String(card?.type_line || '').toLowerCase());
     const damageAmounts = [...lower.matchAll(/\b(?:deal|deals)\s+(\d+)\s+damage\b/g)].map(m => Number(m[1])).filter(Number.isFinite);
-    const manaBraces = lower.match(/\{[wubrgc]\}/g) || [];
-    const manaPerActivation = Math.max(
-        strategicRoleMaxNumber(parsedEffects, 'mana_ability') || 0,
-        (manaBraces.length >= 2 && /\badd\b/.test(lower)) ? manaBraces.length : 0,
-        /\badd\s+(?:two|three|four)\b/.test(lower) ? (lower.includes('four') ? 4 : lower.includes('three') ? 3 : 2) : 0
-    );
+    const manaEffects = (parsedEffects || []).filter(e => e?.canonical?.function === 'mana_ability');
+    const manaNetValues = manaEffects.map(e => Number(e.manaNetAmount)).filter(Number.isFinite);
+    const manaOutputValues = manaEffects.map(e => Number(e.manaOutputAmount ?? e.amount)).filter(Number.isFinite);
+    const manaPerActivation = manaNetValues.length ? Math.max(...manaNetValues) : strategicRoleMaxNumber(parsedEffects, 'mana_ability');
+    const manaOutputPerActivation = manaOutputValues.length ? Math.max(...manaOutputValues) : null;
+    const primaryManaEffect = manaEffects.slice().sort((a,b) => (Number(b.manaNetAmount ?? b.amount) || 0) - (Number(a.manaNetAmount ?? a.amount) || 0))[0] || null;
+    const primaryManaProfile = primaryManaEffect?.manaOutput || null;
+    const activationManaCost = primaryManaEffect?.activationCost || null;
     const drawAmount = Math.max(
         ...[...lower.matchAll(/\bdraw\s+(\d+)\s+cards?\b/g)].map(m => Number(m[1])).filter(Number.isFinite),
         /\bdraw\s+(?:a|one)\s+card\b/.test(lower) ? 1 : 0,
@@ -5950,6 +6162,11 @@ function buildStrategicRoleFingerprint(card, parsedEffects = [], profile = []) {
         cmc: Number.isFinite(card?.cmc) ? Number(card.cmc) : null,
         primaryFunction: strategicRoleFunctions(parsedEffects)[0] || null,
         manaPerActivation,
+        manaOutputPerActivation,
+        manaOutputMode: primaryManaEffect?.manaOutputMode || primaryManaProfile?.mode || null,
+        manaOutputColors: primaryManaEffect?.manaOutputColors || primaryManaProfile?.colors || [],
+        activationManaMin: activationManaCost?.manaMin ?? 0,
+        activationManaMax: activationManaCost?.manaMax ?? 0,
         drawAmount,
         damageAmount: Math.max(...damageAmounts, 0),
         lifePaid,
@@ -5996,10 +6213,14 @@ function roleFingerprintSimilarity(sourceFingerprint, candidateFingerprint) {
         }
     };
     if (sourceFingerprint.role === 'fast_mana') {
-        add(sourceFingerprint.manaPerActivation, candidateFingerprint.manaPerActivation, 0.45);
-        add(sourceFingerprint.cmc, candidateFingerprint.cmc, 0.20);
-        add(sourceFingerprint.recurring, candidateFingerprint.recurring, 0.20);
-        add(sourceFingerprint.activated, candidateFingerprint.activated, 0.10);
+        add(sourceFingerprint.manaPerActivation, candidateFingerprint.manaPerActivation, 0.38);
+        add(sourceFingerprint.manaOutputPerActivation, candidateFingerprint.manaOutputPerActivation, 0.12);
+        add(sourceFingerprint.manaOutputMode, candidateFingerprint.manaOutputMode, 0.16);
+        add(sourceFingerprint.activationManaMin, candidateFingerprint.activationManaMin, 0.08);
+        add(sourceFingerprint.activationManaMax, candidateFingerprint.activationManaMax, 0.06);
+        add(sourceFingerprint.cmc, candidateFingerprint.cmc, 0.10);
+        add(sourceFingerprint.recurring, candidateFingerprint.recurring, 0.07);
+        add(sourceFingerprint.activated, candidateFingerprint.activated, 0.03);
     } else if (sourceFingerprint.role === 'card_advantage_engine') {
         add(sourceFingerprint.recurring, candidateFingerprint.recurring, 0.30);
         add(sourceFingerprint.lifePaid, candidateFingerprint.lifePaid, 0.20);
@@ -6184,9 +6405,27 @@ function directionalMechanicalSimilarity(parsedA, parsedB) {
             parts.push(fieldSimilarity(6, effA.controller, effB.controller));
             if (typeof effA.quantity === 'number' || typeof effB.quantity === 'number') {
                 parts.push(fieldSimilarity(7, effA.quantity, effB.quantity,
-                    (a,b) => Math.max(0, 1 - Math.abs(a-b) / Math.max(a,b,1))));
+                    (a,b) => Math.max(0, 1 - Math.abs(a-b) / Math.max(Math.abs(a), Math.abs(b), 1))));
             } else if (effA.quantity != null || effB.quantity != null) {
                 parts.push(fieldSimilarity(5, effA.quantity, effB.quantity));
+            }
+
+            if (fnA === 'mana_ability' && fnB === 'mana_ability') {
+                const ma = cfA.params || {}, mb = cfB.params || {};
+                const netSim = manaNumericSimilarity(ma.manaNetAmount, mb.manaNetAmount);
+                const outputSim = manaNumericSimilarity(ma.manaOutputAmount, mb.manaOutputAmount);
+                const colorSim = manaColorProfileSimilarity({
+                    mode: ma.manaOutputMode,
+                    colors: ma.manaOutputColors || []
+                }, {
+                    mode: mb.manaOutputMode,
+                    colors: mb.manaOutputColors || []
+                });
+                const activationSim = manaActivationSimilarity(ma.activationCost, mb.activationCost);
+                if (netSim != null) parts.push({ weight: 12, value: netSim });
+                if (outputSim != null) parts.push({ weight: 5, value: outputSim });
+                if (colorSim != null) parts.push({ weight: 8, value: colorSim });
+                if (activationSim != null) parts.push({ weight: 5, value: activationSim });
             }
             const tpA = effA.targetProfile || {}, tpB = effB.targetProfile || {};
             parts.push(fieldSimilarity(4, tpA.kind, tpB.kind));
@@ -9455,7 +9694,7 @@ let semanticCosineBaselineReady = false;
 const STATIC_CARD_CORPUS_FILENAME = 'cards.bin';
 const STATIC_CARD_CORPUS_VERSION = 1;
 const STATIC_CARD_CORPUS_MAGIC = 'MSCARD1G';
-const STATIC_CARD_CORPUS_CACHE_VERSION = '20261008-5';
+const STATIC_CARD_CORPUS_CACHE_VERSION = '20261008-6';
 const STATIC_DATA_META_FILENAME = 'static-data-meta.json';
 let staticDataMetaPromise = null;
 let staticDataBuildId = null;
@@ -9811,7 +10050,7 @@ const FULL_SEMANTIC_INDEX_SEARCH_LIMIT = 96;
 const STATIC_SEMANTIC_INDEX_FILENAME = 'semantic-index.bin';
 const STATIC_SEMANTIC_INDEX_VERSION = 1;
 const STATIC_SEMANTIC_INDEX_MAGIC = 'MSIDX1';
-const STATIC_SEMANTIC_INDEX_CACHE_VERSION = '20261008-5';
+const STATIC_SEMANTIC_INDEX_CACHE_VERSION = '20261008-6';
 let staticSemanticIndexPromise = null;
 let staticSemanticIndexAttempted = false;
 let staticSemanticIndexLoadError = null;
@@ -10995,9 +11234,16 @@ function buildRelatedIntentProfile(cards = [], selectedCards = []) {
             stat.cards.push(ref.card.name);
 
             const cfParams = entry.canonical?.params || {};
-            const q = cfParams.quantity ?? entry.effect?.quantity ?? entry.effect?.amount ?? null;
+            const q = entry.functionName === 'mana_ability'
+                ? (cfParams.manaNetAmount ?? cfParams.quantity ?? entry.effect?.manaNetAmount ?? entry.effect?.quantity ?? null)
+                : (cfParams.quantity ?? entry.effect?.quantity ?? entry.effect?.amount ?? null);
             if (Number.isFinite(Number(q))) {
-                stat.paramSamples.push({ value: Number(q), weight: supportWeight, cardName: ref.card.name });
+                stat.paramSamples.push({
+                    value: Number(q),
+                    weight: supportWeight,
+                    cardName: ref.card.name,
+                    outputValue: entry.functionName === 'mana_ability' && Number.isFinite(Number(cfParams.manaOutputAmount)) ? Number(cfParams.manaOutputAmount) : null
+                });
             }
         }
     }
@@ -11034,6 +11280,20 @@ function buildRelatedIntentProfile(cards = [], selectedCards = []) {
                 running += sample.weight;
                 if (running >= half) { numericTarget = sample.value; break; }
             }
+        }
+    }
+
+    let manaOutputTarget = null;
+    let manaOutputConfidence = 0;
+    if (dominant.functionName === 'mana_ability') {
+        const outputSamples = dominant.paramSamples.filter(sample => Number.isFinite(Number(sample.outputValue)));
+        if (outputSamples.length) {
+            const groupedOutput = new Map();
+            for (const sample of outputSamples) groupedOutput.set(sample.outputValue, (groupedOutput.get(sample.outputValue) || 0) + sample.weight);
+            const modesOutput = Array.from(groupedOutput.entries()).sort((a,b) => b[1] - a[1]);
+            manaOutputTarget = Number(modesOutput[0][0]);
+            const totalOutputWeight = outputSamples.reduce((sum, x) => sum + x.weight, 0) || 1;
+            manaOutputConfidence = Math.min(1, modesOutput[0][1] / totalOutputWeight);
         }
     }
 
@@ -11084,6 +11344,8 @@ function buildRelatedIntentProfile(cards = [], selectedCards = []) {
         numericParameterStrength: parameterStrength,
         dominantRole,
         artifactSupportRatio,
+        manaOutputTarget,
+        manaOutputConfidence,
         confidence: consensusConfidence,
         selectedCount: selectedCards.length
     };
@@ -11097,9 +11359,11 @@ function getRelatedCandidateFunctionRecords(parsedEffects = [], functionName = n
         out.push({
             effect,
             canonical: cf,
-            quantity: Number.isFinite(Number(cf.params?.quantity))
-                ? Number(cf.params.quantity)
-                : (Number.isFinite(Number(effect.quantity)) ? Number(effect.quantity) : (Number.isFinite(Number(effect.amount)) ? Number(effect.amount) : null))
+            quantity: cf.function === 'mana_ability' && Number.isFinite(Number(cf.params?.manaNetAmount))
+                ? Number(cf.params.manaNetAmount)
+                : (Number.isFinite(Number(cf.params?.quantity))
+                    ? Number(cf.params.quantity)
+                    : (Number.isFinite(Number(effect.quantity)) ? Number(effect.quantity) : (Number.isFinite(Number(effect.amount)) ? Number(effect.amount) : null)))
         });
     }
     return out;
@@ -11131,6 +11395,14 @@ function calculateRelatedConsensusFit(profile, parsedCandidate, card = null) {
         quantityFit = profile.numericTarget == null ? 0.75 : 0;
     }
 
+    let manaOutputFit = 0;
+    if (profile.dominantFunction === 'mana_ability' && candidateFunctions.length && profile.manaOutputTarget != null) {
+        for (const record of candidateFunctions) {
+            const output = Number(record.canonical?.params?.manaOutputAmount);
+            if (Number.isFinite(output)) manaOutputFit = Math.max(manaOutputFit, manaNumericSimilarity(profile.manaOutputTarget, output) || 0);
+        }
+    }
+
     let roleFit = 0;
     if (profile.dominantRole) {
         const candidateRoles = inferStrategicRoleProfile(card, parsedCandidate, getCurrentSourceOracleText(card)) || [];
@@ -11154,7 +11426,11 @@ function calculateRelatedConsensusFit(profile, parsedCandidate, card = null) {
         ? (/\bartifact\b/.test(String(card?.type_line || '').toLowerCase()) ? 1 : 0.55)
         : 0.5;
     const roleCombined = roleWeight <= 0 ? 0 : (roleFit * 0.72 + artifactFit * 0.28);
-    const base = functionMatch * functionWeight + quantityFit * parameterWeight + roleCombined * roleWeight;
+    let parameterCombined = quantityFit;
+    if (profile.dominantFunction === 'mana_ability' && profile.manaOutputTarget != null && manaOutputFit > 0) {
+        parameterCombined = quantityFit * 0.70 + manaOutputFit * 0.30;
+    }
+    const base = functionMatch * functionWeight + parameterCombined * parameterWeight + roleCombined * roleWeight;
     const confidenceGate = 0.35 + 0.65 * profile.confidence;
     return {
         score: Math.max(0, Math.min(1, base * confidenceGate)),
@@ -11170,14 +11446,10 @@ function buildRelatedConsensusIntentText(profile) {
     if (!profile?.dominantFunction) return '';
     const fn = profile.dominantFunction;
     if (fn === 'mana_ability' && profile.numericTarget != null) {
-        const dominantColorless = profile.references.filter(ref => {
-            const effects = ref.parsed || [];
-            return effects.some(e => e?.canonical?.function === 'mana_ability' &&
-                (/colorless|\{c\}/i.test(String(e.canonical?.params?.magnitude || '')) ||
-                 (Array.isArray(e.colors) && e.colors.includes('colorless'))));
-        }).length;
-        const colorWord = dominantColorless >= Math.ceil(profile.references.length * 0.60) ? ' colorless' : '';
-        return `artifact mana rock that adds ${profile.numericTarget}${colorWord} mana fast mana reusable mana production`;
+        const net = profile.numericTarget;
+        const output = profile.manaOutputTarget != null ? profile.manaOutputTarget : net;
+        const outputPhrase = output === net ? `${output}` : `${output} output`;
+        return `artifact mana rock with ${net} net mana per activation and ${outputPhrase} mana output fast mana reusable mana production color fixing`;
     }
     const dominantFunctionRecord = profile.functions?.find(x => x.functionName === fn);
     if (dominantFunctionRecord?.paramSamples?.length) {
@@ -11218,12 +11490,10 @@ function buildRelatedSearchQueries(sourceCard, selectedCards, repeatingPatterns,
         const fn = relatedIntentProfile.dominantFunction;
         const qty = relatedIntentProfile.numericTarget;
         if (fn === 'mana_ability') {
-            if (qty != null && relatedIntentProfile.numericParameterStrength >= 0.42) {
-                add(`otag:manaproduction o:"${Array.from({ length: qty }, () => '{C}').join('')}" ${excludedNames} ${filters}`, 'consensus-parameter', 1);
-                add(`otag:manaproduction o:"add" ${excludedNames} ${filters}`, 'consensus-function', 3);
-            } else {
-                add(`otag:manaproduction ${excludedNames} ${filters}`, 'consensus-function', 3);
-            }
+            // numericTarget is NET mana, so it must never be turned into literal output symbols.
+            // Boros Signet is the key example: net +1, but it outputs {R}{W}. Local retrieval
+            // handles the exact net/output/color profile; Scryfall only needs a broad fallback.
+            add(`otag:manaproduction ${excludedNames} ${filters}`, 'consensus-function', 3);
         } else {
             const vocab = FUNCTION_RETRIEVAL_VOCAB[fn];
             if (vocab?.otag) add(`otag:${vocab.otag} ${excludedNames} ${filters}`, 'consensus-function', 2);
