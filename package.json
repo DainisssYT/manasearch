@@ -1,9 +1,9 @@
 {
-  "name": "manasearch",
+  "name": "manasearch-static-data",
   "private": true,
   "type": "module",
   "scripts": {
-    "build:semantic-index": "node scripts/build-semantic-index.mjs"
+    "build-static-data": "node scripts/build-static-data.mjs"
   },
   "dependencies": {
     "@xenova/transformers": "2.16.0"

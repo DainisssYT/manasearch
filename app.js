@@ -1,10 +1,9 @@
-/* ManaSearch build 20261007-16 */
+/* ManaSearch build 20261008-1 */
 // ManaSearch deployment build marker. Bump this whenever app.js changes so cached-module issues are easy to diagnose.
-const MANASEARCH_APP_BUILD = '20261007-16';
+const MANASEARCH_APP_BUILD = '20261008-2';
 console.info(`[ManaSearch] app.js build ${MANASEARCH_APP_BUILD}`);
 
 // State Management
-const ENABLE_LOCAL_CARD2VEC = false;
 let currentSourceCard = null;
 let lastSearchResults = [];
 // Set after a search whose retrieval streams were capped mid-pagination (see fetchScryfallSearch's
@@ -52,8 +51,7 @@ const MECHANICAL_PROFILE_CACHE_MAX = 2500;
 // E, F) ever produced it as a candidate.
 //
 // Scope, honestly stated: this is NOT a precomputed vector index over the whole card corpus, and
-// it can't be one without a backend (that's what the disabled ENABLE_LOCAL_CARD2VEC/Card2Vec path
-// was reaching for). It only knows about cards this session has already seen via some other
+// it is a session-local recovery lane, not a second full-corpus model. It only knows about cards this session has already seen via some other
 // stream or search. So it does nothing useful on someone's very first search ever, and it can't
 // find a wording-different match that's never once turned up here before. What it DOES do: once
 // any search - by any source card, on any session - has pulled a differently-worded functional
@@ -158,7 +156,7 @@ function loadDisplayPreferences() {
     displayPreferences = {
         maxResults: clampDisplayResultLimit(stored?.maxResults ?? DEFAULT_DISPLAY_PREFERENCES.maxResults),
         showScoreBreakdown: stored?.showScoreBreakdown !== false,
-        theme: ['dark', 'light', 'system'].includes(stored?.theme) ? stored.theme : (loadLegacyThemePreference() || DEFAULT_DISPLAY_PREFERENCES.theme),
+        theme: (stored?.theme === 'light' || stored?.theme === 'dark') ? stored.theme : (loadLegacyThemePreference() || DEFAULT_DISPLAY_PREFERENCES.theme),
         resultDensity: ['comfortable', 'compact'].includes(stored?.resultDensity) ? stored.resultDensity : DEFAULT_DISPLAY_PREFERENCES.resultDensity,
         reduceMotion: Boolean(stored?.reduceMotion),
         showStreamProgress: stored?.showStreamProgress !== false
@@ -8201,36 +8199,6 @@ function updateProgress(step, total, message) {
     }
 }
 
-// --- 0 Card2Vec Fetch Similar Cards result ---
-async function getCard2VecRecommendations(cardName) {
-    if (!ENABLE_LOCAL_CARD2VEC) return [];
-    const url = `http://localhost:5000/similar?card=${encodeURIComponent(cardName)}`;
-    try {
-        let response = await fetch(url);
-        if (!response.ok) return [];   
-        const data = await response.json();
-        const seen = new Set();
-        const uniqueRecs = [];
-        for (const rec of data) {
-            const name = rec.name;
-            if (name) {
-                const lowerName = name.toLowerCase();
-                if (!seen.has(lowerName)) {
-                    seen.add(lowerName);
-                    uniqueRecs.push({
-                        name: name,
-                        score: rec.score || 0
-                    });
-                }
-            }
-        }
-        return uniqueRecs;
-    } catch (error) {
-        console.warn("Card2Vec local server not reached. Skipping Card2Vec recommendations.");
-        return [];
-    }
-}
-
 /**
  * Explains WHY a card fails the active hard filters, field by field.
  *
@@ -8658,10 +8626,10 @@ const SEARCH_CACHE_TTL_MS = 10 * 60 * 1000; // 10 minutes
 // Search-depth policy: every live retrieval stream gets at least an 8-page budget when the
 // query has that many pages, while Search Depth (%) controls how much of the complete Scryfall
 // result set is actually traversed. 100% means exhaust every available page.
-const DEFAULT_SEARCH_DEPTH_PERCENT = 50;
+const DEFAULT_SEARCH_DEPTH_PERCENT = 25;
 const MIN_SEARCH_PAGES = 8;
 const MAX_SEARCH_DEPTH_PERCENT = 100;
-const SEARCH_DEPTH_STORAGE_KEY = 'manamatch_search_depth_percent';
+const SEARCH_DEPTH_STORAGE_KEY = 'manamatch_search_depth_percent_v2';
 
 // --- Persistent search cache (localStorage-backed) ------------------------------------------
 // The in-memory searchCache above is wiped on every page refresh, so a user testing a few
@@ -9140,7 +9108,7 @@ async function fetchScryfallSearch(query, maxPagesOverride = MIN_SEARCH_PAGES, s
 
                 // Search Depth (%) operates on the FULL available Scryfall page count.
                 // A minimum of 8 pages is retained for sufficiently large queries, but it never
-                // exceeds the query's actual page count. At 100%, every page is fetched. At 50%,
+                // exceeds the query's actual page count. At 100%, every page is fetched. At 25%,
                 // half of the complete result set is fetched, rounded up, with the 8-page floor.
                 const depthBasedPages = Math.ceil(scryfallTotalPages * (depthPercent / 100));
                 maxPages = depthPercent >= MAX_SEARCH_DEPTH_PERCENT
@@ -9484,11 +9452,223 @@ let semanticCosineBaselineReady = false;
 // V21/V22 semantic retrieval: full-corpus retrieval uses only the precomputed static
 // `semantic-index.bin` generated during deployment. Visitor devices NEVER build a full corpus,
 // fetch Scryfall bulk-data exports, or persist a locally generated semantic index.
+const STATIC_CARD_CORPUS_FILENAME = 'cards.bin';
+const STATIC_CARD_CORPUS_VERSION = 1;
+const STATIC_CARD_CORPUS_MAGIC = 'MSCARD1G';
+const STATIC_CARD_CORPUS_CACHE_VERSION = '20261008-2';
+const STATIC_DATA_META_FILENAME = 'static-data-meta.json';
+let staticDataMetaPromise = null;
+let staticDataBuildCacheKey = null;
+let staticCardCorpusPromise = null;
+let staticCardCorpusMemory = null;
+let staticCardCorpusLoadError = null;
+
+function getStaticDataMetaUrl() {
+    try {
+        const url = new URL(STATIC_DATA_META_FILENAME, document.baseURI || window.location.href);
+        // Metadata is tiny and must be revalidated so newly generated static assets receive
+        // a fresh cache key without requiring an app.js deployment.
+        url.searchParams.set('v', `${STATIC_CARD_CORPUS_CACHE_VERSION}-meta`);
+        return url.href;
+    } catch (_) {
+        return STATIC_DATA_META_FILENAME;
+    }
+}
+
+async function loadStaticDataMetadata() {
+    if (staticDataBuildCacheKey) return staticDataBuildCacheKey;
+    if (staticDataMetaPromise) return staticDataMetaPromise;
+    staticDataMetaPromise = (async () => {
+        try {
+            const response = await fetch(getStaticDataMetaUrl(), {
+                method: 'GET',
+                cache: 'no-store',
+                headers: { 'Accept': 'application/json,*/*;q=0.8' }
+            });
+            if (!response.ok) throw new Error(`Static data metadata download failed (${response.status}).`);
+            const metadata = await response.json();
+            const key = String(metadata?.build_id || '').trim();
+            if (!key) throw new Error('Static data metadata does not contain a build_id.');
+            staticDataBuildCacheKey = encodeURIComponent(key);
+            return staticDataBuildCacheKey;
+        } catch (error) {
+            // The metadata file was introduced after the original static assets. Keep the
+            // previous fixed cache key as a compatibility fallback if metadata is unavailable.
+            console.info('Static data metadata unavailable; using the compatibility cache key:', error?.message || String(error));
+            staticDataBuildCacheKey = encodeURIComponent(STATIC_CARD_CORPUS_CACHE_VERSION);
+            return staticDataBuildCacheKey;
+        }
+    })();
+    return staticDataMetaPromise;
+}
+
+function getStaticAssetCacheKey() {
+    return staticDataBuildCacheKey || encodeURIComponent(STATIC_CARD_CORPUS_CACHE_VERSION);
+}
+
+function getStaticCardCorpusUrl() {
+    try {
+        const url = new URL(STATIC_CARD_CORPUS_FILENAME, document.baseURI || window.location.href);
+        url.searchParams.set('v', getStaticAssetCacheKey());
+        return url.href;
+    } catch (_) {
+        return STATIC_CARD_CORPUS_FILENAME;
+    }
+}
+
+function normalizeLocalCorpusText(value) {
+    return String(value || '').toLowerCase()
+        .replace(/[^a-z0-9+\-/]+/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+}
+
+function getLocalCorpusCardOracleText(card) {
+    return getCurrentSourceOracleText(card) || getCardOracleText(card) || '';
+}
+
+function prepareStaticCardRecord(card) {
+    if (!card || !card.name) return null;
+    const oracle = getLocalCorpusCardOracleText(card);
+    const faces = Array.isArray(card.card_faces) ? card.card_faces : [];
+    const faceText = faces.map(face => face?.oracle_text || '').filter(Boolean).join(' ');
+    const searchText = normalizeLocalCorpusText([
+        card.name,
+        oracle,
+        faceText,
+        Array.isArray(card.keywords) ? card.keywords.join(' ') : '',
+        card.type_line || '',
+        Array.isArray(card.color_identity) ? card.color_identity.join(' ') : ''
+    ].join(' '));
+    return { ...card, _localSearchText: searchText };
+}
+
+function parseStaticCardCorpusBinary(buffer) {
+    if (!(buffer instanceof ArrayBuffer) || buffer.byteLength < 24) {
+        throw new Error('Static card corpus is too small or empty.');
+    }
+    const bytes = new Uint8Array(buffer);
+    const magic = new TextDecoder().decode(bytes.subarray(0, 8));
+    if (magic !== STATIC_CARD_CORPUS_MAGIC) throw new Error('Static card corpus has an unknown format.');
+    const view = new DataView(buffer);
+    const version = view.getUint32(8, true);
+    const payloadBytes = view.getUint32(12, true);
+    const declaredCount = view.getUint32(16, true);
+    if (version !== STATIC_CARD_CORPUS_VERSION) throw new Error(`Static card corpus version ${version} is not supported.`);
+    if (!payloadBytes || 24 + payloadBytes > buffer.byteLength) throw new Error('Static card corpus payload is truncated.');
+
+    const compressed = buffer.slice(24, 24 + payloadBytes);
+    return (async () => {
+        if (!('DecompressionStream' in window)) {
+            throw new Error('This browser does not support gzip decompression for the static card corpus.');
+        }
+        const stream = new Blob([compressed]).stream().pipeThrough(new DecompressionStream('gzip'));
+        const decompressed = await new Response(stream).arrayBuffer();
+        const json = new TextDecoder().decode(new Uint8Array(decompressed));
+        const payload = JSON.parse(json);
+        const sourceCards = Array.isArray(payload) ? payload : payload?.cards;
+        if (!Array.isArray(sourceCards) || !sourceCards.length) throw new Error('Static card corpus contains no cards.');
+        if (declaredCount && sourceCards.length !== declaredCount) {
+            throw new Error(`Static card corpus count mismatch (${sourceCards.length} vs ${declaredCount}).`);
+        }
+        const cards = sourceCards.map(prepareStaticCardRecord).filter(Boolean);
+        const byName = new Map();
+        cards.forEach(card => byName.set(normalizeCardNameForIdentity(card.name), card));
+        return {
+            source: 'static',
+            version,
+            total: cards.length,
+            cards,
+            byName,
+            byteLength: buffer.byteLength
+        };
+    })();
+}
+
+async function loadStaticCardCorpus() {
+    if (staticCardCorpusMemory?.source === 'static') return staticCardCorpusMemory;
+    if (staticCardCorpusPromise) return staticCardCorpusPromise;
+    staticCardCorpusPromise = (async () => {
+        const response = await fetch(getStaticCardCorpusUrl(), {
+            method: 'GET',
+            cache: 'force-cache',
+            headers: { 'Accept': 'application/octet-stream,*/*;q=0.8' }
+        });
+        if (!response.ok) throw new Error(`Static card corpus download failed (${response.status}).`);
+        const buffer = await response.arrayBuffer();
+        const corpus = await runWhenIdle(() => parseStaticCardCorpusBinary(buffer), { timeout: 3500 });
+        staticCardCorpusMemory = corpus;
+        console.info(`Precomputed card corpus loaded: ${corpus.total.toLocaleString()} cards.`);
+        return corpus;
+    })().catch(error => {
+        staticCardCorpusLoadError = error?.message || String(error);
+        console.info('Precomputed card corpus unavailable; Scryfall fallback remains active:', staticCardCorpusLoadError);
+        return null;
+    });
+    return staticCardCorpusPromise;
+}
+
+function preloadStaticCardCorpus() {
+    return loadStaticCardCorpus();
+}
+
+function getStaticCardByName(name) {
+    const key = normalizeCardNameForIdentity(name || '');
+    return staticCardCorpusMemory?.byName?.get(key) || null;
+}
+
+const LOCAL_CORPUS_STOP_WORDS = new Set([
+    'the','a','an','and','or','of','to','for','from','with','you','your','this','that','it','its',
+    'is','are','be','as','at','on','in','into','by','each','any','another','other','one','two','three',
+    'target','targets','card','cards','creature','creatures','player','players','permanent','permanents',
+    'spell','spells','ability','abilities','mana','turn','until','control','controls','controlled',
+    'gets','get','gain','gains','put','onto','enters','becomes','instead','then','when','whenever','if'
+]);
+
+function getLocalCorpusQueryTokens(text) {
+    return [...new Set(normalizeLocalCorpusText(text).split(/\s+/).filter(token =>
+        token.length >= 3 && !LOCAL_CORPUS_STOP_WORDS.has(token)
+    ))].slice(0, 14);
+}
+
+function searchStaticCardCorpus(queryText, options = {}) {
+    const corpus = staticCardCorpusMemory;
+    if (!corpus?.cards?.length || !queryText) return [];
+    const tokens = getLocalCorpusQueryTokens(queryText);
+    if (!tokens.length) return [];
+    const phrase = normalizeLocalCorpusText(queryText);
+    const excludeKey = normalizeCardNameForIdentity(options.excludeName || '');
+    const limit = Math.max(1, Math.min(300, Number(options.limit) || 180));
+    const scored = [];
+    for (const card of corpus.cards) {
+        if (!card?.name || normalizeCardNameForIdentity(card.name) === excludeKey) continue;
+        if (options.highlights && !matchesExactHighlightConstraints(card, options.highlights)) continue;
+        if (options.filters && !matchesActiveFilters(card, options.filters, options.broadFallbackFilters)) continue;
+        const haystack = card._localSearchText || '';
+        if (!haystack) continue;
+        let matched = 0;
+        for (const token of tokens) if (haystack.includes(token)) matched++;
+        if (!matched) continue;
+        const coverage = matched / tokens.length;
+        const phraseBonus = phrase.length >= 8 && haystack.includes(phrase) ? 0.24 : 0;
+        const keywordBonus = Array.isArray(card.keywords) && card.keywords.some(k => tokens.includes(normalizeLocalCorpusText(k))) ? 0.08 : 0;
+        const score = Math.min(1, coverage * 0.68 + phraseBonus + keywordBonus);
+        if (score < 0.18) continue;
+        scored.push({ card, score });
+    }
+    scored.sort((a, b) => b.score - a.score || String(a.card.name).localeCompare(String(b.card.name)));
+    return scored.slice(0, limit).map(({ card, score }) => ({
+        ...card,
+        _localCorpusSimilarity: score,
+        _semanticRetrievalSource: 'local-card-corpus'
+    }));
+}
+
 const FULL_SEMANTIC_INDEX_SEARCH_LIMIT = 96;
 const STATIC_SEMANTIC_INDEX_FILENAME = 'semantic-index.bin';
 const STATIC_SEMANTIC_INDEX_VERSION = 1;
 const STATIC_SEMANTIC_INDEX_MAGIC = 'MSIDX1';
-const STATIC_SEMANTIC_INDEX_CACHE_VERSION = '20261007-1';
+const STATIC_SEMANTIC_INDEX_CACHE_VERSION = '20261008-2';
 let staticSemanticIndexPromise = null;
 let staticSemanticIndexAttempted = false;
 let staticSemanticIndexLoadError = null;
@@ -9499,7 +9679,7 @@ let fullSemanticIndexUnavailableReason = null;
 function getStaticSemanticIndexUrl() {
     try {
         const url = new URL(STATIC_SEMANTIC_INDEX_FILENAME, document.baseURI || window.location.href);
-        url.searchParams.set('v', STATIC_SEMANTIC_INDEX_CACHE_VERSION);
+        url.searchParams.set('v', getStaticAssetCacheKey());
         return url.href;
     } catch (_) {
         return STATIC_SEMANTIC_INDEX_FILENAME;
@@ -9579,6 +9759,7 @@ async function loadStaticSemanticIndex() {
     if (staticSemanticIndexPromise) return staticSemanticIndexPromise;
     staticSemanticIndexAttempted = true;
     staticSemanticIndexPromise = (async () => {
+        await loadStaticDataMetadata();
         const url = getStaticSemanticIndexUrl();
         const response = await fetch(url, {
             method: 'GET',
@@ -11083,7 +11264,7 @@ function initApp() {
     function syncPreferencesControls() {
         if (preferenceResultLimit) preferenceResultLimit.value = String(getDisplayedResultLimit());
         if (preferenceScoreBreakdown) preferenceScoreBreakdown.checked = Boolean(displayPreferences.showScoreBreakdown);
-        if (preferenceTheme) preferenceTheme.value = displayPreferences.theme || 'system';
+        if (preferenceTheme) preferenceTheme.value = (displayPreferences.theme === 'light' || displayPreferences.theme === 'dark') ? displayPreferences.theme : 'dark';
         if (preferenceDensity) preferenceDensity.value = displayPreferences.resultDensity || 'comfortable';
         if (preferenceReduceMotion) preferenceReduceMotion.checked = Boolean(displayPreferences.reduceMotion);
         if (preferenceShowStreamProgress) preferenceShowStreamProgress.checked = displayPreferences.showStreamProgress !== false;
@@ -11092,13 +11273,13 @@ function initApp() {
     function commitPreferences() {
         displayPreferences.maxResults = clampDisplayResultLimit(preferenceResultLimit?.value);
         displayPreferences.showScoreBreakdown = preferenceScoreBreakdown?.checked !== false;
-        displayPreferences.theme = ['dark', 'light', 'system'].includes(preferenceTheme?.value) ? preferenceTheme.value : DEFAULT_DISPLAY_PREFERENCES.theme;
+        displayPreferences.theme = ['dark', 'light'].includes(preferenceTheme?.value) ? preferenceTheme.value : DEFAULT_DISPLAY_PREFERENCES.theme;
         displayPreferences.resultDensity = ['comfortable', 'compact'].includes(preferenceDensity?.value) ? preferenceDensity.value : DEFAULT_DISPLAY_PREFERENCES.resultDensity;
         displayPreferences.reduceMotion = Boolean(preferenceReduceMotion?.checked);
         displayPreferences.showStreamProgress = preferenceShowStreamProgress?.checked !== false;
         saveDisplayPreferences();
         try {
-            localStorage.setItem(THEME_KEY, displayPreferences.theme === 'system' ? resolveTheme('system') : displayPreferences.theme);
+            localStorage.setItem(THEME_KEY, displayPreferences.theme);
         } catch (_) {}
         applyPresentationPreferences();
         if (resultsSection && !resultsSection.classList.contains('hidden') && Array.isArray(lastSearchResults)) {
@@ -11138,7 +11319,7 @@ function initApp() {
     sortSelect = document.getElementById('sort-results');
     setupSourceCardPicker();
 
-    // Search Depth defaults to 50% for a new browser profile. Once the user deliberately changes
+    // Search Depth defaults to 25% for a new browser profile. Once the user deliberately changes
     // it, remember that choice so the control remains genuinely user-configurable across reloads.
     const depthControl = document.getElementById('filter-depth-percent');
     if (depthControl) {
@@ -11302,17 +11483,6 @@ function initApp() {
     });
 
     renderSidebarLists();
-    systemThemeMediaQuery = window.matchMedia?.('(prefers-color-scheme: light)') || null;
-    if (systemThemeMediaQuery?.addEventListener) {
-        systemThemeMediaQuery.addEventListener('change', () => {
-            if (displayPreferences.theme === 'system') applyPresentationPreferences();
-        });
-    } else if (systemThemeMediaQuery?.addListener) {
-        systemThemeMediaQuery.addListener(() => {
-            if (displayPreferences.theme === 'system') applyPresentationPreferences();
-        });
-    }
-    
     if (searchBtn) searchBtn.addEventListener('click', () => loadSourceCard(cardSearchInput.value.trim()));
     if (cardSearchInput) cardSearchInput.addEventListener('keypress', (e) => { if (e.key === 'Enter') loadSourceCard(cardSearchInput.value.trim()); });
     if (findSimilarBtn) findSimilarBtn.addEventListener('click', findSimilarCards);
@@ -11523,6 +11693,7 @@ function initApp() {
     // the first results have rendered.
     getNLPModel().catch(() => {});
     preloadStaticSemanticIndex().catch(() => {});
+    preloadStaticCardCorpus().catch(() => {});
 }
 
 /**
@@ -12083,7 +12254,7 @@ function openSourceCardPicker() {
         sourceCardPickerInput.focus();
     }
     const history = getSourceCardPickerMatches();
-    if (sourceCardPickerStatus) sourceCardPickerStatus.textContent = history.length ? 'Recent cards' : 'Start typing to search Scryfall.';
+    if (sourceCardPickerStatus) sourceCardPickerStatus.textContent = history.length ? 'Recent cards' : 'Start typing to search the local card database.';
     renderSourceCardPickerCards(history, 'No recent cards yet. Start typing to search.');
 }
 
@@ -12092,7 +12263,7 @@ async function searchSourceCardPicker(query) {
     const q = String(query || '').trim();
     if (!q) {
         const history = getSourceCardPickerMatches();
-        if (sourceCardPickerStatus) sourceCardPickerStatus.textContent = history.length ? 'Recent cards' : 'Start typing to search Scryfall.';
+        if (sourceCardPickerStatus) sourceCardPickerStatus.textContent = history.length ? 'Recent cards' : 'Start typing to search the local card database.';
         renderSourceCardPickerCards(history, 'No recent cards yet. Start typing to search.');
         return;
     }
@@ -12102,9 +12273,34 @@ async function searchSourceCardPicker(query) {
         return;
     }
 
-    if (sourceCardPickerStatus) sourceCardPickerStatus.textContent = `Searching for “${q}”…`;
+    if (sourceCardPickerStatus) sourceCardPickerStatus.textContent = `Searching local card database for “${q}”…`;
     renderSourceCardPickerCards([], 'Searching…');
     try {
+        const corpus = await loadStaticCardCorpus();
+        if (requestId !== sourceCardPickerRequestId) return;
+        if (corpus?.cards?.length) {
+            const normalized = normalizeLocalCorpusText(q);
+            const cards = corpus.cards
+                .filter(card => {
+                    const name = normalizeLocalCorpusText(card.name);
+                    return name.includes(normalized) || name.split(/\s+/).some(part => part.startsWith(normalized));
+                })
+                .sort((a, b) => {
+                    const an = normalizeLocalCorpusText(a.name);
+                    const bn = normalizeLocalCorpusText(b.name);
+                    const ar = an === normalized ? 0 : an.startsWith(normalized) ? 1 : 2;
+                    const br = bn === normalized ? 0 : bn.startsWith(normalized) ? 1 : 2;
+                    return ar - br || an.localeCompare(bn);
+                })
+                .slice(0, 12);
+            cards.forEach(card => sourceCardCache.set(card.name.toLowerCase(), card));
+            if (sourceCardPickerStatus) sourceCardPickerStatus.textContent = `${cards.length} local result${cards.length === 1 ? '' : 's'}`;
+            renderSourceCardPickerCards(cards, 'No matching cards.');
+            return;
+        }
+
+        // The static corpus is an optimization, never a hard dependency. If a deployment has not
+        // generated cards.bin yet, retain the original Scryfall picker behavior.
         const response = await scryfallThrottledFetch(
             `https://api.scryfall.com/cards/search?unique=cards&order=name&q=${encodeURIComponent(q)}`,
             { headers: { 'User-Agent': 'ManaMatch/1.0 (Semantic Magic Search)', 'Accept': 'application/json' } }
@@ -12249,6 +12445,15 @@ async function loadSourceCard(query, providedCard = null) {
                 // Fall through to the existing record; a transient hydration failure should not
                 // prevent an otherwise usable cached card from loading.
                 console.warn('Could not hydrate Oracle text for source card:', hydrateError.message);
+            }
+        }
+
+        if (!cardData && !benchmarkColdMode) {
+            const corpus = staticCardCorpusMemory || await loadStaticCardCorpus();
+            const exactLocal = corpus?.byName?.get(normalizeCardNameForIdentity(query)) || null;
+            if (exactLocal) {
+                cardData = exactLocal;
+                sourceCardCache.set(cacheKey, cardData);
             }
         }
 
@@ -13129,17 +13334,28 @@ async function executeRelatedCardSearch() {
                 }));
 
                 if (semanticByName.size) {
-                    const hydrated = await fetchScryfallCollection(
-                        Array.from(semanticByName.values()).map(x => ({ name: x.name }))
-                    );
                     const scoreByName = new Map(
                         Array.from(semanticByName.values()).map(x => [normalizeCardNameForIdentity(x.name), x.similarity || 0])
                     );
-                    semanticMatches = (hydrated || []).map(card => ({
-                        ...card,
-                        _semanticRetrievalSimilarity: scoreByName.get(normalizeCardNameForIdentity(card.name)) || 0,
-                        _semanticRetrievalSource: 'related-semantic-index'
-                    }));
+                    const localHydrated = Array.from(semanticByName.values()).map(item => {
+                        const card = getStaticCardByName(item.name);
+                        return card ? {
+                            ...card,
+                            _semanticRetrievalSimilarity: item.similarity || 0,
+                            _semanticRetrievalSource: 'related-semantic-index-local-corpus'
+                        } : null;
+                    }).filter(Boolean);
+                    const localNames = new Set(localHydrated.map(card => normalizeCardNameForIdentity(card.name)));
+                    const missing = Array.from(semanticByName.values()).filter(item => !localNames.has(normalizeCardNameForIdentity(item.name)));
+                    if (missing.length) {
+                        const hydrated = await fetchScryfallCollection(missing.map(x => ({ name: x.name })));
+                        localHydrated.push(...(hydrated || []).map(card => ({
+                            ...card,
+                            _semanticRetrievalSimilarity: scoreByName.get(normalizeCardNameForIdentity(card.name)) || 0,
+                            _semanticRetrievalSource: 'related-semantic-index-scryfall-fallback'
+                        })));
+                    }
+                    semanticMatches = localHydrated;
                     results.push(...semanticMatches);
                 }
             }
@@ -14001,12 +14217,10 @@ async function findSimilarCards() {
         ? `${activeTags.map(tag => `(otag:"${tag}" OR oracle:"${tag}")`).join(' OR ')} ${filterParts.join(' ')} ${excludeSelf}`.trim()
         : null;
 
-    const card2vecRecs = typeof getCard2VecRecommendations === 'function' 
-        ? await getCard2VecRecommendations(currentSourceCard.name) 
-        : [];
-    const c2vLimit = isBroadSearch ? 20 : 10;
-    const topNCard2Vec = card2vecRecs.slice(0, c2vLimit);
-    const topNNames = new Set(topNCard2Vec.map(r => r.name.toLowerCase()));
+    // The old localhost-only secondary vector placeholder has been removed.
+    // Keep the ranking context field as an empty set for compatibility with existing scorer/deeper
+    // search code, but do not launch a fake stream or make a localhost request.
+    const topNNames = new Set();
 
     const primaryType = extractPrimaryCardType(currentSourceCard.type_line);
     const colorId = (currentSourceCard.color_identity || []).join('');
@@ -14086,7 +14300,7 @@ async function findSimilarCards() {
     const hasFunctionalVisualStream = !benchmarkUseLocalOracleCorpus && uniqueFunctionalQueries.length > 0;
     const exactHighlightStreamLabels = exactHighlightQueries.map((_, idx) => `Search H #${idx + 1} (Exact Highlight)`);
     const plannedStreamLabels = [
-        'Exact Phrase', 'Oracle Terms', 'Mechanics/Tags', 'Card2Vec', 'Broader Mechanical',
+        'Exact Phrase', 'Oracle Terms', 'Mechanics/Tags', 'Local Card Corpus', 'Broader Mechanical',
         'Semantic Index',
         ...(hasFunctionalVisualStream ? ['Functional Match'] : []),
         ...exactHighlightStreamLabels
@@ -14323,12 +14537,22 @@ async function findSimilarCards() {
             "Mechanics/Tags"
         );
         streamCPromise.then(r => mergeIntoPreview(r, "tags")).catch(() => {});
-        const streamDPromise = trackStream(
-            benchmarkUseLocalOracleCorpus ? Promise.resolve([]) :
-            (topNCard2Vec.length > 0 ? fetchScryfallCollection(topNCard2Vec.map(r => ({ name: r.name }))).catch(() => []) : Promise.resolve([])),
-            "Card2Vec"
+        const streamLocalCorpusPromise = trackStream((async () => {
+            if (benchmarkUseLocalOracleCorpus) return [];
+            const corpus = staticCardCorpusMemory || await loadStaticCardCorpus();
+            if (!corpus) return [];
+            const localQuery = hasHighlight ? (highlightRetrievalText || targetTextForScoring) : sourceOracleTextForParsing;
+            return searchStaticCardCorpus(localQuery, {
+                excludeName: currentSourceCard.name,
+                filters,
+                broadFallbackFilters,
+                highlights: manualHighlights,
+                limit: isBroadSearch ? 260 : 180
+            });
+        })(),
+            "Local Card Corpus"
         );
-        streamDPromise.then(r => mergeIntoPreview(r, "card2vec")).catch(() => {});
+        streamLocalCorpusPromise.then(r => mergeIntoPreview(r, "local card corpus")).catch(() => {});
         const streamEPromise = trackStream(
             benchmarkUseLocalOracleCorpus ? Promise.resolve([]) :
             (searchE_Query ? fetchScryfallSearch(searchE_Query, benchmarkPageCap, "Broader Mechanical").catch(() => []) : Promise.resolve([])),
@@ -14495,13 +14719,26 @@ async function findSimilarCards() {
                                     : 'benchmark-full-index'
                             }));
                     } else {
-                        const fetched = await fetchScryfallCollection(Array.from(byName.values()).map(x => ({ name: x.name })));
                         const scoreByName = new Map(Array.from(byName.values()).map(x => [normalizeCardNameForIdentity(x.name), x.similarity]));
-                        hydrated = (fetched || []).map(card => ({
-                            ...card,
-                            _semanticRetrievalSimilarity: scoreByName.get(normalizeCardNameForIdentity(card.name)) || 0,
-                            _semanticRetrievalSource: 'full-index'
-                        }));
+                        const localCards = Array.from(byName.values()).map(item => {
+                            const card = getStaticCardByName(item.name);
+                            return card ? {
+                                ...card,
+                                _semanticRetrievalSimilarity: item.similarity || 0,
+                                _semanticRetrievalSource: 'full-index-local-corpus'
+                            } : null;
+                        }).filter(Boolean);
+                        const localNames = new Set(localCards.map(card => normalizeCardNameForIdentity(card.name)));
+                        const missingNames = Array.from(byName.values()).filter(item => !localNames.has(normalizeCardNameForIdentity(item.name)));
+                        if (missingNames.length) {
+                            const fetched = await fetchScryfallCollection(missingNames.map(x => ({ name: x.name })));
+                            localCards.push(...(fetched || []).map(card => ({
+                                ...card,
+                                _semanticRetrievalSimilarity: scoreByName.get(normalizeCardNameForIdentity(card.name)) || 0,
+                                _semanticRetrievalSource: 'full-index-scryfall-fallback'
+                            })));
+                        }
+                        hydrated = localCards;
                     }
                 }
                 return { index, queryVector: oracleVector || semanticRetrievalVector, semanticRetrievalVector, matches, hydrated };
@@ -14573,8 +14810,8 @@ async function findSimilarCards() {
             runProgressiveRanking();
         };
 
-        const [resultsA, resultsB, resultsC, resultsD, resultsE, resultsBroad, resultsShared, resultsFSets, resultsExactSets, extractor, semanticRetrieval, resolvedMethodStreams] = await Promise.all([
-            streamAPromise, streamBPromise, streamCPromise, streamDPromise, streamEPromise, streamBroadPromise, streamSharedPromise,
+        const [resultsA, resultsB, resultsC, resultsLocalCorpus, resultsE, resultsBroad, resultsShared, resultsFSets, resultsExactSets, extractor, semanticRetrieval, resolvedMethodStreams] = await Promise.all([
+            streamAPromise, streamBPromise, streamCPromise, streamLocalCorpusPromise, streamEPromise, streamBroadPromise, streamSharedPromise,
             functionalResultsPromise,
             Promise.all(exactHighlightPromises),
             extractorPromise,
@@ -14644,7 +14881,7 @@ const streamDiagnostics = {
     "Search A": new Set((resultsA || []).map(c => c.name.toLowerCase())),
     "Search B": new Set((resultsB || []).map(c => c.name.toLowerCase())),
     "Search C": new Set((resultsC || []).map(c => c.name.toLowerCase())),
-    "Search D": new Set((resultsD || []).map(c => c.name.toLowerCase())),
+    "Local Card Corpus": new Set((resultsLocalCorpus || []).map(c => c.name.toLowerCase())),
     "Search E": new Set((resultsE || []).map(c => c.name.toLowerCase())),
     "Broad Retrieval": new Set((resultsBroad || []).map(c => c.name.toLowerCase())),
     "Shared Source Text": new Set((resultsSharedFlat || []).map(c => c.name.toLowerCase())),
@@ -14671,7 +14908,7 @@ const streamCoverage = {
 
 const sniperCardIds = new Set((resultsA || []).map(card => card.id));
 const methodRawCandidates = Object.values(methodResults).flatMap(value => Array.isArray(value) ? value : []);
-const rawCandidates = [...resultsA, ...resultsB, ...resultsC, ...resultsD, ...resultsE, ...resultsBroad, ...resultsSharedFlat, ...resultsF, ...resultsG, ...resultsExact, ...methodRawCandidates];
+const rawCandidates = [...resultsA, ...resultsB, ...resultsC, ...resultsLocalCorpus, ...resultsE, ...resultsBroad, ...resultsSharedFlat, ...resultsF, ...resultsG, ...resultsExact, ...methodRawCandidates];
 const countRetrieved = rawCandidates.length;
 
 // Stage 1: Raw candidate pool set
@@ -15023,8 +15260,8 @@ if (candidates.length > 0) {
     lastSearchCandidateCount = countAfterHardFilters;
 
     // Collect a resumable cursor from every stream that was deliberately capped mid-pagination
-    // (see fetchScryfallSearch's `.continuation`) - Search D (Card2Vec via fetchScryfallCollection)
-    // and Search G (local session-corpus lookup) aren't paginated the same way and never carry one.
+    // (see fetchScryfallSearch's `.continuation`) - local corpus and semantic-index lanes are static
+    // and the local/semantic corpus lanes are not paginated the same way and never carry one.
     // Search Deeper must preserve every authoritative constraint from the original search.
     // In particular, Exact Highlight retrieval (Search H) is a real paginated stream too; if its
     // continuation is omitted here, deeper clicks can start pulling from A/B/C/E/F only. Even more
@@ -15542,12 +15779,17 @@ function renderResults(cards) {
         const matchPercentage = Math.round(Math.max(0, Math.min(1, displaySimilarityScore)) * 100);
         const priceUsd = card.prices?.usd ? '$' + card.prices.usd : 'N/A';
         const priceEur = card.prices?.eur ? '€' + card.prices.eur : 'N/A';
+        const scoreValue = (value) => Number.isFinite(Number(value)) ? Math.round(Math.max(0, Math.min(1, Number(value))) * 100) : 0;
         const scores = {
-            Mechanical: card.mechanicalScore ? Math.round(card.mechanicalScore * 100) : 0,
-            Context: card.contextScore ? Math.round(card.contextScore * 100) : 0,
-            Synergy: card.synergyScore ? Math.round(card.synergyScore * 100) : 0,
-            Exactness: card.exactnessScore ? Math.round(card.exactnessScore * 100) : 0,
-            Category: card.categoryScore ? Math.round(card.categoryScore * 100) : 0
+            Mechanical: scoreValue(card.mechanicalScore),
+            Functional: scoreValue(card.functionScore ?? card.functionalSimilarityScore),
+            Semantic: scoreValue(card.oracleSemanticScore ?? card.contextScore),
+            'Strategic Role': scoreValue(card.roleScore),
+            Synergy: scoreValue(card.synergyScore),
+            Exactness: scoreValue(card.exactnessScore),
+            Category: scoreValue(card.categoryScore),
+            Quantity: scoreValue(card.quantitySimilarityScore),
+            'Related Consensus': scoreValue(card.relatedConsensusScore)
         };
 
         cardElement.classList.toggle('selected-card', isSelected);
@@ -15595,14 +15837,23 @@ function renderResults(cards) {
 
         const breakdown = cardElement.querySelector('.result-score-breakdown');
         if (breakdown) {
-            const lines = Array.from(breakdown.querySelectorAll('.score-line'));
-            ['Mechanical','Context','Synergy','Exactness','Category'].forEach((label, i) => {
-                if (lines[i]) lines[i].textContent = `${label}: ${scores[label]}%`;
+            const lineByLabel = new Map(Array.from(breakdown.querySelectorAll('.score-line')).map(line => [line.dataset.scoreLabel, line]));
+            Object.entries(scores).forEach(([label, value]) => {
+                const line = lineByLabel.get(label);
+                if (line) line.textContent = `${label}: ${value}%`;
             });
+            // Related-only diagnostics are useful when they exist, but should not clutter ordinary
+            // searches with meaningless 0% lines.
+            const relatedConsensusLine = lineByLabel.get('Related Consensus');
+            const quantityLine = lineByLabel.get('Quantity');
+            const hasRelatedConsensus = Number.isFinite(Number(card.relatedConsensusScore)) && Number(card.relatedConsensusScore) > 0;
+            const hasQuantitySignal = Number.isFinite(Number(card.quantitySimilarityScore)) && Number(card.quantitySimilarityScore) > 0;
+            if (relatedConsensusLine) relatedConsensusLine.hidden = !hasRelatedConsensus;
+            if (quantityLine) quantityLine.hidden = !hasQuantitySignal;
             const priceLabel = breakdown.querySelector('.card-price-label');
             const fullPriceLabel = `Price: ${priceUsd} / ${priceEur}`;
             if (priceLabel) { priceLabel.textContent = fullPriceLabel; priceLabel.title = fullPriceLabel; }
-            breakdown.style.display = displayPreferences.showScoreBreakdown ? '' : 'none';
+            breakdown.classList.toggle('scores-hidden', displayPreferences.showScoreBreakdown === false);
         }
 
         const favoriteBtn = cardElement.querySelector('.result-favorite-btn');
@@ -15659,7 +15910,7 @@ function renderResults(cards) {
 
         const breakdown = document.createElement('div');
         breakdown.className = 'result-score-breakdown';
-        for (const label of ['Mechanical','Context','Synergy','Exactness','Category']) {
+        for (const label of ['Mechanical','Functional','Semantic','Strategic Role','Synergy','Exactness','Category','Quantity','Related Consensus']) {
             const line = document.createElement('span');
             line.className = 'score-line';
             line.dataset.scoreLabel = label;

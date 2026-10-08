@@ -1,0 +1,45 @@
+name: Update ManaSearch static card data
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '17 5 * * *'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: manasearch-static-data
+  cancel-in-progress: false
+
+jobs:
+  update-static-data:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+
+      - name: Rebuild static card corpus and semantic index when Scryfall changes
+        run: npm run build-static-data
+
+      - name: Commit updated static data
+        run: |
+          if git diff --quiet -- cards.bin semantic-index.bin static-data-meta.json; then
+            echo "No static data changes detected."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add cards.bin semantic-index.bin static-data-meta.json
+          git commit -m "Update ManaSearch card and semantic indexes"
+          git push

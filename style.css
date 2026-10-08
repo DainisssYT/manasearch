@@ -4718,25 +4718,51 @@ body.light-theme .search-hint { color: var(--text-muted); }
 }
 
 body.compact-results .results-grid {
-    gap: 11px;
+    grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+    gap: 8px;
 }
 
 body.compact-results .card-item-info {
-    padding: 9px;
+    padding: 8px;
 }
 
 body.compact-results .card-item-title {
-    font-size: 14px;
+    font-size: 13px;
+}
+
+body.compact-results .result-type-line {
+    font-size: 11px !important;
+}
+
+body.compact-results .card-match-line {
+    margin: 2px 0 !important;
 }
 
 body.compact-results .result-score-breakdown {
-    gap: 4px 7px;
-    margin-top: 5px;
-    margin-bottom: 5px;
+    gap: 3px 6px;
+    margin-top: 4px;
+    margin-bottom: 4px;
+    font-size: 9px;
 }
 
 body.compact-results .card-actions {
-    margin-top: 5px !important;
+    margin-top: 4px !important;
+    gap: 5px !important;
+}
+
+.result-score-breakdown.scores-hidden .score-line {
+    display: none !important;
+}
+
+.result-score-breakdown.scores-hidden {
+    display: grid !important;
+    min-height: 22px;
+    margin-top: 4px;
+    margin-bottom: 4px;
+}
+
+.result-score-breakdown.scores-hidden .card-price-label {
+    grid-column: 1 / -1;
 }
 
 body.hide-stream-progress #stream-checklist {

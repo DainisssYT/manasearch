@@ -256,7 +256,7 @@
                             <span class="search-depth-summary">How much of the available card pool is explored before results are finalized.</span>
                         </div>
                         <div class="search-depth-input-wrap">
-                            <input type="number" id="filter-depth-percent" placeholder="50" min="1" max="100" step="1" value="50" inputmode="numeric" aria-describedby="search-depth-help">
+                            <input type="number" id="filter-depth-percent" placeholder="25" min="1" max="100" step="1" value="25" inputmode="numeric" aria-describedby="search-depth-help">
                             <span class="percent-suffix" aria-hidden="true">%</span>
                         </div>
                     </div>
@@ -578,11 +578,10 @@
                 <div class="preference-setting">
                     <div class="preference-setting-copy">
                         <label for="preference-theme"><strong>Theme</strong></label>
-                        <span>Choose a fixed theme or follow your operating system preference.</span>
+                        <span>Choose the appearance you want ManaSearch to use.</span>
                     </div>
                     <div class="preference-control">
                         <select id="preference-theme" class="preference-select" aria-label="Theme">
-                            <option value="system">System</option>
                             <option value="dark">Dark</option>
                             <option value="light">Light</option>
                         </select>
@@ -676,6 +675,6 @@
         import * as transformers from "https://cdn.jsdelivr.net/npm/@xenova/transformers@2.16.0";
         window.transformers = transformers;
     </script>
-    <script type="module" src="app.js?v=20261007-16"></script>
+    <script type="module" src="app.js?v=20261008-2"></script>
 </body>
 </html>
