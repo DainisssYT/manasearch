@@ -1,7 +1,9 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import zlib from 'node:zlib';
+import zlib, { createGunzip } from 'node:zlib';
 import { promisify } from 'node:util';
+import { Readable } from 'node:stream';
+import readline from 'node:readline';
 import { pipeline as createPipeline } from '@xenova/transformers';
 
 const gzip = promisify(zlib.gzip);
@@ -17,7 +19,7 @@ const CARD_MAGIC = 'MSCARD1G';
 const CARD_VERSION = 1;
 const MODEL_ID = 'Xenova/all-MiniLM-L6-v2';
 const EMBEDDING_BATCH_SIZE = 32;
-const BUILDER_VERSION = 3;
+const BUILDER_VERSION = 4;
 
 const SEMANTIC_KEYWORD_EXPANSIONS = {
   cascade: ' cascade reveals cards until a spell is found and casts it ',
@@ -163,6 +165,50 @@ async function fetchJson(url) {
   return response.json();
 }
 
+async function readOracleCardsFromDownload(response, sourceType) {
+  if (!response.body) throw new Error('Scryfall bulk download returned no response body.');
+
+  if (sourceType === 'jsonl') {
+    const contentEncoding = String(response.headers.get('content-encoding') || '').toLowerCase();
+    let input = Readable.fromWeb(response.body);
+
+    // Since Scryfall's 2026 bulk-data format uses jsonl_download_uri, the file itself is
+    // gzip-compressed JSONL and normally arrives without HTTP Content-Encoding. Node's
+    // fetch also transparently decodes an HTTP Content-Encoding: gzip response, so only
+    // add our own gunzip stage when the HTTP response is not already content-encoded.
+    if (contentEncoding !== 'gzip') input = input.pipe(createGunzip());
+
+    const rl = readline.createInterface({ input, crlfDelay: Infinity });
+    const cards = [];
+    let lineNumber = 0;
+    try {
+      for await (const rawLine of rl) {
+        lineNumber += 1;
+        const line = String(rawLine).trim();
+        if (!line) continue;
+        try {
+          cards.push(JSON.parse(line));
+        } catch (error) {
+          throw new Error(`Invalid Scryfall JSONL at line ${lineNumber}: ${error?.message || error}`);
+        }
+      }
+    } finally {
+      rl.close();
+    }
+    return cards;
+  }
+
+  // Legacy compatibility: older Scryfall bulk manifests exposed download_uri pointing
+  // to one gzipped JSON array. Keep this path so old cached manifests still work.
+  const compressed = Buffer.from(await response.arrayBuffer());
+  const raw = compressed.length >= 2 && compressed[0] === 0x1f && compressed[1] === 0x8b
+    ? zlib.gunzipSync(compressed)
+    : compressed;
+  const parsed = JSON.parse(raw.toString('utf8'));
+  if (!Array.isArray(parsed)) throw new Error('Legacy Scryfall bulk payload was not a JSON array.');
+  return parsed;
+}
+
 async function writeAtomicFile(filePath, data) {
   const directory = path.dirname(filePath);
   const base = path.basename(filePath);
@@ -179,8 +225,28 @@ async function writeAtomicFile(filePath, data) {
 async function main() {
   console.log('Fetching Scryfall bulk-data metadata…');
   const bulk = await fetchJson(SCRYPT);
-  const oracleEntry = bulk.data?.find(item => item.type === 'oracle_cards');
-  if (!oracleEntry?.download_uri) throw new Error('Scryfall oracle_cards bulk dataset was not found.');
+  let oracleEntry = bulk.data?.find(item => item?.type === 'oracle_cards') || null;
+
+  // Scryfall also exposes a direct type endpoint. Use it as a defensive fallback if the
+  // list response is temporarily missing or shaped differently than expected.
+  if (!oracleEntry) {
+    try {
+      oracleEntry = await fetchJson(`${SCRYPT}/oracle_cards`);
+    } catch (error) {
+      const availableTypes = Array.isArray(bulk.data)
+        ? bulk.data.map(item => item?.type).filter(Boolean).join(', ')
+        : 'none';
+      throw new Error(`Scryfall oracle_cards bulk dataset was not found. Available types: ${availableTypes}. ${error?.message || ''}`.trim());
+    }
+  }
+
+  // Since July 2026 Scryfall's bulk exports use jsonl_download_uri (gzip-compressed
+  // newline-delimited JSON). Older manifests used download_uri for one JSON array.
+  const downloadUri = oracleEntry?.jsonl_download_uri || oracleEntry?.download_uri;
+  const downloadType = oracleEntry?.jsonl_download_uri ? 'jsonl' : 'legacy-json';
+  if (!downloadUri) {
+    throw new Error('Scryfall oracle_cards metadata has no jsonl_download_uri or legacy download_uri.');
+  }
 
   let previousMeta = null;
   try { previousMeta = JSON.parse(await fs.readFile(META_OUT, 'utf8')); } catch (_) {}
@@ -192,14 +258,16 @@ async function main() {
     return;
   }
 
-  console.log(`Downloading oracle card dataset (${oracleEntry.size} bytes)…`);
-  const response = await fetch(oracleEntry.download_uri, {
-    headers: { 'User-Agent': USER_AGENT, 'Accept': 'application/gzip,application/json;q=0.9,*/*;q=0.8' }
+  const declaredSize = oracleEntry.compressed_size ?? oracleEntry.size ?? 'unknown';
+  console.log(`Downloading oracle card dataset (${declaredSize} bytes compressed)…`);
+  const response = await fetch(downloadUri, {
+    headers: {
+      'User-Agent': USER_AGENT,
+      'Accept': downloadType === 'jsonl' ? 'application/gzip,*/*;q=0.8' : 'application/gzip,application/json;q=0.9,*/*;q=0.8'
+    }
   });
   if (!response.ok) throw new Error(`Bulk download failed: ${response.status} ${response.statusText}`);
-  const compressed = Buffer.from(await response.arrayBuffer());
-  const raw = zlib.gunzipSync(compressed);
-  const sourceCards = JSON.parse(raw.toString('utf8'));
+  const sourceCards = await readOracleCardsFromDownload(response, downloadType);
   if (!Array.isArray(sourceCards) || !sourceCards.length) throw new Error('Downloaded oracle card dataset is empty.');
 
   // Oracle cards are already the right semantic unit: one record per distinct Oracle card,
@@ -252,7 +320,7 @@ async function main() {
     generated_at: generatedAt,
     build_id: buildId,
     oracle_cards_updated_at: oracleEntry.updated_at,
-    oracle_cards_uri: oracleEntry.download_uri,
+    oracle_cards_uri: downloadUri,
     card_count: cards.length,
     embedding_dimension: vectors[0]?.length || 0,
     model: MODEL_ID
