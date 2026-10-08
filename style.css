@@ -3716,12 +3716,18 @@ body.light-theme .search-hint { color: var(--text-muted); }
     position: relative;
     width: 100%;
     flex: 0 0 auto;
+    aspect-ratio: 63 / 88;
+    overflow: hidden;
+    background: var(--bg-primary);
 }
+
 
 .card-art-wrap > img {
     width: 100%;
-    height: auto;
+    height: 100%;
     display: block;
+    object-fit: cover;
+    background: var(--bg-primary);
 }
 
 .card-flip-btn {

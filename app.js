@@ -1,6 +1,6 @@
 /* ManaSearch build 20261008-8 */
 // ManaSearch deployment build marker. Bump this whenever app.js changes so cached-module issues are easy to diagnose.
-const MANASEARCH_APP_BUILD = '20261008-8';
+const MANASEARCH_APP_BUILD = '20261008-9';
 console.info(`[ManaSearch] app.js build ${MANASEARCH_APP_BUILD}`);
 
 // State Management
@@ -9984,7 +9984,7 @@ function prepareStaticCardRecord(card) {
         card.type_line || '',
         Array.isArray(card.color_identity) ? card.color_identity.join(' ') : ''
     ].join(' '));
-    return { ...card, _localSearchText: searchText };
+    return { ...card, _localSearchText: searchText, _localNameKey: normalizeCardNameForIdentity(card.name) };
 }
 
 function parseStaticCardCorpusBinary(buffer) {
@@ -10090,7 +10090,7 @@ function getLocalCorpusQueryTokens(text) {
     ))].slice(0, 14);
 }
 
-function searchStaticCardCorpus(queryText, options = {}) {
+async function searchStaticCardCorpus(queryText, options = {}) {
     const corpus = staticCardCorpusMemory;
     if (!corpus?.cards?.length || !queryText) return [];
     const tokens = getLocalCorpusQueryTokens(queryText);
@@ -10099,21 +10099,33 @@ function searchStaticCardCorpus(queryText, options = {}) {
     const excludeKey = normalizeCardNameForIdentity(options.excludeName || '');
     const limit = Math.max(1, Math.min(1200, Number(options.limit) || 180));
     const scored = [];
-    for (const card of corpus.cards) {
-        if (!card?.name || normalizeCardNameForIdentity(card.name) === excludeKey) continue;
-        if (options.highlights && !matchesExactHighlightConstraints(card, options.highlights)) continue;
-        if (options.filters && !matchesActiveFilters(card, options.filters, options.broadFallbackFilters)) continue;
-        const haystack = card._localSearchText || '';
-        if (!haystack) continue;
-        let matched = 0;
-        for (const token of tokens) if (haystack.includes(token)) matched++;
-        if (!matched) continue;
-        const coverage = matched / tokens.length;
-        const phraseBonus = phrase.length >= 8 && haystack.includes(phrase) ? 0.24 : 0;
-        const keywordBonus = Array.isArray(card.keywords) && card.keywords.some(k => tokens.includes(normalizeLocalCorpusText(k))) ? 0.08 : 0;
-        const score = Math.min(1, coverage * 0.68 + phraseBonus + keywordBonus);
-        if (score < 0.18) continue;
-        scored.push({ card, score });
+
+    // cards.bin is a ~35k-card corpus. Keep the scan on the browser main thread for now (the
+    // current corpus format is compact and local), but yield every few hundred cards so the browser
+    // can paint, process input, and animate the UI instead of appearing frozen for a second or more.
+    const cards = corpus.cards;
+    const CHUNK_SIZE = 1400;
+    const useFilters = Boolean(options.filters && hasActiveConstraintFilters(options.filters));
+    for (let startIndex = 0; startIndex < cards.length; startIndex += CHUNK_SIZE) {
+        const endIndex = Math.min(cards.length, startIndex + CHUNK_SIZE);
+        for (let i = startIndex; i < endIndex; i++) {
+            const card = cards[i];
+            if (!card?.name || (card._localNameKey || normalizeCardNameForIdentity(card.name)) === excludeKey) continue;
+            if (options.highlights && options.highlights.length && !matchesExactHighlightConstraints(card, options.highlights)) continue;
+            if (useFilters && !matchesActiveFilters(card, options.filters, options.broadFallbackFilters)) continue;
+            const haystack = card._localSearchText || '';
+            if (!haystack) continue;
+            let matched = 0;
+            for (const token of tokens) if (haystack.includes(token)) matched++;
+            if (!matched) continue;
+            const coverage = matched / tokens.length;
+            const phraseBonus = phrase.length >= 8 && haystack.includes(phrase) ? 0.24 : 0;
+            const keywordBonus = Array.isArray(card.keywords) && card.keywords.some(k => tokens.includes(normalizeLocalCorpusText(k))) ? 0.08 : 0;
+            const score = Math.min(1, coverage * 0.68 + phraseBonus + keywordBonus);
+            if (score < 0.18) continue;
+            scored.push({ card, score });
+        }
+        if (endIndex < cards.length) await backgroundAwareDelay(0);
     }
     scored.sort((a, b) => b.score - a.score || String(a.card.name).localeCompare(String(b.card.name)));
     return scored.slice(0, limit).map(({ card, score }) => ({
@@ -10159,14 +10171,14 @@ function extractLocalRetrievalAlternativesFromScryfallQuery(query) {
     return tokens.length ? [tokens.join(' ')] : [];
 }
 
-function searchStaticCardCorpusAlternatives(queries, options = {}) {
+async function searchStaticCardCorpusAlternatives(queries, options = {}) {
     const list = [...new Set((Array.isArray(queries) ? queries : [queries]).map(q => String(q || '').trim()).filter(Boolean))];
     if (!list.length || !staticCardCorpusMemory?.cards?.length) return [];
     const requestedLimit = Math.max(1, Math.min(1200, Number(options.limit) || 180));
     const perQueryLimit = Math.min(1200, Math.max(1, requestedLimit));
     const merged = new Map();
     for (const query of list.slice(0, 16)) {
-        const hits = searchStaticCardCorpus(query, { ...options, limit: perQueryLimit });
+        const hits = await searchStaticCardCorpus(query, { ...options, limit: perQueryLimit });
         for (const card of hits) {
             const key = normalizeCardNameForIdentity(card?.name || '');
             if (!key) continue;
@@ -10177,6 +10189,9 @@ function searchStaticCardCorpusAlternatives(queries, options = {}) {
                 existing._localRetrievalQueries.push(query);
             }
         }
+        // Explicitly yield between alternative queries. Related Search can have many alternatives,
+        // and without this pause the browser can spend a long uninterrupted stretch on local scans.
+        await backgroundAwareDelay(0);
     }
     return Array.from(merged.values())
         .sort((a, b) => (Number(b._localCorpusSimilarity) || 0) - (Number(a._localCorpusSimilarity) || 0) || String(a.name).localeCompare(String(b.name)))
@@ -10239,7 +10254,7 @@ async function retrieveLocalFirst(localQueries, fallbackQuery, options = {}) {
         const queries = (Array.isArray(localQueries) ? localQueries : [localQueries])
             .map(q => String(q || '').trim())
             .filter(Boolean);
-        const results = searchStaticCardCorpusAlternatives(queries, {
+        const results = await searchStaticCardCorpusAlternatives(queries, {
             limit,
             excludeName,
             filters,
@@ -13886,7 +13901,7 @@ async function executeRelatedCardSearch() {
         ].filter(Boolean);
         const localRelatedCorpus = staticCardCorpusMemory || await loadStaticCardCorpus();
         if (localRelatedCorpus?.cards?.length) {
-            results = searchStaticCardCorpusAlternatives(localRelatedQueries, {
+            results = await searchStaticCardCorpusAlternatives(localRelatedQueries, {
                 limit: 520,
                 excludeName: sourceCardAtStart.name,
                 filters,
@@ -16203,8 +16218,8 @@ async function searchDeeper() {
         );
         let localBatchResults = [];
         if (hasLocalPlans && staticCardCorpusMemory?.cards?.length) {
-            localBatchResults = localPlans.map(plan => {
-                const cards = searchStaticCardCorpusAlternatives(plan.queries, {
+            localBatchResults = await Promise.all(localPlans.map(async plan => {
+                const cards = await searchStaticCardCorpusAlternatives(plan.queries, {
                     limit: Math.max(localLimit, Number(plan.limit) || 0),
                     excludeName: context.sourceCard?.name,
                     filters: context.filters,
@@ -16212,7 +16227,7 @@ async function searchDeeper() {
                     highlights: context.highlightConstraints || []
                 });
                 return decorateLocalCoverage(cards, plan.key, plan.queries.join(' | '));
-            });
+            }));
         }
 
         const newRawCards = [];
@@ -16479,6 +16494,85 @@ function updateResultsSummary() {
     summary.classList.remove('hidden');
 }
 
+
+// --------------------------------------------------------------------------
+// Responsive result-image hydration
+// --------------------------------------------------------------------------
+// Creating 50 result cards at once is cheap compared with decoding 50 card images. The browser's
+// native loading="lazy" still starts work for images it considers "near" the viewport, which is too
+// eager during progressive re-ranking. We therefore keep image URLs out of src until the result card
+// is actually near the viewport. The observer uses a generous lead window so scrolling never feels
+// like it is waiting on artwork, while off-screen cards consume almost no image decode time.
+const RESULT_IMAGE_PLACEHOLDER = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(
+    '<svg xmlns="http://www.w3.org/2000/svg" width="630" height="880" viewBox="0 0 630 880"><rect width="630" height="880" fill="none"/></svg>'
+);
+let resultImageObserver = null;
+const resultImageLoadQueue = new Set();
+
+function ensureResultImageObserver() {
+    if (resultImageObserver || typeof IntersectionObserver === 'undefined') return resultImageObserver;
+    resultImageObserver = new IntersectionObserver(entries => {
+        for (const entry of entries) {
+            if (!entry.isIntersecting) continue;
+            const img = entry.target;
+            resultImageObserver.unobserve(img);
+            hydrateResultImage(img);
+        }
+    }, {
+        root: null,
+        // Start downloading before the card enters view, but not hundreds of cards ahead.
+        rootMargin: '900px 0px 1100px 0px',
+        threshold: 0.01
+    });
+    return resultImageObserver;
+}
+
+function hydrateResultImage(img, explicitSrc = null) {
+    if (!img) return;
+    const desiredSrc = explicitSrc || img.dataset.cardImageSrc || '';
+    if (!desiredSrc) return;
+    if (img.dataset.cardImageLoaded === desiredSrc && img.getAttribute('src') === desiredSrc) return;
+
+    // Avoid starting dozens of decodes in the same task. The browser gets a chance to paint between
+    // small batches, which makes scrolling and buttons remain responsive while the result grid is
+    // being progressively filled.
+    if (resultImageLoadQueue.has(img)) return;
+    resultImageLoadQueue.add(img);
+    const start = () => {
+        resultImageLoadQueue.delete(img);
+        if (!img.isConnected) return;
+        img.dataset.cardImageLoaded = desiredSrc;
+        img.src = desiredSrc;
+        // async decode keeps the image decode off the critical layout path where supported.
+        try { img.decode?.().catch?.(() => {}); } catch (_) {}
+    };
+    if (typeof requestAnimationFrame === 'function') requestAnimationFrame(start);
+    else setTimeout(start, 0);
+}
+
+function prepareResultImage(img, desiredSrc) {
+    if (!img) return;
+    img.loading = 'lazy';
+    img.decoding = 'async';
+    try { img.fetchPriority = 'low'; } catch (_) {}
+    img.dataset.cardImageSrc = desiredSrc || '';
+    if (!img.getAttribute('src')) img.src = RESULT_IMAGE_PLACEHOLDER;
+
+    const observer = ensureResultImageObserver();
+    if (observer && desiredSrc) {
+        observer.observe(img);
+    } else if (desiredSrc) {
+        // Older browsers without IntersectionObserver still get an image, just without viewport
+        // scheduling. Native loading="lazy" remains in place as a secondary optimization.
+        hydrateResultImage(img, desiredSrc);
+    }
+}
+
+function cleanupResultImageObservers() {
+    if (!resultImageObserver) return;
+    resultsGrid?.querySelectorAll('.card-art-wrap img').forEach(img => resultImageObserver.unobserve(img));
+}
+
 function renderResults(cards) {
     resultsSection.classList.remove('hidden');
 
@@ -16564,7 +16658,18 @@ function renderResults(cards) {
             ? Math.max(0, Math.min(faceImages.length - 1, Number(resultCardFaceState.get(stateKey)) || 0))
             : 0;
         const desiredSrc = hasMultipleFaces ? faceImages[faceIndex].image_uris.normal : cardImg;
-        if (img && img.getAttribute('src') !== desiredSrc) img.src = desiredSrc;
+        if (img) {
+            const previousDesired = img.dataset.cardImageSrc || '';
+            prepareResultImage(img, desiredSrc);
+            if (previousDesired && previousDesired !== desiredSrc && img.getAttribute('src') !== RESULT_IMAGE_PLACEHOLDER) {
+                // A result node can be reused for a different printing/face during progressive
+                // re-ranking. For an image that is already on screen, switch immediately; for an
+                // off-screen image the observer will hydrate the new URL when needed.
+                if (img.dataset.cardImageLoaded === previousDesired) {
+                    hydrateResultImage(img, desiredSrc);
+                }
+            }
+        }
         if (img) img.alt = hasMultipleFaces ? (faceImages[faceIndex].name || card.name) : card.name;
 
         const flipBtn = cardElement.querySelector('.card-flip-btn');
@@ -16636,6 +16741,8 @@ function renderResults(cards) {
         artWrap.className = 'card-art-wrap';
         const img = document.createElement('img');
         img.loading = 'lazy';
+        img.decoding = 'async';
+        img.src = RESULT_IMAGE_PLACEHOLDER;
         artWrap.appendChild(img);
         const flipBtn = document.createElement('button');
         flipBtn.type = 'button';
@@ -16715,7 +16822,15 @@ function renderResults(cards) {
         updateResultCard(node, card);
         fragment.appendChild(node);
     }
+    cleanupResultImageObservers();
     resultsGrid.replaceChildren(fragment);
+    // Re-observe current nodes after the previous grid was cleared. This matters when a stable card
+    // node is reused during progressive ranking: cleanup intentionally unobserves the old grid, so
+    // the new visible set must be registered again.
+    const observer = ensureResultImageObserver();
+    if (observer) {
+        resultsGrid.querySelectorAll('.card-art-wrap img[data-card-image-src]').forEach(img => observer.observe(img));
+    }
 
     // One delegated listener set handles both stable/reused nodes and newly-created nodes. This
     // avoids index-based closures becoming stale when progressive ranking reorders the grid.
@@ -16749,7 +16864,9 @@ function renderResults(cards) {
                     resultCardFaceState.set(key, next);
                     const img = cardEl.querySelector('.card-art-wrap img');
                     if (img) {
-                        img.src = faces[next].image_uris.normal;
+                        const nextSrc = faces[next].image_uris.normal;
+                        prepareResultImage(img, nextSrc);
+                        hydrateResultImage(img, nextSrc);
                         img.alt = faces[next].name || card.name;
                     }
                 }
