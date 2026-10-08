@@ -1,6 +1,6 @@
-/* ManaSearch build 20261008-7 */
+/* ManaSearch build 20261008-8 */
 // ManaSearch deployment build marker. Bump this whenever app.js changes so cached-module issues are easy to diagnose.
-const MANASEARCH_APP_BUILD = '20261008-7';
+const MANASEARCH_APP_BUILD = '20261008-8';
 console.info(`[ManaSearch] app.js build ${MANASEARCH_APP_BUILD}`);
 
 // State Management
@@ -196,6 +196,7 @@ function applyPresentationPreferences() {
 
 // UI Elements 
 let cardSearchInput, searchBtn, sourceCardSection, sourceCardOracle, findSimilarBtn;
+let staticSearchStatus, staticSearchStatusText, staticSearchStatusSpinner, staticSearchRetryBtn;
 let loadingIndicator, resultsSection, resultsGrid, themeToggle, historyList;
 let systemThemeMediaQuery = null;
 let favoritesList, favoriteBtn, exportBtn, compareModal, compareContainer, compareStatus;
@@ -9694,7 +9695,7 @@ let semanticCosineBaselineReady = false;
 const STATIC_CARD_CORPUS_FILENAME = 'cards.bin';
 const STATIC_CARD_CORPUS_VERSION = 1;
 const STATIC_CARD_CORPUS_MAGIC = 'MSCARD1G';
-const STATIC_CARD_CORPUS_CACHE_VERSION = '20261008-6';
+const STATIC_CARD_CORPUS_CACHE_VERSION = '20261008-8';
 const STATIC_DATA_META_FILENAME = 'static-data-meta.json';
 let staticDataMetaPromise = null;
 let staticDataBuildId = null;
@@ -9702,6 +9703,206 @@ let staticDataBuildCacheKey = null;
 let staticCardCorpusPromise = null;
 let staticCardCorpusMemory = null;
 let staticCardCorpusLoadError = null;
+
+// The Similar Cards button is intentionally locked until BOTH static search assets are ready.
+// These assets are the production full-corpus sources for local lexical/mechanical and semantic
+// retrieval. A few transient network failures are retried automatically before the UI reports a
+// hard failure and offers a manual retry.
+const STATIC_SEARCH_RESOURCE_MAX_ATTEMPTS = 3;
+const STATIC_SEARCH_RETRY_DELAYS_MS = [800, 1600];
+const staticSearchResourceState = {
+    cards: 'idle',
+    semantic: 'idle',
+    loading: false,
+    ready: false,
+    failed: false,
+    lastError: ''
+};
+let staticSearchResourcesPromise = null;
+
+function setStaticSearchResourceState(resource, state) {
+    if (!(resource in staticSearchResourceState)) return;
+    staticSearchResourceState[resource] = state;
+    updateStaticSearchAvailability();
+}
+
+function staticSearchResourcesReady() {
+    return staticSearchResourceState.ready === true;
+}
+
+function updateStaticSearchStatus(message = null) {
+    if (!staticSearchStatus || !staticSearchStatusText) return;
+
+    const { cards, semantic, loading, ready, failed } = staticSearchResourceState;
+    staticSearchStatus.classList.remove('is-loading', 'is-ready', 'is-error');
+
+    if (loading) {
+        const readyLabels = [];
+        const pendingLabels = [];
+        const failedLabels = [];
+        if (cards === 'ready') readyLabels.push('cards.bin');
+        else if (cards === 'failed') failedLabels.push('cards.bin');
+        else if (cards === 'loading' || cards === 'idle') pendingLabels.push('cards.bin');
+        if (semantic === 'ready') readyLabels.push('semantic-index.bin');
+        else if (semantic === 'failed') failedLabels.push('semantic-index.bin');
+        else if (semantic === 'loading' || semantic === 'idle') pendingLabels.push('semantic-index.bin');
+
+        let detail = 'cards.bin and semantic-index.bin are loading…';
+        if (failedLabels.length) {
+            const failedText = `${failedLabels.join(' and ')} unavailable`;
+            const pendingText = pendingLabels.length ? `; still loading ${pendingLabels.join(' and ')}…` : '';
+            detail = `${failedText}${pendingText}`;
+        } else if (readyLabels.length && pendingLabels.length) {
+            detail = `${readyLabels.join(' and ')} ready; loading ${pendingLabels.join(' and ')}…`;
+        } else if (readyLabels.length) {
+            detail = `${readyLabels.join(' and ')} ready; verifying the remaining search data…`;
+        }
+        staticSearchStatusText.textContent = message || `Loading search data — ${detail} Find Similar Cards will be available when both files are ready.`;
+        staticSearchStatus.classList.add('is-loading');
+        if (staticSearchStatusSpinner) staticSearchStatusSpinner.classList.remove('hidden');
+        if (staticSearchRetryBtn) staticSearchRetryBtn.classList.add('hidden');
+    } else if (ready) {
+        staticSearchStatusText.textContent = message || 'Search data ready — cards.bin and semantic-index.bin are loaded.';
+        staticSearchStatus.classList.add('is-ready');
+        if (staticSearchStatusSpinner) staticSearchStatusSpinner.classList.add('hidden');
+        if (staticSearchRetryBtn) staticSearchRetryBtn.classList.add('hidden');
+    } else if (failed) {
+        staticSearchStatusText.textContent = message || 'Search data could not be loaded after 3 attempts. Find Similar Cards is disabled.';
+        staticSearchStatus.classList.add('is-error');
+        if (staticSearchStatusSpinner) staticSearchStatusSpinner.classList.add('hidden');
+        if (staticSearchRetryBtn) staticSearchRetryBtn.classList.remove('hidden');
+    } else {
+        staticSearchStatusText.textContent = message || 'Search data is preparing…';
+        staticSearchStatus.classList.add('is-loading');
+        if (staticSearchStatusSpinner) staticSearchStatusSpinner.classList.remove('hidden');
+        if (staticSearchRetryBtn) staticSearchRetryBtn.classList.add('hidden');
+    }
+}
+
+function updateStaticSearchAvailability() {
+    const ready = staticSearchResourceState.cards === 'ready' && staticSearchResourceState.semantic === 'ready';
+    staticSearchResourceState.ready = ready;
+
+    if (staticSearchStatus) {
+        if (staticSearchResourceState.loading) {
+            staticSearchStatus.classList.remove('hidden');
+        } else if (ready || staticSearchResourceState.failed) {
+            staticSearchStatus.classList.remove('hidden');
+        }
+    }
+
+    if (findSimilarBtn) {
+        const hasSource = Boolean(currentSourceCard);
+        findSimilarBtn.disabled = !(hasSource && ready);
+        findSimilarBtn.setAttribute('aria-disabled', String(!(hasSource && ready)));
+        findSimilarBtn.setAttribute('aria-busy', String(staticSearchResourceState.loading));
+    }
+
+    updateStaticSearchStatus();
+}
+
+async function waitForStaticSearchRetry(attempt) {
+    const delay = STATIC_SEARCH_RETRY_DELAYS_MS[Math.max(0, attempt - 1)] || STATIC_SEARCH_RETRY_DELAYS_MS.at(-1) || 1000;
+    await new Promise(resolve => setTimeout(resolve, delay));
+}
+
+async function retryStaticSearchResource(resourceLabel, loader) {
+    let lastError = null;
+    for (let attempt = 1; attempt <= STATIC_SEARCH_RESOURCE_MAX_ATTEMPTS; attempt++) {
+        try {
+            updateStaticSearchStatus(`Loading ${resourceLabel}… attempt ${attempt}/${STATIC_SEARCH_RESOURCE_MAX_ATTEMPTS}. Find Similar Cards is disabled until the search data is ready.`);
+            return await loader(attempt);
+        } catch (error) {
+            lastError = error;
+            console.warn(`[ManaSearch] ${resourceLabel} load attempt ${attempt}/${STATIC_SEARCH_RESOURCE_MAX_ATTEMPTS} failed:`, error?.message || String(error));
+            if (attempt < STATIC_SEARCH_RESOURCE_MAX_ATTEMPTS) {
+                updateStaticSearchStatus(`${resourceLabel} could not be accessed yet. Retrying automatically (${attempt + 1}/${STATIC_SEARCH_RESOURCE_MAX_ATTEMPTS})… Find Similar Cards remains disabled.`);
+                await waitForStaticSearchRetry(attempt);
+            }
+        }
+    }
+    throw lastError || new Error(`${resourceLabel} could not be loaded.`);
+}
+
+async function loadStaticSearchResources({ forceRetry = false } = {}) {
+    if (staticSearchResourceState.ready && !forceRetry) return true;
+    if (staticSearchResourcesPromise && !forceRetry) return staticSearchResourcesPromise;
+
+    if (forceRetry) {
+        staticSearchResourcesPromise = null;
+        staticCardCorpusPromise = null;
+        staticSemanticIndexPromise = null;
+        staticCardCorpusLoadError = null;
+        staticSemanticIndexLoadError = null;
+        staticSearchResourceState.cards = 'idle';
+        staticSearchResourceState.semantic = 'idle';
+        staticSearchResourceState.failed = false;
+        staticSearchResourceState.lastError = '';
+    }
+
+    staticSearchResourceState.loading = true;
+    staticSearchResourceState.failed = false;
+    staticSearchResourceState.lastError = '';
+    updateStaticSearchAvailability();
+
+    staticSearchResourcesPromise = (async () => {
+        const cardPromise = retryStaticSearchResource('cards.bin', async (attempt) => {
+            // Force a fresh network attempt after the first failure so a transient cached 404/5xx
+            // cannot be mistaken for a persistent asset failure.
+            const corpus = await loadStaticCardCorpus({ retryAttempt: attempt });
+            if (!corpus) throw new Error(staticCardCorpusLoadError || 'cards.bin is unavailable.');
+            return corpus;
+        }).then(corpus => {
+            staticSearchResourceState.cards = 'ready';
+            updateStaticSearchAvailability();
+            return corpus;
+        }).catch(error => {
+            staticSearchResourceState.cards = 'failed';
+            updateStaticSearchAvailability();
+            throw error;
+        });
+
+        const semanticPromise = retryStaticSearchResource('semantic-index.bin', async (attempt) => {
+            const index = await loadStaticSemanticIndex({ retryAttempt: attempt });
+            if (!index) throw new Error(staticSemanticIndexLoadError || 'semantic-index.bin is unavailable.');
+            return index;
+        }).then(index => {
+            staticSearchResourceState.semantic = 'ready';
+            updateStaticSearchAvailability();
+            return index;
+        }).catch(error => {
+            staticSearchResourceState.semantic = 'failed';
+            updateStaticSearchAvailability();
+            throw error;
+        });
+
+        const [cardsResult, semanticResult] = await Promise.allSettled([cardPromise, semanticPromise]);
+        const errors = [];
+        if (cardsResult.status === 'rejected') errors.push(`cards.bin: ${cardsResult.reason?.message || cardsResult.reason}`);
+        if (semanticResult.status === 'rejected') errors.push(`semantic-index.bin: ${semanticResult.reason?.message || semanticResult.reason}`);
+        if (errors.length) {
+            staticSearchResourceState.failed = true;
+            staticSearchResourceState.lastError = errors.join(' | ');
+            staticSearchResourceState.loading = false;
+            updateStaticSearchAvailability();
+            return false;
+        }
+
+        staticSearchResourceState.loading = false;
+        staticSearchResourceState.failed = false;
+        staticSearchResourceState.lastError = '';
+        updateStaticSearchAvailability();
+        return true;
+    })().catch(error => {
+        staticSearchResourceState.loading = false;
+        staticSearchResourceState.failed = true;
+        staticSearchResourceState.lastError = error?.message || String(error);
+        updateStaticSearchAvailability();
+        return false;
+    });
+
+    return staticSearchResourcesPromise;
+}
 
 function getStaticDataMetaUrl() {
     try {
@@ -9748,10 +9949,11 @@ function getStaticAssetCacheKey() {
     return staticDataBuildCacheKey || encodeURIComponent(STATIC_CARD_CORPUS_CACHE_VERSION);
 }
 
-function getStaticCardCorpusUrl() {
+function getStaticCardCorpusUrl(retryAttempt = 0) {
     try {
         const url = new URL(STATIC_CARD_CORPUS_FILENAME, document.baseURI || window.location.href);
         url.searchParams.set('v', getStaticAssetCacheKey());
+        if (retryAttempt > 1) url.searchParams.set('retry', String(retryAttempt));
         return url.href;
     } catch (_) {
         return STATIC_CARD_CORPUS_FILENAME;
@@ -9834,7 +10036,7 @@ function parseStaticCardCorpusBinary(buffer) {
     })();
 }
 
-async function loadStaticCardCorpus() {
+async function loadStaticCardCorpus({ retryAttempt = 1 } = {}) {
     if (staticCardCorpusMemory?.source === 'static') return staticCardCorpusMemory;
     if (staticCardCorpusPromise) return staticCardCorpusPromise;
     staticCardCorpusPromise = (async () => {
@@ -9842,9 +10044,9 @@ async function loadStaticCardCorpus() {
         // Without this await, a newly generated cards.bin could be requested under the
         // old compatibility cache key while semantic-index.bin correctly used the new one.
         await loadStaticDataMetadata();
-        const response = await fetch(getStaticCardCorpusUrl(), {
+        const response = await fetch(getStaticCardCorpusUrl(retryAttempt), {
             method: 'GET',
-            cache: 'force-cache',
+            cache: retryAttempt > 1 ? 'no-store' : 'force-cache',
             headers: { 'Accept': 'application/octet-stream,*/*;q=0.8' }
         });
         if (!response.ok) throw new Error(`Static card corpus download failed (${response.status}).`);
@@ -9857,6 +10059,10 @@ async function loadStaticCardCorpus() {
         staticCardCorpusLoadError = error?.message || String(error);
         console.info('Precomputed card corpus unavailable; Scryfall fallback remains active:', staticCardCorpusLoadError);
         return null;
+    }).finally(() => {
+        // A failed attempt must not permanently poison the promise. The coordinated resource
+        // loader can retry the asset, while successful loads are retained in memory above.
+        staticCardCorpusPromise = null;
     });
     return staticCardCorpusPromise;
 }
@@ -10050,7 +10256,7 @@ const FULL_SEMANTIC_INDEX_SEARCH_LIMIT = 96;
 const STATIC_SEMANTIC_INDEX_FILENAME = 'semantic-index.bin';
 const STATIC_SEMANTIC_INDEX_VERSION = 1;
 const STATIC_SEMANTIC_INDEX_MAGIC = 'MSIDX1';
-const STATIC_SEMANTIC_INDEX_CACHE_VERSION = '20261008-6';
+const STATIC_SEMANTIC_INDEX_CACHE_VERSION = '20261008-8';
 let staticSemanticIndexPromise = null;
 let staticSemanticIndexAttempted = false;
 let staticSemanticIndexLoadError = null;
@@ -10058,10 +10264,11 @@ let fullSemanticIndexMemory = null;
 let fullSemanticIndexUnavailable = false;
 let fullSemanticIndexUnavailableReason = null;
 
-function getStaticSemanticIndexUrl() {
+function getStaticSemanticIndexUrl(retryAttempt = 0) {
     try {
         const url = new URL(STATIC_SEMANTIC_INDEX_FILENAME, document.baseURI || window.location.href);
         url.searchParams.set('v', getStaticAssetCacheKey());
+        if (retryAttempt > 1) url.searchParams.set('retry', String(retryAttempt));
         return url.href;
     } catch (_) {
         return STATIC_SEMANTIC_INDEX_FILENAME;
@@ -10136,16 +10343,16 @@ function parseStaticSemanticIndexBinary(buffer) {
     return index;
 }
 
-async function loadStaticSemanticIndex() {
+async function loadStaticSemanticIndex({ retryAttempt = 1 } = {}) {
     if (fullSemanticIndexMemory?.source === 'static') return fullSemanticIndexMemory;
     if (staticSemanticIndexPromise) return staticSemanticIndexPromise;
     staticSemanticIndexAttempted = true;
     staticSemanticIndexPromise = (async () => {
         await loadStaticDataMetadata();
-        const url = getStaticSemanticIndexUrl();
+        const url = getStaticSemanticIndexUrl(retryAttempt);
         const response = await fetch(url, {
             method: 'GET',
-            cache: 'force-cache',
+            cache: retryAttempt > 1 ? 'no-store' : 'force-cache',
             headers: { 'Accept': 'application/octet-stream,*/*;q=0.8' }
         });
         if (!response.ok) {
@@ -10162,6 +10369,10 @@ async function loadStaticSemanticIndex() {
         staticSemanticIndexLoadError = error?.message || String(error);
         console.info('Precomputed semantic index unavailable; normal search remains fully functional:', staticSemanticIndexLoadError);
         return null;
+    }).finally(() => {
+        // Let a failed attempt be retried by the coordinated loader. A successful index remains
+        // available through fullSemanticIndexMemory.
+        staticSemanticIndexPromise = null;
     });
     return staticSemanticIndexPromise;
 }
@@ -11654,6 +11865,16 @@ function initApp() {
     sourceCardSection = document.getElementById('source-card-section');
     sourceCardOracle = document.getElementById('source-card-oracle');
     findSimilarBtn = document.getElementById('find-similar-btn');
+    staticSearchStatus = document.getElementById('static-search-status');
+    staticSearchStatusText = document.getElementById('static-search-status-text');
+    staticSearchStatusSpinner = document.getElementById('static-search-status-spinner');
+    staticSearchRetryBtn = document.getElementById('static-search-retry-btn');
+    if (staticSearchRetryBtn) {
+        staticSearchRetryBtn.addEventListener('click', () => {
+            loadStaticSearchResources({ forceRetry: true }).catch(() => {});
+        });
+    }
+    updateStaticSearchAvailability();
     loadingIndicator = document.getElementById('loading-indicator');
     resultsSection = document.getElementById('results-section');
     resultsGrid = document.getElementById('results-grid');
@@ -12100,13 +12321,11 @@ function initApp() {
 
     initColorPips();
 
-    // Fire-and-forget preload of both semantic resources. The static semantic index is a
-    // deployment artifact, not something visitors should build locally. Starting it here means
-    // its ~13.6 MB download can overlap the first Scryfall search instead of beginning only after
-    // the first results have rendered.
+    // Fire-and-forget preload of the production static search resources. Find Similar Cards stays
+    // disabled until both cards.bin and semantic-index.bin are fully loaded and validated. Each
+    // asset receives up to three automatic attempts before the status area offers a manual retry.
     getNLPModel().catch(() => {});
-    preloadStaticSemanticIndex().catch(() => {});
-    preloadStaticCardCorpus().catch(() => {});
+    loadStaticSearchResources().catch(() => {});
 }
 
 /**
@@ -12788,6 +13007,7 @@ function clearSourceCard() {
     sourceCardLoaded?.classList.add('hidden');
     sourceCardSection?.classList.remove('hidden');
     if (findSimilarBtn) findSimilarBtn.disabled = true;
+    updateStaticSearchAvailability();
     if (resultsSection) resultsSection.classList.add('hidden');
     if (resultsGrid) resultsGrid.innerHTML = '';
     if (cardSearchInput) cardSearchInput.value = '';
@@ -12930,6 +13150,7 @@ async function loadSourceCard(query, providedCard = null) {
         sourceCardLoaded?.classList.add('hidden');
         sourceCardEmpty?.classList.remove('hidden');
         findSimilarBtn.disabled = true;
+        updateStaticSearchAvailability();
     } finally {
         if (requestId === searchRequestId) showLoading(false);
     }
@@ -12959,7 +13180,7 @@ function displaySourceCard(card) {
     sourceCardEmpty?.classList.add('hidden');
     sourceCardLoaded?.classList.remove('hidden');
     sourceCardSection.classList.remove('hidden');
-    findSimilarBtn.disabled = false;
+    updateStaticSearchAvailability();
 }
 
 // 1. Batch NLP embedding calculations and chunk thread yields
@@ -14489,6 +14710,20 @@ function throwIfSearchCancelled(isCancelled) {
 
 async function findSimilarCards() {
     if (!currentSourceCard) return;
+    if (!staticSearchResourcesReady()) {
+        // The button is disabled while the files load, but keep a defensive guard here as well so
+        // keyboard/programmatic invocations can never start a search against a partially loaded
+        // static corpus or semantic index.
+        if (!staticSearchResourceState.loading) {
+            await loadStaticSearchResources({ forceRetry: staticSearchResourceState.failed }).catch(() => {});
+        }
+        if (!staticSearchResourcesReady()) {
+            updateStaticSearchStatus(staticSearchResourceState.failed
+                ? 'Search data is unavailable. Find Similar Cards remains disabled until cards.bin and semantic-index.bin can be loaded.'
+                : 'Search data is still loading. Find Similar Cards will unlock when cards.bin and semantic-index.bin are ready.');
+            return;
+        }
+    }
 
     const requestId = ++searchRequestId;
     activeResultView = { mode: 'main', requestId };

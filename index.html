@@ -145,6 +145,11 @@
                 </div>
 
                 <button type="button" id="find-similar-btn" class="primary-search-btn" disabled>Find Similar Cards</button>
+                <div id="static-search-status" class="static-search-status" role="status" aria-live="polite">
+                    <span id="static-search-status-spinner" class="static-search-status-spinner" aria-hidden="true"></span>
+                    <span id="static-search-status-text" class="static-search-status-text">Loading search data — cards.bin and semantic-index.bin are loading… Find Similar Cards will be available when both files are ready.</span>
+                    <button type="button" id="static-search-retry-btn" class="static-search-retry-btn hidden">Retry</button>
+                </div>
             </section>
 
             <!-- Loading Indicator -->
@@ -675,6 +680,6 @@
         import * as transformers from "https://cdn.jsdelivr.net/npm/@xenova/transformers@2.16.0";
         window.transformers = transformers;
     </script>
-    <script type="module" src="app.js?v=20261008-7"></script>
+    <script type="module" src="app.js?v=20261008-8"></script>
 </body>
 </html>

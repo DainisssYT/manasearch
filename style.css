@@ -2426,6 +2426,83 @@ section {
     letter-spacing: 0.01em;
 }
 
+/* Static search-data readiness: shown directly below Find Similar Cards so users always know
+   why the primary search action is disabled while cards.bin and semantic-index.bin load. */
+.static-search-status {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-wrap: wrap;
+    gap: 8px;
+    width: 100%;
+    min-height: 30px;
+    margin-top: 7px;
+    padding: 5px 8px;
+    box-sizing: border-box;
+    color: var(--text-muted);
+    font-size: 11px;
+    line-height: 1.4;
+    text-align: center;
+    border-radius: 7px;
+}
+
+.static-search-status-text {
+    flex: 1 1 auto;
+    min-width: 0;
+}
+
+.static-search-status.is-loading {
+    color: var(--text-muted);
+}
+
+.static-search-status.is-ready {
+    color: var(--accent-color);
+}
+
+.static-search-status.is-error {
+    color: var(--danger-color, #e06b6b);
+    background: color-mix(in srgb, currentColor 7%, transparent);
+}
+
+.static-search-status-spinner {
+    width: 13px;
+    height: 13px;
+    flex: 0 0 13px;
+    box-sizing: border-box;
+    border: 2px solid var(--bg-accent);
+    border-top-color: var(--accent-color);
+    border-radius: 50%;
+    animation: static-search-spin .8s linear infinite;
+}
+
+.static-search-retry-btn {
+    flex: 0 0 auto;
+    min-height: 24px;
+    padding: 3px 8px;
+    border: 1px solid var(--bg-accent);
+    border-radius: 6px;
+    background: var(--bg-accent);
+    color: var(--text-main);
+    font-size: 11px;
+    font-weight: 700;
+    cursor: pointer;
+}
+
+.static-search-retry-btn:hover {
+    border-color: var(--accent-color);
+}
+
+@keyframes static-search-spin {
+    from { transform: rotate(0deg); }
+    to { transform: rotate(360deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .static-search-status-spinner {
+        animation: none;
+    }
+}
+
 #source-card-section,
 #filter-section,
 #results-section {
