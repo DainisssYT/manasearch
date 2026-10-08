@@ -14,32 +14,89 @@ concurrency:
 
 jobs:
   update-static-data:
+    name: Build and publish static card data
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v7
         with:
-          fetch-depth: 1
+          fetch-depth: 0
 
-      - name: Setup Node
-        uses: actions/setup-node@v4
+      - name: Setup Node.js 24
+        uses: actions/setup-node@v7
         with:
-          node-version: 20
+          node-version: '24'
+          package-manager-cache: false
+
+      - name: Verify build environment
+        run: |
+          node --version
+          npm --version
+          test -f package.json
+          test -f scripts/build-static-data.mjs
 
       - name: Install dependencies
         run: npm install --no-audit --no-fund
 
-      - name: Rebuild static card corpus and semantic index when Scryfall changes
+      - name: Verify Transformers.js dependency
+        run: node -e "import('@xenova/transformers').then(m => { if (typeof m.pipeline !== 'function') throw new Error('pipeline export missing'); console.log('Transformers.js pipeline import OK'); })"
+
+      - name: Build static card corpus and semantic index
         run: npm run build-static-data
 
-      - name: Commit updated static data
+      - name: Verify generated files
         run: |
-          if git diff --quiet -- cards.bin semantic-index.bin static-data-meta.json; then
+          test -s cards.bin
+          test -s semantic-index.bin
+          test -s static-data-meta.json
+          node - <<'NODE'
+          const fs = require('node:fs');
+          const meta = JSON.parse(fs.readFileSync('static-data-meta.json', 'utf8'));
+          if (!meta.build_id) throw new Error('static-data-meta.json has no build_id');
+          if (!Number.isInteger(meta.card_count) || meta.card_count <= 0) throw new Error('Invalid card_count');
+          if (meta.embedding_dimension !== 384) throw new Error(`Unexpected embedding dimension: ${meta.embedding_dimension}`);
+          const card = fs.readFileSync('cards.bin');
+          if (card.subarray(0, 8).toString('ascii') !== 'MSCARD1G') throw new Error('cards.bin magic mismatch');
+          if (card.readUInt32LE(8) !== 1) throw new Error('cards.bin version mismatch');
+          if (card.readUInt32LE(16) !== meta.card_count) throw new Error('cards.bin card count mismatch');
+          const semantic = fs.readFileSync('semantic-index.bin');
+          if (semantic.subarray(0, 6).toString('ascii') !== 'MSIDX1') throw new Error('semantic-index.bin magic mismatch');
+          if (semantic.readUInt32LE(12) !== 384) throw new Error('semantic-index.bin dimension mismatch');
+          if (semantic.readUInt32LE(16) !== meta.card_count) throw new Error('semantic-index.bin card count mismatch');
+          console.log(`Validated ${meta.card_count} cards, 384D semantic index, build ${meta.build_id}`);
+          NODE
+
+      - name: Upload generated static-data artifact
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: manasearch-static-data
+          if-no-files-found: error
+          retention-days: 7
+          path: |
+            cards.bin
+            semantic-index.bin
+            static-data-meta.json
+
+      - name: Commit generated static data
+        env:
+          TARGET_BRANCH: ${{ github.ref_name }}
+        run: |
+          if git diff --quiet -- cards.bin semantic-index.bin static-data-meta.json && \
+             [ -z "$(git status --porcelain -- cards.bin semantic-index.bin static-data-meta.json)" ]; then
             echo "No static data changes detected."
             exit 0
           fi
+
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add cards.bin semantic-index.bin static-data-meta.json
+          git add -A -- cards.bin semantic-index.bin static-data-meta.json
+
+          if git diff --cached --quiet -- cards.bin semantic-index.bin static-data-meta.json; then
+            echo "No staged static data changes detected."
+            exit 0
+          fi
+
           git commit -m "Update ManaSearch card and semantic indexes"
-          git push
+          git push origin "HEAD:${TARGET_BRANCH}"
+
