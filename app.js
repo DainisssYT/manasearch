@@ -1,6 +1,6 @@
 /* ManaSearch build 20261008-8 */
 // ManaSearch deployment build marker. Bump this whenever app.js changes so cached-module issues are easy to diagnose.
-const MANASEARCH_APP_BUILD = '20261008-9';
+const MANASEARCH_APP_BUILD = '20261008-10';
 console.info(`[ManaSearch] app.js build ${MANASEARCH_APP_BUILD}`);
 
 // State Management
@@ -13901,12 +13901,13 @@ async function executeRelatedCardSearch() {
         ].filter(Boolean);
         const localRelatedCorpus = staticCardCorpusMemory || await loadStaticCardCorpus();
         if (localRelatedCorpus?.cards?.length) {
-            results = await searchStaticCardCorpusAlternatives(localRelatedQueries, {
+            const localRelatedResults = await searchStaticCardCorpusAlternatives(localRelatedQueries, {
                 limit: 520,
                 excludeName: sourceCardAtStart.name,
                 filters,
                 broadFallbackFilters: null
-            }).map(card => ({
+            });
+            results = localRelatedResults.map(card => ({
                 ...card,
                 _relatedRetrievalSource: 'local-card-corpus'
             }));
