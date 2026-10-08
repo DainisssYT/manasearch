@@ -9455,9 +9455,10 @@ let semanticCosineBaselineReady = false;
 const STATIC_CARD_CORPUS_FILENAME = 'cards.bin';
 const STATIC_CARD_CORPUS_VERSION = 1;
 const STATIC_CARD_CORPUS_MAGIC = 'MSCARD1G';
-const STATIC_CARD_CORPUS_CACHE_VERSION = '20261008-2';
+const STATIC_CARD_CORPUS_CACHE_VERSION = '20261008-3';
 const STATIC_DATA_META_FILENAME = 'static-data-meta.json';
 let staticDataMetaPromise = null;
+let staticDataBuildId = null;
 let staticDataBuildCacheKey = null;
 let staticCardCorpusPromise = null;
 let staticCardCorpusMemory = null;
@@ -9489,12 +9490,14 @@ async function loadStaticDataMetadata() {
             const metadata = await response.json();
             const key = String(metadata?.build_id || '').trim();
             if (!key) throw new Error('Static data metadata does not contain a build_id.');
+            staticDataBuildId = key;
             staticDataBuildCacheKey = encodeURIComponent(key);
             return staticDataBuildCacheKey;
         } catch (error) {
             // The metadata file was introduced after the original static assets. Keep the
             // previous fixed cache key as a compatibility fallback if metadata is unavailable.
             console.info('Static data metadata unavailable; using the compatibility cache key:', error?.message || String(error));
+            staticDataBuildId = null;
             staticDataBuildCacheKey = encodeURIComponent(STATIC_CARD_CORPUS_CACHE_VERSION);
             return staticDataBuildCacheKey;
         }
@@ -9571,12 +9574,19 @@ function parseStaticCardCorpusBinary(buffer) {
         if (declaredCount && sourceCards.length !== declaredCount) {
             throw new Error(`Static card corpus count mismatch (${sourceCards.length} vs ${declaredCount}).`);
         }
+        const payloadBuildId = String(payload?.build_id || '').trim();
+        const expectedBuildId = staticDataBuildId || '';
+        if (expectedBuildId && payloadBuildId && payloadBuildId !== expectedBuildId) {
+            throw new Error('Static card corpus build ID does not match static-data-meta.json.');
+        }
         const cards = sourceCards.map(prepareStaticCardRecord).filter(Boolean);
+        if (!cards.length) throw new Error('Static card corpus contains no usable cards.');
         const byName = new Map();
         cards.forEach(card => byName.set(normalizeCardNameForIdentity(card.name), card));
         return {
             source: 'static',
             version,
+            buildId: payloadBuildId || expectedBuildId || null,
             total: cards.length,
             cards,
             byName,
@@ -9589,6 +9599,10 @@ async function loadStaticCardCorpus() {
     if (staticCardCorpusMemory?.source === 'static') return staticCardCorpusMemory;
     if (staticCardCorpusPromise) return staticCardCorpusPromise;
     staticCardCorpusPromise = (async () => {
+        // Resolve the current static-data build ID before constructing cards.bin's URL.
+        // Without this await, a newly generated cards.bin could be requested under the
+        // old compatibility cache key while semantic-index.bin correctly used the new one.
+        await loadStaticDataMetadata();
         const response = await fetch(getStaticCardCorpusUrl(), {
             method: 'GET',
             cache: 'force-cache',
