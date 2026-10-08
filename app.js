@@ -1,6 +1,6 @@
-/* ManaSearch build 20261008-4 */
+/* ManaSearch build 20261008-5 */
 // ManaSearch deployment build marker. Bump this whenever app.js changes so cached-module issues are easy to diagnose.
-const MANASEARCH_APP_BUILD = '20261008-4';
+const MANASEARCH_APP_BUILD = '20261008-5';
 console.info(`[ManaSearch] app.js build ${MANASEARCH_APP_BUILD}`);
 
 // State Management
@@ -9455,7 +9455,7 @@ let semanticCosineBaselineReady = false;
 const STATIC_CARD_CORPUS_FILENAME = 'cards.bin';
 const STATIC_CARD_CORPUS_VERSION = 1;
 const STATIC_CARD_CORPUS_MAGIC = 'MSCARD1G';
-const STATIC_CARD_CORPUS_CACHE_VERSION = '20261008-4';
+const STATIC_CARD_CORPUS_CACHE_VERSION = '20261008-5';
 const STATIC_DATA_META_FILENAME = 'static-data-meta.json';
 let staticDataMetaPromise = null;
 let staticDataBuildId = null;
@@ -9652,7 +9652,7 @@ function searchStaticCardCorpus(queryText, options = {}) {
     if (!tokens.length) return [];
     const phrase = normalizeLocalCorpusText(queryText);
     const excludeKey = normalizeCardNameForIdentity(options.excludeName || '');
-    const limit = Math.max(1, Math.min(300, Number(options.limit) || 180));
+    const limit = Math.max(1, Math.min(1200, Number(options.limit) || 180));
     const scored = [];
     for (const card of corpus.cards) {
         if (!card?.name || normalizeCardNameForIdentity(card.name) === excludeKey) continue;
@@ -9678,11 +9678,140 @@ function searchStaticCardCorpus(queryText, options = {}) {
     }));
 }
 
+function extractLocalRetrievalAlternativesFromScryfallQuery(query) {
+    const input = String(query || '');
+    if (!input) return [];
+    const alternatives = [];
+    const push = value => {
+        const text = String(value || '').replace(/\\/g, '').replace(/\"/g, '"').trim();
+        if (!text) return;
+        const normalized = normalizeLocalCorpusText(text);
+        if (!normalized || normalized.length < 3) return;
+        if (!alternatives.some(existing => normalizeLocalCorpusText(existing) === normalized)) alternatives.push(text);
+    };
+
+    const quotedField = /\b(?:o|oracle|otag|atag):\s*"((?:\\"|[^"])*)"/gi;
+    let match;
+    while ((match = quotedField.exec(input))) push(match[1]);
+    const bareOracle = /\b(?:o|oracle):\s*([^\s()]+)/gi;
+    while ((match = bareOracle.exec(input))) {
+        if (!String(match[1] || '').startsWith('\"')) push(match[1]);
+    }
+    const bareOtag = /\b(?:otag|atag):\s*([^\s()]+)/gi;
+    while ((match = bareOtag.exec(input))) {
+        if (!String(match[1] || '').startsWith('\"')) push(match[1]);
+    }
+
+    if (alternatives.length) return alternatives.slice(0, 12);
+
+    // Last-resort local interpretation for any future Scryfall query builder that does not use
+    // oracle:/otag: fields. Strip query operators/field names and keep meaningful lexical terms.
+    const stripped = input
+        .replace(/(?:-)?[a-z_]+\s*:/gi, ' ')
+        .replace(/[()"']/g, ' ')
+        .replace(/\b(?:OR|AND|NOT)\b/gi, ' ');
+    const tokens = getLocalCorpusQueryTokens(stripped);
+    return tokens.length ? [tokens.join(' ')] : [];
+}
+
+function searchStaticCardCorpusAlternatives(queries, options = {}) {
+    const list = [...new Set((Array.isArray(queries) ? queries : [queries]).map(q => String(q || '').trim()).filter(Boolean))];
+    if (!list.length || !staticCardCorpusMemory?.cards?.length) return [];
+    const requestedLimit = Math.max(1, Math.min(1200, Number(options.limit) || 180));
+    const perQueryLimit = Math.min(1200, Math.max(1, requestedLimit));
+    const merged = new Map();
+    for (const query of list.slice(0, 16)) {
+        const hits = searchStaticCardCorpus(query, { ...options, limit: perQueryLimit });
+        for (const card of hits) {
+            const key = normalizeCardNameForIdentity(card?.name || '');
+            if (!key) continue;
+            const existing = merged.get(key);
+            if (!existing || (Number(card._localCorpusSimilarity) || 0) > (Number(existing._localCorpusSimilarity) || 0)) {
+                merged.set(key, { ...card, _localRetrievalQueries: [query] });
+            } else if (existing && !existing._localRetrievalQueries.includes(query)) {
+                existing._localRetrievalQueries.push(query);
+            }
+        }
+    }
+    return Array.from(merged.values())
+        .sort((a, b) => (Number(b._localCorpusSimilarity) || 0) - (Number(a._localCorpusSimilarity) || 0) || String(a.name).localeCompare(String(b.name)))
+        .slice(0, requestedLimit)
+        .map(card => ({ ...card, _retrievalSource: 'static-card-corpus' }));
+}
+
+function buildSharedLocalSearchQueries(cards) {
+    if (!Array.isArray(cards) || cards.length < 2) return [];
+    const stop = LOCAL_CORPUS_STOP_WORDS;
+    const texts = cards.map(card => normalizeLocalCorpusText(getCurrentSourceOracleText(card) || '').split(/\s+/).filter(Boolean));
+    const sets = texts.map(words => new Set(words.filter(word => word.length > 2 && !stop.has(word) && !/^\d+$/.test(word))));
+    if (!sets.length) return [];
+    const common = [...sets[0]].filter(word => sets.every(set => set.has(word)));
+    const queries = common.slice(0, 8);
+    // Prefer a few short common phrases when they exist, because they are much more discriminating
+    // than isolated high-frequency words.
+    const phraseSet = texts[0] || [];
+    for (let len = 4; len >= 2 && queries.length < 12; len--) {
+        for (let i = 0; i <= phraseSet.length - len && queries.length < 12; i++) {
+            const part = phraseSet.slice(i, i + len);
+            if (part.some(word => word.length <= 2 || stop.has(word) || /^\d+$/.test(word))) continue;
+            const phrase = part.join(' ');
+            if (texts.every(words => words.join(' ').includes(phrase))) queries.push(phrase);
+        }
+    }
+    return [...new Set(queries)].slice(0, 12);
+}
+
+function decorateLocalCoverage(results, label, queryText = '') {
+    const output = Array.isArray(results) ? results : [];
+    const total = Number(staticCardCorpusMemory?.total) || 0;
+    output.coverage = {
+        query: queryText || `[local corpus] ${label}`,
+        totalCards: total,
+        pagesFetched: 1,
+        maxPages: 1,
+        retrievedCount: output.length,
+        fullyCovered: true,
+        bailedAfterRetries: false,
+        local: true
+    };
+    output.continuation = null;
+    output.retrievalSource = 'static-card-corpus';
+    return output;
+}
+
+async function retrieveLocalFirst(localQueries, fallbackQuery, options = {}) {
+    const {
+        label = 'Local Card Corpus',
+        fallbackMaxPages = MIN_SEARCH_PAGES,
+        limit = 180,
+        excludeName,
+        filters,
+        broadFallbackFilters = null,
+        highlights
+    } = options;
+    const corpus = staticCardCorpusMemory || await loadStaticCardCorpus();
+    if (corpus?.cards?.length) {
+        const queries = (Array.isArray(localQueries) ? localQueries : [localQueries])
+            .map(q => String(q || '').trim())
+            .filter(Boolean);
+        const results = searchStaticCardCorpusAlternatives(queries, {
+            limit,
+            excludeName,
+            filters,
+            broadFallbackFilters,
+            highlights
+        });
+        return decorateLocalCoverage(results, label, queries.join(' | '));
+    }
+    if (!fallbackQuery) return decorateLocalCoverage([], label, '[local corpus unavailable]');
+    return fetchScryfallSearch(fallbackQuery, fallbackMaxPages, `${label} (Scryfall fallback)`);
+}
+
 const FULL_SEMANTIC_INDEX_SEARCH_LIMIT = 96;
 const STATIC_SEMANTIC_INDEX_FILENAME = 'semantic-index.bin';
 const STATIC_SEMANTIC_INDEX_VERSION = 1;
 const STATIC_SEMANTIC_INDEX_MAGIC = 'MSIDX1';
-const STATIC_SEMANTIC_INDEX_CACHE_VERSION = '20261008-4';
+const STATIC_SEMANTIC_INDEX_CACHE_VERSION = '20261008-5';
 let staticSemanticIndexPromise = null;
 let staticSemanticIndexAttempted = false;
 let staticSemanticIndexLoadError = null;
@@ -13252,37 +13381,59 @@ async function executeRelatedCardSearch() {
 
     try {
         // 1. RETRIEVAL
-        // Try the efficient grouped query first.  If Scryfall rejects that syntax (or a future
-        // pattern introduces a parser edge case), fall back to individually valid o:"phrase"
-        // queries rather than surfacing "invalid Scryfall query" to the user.
+        // Live Related Search is now local-first as well. The selected cards' consensus intent and
+        // shared patterns provide the primary local query text; the old Scryfall formulations are
+        // retained only as a compatibility fallback when cards.bin is unavailable.
         let results = [];
         let lastRelatedQueryError = null;
-        // 404/no-match is handled as an ordinary empty result by fetchScryfallSearch.  We only
-        // retry genuine 400 parser errors here; no-match queries should simply allow the next
-        // related retrieval formulation to try.
-        const queryAttempts = relatedSearchQueries;
-        for (let qi = 0; qi < queryAttempts.length; qi++) {
-            const attempt = queryAttempts[qi];
-            const candidateQuery = typeof attempt === 'string' ? attempt : attempt?.query;
-            const kind = typeof attempt === 'string' ? 'related' : (attempt?.kind || 'related');
-            try {
-                const attemptResults = await fetchScryfallSearch(
-                    candidateQuery,
-                    2,
-                    `Related ${kind}`
-                );
-                if (attemptResults.length > 0) {
-                    results.push(...attemptResults);
+        const localRelatedQueries = [
+            buildRelatedConsensusIntentText(relatedIntentProfile),
+            ...repeatingPatterns.slice(0, 8),
+            ...relatedSearchQueries.flatMap(attempt => extractLocalRetrievalAlternativesFromScryfallQuery(
+                typeof attempt === 'string' ? attempt : attempt?.query
+            ))
+        ].filter(Boolean);
+        const localRelatedCorpus = staticCardCorpusMemory || await loadStaticCardCorpus();
+        if (localRelatedCorpus?.cards?.length) {
+            results = searchStaticCardCorpusAlternatives(localRelatedQueries, {
+                limit: 520,
+                excludeName: sourceCardAtStart.name,
+                filters,
+                broadFallbackFilters: null
+            }).map(card => ({
+                ...card,
+                _relatedRetrievalSource: 'local-card-corpus'
+            }));
+            results.retrievalSource = 'static-card-corpus';
+            results.coverage = {
+                query: localRelatedQueries.join(' | '),
+                totalCards: localRelatedCorpus.total,
+                pagesFetched: 1,
+                maxPages: 1,
+                retrievedCount: results.length,
+                fullyCovered: true,
+                local: true
+            };
+            results.continuation = null;
+        } else {
+            // Compatibility fallback for browsers/deployments that do not have a usable cards.bin.
+            // 404/no-match is treated as an ordinary empty result; malformed-query errors remain
+            // retryable across the alternate Scryfall formulations.
+            const queryAttempts = relatedSearchQueries;
+            for (let qi = 0; qi < queryAttempts.length; qi++) {
+                const attempt = queryAttempts[qi];
+                const candidateQuery = typeof attempt === 'string' ? attempt : attempt?.query;
+                const kind = typeof attempt === 'string' ? 'related' : (attempt?.kind || 'related');
+                try {
+                    const attemptResults = await fetchScryfallSearch(candidateQuery, 2, `Related ${kind}`);
+                    if (attemptResults.length > 0) results.push(...attemptResults);
+                    lastRelatedQueryError = null;
+                } catch (error) {
+                    lastRelatedQueryError = error;
+                    if (error?.status !== 400) throw error;
                 }
-                lastRelatedQueryError = null;
-            } catch (error) {
-                lastRelatedQueryError = error;
-                // Only malformed-query errors are safe to retry with another formulation.
-                // Network, rate-limit, and cancellation errors must propagate instead of being
-                // hidden behind a misleading "invalid query" message.
-                if (error?.status !== 400) throw error;
+                if (!isCurrentRelatedSearch()) return;
             }
-            if (!isCurrentRelatedSearch()) return;
         }
 
         // The semantic index is a second, first-class Related Search retrieval lane. It is essential
@@ -14417,9 +14568,17 @@ async function findSimilarCards() {
     let searchTimeoutId = null;
 
     try {
+        const localExactQueries = hasHighlight
+            ? [highlightRetrievalText || exactnessTextForScoring || targetTextForScoring]
+            : [targetTextForScoring];
         const streamAPromise = trackStream(
             benchmarkUseLocalOracleCorpus ? Promise.resolve([]) :
-            (searchA_Query ? fetchScryfallSearch(searchA_Query, benchmarkPageCap, "Exact Phrase").catch(() => []) : Promise.resolve([])),
+            (searchA_Query
+                ? retrieveLocalFirst(localExactQueries, searchA_Query, {
+                    label: 'Exact Phrase', fallbackMaxPages: benchmarkPageCap, limit: isBroadSearch ? 320 : 220,
+                    excludeName: currentSourceCard.name, filters, broadFallbackFilters, highlights: manualHighlights
+                }).catch(() => [])
+                : Promise.resolve([])),
             "Exact Phrase"
         );
 
@@ -14541,13 +14700,23 @@ async function findSimilarCards() {
 
         const streamBPromise = trackStream(
             benchmarkUseLocalOracleCorpus ? Promise.resolve([]) :
-            (searchB_Query ? fetchScryfallSearch(searchB_Query, searchBMaxPages, "Oracle Terms").catch(() => []) : Promise.resolve([])),
+            (searchB_Query
+                ? retrieveLocalFirst([cleanKeywords.join(' ')], searchB_Query, {
+                    label: 'Oracle Terms', fallbackMaxPages: searchBMaxPages, limit: isBroadSearch ? 360 : 240,
+                    excludeName: currentSourceCard.name, filters, broadFallbackFilters, highlights: manualHighlights
+                }).catch(() => [])
+                : Promise.resolve([])),
             "Oracle Terms"
         );
         streamBPromise.then(r => mergeIntoPreview(r, "oracle terms")).catch(() => {});
         const streamCPromise = trackStream(
             benchmarkUseLocalOracleCorpus ? Promise.resolve([]) :
-            (searchC_Query ? fetchScryfallSearch(searchC_Query, benchmarkPageCap, "Mechanics/Tags").catch(() => []) : Promise.resolve([])),
+            (searchC_Query
+                ? retrieveLocalFirst(activeTags, searchC_Query, {
+                    label: 'Mechanics/Tags', fallbackMaxPages: benchmarkPageCap, limit: isBroadSearch ? 360 : 240,
+                    excludeName: currentSourceCard.name, filters, broadFallbackFilters, highlights: manualHighlights
+                }).catch(() => [])
+                : Promise.resolve([])),
             "Mechanics/Tags"
         );
         streamCPromise.then(r => mergeIntoPreview(r, "tags")).catch(() => {});
@@ -14569,7 +14738,12 @@ async function findSimilarCards() {
         streamLocalCorpusPromise.then(r => mergeIntoPreview(r, "local card corpus")).catch(() => {});
         const streamEPromise = trackStream(
             benchmarkUseLocalOracleCorpus ? Promise.resolve([]) :
-            (searchE_Query ? fetchScryfallSearch(searchE_Query, benchmarkPageCap, "Broader Mechanical").catch(() => []) : Promise.resolve([])),
+            (searchE_Query
+                ? retrieveLocalFirst([primaryType || '', sourceRoleProfileForFloor?.kind || '', ...activeTags], searchE_Query, {
+                    label: 'Broader Mechanical', fallbackMaxPages: benchmarkPageCap, limit: isBroadSearch ? 320 : 220,
+                    excludeName: currentSourceCard.name, filters, broadFallbackFilters, highlights: manualHighlights
+                }).catch(() => [])
+                : Promise.resolve([])),
             "Broader Mechanical"
         );
         streamEPromise.then(r => mergeIntoPreview(r, "broader mechanical match")).catch(() => {});
@@ -14581,16 +14755,23 @@ async function findSimilarCards() {
             ? trackStream(
                 benchmarkUseLocalOracleCorpus ? Promise.resolve([]) :
                 (broadOracleQuery
-                    ? fetchScryfallSearch(broadOracleQuery, broadSearchMaxPages, "Broad Retrieval").catch(() => [])
+                    ? retrieveLocalFirst([broadSourceText], broadOracleQuery, {
+                        label: 'Broad Retrieval', fallbackMaxPages: broadSearchMaxPages, limit: 520,
+                        excludeName: currentSourceCard.name, filters, broadFallbackFilters, highlights: manualHighlights
+                    }).catch(() => [])
                     : Promise.resolve([])),
                 "Broad Retrieval"
             )
             : Promise.resolve([]);
         streamBroadPromise.then(r => mergeIntoPreview(r, "broad retrieval")).catch(() => {});
+        const sharedLocalQueries = buildSharedLocalSearchQueries(activeSourceCardsForSearch);
         const streamSharedPromise = sharedSourceTextQuery
             ? trackStream(
                 benchmarkUseLocalOracleCorpus ? Promise.resolve([]) :
-                fetchScryfallSearch(sharedSourceTextQuery, benchmarkPageCap, "Shared Source Text").catch(() => []),
+                retrieveLocalFirst(sharedLocalQueries, sharedSourceTextQuery, {
+                    label: 'Shared Source Text', fallbackMaxPages: benchmarkPageCap, limit: 420,
+                    excludeName: currentSourceCard.name, filters, broadFallbackFilters, highlights: manualHighlights
+                }).catch(() => []),
                 "Shared Source Text"
             )
             : Promise.resolve([]);
@@ -14614,7 +14795,11 @@ async function findSimilarCards() {
         // visible Functional Match chip complete once the whole F group has settled.
         const functionalQueryPromises = benchmarkUseLocalOracleCorpus ? [] : uniqueFunctionalQueries.map((q, idx) => {
             const streamLabel = `Search F #${idx + 1} (Functional Match)`;
-            const p = fetchScryfallSearch(q.query, benchmarkPageCap, streamLabel).catch(() => []);
+            const localQueries = extractLocalRetrievalAlternativesFromScryfallQuery(q.query);
+            const p = retrieveLocalFirst(localQueries, q.query, {
+                label: streamLabel, fallbackMaxPages: benchmarkPageCap, limit: isBroadSearch ? 320 : 220,
+                excludeName: currentSourceCard.name, filters, broadFallbackFilters, highlights: manualHighlights
+            }).catch(() => []);
             p.then(r => mergeIntoPreview(r, `functional match ${idx + 1}`)).catch(() => {});
             return p;
         });
@@ -14639,7 +14824,10 @@ async function findSimilarCards() {
         const exactHighlightPromises = benchmarkUseLocalOracleCorpus ? [] : exactHighlightQueries.map((q, idx) => {
             const streamLabel = `Search H #${idx + 1} (Exact Highlight)`;
             const p = trackStream(
-                fetchScryfallSearch(q.query, benchmarkPageCap, streamLabel).catch(() => []),
+                retrieveLocalFirst([q.query.match(/\"([^\"]+)\"/)?.[1] || q.query], q.query, {
+                    label: streamLabel, fallbackMaxPages: benchmarkPageCap, limit: 260,
+                    excludeName: currentSourceCard.name, filters, broadFallbackFilters, highlights: manualHighlights
+                }).catch(() => []),
                 streamLabel
             );
             p.then(r => mergeIntoPreview(r, `exact highlight ${idx + 1}`)).catch(() => {});
@@ -14650,7 +14838,10 @@ async function findSimilarCards() {
             if (!query) return;
             const promise = trackStream(
                 benchmarkUseLocalOracleCorpus ? Promise.resolve([]) :
-                fetchScryfallSearch(query, benchmarkPageCap, label).catch(() => []),
+                retrieveLocalFirst(extractLocalRetrievalAlternativesFromScryfallQuery(query), query, {
+                    label, fallbackMaxPages: benchmarkPageCap, limit: isBroadSearch ? 320 : 220,
+                    excludeName: currentSourceCard.name, filters, broadFallbackFilters, highlights: manualHighlights
+                }).catch(() => []),
                 label
             );
             promise.then(r => mergeIntoPreview(r, key)).catch(() => {});
@@ -14661,6 +14852,23 @@ async function findSimilarCards() {
         if (activeSearchMethodFlags.role) registerMethodStream('role search', methodQueries.role, 'Role Search');
         if (activeSearchMethodFlags.alternate) registerMethodStream('alternative search', methodQueries.alternate, 'Alternative Search');
         if (activeSearchMethodFlags.synergy) registerMethodStream('synergy search', methodQueries.synergy, 'Synergy Search');
+
+        // Local retrieval plans are also retained for Search Deeper. Unlike Scryfall pagination, a
+        // static corpus has no remote cursor; deeper local passes deterministically increase the
+        // candidate window and add only cards that were not already shown. This preserves the
+        // existing additive Search Deeper behavior without making another API request.
+        const localDeeperPlans = [
+            { key: 'Exact Phrase', queries: localExactQueries, limit: isBroadSearch ? 320 : 220 },
+            { key: 'Oracle Terms', queries: [cleanKeywords.join(' ')], limit: isBroadSearch ? 360 : 240 },
+            { key: 'Mechanics/Tags', queries: activeTags, limit: isBroadSearch ? 360 : 240 },
+            { key: 'Local Card Corpus', queries: [hasHighlight ? (highlightRetrievalText || targetTextForScoring) : sourceOracleTextForParsing], limit: isBroadSearch ? 360 : 260 },
+            { key: 'Broader Mechanical', queries: [primaryType || '', sourceRoleProfileForFloor?.kind || '', ...activeTags], limit: isBroadSearch ? 320 : 220 },
+            ...(isBroadSearch ? [{ key: 'Broad Retrieval', queries: [broadSourceText], limit: 520 }] : []),
+            ...(sharedSourceTextQuery ? [{ key: 'Shared Source Text', queries: sharedLocalQueries, limit: 420 }] : []),
+            ...uniqueFunctionalQueries.map((q, idx) => ({ key: `Functional Match #${idx + 1}`, queries: extractLocalRetrievalAlternativesFromScryfallQuery(q.query), limit: isBroadSearch ? 320 : 220 })),
+            ...exactHighlightQueries.map((q, idx) => ({ key: `Exact Highlight #${idx + 1}`, queries: [q.query.match(/\"([^\"]+)\"/)?.[1] || q.query], limit: 260 })),
+            ...Object.entries(methodQueries).filter(([, query]) => query).map(([key, query]) => ({ key: `${key} search`, queries: extractLocalRetrievalAlternativesFromScryfallQuery(query), limit: isBroadSearch ? 320 : 220 }))
+        ].filter(plan => plan.queries?.some(q => String(q || '').trim()));
 
         // The NLP model and the precomputed semantic index are independent startup resources.
         // Start both now so their download/initialization overlaps the Scryfall retrieval streams.
@@ -14915,6 +15123,7 @@ const streamCoverage = {
     "Search A": resultsA?.coverage || null,
     "Search B": resultsB?.coverage || null,
     "Search C": resultsC?.coverage || null,
+    "Local Card Corpus": resultsLocalCorpus?.coverage || null,
     "Search E": resultsE?.coverage || null,
     "Broad Retrieval": resultsBroad?.coverage || null,
     "Shared Source Text": resultsSharedFlat?.coverage || null
@@ -15285,9 +15494,13 @@ if (candidates.length > 0) {
     const deeperStreamCursors = [resultsA, resultsB, resultsC, resultsE, resultsBroad, ...resultsFSets, ...resultsExactSets]
         .map(r => r?.continuation)
         .filter(Boolean);
-    pendingDeeperSearch = deeperStreamCursors.length > 0 ? {
+    const useLocalDeeper = Boolean(staticCardCorpusMemory?.cards?.length && localDeeperPlans.length);
+    pendingDeeperSearch = (deeperStreamCursors.length > 0 || useLocalDeeper) ? {
         requestId,
         streams: deeperStreamCursors,
+        localPlans: useLocalDeeper ? localDeeperPlans : [],
+        localDepth: 1,
+        localMaxLimit: 1200,
         existingNames: new Set(candidates.map(c => (c.name || '').toLowerCase())),
         context: {
             filters, broadFallbackFilters,
@@ -15307,7 +15520,9 @@ if (candidates.length > 0) {
     if (searchDeeperBtn) {
         searchDeeperBtn.classList.toggle('hidden', !pendingDeeperSearch);
         searchDeeperBtn.disabled = false;
-        searchDeeperBtn.textContent = '🔍 Search Deeper (+8 pages/stream)';
+        searchDeeperBtn.textContent = useLocalDeeper && deeperStreamCursors.length === 0
+            ? '🔍 Search Deeper (+local candidates)'
+            : '🔍 Search Deeper (+8 pages/stream)';
     }
 
     const rankingEvidenceTop = candidates.slice(0, 20).map((card, index) => ({
@@ -15447,7 +15662,10 @@ if (candidates.length > 0) {
  * New results are simply merged in and re-sorted by the same scoreKey the original search used.
  */
 async function searchDeeper() {
-    if (!pendingDeeperSearch || pendingDeeperSearch.streams.length === 0) return;
+    if (!pendingDeeperSearch) return;
+    const hasApiStreams = Array.isArray(pendingDeeperSearch.streams) && pendingDeeperSearch.streams.length > 0;
+    const hasLocalPlans = Array.isArray(pendingDeeperSearch.localPlans) && pendingDeeperSearch.localPlans.length > 0;
+    if (!hasApiStreams && !hasLocalPlans) return;
     if (pendingDeeperSearch.requestId !== searchRequestId) {
         pendingDeeperSearch = null;
         const staleBtn = document.getElementById('search-deeper-btn');
@@ -15463,29 +15681,49 @@ async function searchDeeper() {
     }
 
     const PAGES_PER_CLICK = 8;
-    const { streams, existingNames, context } = pendingDeeperSearch;
+    const { streams = [], localPlans = [], existingNames, context } = pendingDeeperSearch;
 
     try {
-        const batchResults = await Promise.all(
-            streams.map(c => fetchScryfallContinuationPages(c, PAGES_PER_CLICK).catch(() => ({ results: [], continuation: null, bailedAfterRetries: true })))
-        );
+        const apiBatchResults = hasApiStreams
+            ? await Promise.all(
+                streams.map(c => fetchScryfallContinuationPages(c, PAGES_PER_CLICK).catch(() => ({ results: [], continuation: null, bailedAfterRetries: true })))
+            )
+            : [];
         if (requestId !== searchRequestId || pendingDeeperSearch?.requestId !== requestId) return;
+
+        const localDepth = Math.max(1, Number(pendingDeeperSearch.localDepth) || 1);
+        const localLimit = Math.min(
+            Math.max(300, Number(pendingDeeperSearch.localMaxLimit) || 1200),
+            localDepth * 300
+        );
+        let localBatchResults = [];
+        if (hasLocalPlans && staticCardCorpusMemory?.cards?.length) {
+            localBatchResults = localPlans.map(plan => {
+                const cards = searchStaticCardCorpusAlternatives(plan.queries, {
+                    limit: Math.max(localLimit, Number(plan.limit) || 0),
+                    excludeName: context.sourceCard?.name,
+                    filters: context.filters,
+                    broadFallbackFilters: context.broadFallbackFilters,
+                    highlights: context.highlightConstraints || []
+                });
+                return decorateLocalCoverage(cards, plan.key, plan.queries.join(' | '));
+            });
+        }
 
         const newRawCards = [];
         const seenThisBatch = new Set();
-        for (const batch of batchResults) {
-            for (const card of batch.results) {
-                const key = (card.name || '').toLowerCase();
-                if (existingNames.has(key) || seenThisBatch.has(key)) continue;
-                seenThisBatch.add(key);
-                newRawCards.push(card);
-            }
-        }
+        const collect = card => {
+            const key = normalizeCardNameForIdentity(card?.name || '');
+            if (!key || existingNames.has(key) || seenThisBatch.has(key)) return;
+            seenThisBatch.add(key);
+            newRawCards.push(card);
+        };
+        apiBatchResults.forEach(batch => (batch?.results || []).forEach(collect));
+        localBatchResults.forEach(batch => (batch || []).forEach(collect));
 
-        // Apply the exact-highlight constraint BEFORE any expensive scoring. Search Deeper is an
-        // extension of the original search, not a new unrestricted search, so an Exact highlight
-        // remains mandatory on every additional page/stream. Flexible highlights remain ranking
-        // intent only.
+        // Search Deeper is an extension of the original search, not a fresh unrestricted query.
+        // Exact highlights and every explicit user constraint therefore remain mandatory on each
+        // additional local or Scryfall candidate before any expensive scoring happens.
         const passedFilters = newRawCards.filter(c =>
             matchesExactHighlightConstraints(c, context.highlightConstraints || []) &&
             matchesActiveFilters(c, context.filters, context.broadFallbackFilters)
@@ -15508,17 +15746,8 @@ async function searchDeeper() {
             });
             if (requestId !== searchRequestId || pendingDeeperSearch?.requestId !== requestId) return;
 
-            // Same basic quality gate as the main pipeline's absolute floor (kept in sync with the
-            // constant in findSimilarCards) - a candidate that scores below this was never a
-            // plausible result regardless of which search pass found it. Gated on context.scoreKey
-            // rather than always similarityScore, matching the main pipeline's floor (rank system
-            // item 5) - a "search deeper" run should respect the same active sort criteria as the
-            // search it's extending.
             const ABSOLUTE_RELEVANCE_FLOOR = 0.18;
             const qualified = passedFilters.filter(c => {
-                // Defense-in-depth: the exact constraint was already applied before scoring, but
-                // keep the invariant here too so future search-deeper changes cannot accidentally
-                // render an invalid candidate.
                 if (!matchesExactHighlightConstraints(c, context.highlightConstraints || [])) return false;
                 const score = c[context.scoreKey] || 0;
                 const direct = Math.max(c.mechanicalScore || 0, c.functionScore || 0, c.roleScore || 0, c.highlightIntentScore || 0);
@@ -15533,25 +15762,36 @@ async function searchDeeper() {
             renderResults(lastSearchResults);
             updateResultsSummary();
 
-            qualified.forEach(c => existingNames.add((c.name || '').toLowerCase()));
+            newRawCards.forEach(c => existingNames.add(normalizeCardNameForIdentity(c.name)));
         }
 
-        // Keep only the streams that still have more pages; drop the ones that are now exhausted.
         if (requestId !== searchRequestId || pendingDeeperSearch?.requestId !== requestId) return;
-        pendingDeeperSearch.streams = batchResults.map(b => b.continuation).filter(Boolean);
 
-        if (pendingDeeperSearch.streams.length === 0) {
+        pendingDeeperSearch.streams = apiBatchResults.map(b => b.continuation).filter(Boolean);
+        if (hasLocalPlans) {
+            pendingDeeperSearch.localDepth = localDepth + 1;
+            const reachedLocalLimit = pendingDeeperSearch.localDepth * 300 > (Number(pendingDeeperSearch.localMaxLimit) || 1200);
+            if (reachedLocalLimit) pendingDeeperSearch.localPlans = [];
+        }
+
+        const localStillAvailable = Array.isArray(pendingDeeperSearch.localPlans) && pendingDeeperSearch.localPlans.length > 0;
+        const apiStillAvailable = Array.isArray(pendingDeeperSearch.streams) && pendingDeeperSearch.streams.length > 0;
+        if (!localStillAvailable && !apiStillAvailable) {
             pendingDeeperSearch = null;
             if (searchDeeperBtn) searchDeeperBtn.classList.add('hidden');
         } else if (searchDeeperBtn) {
             searchDeeperBtn.disabled = false;
-            searchDeeperBtn.textContent = '🔍 Search Deeper (+8 pages/stream)';
+            searchDeeperBtn.textContent = localStillAvailable && !apiStillAvailable
+                ? '🔍 Search Deeper (+local candidates)'
+                : '🔍 Search Deeper (+8 pages/stream)';
         }
     } catch (error) {
         console.error("Error in searchDeeper:", error);
         if (requestId === searchRequestId && searchDeeperBtn) {
             searchDeeperBtn.disabled = false;
-            searchDeeperBtn.textContent = '🔍 Search Deeper (+8 pages/stream)';
+            searchDeeperBtn.textContent = hasLocalPlans && !hasApiStreams
+                ? '🔍 Search Deeper (+local candidates)'
+                : '🔍 Search Deeper (+8 pages/stream)';
         }
     }
 }
