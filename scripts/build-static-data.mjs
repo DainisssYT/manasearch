@@ -17,7 +17,7 @@ const CARD_MAGIC = 'MSCARD1G';
 const CARD_VERSION = 1;
 const MODEL_ID = 'Xenova/all-MiniLM-L6-v2';
 const EMBEDDING_BATCH_SIZE = 32;
-const BUILDER_VERSION = 2;
+const BUILDER_VERSION = 3;
 
 const SEMANTIC_KEYWORD_EXPANSIONS = {
   cascade: ' cascade reveals cards until a spell is found and casts it ',
@@ -288,3 +288,4 @@ main().catch(error => {
   console.error(error?.stack || error);
   process.exitCode = 1;
 });
+
