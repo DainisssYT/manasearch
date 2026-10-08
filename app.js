@@ -1,6 +1,6 @@
 /* ManaSearch build 20261008-8 */
 // ManaSearch deployment build marker. Bump this whenever app.js changes so cached-module issues are easy to diagnose.
-const MANASEARCH_APP_BUILD = '20261008-11';
+const MANASEARCH_APP_BUILD = '20261008-17';
 console.info(`[ManaSearch] app.js build ${MANASEARCH_APP_BUILD}`);
 
 // State Management
@@ -7250,6 +7250,7 @@ function buildUniversalMechanicProfile(card = null, text = '', parsedEffects = n
     const tokens = collectRegexGroupTokens(oracle, UNIVERSAL_TOKEN_REGEX);
     const manaSymbols = collectRegexTokens(oracle, UNIVERSAL_MANA_SYMBOL_REGEX);
     const polarity = polarityProfile(oracle);
+    const semanticMechanicBridge = buildSemanticMechanicBridgeProfile(card, oracle);
 
     const atoms = new Set();
     keywords.forEach(v => atoms.add(`keyword:${v}`));
@@ -7282,6 +7283,8 @@ function buildUniversalMechanicProfile(card = null, text = '', parsedEffects = n
         tokens,
         manaSymbols,
         polarity,
+        semanticMechanicBridge,
+        semanticBridgeAnchors: semanticMechanicBridge.anchors,
         atoms,
         keywordCount: keywords.size,
         actionCount: actions.size,
@@ -7416,7 +7419,7 @@ function calculateUniversalMechanicSimilarity(profileA, profileB) {
 // raw Oracle semantics and Scryfall keyword metadata remain parallel evidence sources. The graph
 // therefore never hard-vetoes a candidate solely because a heuristic field is absent.
 
-const MECHANICAL_GRAPH_VERSION = 1;
+const MECHANICAL_GRAPH_VERSION = 2;
 
 const MECHANIC_OBJECT_PARENTS = {
     'artifact creature': ['creature', 'artifact', 'permanent'],
@@ -7572,6 +7575,1104 @@ const KEYWORD_MECHANIC_ANCHORS = {
     populate: ['token_copy'],
     discover: ['library', 'cast_free']
 };
+
+
+// ============================================================================
+// V23 UNIVERSAL SEMANTIC MECHANIC BRIDGE
+// ----------------------------------------------------------------------------
+// The taxonomy supplied with ManaSearch contains many named mechanics that are
+// not finite parser actions. A card can therefore be mechanically equivalent
+// without sharing the same literal keyword or verb. This bridge supplies a
+// conservative ontology: each named mechanic receives (1) an identity anchor,
+// (2) structural semantic anchors, and, where the rules can be recognized safely,
+// (3) text-pattern anchors. The bridge is deliberately separate from the finite
+// effect parser so obscure mechanics do not have to be invented as fake parser
+// actions, and existing scoring/ranking remains intact.
+// ============================================================================
+
+function normalizeMechanicBridgeKey(value) {
+    return normalizeMechanicToken(value)
+        .replace(/[−–—]/g, '-')
+        .replace(/\s*\/\s*/g, '/')
+        .replace(/\bwith\b/g, 'with')
+        .trim();
+}
+
+// Each group maps multiple named mechanics to a shared structural meaning. Some
+// mechanics intentionally receive only a narrow/unique group: not every named
+// mechanic should be conflated with another mechanic merely because both involve
+// "tokens", "combat", or "cost".
+const SEMANTIC_MECHANIC_BRIDGE_GROUPS = [
+    // Commander / variant mechanics
+    [['partner', 'friends forever', 'partner with', "doctor's companion", 'doctors companion'], ['commander:partner', 'commander:paired_commander']],
+    [['choose a background'], ['commander:background']],
+    [['eminence'], ['commander:zone_independent_trigger']],
+    [['lieutenant'], ['commander:commander_control_condition']],
+    [['planechase'], ['game_variant:planechase']],
+    [['planeswalk'], ['game_variant:plane_travel']],
+    [['archenemy'], ['game_variant:archenemy']],
+    [['set in motion', 'abandon'], ['scheme:advancement']],
+    [['conspiracy', 'hidden agenda', 'double agenda'], ['conspiracy:starting_zone', 'conspiracy:face_down_or_secret']],
+
+    // Additional / variable costs
+    [['sweep'], ['cost:sweep_land_replacement']],
+    [['conspire'], ['cost:tap_creatures', 'spell:copy']],
+    [['casualty'], ['cost:sacrifice_creature', 'spell:copy']],
+    [['bargain'], ['cost:sacrifice_permanent']],
+    [['collect evidence'], ['cost:exile_cards_from_graveyard', 'cost:mana_equivalent_value']],
+    [['forage'], ['cost:exile_cards_from_graveyard', 'cost:food_or_creature']],
+    [['gift'], ['cost:give_opponent_resource', 'choice:optional_bonus']],
+    [['behold'], ['cost:reveal_from_hand', 'choice:reveal_information']],
+    [['binary'], ['choice:two_state']],
+    [['kicker'], ['cost:optional_additional_cost']],
+    [['spree'], ['cost:multiple_modes', 'choice:paid_modes']],
+    [['tiered'], ['cost:scaling_tiers', 'effect:increasing_payoff']],
+    [['buyback'], ['cost:optional_additional_cost', 'zone:return_to_hand']],
+    [['entwine'], ['choice:choose_multiple_modes']],
+    [['offspring'], ['cost:additional_cost', 'token:create_token_copy']],
+    [['multikicker'], ['cost:repeatable_optional_additional_cost']],
+    [['replicate'], ['spell:copy', 'cost:repeatable_optional_cost']],
+    [['escalate'], ['spell:copy_or_modes', 'cost:repeatable_mode_cost']],
+    [['strive'], ['spell:repeatable_per_target_cost', 'spell:multiple_targets']],
+    [['squad'], ['cost:repeatable_additional_cost', 'token:create_token_copy']],
+    [['ravenous'], ['cost:additional_cost', 'counter:enters_with_x_counters']],
+
+    // Alternative costs / spell modification
+    [['plot'], ['cast:exile_for_later', 'cast:cast_later', 'cast:alternative_cost']],
+    [['impending'], ['cast:cast_later', 'counter:time_counters', 'battlefield:temporary_restriction']],
+    [['suspend'], ['cast:exile_for_later', 'counter:time_counters', 'cast:cast_later']],
+    [['warp'], ['cast:alternative_cost', 'cast:cast_later']],
+    [['evoke'], ['cast:alternative_cost', 'battlefield:etb_then_sacrifice']],
+    [['prototype'], ['cast:alternative_cost', 'card:alternate_characteristics']],
+    [['awaken'], ['cast:alternative_cost', 'zone:land_becomes_creature', 'counter:+1/+1']],
+    [['dash'], ['cast:alternative_cost', 'combat:haste', 'zone:return_to_hand']],
+    [['blitz'], ['cast:alternative_cost', 'combat:haste', 'trigger:dies_draw']],
+    [['overload'], ['cast:alternative_cost', 'target:mass_replacement']],
+    [['bestow'], ['cast:alternative_cost', 'battlefield:aura_or_creature']],
+    [['mutate'], ['cast:alternative_cost', 'battlefield:combine_permanents']],
+    [['cleave'], ['cast:alternative_cost', 'text:remove_ability_wording']],
+    [['adventure'], ['card:split_faces', 'cast:alternative_zone_exile']],
+    [['split cards / fuse', 'split cards/fuse', 'fuse'], ['card:split', 'choice:cast_one_or_both']],
+    [['omen'], ['cast:alternate_mode', 'card:split_faces']],
+    [['more than meets the eye'], ['cast:alternate_cost', 'card:double_sided_or_front_back']],
+    [['modal double-faced cards'], ['card:double_sided', 'choice:modal_faces']],
+    [['face-down cards'], ['card:face_down']],
+    [['morph'], ['card:face_down', 'card:turn_face_up', 'cost:alternate_cost']],
+    [['megamorph'], ['card:face_down', 'card:turn_face_up', 'counter:+1/+1']],
+    [['manifest', 'manifest dread'], ['card:face_down', 'battlefield:put_card_or_top_card']],
+    [['foretell'], ['cast:exile_for_later', 'cast:alternate_cost', 'cast:cast_later']],
+    [['disguise', 'cloak'], ['card:face_down', 'card:turn_face_up', 'keyword:ward']],
+
+    // Cost reduction / mana substitution
+    [['affinity'], ['cost:reduction_by_object_count']],
+    [['undaunted'], ['cost:reduction_by_opponent_count']],
+    [['situational reduced costs'], ['cost:conditional_reduction']],
+    [['surge'], ['cost:alternate_cost_if_condition']],
+    [['prowl'], ['cost:alternate_cost_if_combat_damage']],
+    [['spectacle'], ['cost:alternate_cost_if_opponent_lost_life']],
+    [['offering'], ['cost:alternate_cost_by_sacrificing_creature_type']],
+    [['convoke'], ['cost:tap_creatures', 'cost:mana_substitute']],
+    [['improvise'], ['cost:tap_artifacts', 'cost:mana_substitute']],
+    [['delve'], ['cost:exile_graveyard_cards', 'cost:mana_substitute']],
+    [['assist'], ['cost:other_player_may_help_pay']],
+    [['emerge'], ['cost:sacrifice_creature', 'cost:reduction_by_creature_mana_value']],
+    [['emerge from artifact'], ['cost:sacrifice_artifact', 'cost:reduction_by_artifact_mana_value']],
+    [['phyrexian mana', 'compleated'], ['cost:life_or_mana_substitution']],
+    [['web-slinging', 'enweb'], ['cost:alternate_cost', 'cost:tap_creatures_or_spiders']],
+    [['waterbend'], ['cost:alternate_payment', 'mana:resource_substitution']],
+    [['sneak'], ['cast:alternative_cost', 'combat:haste', 'zone:return_to_hand_or_exile']],
+
+    // Timing / spell-count / delayed recast
+    [['flash'], ['cast:instant_timing']],
+    [['kicker'], ['cost:optional_additional_cost']],
+    [['buyback'], ['cost:optional_additional_cost', 'zone:return_to_hand']],
+    [['split second'], ['stack:cannot_respond_with_spells_or_abilities']],
+    [['addendum'], ['cast:timing_if_main_phase', 'effect:alternate_bonus']],
+    [['mana spent to cast'], ['cost:mana_spent_as_value']],
+    [['adamant'], ['cost:colored_mana_threshold', 'effect:bonus_by_color']],
+    [['sunburst'], ['counter:number_of_colors_spent', 'stat:color_count']],
+    [['converge'], ['cost:number_of_colors_spent']],
+    [['when you cast this'], ['trigger:spell_cast_self']],
+    [['storm'], ['spell:copy_per_spell_cast']],
+    [['ripple'], ['spell:reveal_and_cast_or_add_from_library']],
+    [['cascade'], ['library:reveal_until_qualifying_spell', 'cast:cast_without_paying']],
+    [['gravestorm'], ['spell:copy_per_permanent_put_into_graveyard']],
+    [['demonstrate'], ['spell:opponent_gets_copy', 'choice:optional_copy']],
+    [['radiance'], ['effect:shared_targeting_by_color']],
+    [['delayed re-cast'], ['cast:copy_later', 'trigger:delayed']],
+    [['epic'], ['spell:repeat_each_turn', 'cast:cannot_cast_other_spells']],
+    [['rebound'], ['spell:cast_again_from_exile_next_upkeep']],
+    [['cipher'], ['combat:damage_trigger', 'spell:copy_from_exile']],
+    [['paradigm'], ['spell:repeat_each_turn', 'spell:copy_from_exile', 'spell:copy_without_paying', 'cast:cast_without_paying', 'trigger:first_main_phase']],
+
+    // Combat: attack / block / evasion
+    [['can / can’t attack / block', 'can / cannot attack', "can / can't attack"], ['combat:attack_or_block_restriction']],
+    [['defender'], ['combat:cannot_attack']],
+    [['haste'], ['combat:attack_immediately', 'activation:tap_immediately']],
+    [['landwalk'], ['combat:evasion_by_land_type']],
+    [['horsemanship'], ['combat:unblockable_by_non_horsemanship']],
+    [['flying'], ['combat:evasion_flying']],
+    [['reach'], ['combat:block_flying']],
+    [['shadow'], ['combat:evasion_shadow']],
+    [['fear'], ['combat:evasion_color_restriction']],
+    [['intimidate'], ['combat:evasion_color_restriction']],
+    [['menace', 'suspected'], ['combat:evasion_multiple_blockers_or_suspected']],
+    [['skulk'], ['combat:evasion_power_restriction']],
+    [['dethrone'], ['combat:attacking_player_with_more_life', 'counter:+1/+1']],
+    [['mentor'], ['combat:attack_trigger', 'counter:+1/+1']],
+    [['training'], ['combat:attack_trigger', 'counter:+1/+1']],
+    [['exalted'], ['combat:solo_attacker', 'stat:+1/+1']],
+    [['battle cry'], ['combat:attack_trigger', 'stat:+1/+0_team']],
+    [['enlist'], ['combat:attack_trigger', 'stat:lend_power']],
+    [['melee'], ['combat:attack_trigger', 'stat:+1/+1_per_opponent']],
+    [['battalion'], ['combat:attack_with_three_or_more']],
+    [['pack tactics'], ['combat:attack_power_threshold']],
+    [['provoke'], ['combat:force_block']],
+    [['annihilator'], ['combat:attack_trigger', 'opponent:sacrifice_permanents']],
+    [['myriad'], ['combat:attack_trigger', 'token:attacking_copies']],
+    [['mobilize'], ['combat:attack_trigger', 'token:temporary_attacking_copies']],
+    [['firebending'], ['combat:attack_trigger', 'mana:combat_reward']],
+    [['frenzy'], ['combat:unblocked_bonus']],
+    [['flanking'], ['combat:blocker_penalty']],
+    [['bushido'], ['combat:blocked_or_blocking_bonus']],
+    [['rampage'], ['combat:blocked_by_multiple_bonus']],
+    [['afflict'], ['combat:blocker_damage_or_life_loss']],
+    [['poisonous'], ['combat:combat_damage_poison']],
+    [['toxic'], ['combat:combat_damage_poison']],
+    [['renown'], ['combat:combat_damage_to_player', 'counter:+1/+1']],
+    [['ingest'], ['combat:combat_damage', 'zone:exile_top_library']],
+    [['decayed'], ['combat:cannot_block', 'trigger:dies']],
+    [['double strike'], ['combat:two_damage_steps']],
+    [['first strike'], ['combat:first_damage_step']],
+    [['trample'], ['combat:excess_damage']],
+    [['vigilance'], ['combat:attack_without_tapping']],
+    [['banding'], ['combat:block_assignment_control']],
+    [['space sculptor'], ['game_variant:space_or_layout_rules']],
+
+    // Tokens / battlefield token actions
+    [['investigate', 'clue'], ['token:create_clue', 'resource:artifact_token']],
+    [['incubate', 'incubator'], ['token:create_incubator', 'card:transform_token']],
+    [['treasure'], ['token:create_treasure', 'mana:treasure']],
+    [['gold'], ['token:create_gold']],
+    [['food'], ['token:create_food', 'life:food_activation']],
+    [['powerstone'], ['token:create_powerstone', 'mana:restricted_artifact']],
+    [['role', 'cursed role', 'monster role', 'royal role', 'sorcerer role', 'virtuous role', 'wicked role', 'young hero role'], ['token:create_role_aura_token', 'aura:attach_to_creature']],
+    [['map'], ['token:create_map']],
+    [['junk'], ['token:create_junk']],
+    [['lander'], ['token:create_lander']],
+    [['mutagen'], ['token:create_mutagen']],
+    [['populate'], ['token:copy_existing_token']],
+    [['amass <type>', 'amass'], ['token:create_army_or_amass', 'counter:+1/+1']],
+    [['living weapon'], ['token:create_creature', 'equipment:attach']],
+    [['for mirrodin!'], ['token:create_rebel', 'equipment:attach']],
+    [['job select'], ['token:create_role_or_choice']],
+    [['change sides'], ['control:change_control_side']],
+    [['meld'], ['card:meld_permanents']],
+    [['transform'], ['card:change_face']],
+    [['flip'], ['card:flip_face']],
+    [['distribute counters'], ['counter:distribute']],
+    [['bolster'], ['counter:lowest_toughness']],
+    [['support'], ['counter:+1/+1_on_other_creatures']],
+    [['endure'], ['counter:+1/+1_or_incubate_on_death']],
+    [['proliferate'], ['counter:add_existing_counter_type']],
+    [['time travel'], ['counter:time_counters', 'zone:time_or_suspended_objects']],
+    [['earthbend'], ['land:becomes_creature', 'counter:earthbend']],
+    [['blight'], ['permanent:blight_counters_or_debilitation']],
+    [['exert'], ['combat:attack_or_activate_without_untapping', 'state:does_not_untap']],
+    [['detain'], ['control:temporarily_lock_permanent']],
+    [['goad'], ['combat:must_attack_if_able', 'target:opponent_choice']],
+    [['exploit'], ['trigger:etb', 'cost:sacrifice_creature', 'sacrifice:optional_creature']],
+    [['airbend'], ['permanent:move_or_change_state_without_zone_change']],
+
+    // Library / information / outside the game
+    [['scry'], ['library:top_manipulation', 'selection:bottom_or_top']],
+    [['fateseal'], ['library:opponent_top_manipulation']],
+    [['clash'], ['library:top_reveal', 'choice:top_or_bottom', 'combat:life_loss_reward']],
+    [['explore'], ['library:top_reveal', 'counter:+1/+1_or_graveyard']],
+    [['surveil'], ['library:top_to_graveyard', 'selection:graveyard']],
+    [['connive'], ['draw:draw_then_discard', 'counter:+1/+1_or_loot']],
+    [['parley'], ['library:reveal_top_all_players', 'effect:shared_count_reward']],
+    [['companion'], ['outside_game:deckbuilding_condition', 'cast:from_outside_game']],
+    [['learn'], ['outside_game:lesson_or_discard_selection']],
+    [['initiative'], ['outside_game:dungeon_or_initiative_tracker']],
+    [['venture into the dungeon', 'undercity'], ['outside_game:dungeon_progress']],
+    [['day / night / daybound / nightbound', 'day', 'night', 'daybound', 'nightbound'], ['game_state:day_night']],
+    [['ascend'], ['game_state:citys_blessing']],
+    [['monarch'], ['game_state:monarch_control', 'draw:monarch_draw']],
+    [['attraction'], ['game_component:attractions']],
+    [['contraption', 'assemble'], ['game_component:contraptions']],
+    [['the ring tempts you'], ['game_state:ring_bearer_progression']],
+    [['start your engines!'], ['game_state:starting_engine_counter']],
+    [['vote'], ['choice:players_vote']],
+    [['council’s dilemma', "council's dilemma"], ['choice:each_player_votes']],
+    [['join forces'], ['choice:players_pay_or_choose_together']],
+    [['tempting offer'], ['choice:opponent_may_pay_or_choose']],
+    [['will of the council'], ['choice:players_vote_yes_no']],
+    [['villainous choice'], ['choice:opponents_vote']],
+    [['discover'], ['library:reveal_until_value', 'cast:cast_without_paying_or_put_into_hand']],
+
+    // Hand abilities
+    [['discard for alternate effect'], ['hand:discard_as_activation', 'effect:alternate_mode']],
+    [['cycling'], ['hand:discard_to_draw']],
+    [['landcycling', 'forestcycling', 'islandcycling', 'swampcycling', 'mountaincycling', 'plainscycling', 'typecycling'], ['hand:discard_to_search_typed_land']],
+    [['transmute'], ['hand:discard_to_tutor_same_mana_value', 'activation:activated_ability']],
+    [['channel'], ['hand:discard_to_activate_ability']],
+    [['reinforce'], ['hand:discard_to_add_counters']],
+    [['bloodrush'], ['hand:discard_to_buff_attacking_creature']],
+    [['madness'], ['hand:discard_to_cast_from_exile_or_graveyard', 'cast:alternate_cost']],
+    [['mayhem'], ['hand:discard_trigger']],
+    [['ninjutsu'], ['combat:return_unblocked_attacker', 'battlefield:put_creature_tapped_attacking']],
+    [['miracle'], ['hand:reveal_first_draw', 'cast:alternate_cost']],
+    [['splice onto'], ['hand:reveal_from_hand_add_to_spell', 'spell:modify_existing_spell']],
+    [['forecast'], ['hand:reveal_from_hand_activated_ability']],
+
+    // Graveyard / recursion
+    [['jump-start', 'flashback', 'harmonize'], ['graveyard:cast_again', 'cast:alternate_from_graveyard']],
+    [['embalm', 'eternalize'], ['graveyard:create_token_copy', 'battlefield:temporary_or_tokenized_reentry']],
+    [['unearth'], ['graveyard:return_to_battlefield_temporary', 'combat:haste']],
+    [['encore'], ['graveyard:create_attacking_token_copies', 'combat:must_attack', 'end_step:exile_tokens']],
+    [['scavenge', 'renew'], ['graveyard:exile_card_to_add_counters']],
+    [['disturb'], ['graveyard:cast_transformed', 'card:double_face']],
+    [['aftermath'], ['card:split', 'graveyard:cast_from_graveyard_different_face']],
+    [['retrace'], ['graveyard:cast_by_discarding_land']],
+    [['escape'], ['graveyard:cast_by_exiling_cards']],
+    [['dredge'], ['graveyard:replace_draw_with_mill_and_return']],
+    [['recover'], ['graveyard:return_to_hand_with_payment']],
+
+    // Battlefield activated abilities
+    [['cohort'], ['activation:tap_creature_you_control', 'condition:ally_controlled']],
+    [['boast'], ['activation:only_if_attacked_this_turn']],
+    [['grandeur'], ['activation:discard_same_name_card']],
+    [['saddle'], ['activation:tap_creatures_power_threshold', 'combat:mount']],
+    [['exhaust'], ['activation:limited_once_or_exhaustion']],
+    [['power-up'], ['activation:once', 'activation:power_up', 'cost:entered_this_turn_reduction', 'counter:+1/+1', 'counter:ability_counter']],
+    [['prepared', 'preparation'], ['game_state:prepared_designation', 'card:paired_spell_in_exile']],
+    [['aura swap'], ['activation:swap_attached_aura', 'zone:hand']],
+    [['transfigure'], ['activation:sacrifice_to_tutor_mana_value']],
+    [['monstrosity'], ['activation:become_monstrous', 'counter:+1/+1']],
+    [['adapt'], ['activation:add_counters_if_none']],
+    [['level up'], ['activation:level_counters', 'stat:level_based']],
+    [['outlast'], ['activation:add_counters_sorcery_speed']],
+    [['craft'], ['activation:exile_components', 'card:transform_artifact']],
+    [['reconfigure'], ['activation:attach_or_unattach_equipment', 'combat:creature_or_equipment_mode']],
+
+    // Basic / zone actions and generalized modifiers
+    [['activate'], ['activation:activated_ability']],
+    [['cast'], ['cast:spell_casting']],
+    [['play'], ['cast:play_land_or_card']],
+    [['create'], ['token:create_or_copy']],
+    [['counter'], ['stack:counter_spell_or_ability']],
+    [['destroy'], ['zone:destroy_to_graveyard']],
+    [['draw'], ['draw:cards_to_hand']],
+    [['discard'], ['hand:discard']],
+    [['exile'], ['zone:exile']],
+    [['mill'], ['library:mill_to_graveyard']],
+    [['sacrifice'], ['zone:sacrifice_to_graveyard']],
+    [['ante'], ['game_variant:ante']],
+    [['attach'], ['attachment:attach']],
+    [['double'], ['effect:double_value_or_quantity']],
+    [['exchange'], ['effect:exchange_two_values_or_control']],
+    [['tap'], ['activation:tap_or_tap_payment']],
+    [['untap'], ['activation:untap_or_untap_payment']],
+    [['shuffle'], ['library:shuffle']],
+    [['search'], ['library:tutor_or_search']],
+    [['reveal'], ['information:reveal']],
+    [['fight'], ['combat:fight']],
+
+    // Conditions / variables
+    [['devotion'], ['condition:count_devotion_symbols']],
+    [['party'], ['condition:party_class_count']],
+    [['chroma'], ['condition:mana_symbol_count_in_cost_or_text']],
+    [['domain'], ['condition:basic_land_types_controlled']],
+    [['undergrowth'], ['condition:graveyard_creature_count']],
+    [['fathomless descent'], ['condition:graveyard_permanent_count']],
+    [['vivid'], ['counter:charge_counters_or_limited_resource']],
+    [['coven'], ['condition:three_creature_types_or_count']],
+    [['metalcraft'], ['condition:artifact_count_threshold']],
+    [['ferocious'], ['condition:power_4_threshold']],
+    [['formidable'], ['condition:creature_power_threshold']],
+    [['delirium'], ['condition:card_type_count_graveyard']],
+    [['spell mastery'], ['condition:instant_sorcery_count_graveyard']],
+    [['threshold'], ['condition:graveyard_card_count']],
+    [['descent', 'descend'], ['condition:permanents_in_graveyard_count']],
+    [['morbid'], ['condition:creature_died_this_turn']],
+    [['raid'], ['condition:attacked_this_turn']],
+    [['revolt'], ['condition:permanent_left_battlefield_this_turn']],
+    [['celebration'], ['condition:two_nonland_permanents_entered_or_were_affected']],
+    [['expend'], ['condition:mana_spent_this_turn_threshold']],
+    [['void'], ['condition:mana_value_zero_or_colorless_void_rule']],
+    [['infusion'], ['condition:gained_life_this_turn']],
+    [['hellbent'], ['condition:empty_hand']],
+    [['fateful hour'], ['condition:low_life_total']],
+    [['corrupted'], ['condition:poison_counter_threshold']],
+    [['historic'], ['condition:historic_object_count']],
+    [['modified'], ['condition:modified_creature']],
+    [['commit a crime'], ['condition:committed_crime_this_turn']],
+    [['outlaw'], ['creature_type:assassin_mercenary_pirate_rogue_warlock']],
+
+    // Triggered mechanics
+    [['hideaway'], ['trigger:etb_exile_hidden_card', 'cast:conditional_free_cast']],
+    [['imprint'], ['trigger:exile_and_reference_card']],
+    [['champion'], ['trigger:etb_exile_another_permanent', 'zone:return_champion_on_leaves']],
+    [['partner with'], ['commander:paired_search_on_etb']],
+    [['etb with counters'], ['trigger:etb_counters']],
+    [['amplify'], ['trigger:etb_reveal_same_creature_type', 'counter:+1/+1']],
+    [['bloodthirst'], ['trigger:etb_if_opponent_lost_life', 'counter:+1/+1']],
+    [['devour'], ['trigger:etb_sacrifice_creatures', 'counter:+1/+1']],
+    [['tribute'], ['trigger:etb_opponent_choice', 'counter:enters_with_counters_or_bonus']],
+    [['fabricate'], ['trigger:etb_counter_or_token_choice']],
+    [['riot'], ['trigger:etb_haste_or_counter_choice']],
+    [['unleash'], ['trigger:enters_with_counter_or_cannot_block']],
+    [['backup'], ['trigger:etb_counter_on_other_creature', 'effect:grant_ability_until_turn_end']],
+    [['graft'], ['trigger:enters_with_counter', 'counter:move_between_creatures']],
+    [['evolve'], ['trigger:larger_creature_enters', 'counter:+1/+1']],
+    [['soulbond'], ['trigger:pair_creatures', 'ability:shared_static_or_trigger']],
+    [['rally'], ['trigger:ally_or_creature_enters', 'effect:team_bonus']],
+    [['alliance'], ['trigger:one_or_more_creatures_enter_or_attack']],
+    [['constellation'], ['trigger:enchantment_enters']],
+    [['landfall'], ['trigger:land_enters']],
+    [['eerie'], ['trigger:enchantment_or_room_event']],
+    [['extort'], ['trigger:spell_cast', 'life:drain_for_each_opponent']],
+    [['prowess'], ['trigger:noncreature_spell_cast', 'stat:+1/+1_or_power_toughness']],
+    [['magecraft'], ['trigger:instant_sorcery_or_copy_ability']],
+    [['flurry'], ['trigger:second_or_later_spell_each_turn']],
+    [['paradox'], ['trigger:artifact_enters_or_spell_cast_related_event']],
+    [['opus'], ['trigger:mana_spent_exceeds_power_or_toughness', 'counter:+1/+1']],
+    [['repartee'], ['trigger:spell_cast_or_copy_related_event', 'effect:choice_or_interaction']],
+    [['increment'], ['trigger:spell_cast', 'condition:mana_spent_greater_than_power_or_toughness', 'counter:+1/+1']],
+    [['cumulative upkeep'], ['trigger:upkeep', 'cost:increasing_upkeep_payment']],
+    [['phasing'], ['zone:phase_out']],
+    [['echo'], ['trigger:upkeep', 'cost:pay_or_sacrifice']],
+    [['fading'], ['counter:time_counters', 'trigger:upkeep_remove_counter']],
+    [['vanishing'], ['counter:time_counters', 'trigger:upkeep_remove_counter_and_sacrifice']],
+    [['kinship'], ['trigger:upkeep_reveal_top_and_share_type']],
+    [['modular'], ['trigger:dies_move_counters', 'counter:+1/+1']],
+    [['soulshift'], ['trigger:dies_return_spirit_from_graveyard']],
+    [['haunt'], ['trigger:dies_exile_and_haunt']],
+    [['persist'], ['trigger:dies_return_with_minus_counter']],
+    [['undying'], ['trigger:dies_return_with_plus_counter']],
+    [['afterlife'], ['trigger:dies_create_flying_token']],
+    [['enrage'], ['trigger:damage_to_creature']],
+    [['inspired'], ['trigger:becomes_untapped']],
+    [['heroic'], ['trigger:targeted_by_spell_or_ability']],
+    [['valiant'], ['trigger:targeted_by_spell_or_ability', 'combat:combat_bonus']],
+    [['gotcha'], ['trigger:opponent_action_conditional', 'graveyard:return_self_or_play']],
+    [['survival'], ['trigger:upkeep_survival_condition']],
+
+    // Protection / damage
+    [['hexproof'], ['protection:opponent_targeting']],
+    [['shroud'], ['protection:any_targeting']],
+    [['ward'], ['protection:targeting_tax']],
+    [['indestructible'], ['protection:destruction']],
+    [['totem armor'], ['protection:destruction_replacement', 'aura:goes_to_graveyard_instead']],
+    [['regenerate'], ['protection:destruction_replacement', 'state:tap_remove_damage']],
+    [['absorb'], ['damage:reduce_damage_received']],
+    [['protection'], ['protection:targeting_damage_blocking']],
+    [['deathtouch'], ['damage:lethal_damage_to_creatures']],
+    [['lifelink'], ['damage:life_gain']],
+    [['wither'], ['damage:minus_counters']],
+    [['infect'], ['damage:minus_counters_and_poison']],
+
+    // Counters / permanent properties
+    [['+1/+1'], ['counter:+1/+1']],
+    [['-1/-1'], ['counter:-1/-1']],
+    [['stun'], ['counter:stun']],
+    [['shield'], ['counter:shield']],
+    [['ability counters'], ['counter:ability_counter']],
+    [['stickers', 'tickets'], ['game_component:stickers_tickets']],
+    [['finality'], ['counter:finality']],
+    [['energy'], ['resource:energy']],
+    [['experience'], ['resource:experience']],
+    [['rad'], ['counter:rad']],
+    [['poison'], ['resource:poison_counters']],
+    [['equipment', 'equip'], ['attachment:equipment', 'activation:attach_equipment']],
+    [['aura', 'enchant'], ['attachment:aura', 'restriction:enchant']],
+    [['fortification', 'fortify'], ['attachment:fortification']],
+    [['saga', 'read ahead'], ['permanent:saga_chapter_triggers']],
+    [['class'], ['permanent:class_level_enchantment']],
+    [['vehicle', 'crew', 'living metal'], ['permanent:vehicle_crew', 'artifact_creature_mode']],
+    [['augment', 'host'], ['permanent:augment_host_combination']],
+    [['battle', 'siege'], ['permanent:battle_defense_and_battle_type']],
+    [['spacecraft', 'station'], ['permanent:spacecraft_or_station_crew']],
+    [['case'], ['permanent:case_solved_condition']],
+    [['room'], ['permanent:room_door_progression']],
+    [['curse', 'trap', 'tribal'], ['permanent:tagged_subtype_synergy']],
+    [['changeling'], ['creature:all_creature_types']],
+    [['devoid'], ['property:colorless']],
+
+    // Current/newer named mechanics in the taxonomy with distinctive structures
+    [['teamwork'], ['cost:tap_creatures_by_power', 'spell:bonus_if_teamwork_paid', 'spell:conditional_cast_mode']],
+    [['prepare'], ['game_state:prepared_designation', 'card:paired_prepare_spell']],
+    [['heal'], ['damage:remove_damage']],
+    [['recruit'], ['combat:tap_or_attack_condition']],
+    [['storied'], ['trigger:story_or_historic_count']],
+];
+
+const SEMANTIC_MECHANIC_BRIDGE_INDEX = (() => {
+    const index = Object.create(null);
+    for (const [names, anchors] of SEMANTIC_MECHANIC_BRIDGE_GROUPS) {
+        const cleanAnchors = Array.from(new Set((anchors || []).map(a => normalizeMechanicToken(a)).filter(Boolean)));
+        for (const name of names) {
+            const key = normalizeMechanicBridgeKey(name);
+            if (!key) continue;
+            if (!index[key]) index[key] = new Set();
+            cleanAnchors.forEach(a => index[key].add(a));
+        }
+    }
+    // Explicit aliases for spelling/punctuation variants found in card databases.
+    const aliases = {
+        "partner with": 'partner with',
+        'doctor companion': "doctor's companion",
+        'doctor’s companion': "doctor's companion",
+        'friends forever': 'friends forever',
+        'daybound/nightbound': 'day / night / daybound / nightbound',
+        'day/night': 'day / night / daybound / nightbound',
+        'manifest dread': 'manifest dread',
+        'amass': 'amass',
+        'landcycling': 'landcycling',
+        'typecycling': 'typecycling',
+        'living metal': 'living metal',
+        'power up': 'power-up'
+    };
+    for (const [alias, target] of Object.entries(aliases)) {
+        const targetSet = index[normalizeMechanicBridgeKey(target)];
+        if (targetSet) index[normalizeMechanicBridgeKey(alias)] = new Set(targetSet);
+    }
+    return index;
+})();
+
+// Text-to-mechanic bridge rules. These intentionally detect only high-confidence
+// rule templates; broad words such as "choose", "attack", or "counter" are not
+// sufficient by themselves to infer a named mechanic.
+
+// V24 contextual bridge support ---------------------------------------------------------------
+// A highlighted Oracle span often does not contain the named mechanic keyword. Scryfall's
+// card-level `keywords` metadata is still authoritative, but it cannot simply be copied into a
+// highlight profile because unrelated mechanics elsewhere on the same source card would leak into
+// the score. This inverse bridge instead infers only the named mechanics whose semantic/structural
+// signature is actually supported by the highlighted text (or by the full-card clause containing it).
+
+const SEMANTIC_BRIDGE_GENERIC_CONCEPT_TERMS = new Set([
+    'game', 'card', 'cards', 'permanent', 'permanents', 'effect', 'effects', 'ability', 'abilities',
+    'choice', 'optional', 'condition', 'combat', 'trigger', 'action', 'resource', 'state', 'zone',
+    'spell', 'player', 'opponent', 'cost', 'value', 'event', 'object', 'mode', 'mode_count', 'normal'
+]);
+
+const SEMANTIC_BRIDGE_CONCEPT_SYNONYMS = Object.freeze({
+    attacks: 'attack', attacking: 'attack', attacked: 'attack',
+    blocks: 'block', blocking: 'block', blocked: 'block',
+    enters: 'enter', entering: 'enter', entered: 'enter',
+    dies: 'die', died: 'die', dying: 'die',
+    casts: 'cast', casting: 'cast', casted: 'cast',
+    draws: 'draw', drawn: 'draw',
+    discards: 'discard', discarded: 'discard',
+    exiles: 'exile', exiled: 'exile',
+    returns: 'return', returned: 'return',
+    copies: 'copy', copied: 'copy',
+    counters: 'counter', countered: 'counter',
+    tokens: 'token',
+    creatures: 'creature', players: 'player', spells: 'spell',
+    tapped: 'tap', taps: 'tap', tapping: 'tap',
+    untapped: 'untap', untaps: 'untap', untapping: 'untap',
+    revealed: 'reveal', reveals: 'reveal',
+    sacrificed: 'sacrifice', sacrifices: 'sacrifice',
+    destroyed: 'destroy', destroys: 'destroy',
+    prevented: 'prevent', prevents: 'prevent',
+    cannot: 'cant',
+    multiple: 'multiple', several: 'multiple'
+});
+
+function semanticBridgeConceptTokens(anchor) {
+    let raw = normalizeMechanicToken(anchor);
+    if (!raw) return [];
+    raw = raw.replace(/^bridge:(?:legacy:)?/, '');
+    return Array.from(new Set(raw
+        .replace(/[/:,_+\-]+/g, ' ')
+        .split(/\s+/)
+        .map(t => SEMANTIC_BRIDGE_CONCEPT_SYNONYMS[t] || t)
+        .filter(Boolean)));
+}
+
+const SEMANTIC_BRIDGE_ANCHOR_FREQUENCY = (() => {
+    const counts = Object.create(null);
+    for (const [, anchors] of SEMANTIC_MECHANIC_BRIDGE_GROUPS) {
+        for (const anchor of new Set(anchors || [])) {
+            const key = normalizeMechanicToken(anchor);
+            if (key) counts[key] = (counts[key] || 0) + 1;
+        }
+    }
+    return counts;
+})();
+
+function semanticBridgeAnchorSpecificity(anchor) {
+    const clean = normalizeMechanicToken(anchor).replace(/^bridge:(?:legacy:)?/, '');
+    const frequency = SEMANTIC_BRIDGE_ANCHOR_FREQUENCY[clean] || 1;
+    if (frequency <= 1) return 1.55;
+    if (frequency <= 3) return 1.34;
+    if (frequency <= 8) return 1.15;
+    if (frequency <= 18) return 1.00;
+    return 0.82;
+}
+
+function collectSemanticBridgeTextEvidence(text) {
+    const input = String(text || '');
+    const anchors = new Set();
+    for (const [regex, mappedAnchors] of SEMANTIC_MECHANIC_BRIDGE_TEXT_RULES || []) {
+        regex.lastIndex = 0;
+        if (regex.test(input)) {
+            for (const anchor of mappedAnchors || []) anchors.add(normalizeMechanicToken(anchor));
+        }
+    }
+
+    // General Oracle grammar anchors support the inverse bridge when the user highlighted the
+    // implementing sentence rather than the keyword. They are deliberately non-specific and are
+    // therefore only decisive when they agree with a mechanic's more distinctive signature.
+    const lexicalRules = [
+        [/\battack(?:s|ing|ed)?\b/i, 'combat:attack'],
+        [/\bblock(?:s|ed|ing)?\b/i, 'combat:block'],
+        [/\bmust attack\b|\bcan't attack\b|\bcannot attack\b/i, 'combat:cannot_attack'],
+        [/\bcan't block\b|\bcannot block\b/i, 'combat:cannot_block'],
+        [/\bcan't be blocked\b|\bcannot be blocked\b|\bunblockable\b/i, 'combat:evasion_unblockable'],
+        [/\bcan only be blocked by\b|\bcan't be blocked except by\b/i, 'combat:blocking_restriction'],
+        [/\bdeals? combat damage to (?:a )?player\b/i, 'combat:combat_damage_to_player'],
+        [/\bexcess combat damage\b/i, 'combat:excess_damage'],
+        [/\bfirst[- ]strike\b/i, 'combat:first_damage_step'],
+        [/\bdouble strike\b/i, 'combat:two_damage_steps'],
+        [/\bwhenever\b.*\battacks?\b|\bwhen\b.*\battacks?\b/i, 'trigger:attack'],
+        [/\bwhenever\b.*\bblocks?\b|\bwhen\b.*\bblocks?\b/i, 'trigger:block'],
+        [/\bwhenever\b.*\bdies\b|\bwhen\b.*\bdies\b/i, 'trigger:dies'],
+        [/\b(?:enters|enter) the battlefield\b/i, 'trigger:etb'],
+        [/\bat the beginning of\b/i, 'trigger:beginning_of_turn'],
+        [/\bat the end of\b/i, 'trigger:end_of_turn'],
+        [/\bwhenever you cast\b|\bwhen you cast\b/i, 'trigger:spell_cast'],
+        [/\bcast\b/i, 'cast:spell_casting'],
+        [/\bfrom (?:your )?graveyard\b/i, 'zone:graveyard'],
+        [/\bfrom exile\b|\binto exile\b|\bexile\b/i, 'zone:exile'],
+        [/\breturn\b.*\bto (?:the battlefield|its owner's hand|your hand|their hand)\b/i, 'zone:return'],
+        [/\bto the battlefield\b|\bonto the battlefield\b/i, 'zone:return_to_battlefield'],
+        [/\bsacrifice\b/i, 'zone:sacrifice_to_graveyard'],
+        [/\bdestroy\b/i, 'zone:destroy_to_graveyard'],
+        [/\bcreate\b.*\btoken\b/i, 'token:create'],
+        [/\btoken(?:s)?\b/i, 'token:token'],
+        [/\bput\b.*\bcounter\b/i, 'counter:add'],
+        [/\bremove\b.*\bcounter\b/i, 'counter:remove'],
+        [/\b\+1\/\+1 counter\b/i, 'counter:+1/+1'],
+        [/\b-1\/-1 counter\b/i, 'counter:-1/-1'],
+        [/\bstun counter\b/i, 'counter:stun'],
+        [/\bshield counter\b/i, 'counter:shield'],
+        [/\bpoison counter\b/i, 'resource:poison_counters'],
+        [/\benergy counter\b/i, 'resource:energy'],
+        [/\bdraw\b/i, 'draw:cards_to_hand'],
+        [/\bdiscard\b/i, 'hand:discard'],
+        [/\bsearch\b.*\blibrary\b/i, 'library:tutor_or_search'],
+        [/\bshuffle\b/i, 'library:shuffle'],
+        [/\breveal\b/i, 'information:reveal'],
+        [/\bscry\b/i, 'library:top_manipulation'],
+        [/\bsurveil\b/i, 'library:top_to_graveyard'],
+        [/\bmill\b/i, 'library:mill_to_graveyard'],
+        [/\bcopy\b.*\bspell\b/i, 'spell:copy'],
+        [/\bwithout paying (?:its|their) mana cost\b/i, 'cast:cast_without_paying'],
+        [/\bpay\b.*\bmana\b/i, 'cost:mana'],
+        [/\bpay\b.*\blife\b/i, 'cost:life'],
+        [/\badd\b.*\bmana\b|\bproduce\b.*\bmana\b/i, 'mana:production'],
+        [/\btap\b/i, 'activation:tap'],
+        [/\buntap\b/i, 'activation:untap'],
+        [/\bphase out\b|\bphases out\b/i, 'zone:phase_out'],
+        [/\bface[- ]down\b/i, 'card:face_down'],
+        [/\bturn (?:it|this|that) face up\b/i, 'card:turn_face_up'],
+        [/\btransform\b/i, 'card:change_face'],
+        [/\battach\b|\bequip(?:ped|s)?\b/i, 'attachment:attach'],
+        [/\bprevent(?:s|ed)?\b.*\bdamage\b/i, 'protection:damage_prevention'],
+        [/\bcan't be the target\b|\bcannot be the target\b/i, 'protection:targeting'],
+        [/\bmultiple blockers?\b|\btwo or more creatures?\b/i, 'combat:evasion_multiple_blockers_or_suspected'],
+        [/\bassign (?:their|its|combat) damage\b/i, 'combat:block_assignment_control'],
+        [/\bcounter it unless (?:that player|its controller) pays\b/i, 'protection:targeting_tax'],
+        [/\bunless (?:that player|its controller) pays\b.*\b(?:target|counter)\b/i, 'protection:targeting_tax'],
+        [/\beach card you exile from (?:your )?graveyard.*\bpays for\b/i, 'cost:exile_graveyard_cards'],
+        [/\bpays for \{\d+\}|\bpays for one\b/i, 'cost:mana_substitute'],
+        [/\bwhen .* enters(?: the battlefield)?\b.*\bchoose one\b[\s\S]*\b(?:counter|token)\b/i, 'trigger:etb'],
+        [/\bwhen .* enters(?: the battlefield)?\b.*\bchoose one\b[\s\S]*\b(?:counter|token)\b/i, 'choice:modal'],
+        [/\bput a \+1\/\+1 counter\b.*\bcreate .*token\b|\bcreate .*token\b.*\bput a \+1\/\+1 counter\b/i, 'counter:+1/+1'],
+        [/\breturn (?:it|that card|this card)\b.*\bto the battlefield\b[\s\S]*\b-1\/-1 counter\b/i, 'graveyard:return_to_battlefield'],
+        [/\breturn (?:it|that card|this card)\b.*\bto the battlefield\b[\s\S]*\b-1\/-1 counter\b/i, 'counter:-1/-1'],
+        [/\breturn (?:it|that card|this card)\b.*\bto the battlefield\b[\s\S]*\b\+1\/\+1 counter\b/i, 'graveyard:return_to_battlefield'],
+        [/\breturn (?:it|that card|this card)\b.*\bto the battlefield\b[\s\S]*\b\+1\/\+1 counter\b/i, 'counter:+1/+1'],
+        [/\bmust attack each combat if able\b.*\bplayer other than you\b/i, 'combat:must_attack_if_able', 'target:opponent_choice'],
+        [/\bcan't be blocked except by two or more creatures\b/i, 'combat:evasion_multiple_blockers_or_suspected'],
+        [/\bsacrifice (?:a|an|this|that) (?:creature|permanent)\b[\s\S]*\benters?(?: the battlefield)?\b/i, 'cost:sacrifice_creature', 'trigger:etb'],
+        [/\bcycling\b/i, 'hand:discard_to_draw'],
+        [/\bdiscard (?:this|a) card\b[\s\S]*\bdraw (?:a|one) card\b/i, 'hand:discard_to_draw'],
+        [/\bdiscard (?:this|a) card\b[\s\S]*\bsearch your library\b/i, 'hand:discard_to_search_typed_land'],
+        [/\bdiscard (?:this|a) card\b[\s\S]*\bactivate\b/i, 'hand:discard_to_activate_ability'],
+        [/\bscheme\b/i, 'scheme:advancement'],
+        [/\bcommander\b/i, 'commander:commander_control_condition'],
+        [/\battraction\b/i, 'game_component:attractions'],
+        [/\bcontraption\b/i, 'game_component:contraptions'],
+        [/\bthe ring tempts you\b/i, 'game_state:ring_bearer_progression'],
+        [/\bdaybound\b|\bnightbound\b/i, 'game_state:day_night'],
+        [/\bcity's blessing\b/i, 'game_state:citys_blessing'],
+        [/\bdungeon\b|\bundercity\b/i, 'outside_game:dungeon_progress'],
+        [/\bvote\b|\bvotes\b|\bvoting\b/i, 'choice:players_vote'],
+        [/\bproliferate\b/i, 'counter:add_existing_counter_type'],
+        [/\bprotection from\b/i, 'protection:targeting_damage_blocking'],
+        [/\bregenerate\b/i, 'protection:destruction_replacement'],
+        [/\bindestructible\b/i, 'protection:destruction'],
+        [/\bhexproof\b|\bshroud\b|\bward\b/i, 'protection:targeting'],
+        [/\bdeathtouch\b/i, 'damage:lethal_damage_to_creatures'],
+        [/\blifelink\b/i, 'damage:life_gain'],
+        [/\bwither\b/i, 'damage:minus_counters'],
+        [/\binfect\b/i, 'damage:minus_counters_and_poison']
+    ];
+    for (const [regex, anchor] of lexicalRules) {
+        regex.lastIndex = 0;
+        if (regex.test(input)) anchors.add(anchor);
+    }
+    return anchors;
+}
+
+function semanticBridgeSignatureForKeyword(keyword) {
+    const clean = normalizeMechanicBridgeKey(keyword);
+    const signature = new Set();
+    const mapped = SEMANTIC_MECHANIC_BRIDGE_INDEX[clean];
+    if (mapped) mapped.forEach(a => signature.add(normalizeMechanicToken(a)));
+    // Legacy anchors remain useful for normal whole-card scoring, but are intentionally excluded
+    // from contextual inference. Mixing a second legacy vocabulary into the signature dilutes the
+    // exact-match ratio and makes a genuinely distinctive highlighted implementation look weak.
+    return signature;
+}
+
+function semanticBridgeAnchorConceptSet(anchors) {
+    const terms = new Set();
+    for (const anchor of anchors || []) {
+        for (const term of semanticBridgeConceptTokens(anchor)) {
+            if (!SEMANTIC_BRIDGE_GENERIC_CONCEPT_TERMS.has(term)) terms.add(term);
+        }
+    }
+    return terms;
+}
+
+function semanticBridgeSignatureTextScore(signatureAnchors, textAnchors) {
+    const signature = signatureAnchors instanceof Set ? signatureAnchors : new Set(signatureAnchors || []);
+    const text = textAnchors instanceof Set ? textAnchors : new Set(textAnchors || []);
+    if (!signature.size || !text.size) return { score: 0, exact: 0, concept: 0, matchedTerms: 0 };
+
+    const signatureConcepts = semanticBridgeAnchorConceptSet(signature);
+    const textConcepts = semanticBridgeAnchorConceptSet(text);
+    let signatureWeight = 0;
+    let sharedExactWeight = 0;
+    for (const anchor of signature) {
+        const w = semanticBridgeAnchorSpecificity(anchor);
+        signatureWeight += w;
+        if (text.has(anchor)) sharedExactWeight += w;
+    }
+    const exactCoverage = signatureWeight ? sharedExactWeight / signatureWeight : 0;
+    const sharedTerms = [...signatureConcepts].filter(t => textConcepts.has(t));
+    const conceptScore = sharedTerms.length / Math.max(1, signatureConcepts.size);
+    const score = Math.max(exactCoverage, conceptScore * 0.72);
+    return { score, exact: exactCoverage, concept: conceptScore, matchedTerms: sharedTerms.length };
+}
+
+function bridgeClauseTokenOverlap(a, b) {
+    const tokenize = text => new Set(normalizeMechanicToken(text)
+        .replace(/[^a-z0-9+\/-]+/g, ' ')
+        .split(/\s+/)
+        .filter(t => t.length > 2));
+    const aa = tokenize(a), bb = tokenize(b);
+    if (!aa.size || !bb.size) return 0;
+    const overlap = [...aa].filter(v => bb.has(v)).length;
+    return overlap / Math.max(1, aa.size);
+}
+
+function inferContextualSemanticMechanics(card, text, directKeywords = new Set()) {
+    const highlighted = String(text || '').trim();
+    const allKeywords = new Set((Array.isArray(card?.keywords) ? card.keywords : [])
+        .map(normalizeMechanicToken).filter(Boolean));
+    if (!highlighted || !allKeywords.size) return { inferred: new Set(), evidence: new Map() };
+
+    const textAnchors = collectSemanticBridgeTextEvidence(highlighted);
+    const fullOracle = String(card?.oracle_text || (card?.card_faces ? card.card_faces.map(f => f.oracle_text || '').join('\n\n') : '') || '');
+    const subset = normalizeMechanicToken(highlighted) !== normalizeMechanicToken(fullOracle);
+    if (!subset) return {
+        inferred: new Set(allKeywords),
+        evidence: new Map([...allKeywords].map(k => [k, { score: 1, reason: 'full-card' }]))
+    };
+
+    const clauses = fullOracle
+        .split(/(?:\r?\n)+|(?<=[.!?])\s+(?=[A-Z{])/)
+        .map(x => x.trim())
+        .filter(Boolean);
+    const inferred = new Set();
+    const evidence = new Map();
+
+    for (const keyword of allKeywords) {
+        if (directKeywords.has(keyword)) {
+            inferred.add(keyword);
+            evidence.set(keyword, { score: 1, reason: 'keyword-in-highlight' });
+            continue;
+        }
+
+        const signature = semanticBridgeSignatureForKeyword(keyword);
+        if (!signature.size) continue;
+        const direct = semanticBridgeSignatureTextScore(signature, textAnchors);
+        let best = { score: 0, clause: null, clauseScore: 0, overlap: 0 };
+
+        for (const clause of clauses) {
+            const clauseAnchors = collectSemanticBridgeTextEvidence(clause);
+            const clauseScore = semanticBridgeSignatureTextScore(signature, clauseAnchors).score;
+            if (clauseScore <= 0) continue;
+            const overlap = bridgeClauseTokenOverlap(highlighted, clause);
+            const containsHighlighted = normalizeMechanicToken(clause).includes(normalizeMechanicToken(highlighted));
+            const proximity = containsHighlighted ? 1 : overlap;
+            const contextual = clauseScore * (0.58 + 0.42 * proximity);
+            if (contextual > best.score) best = { score: contextual, clause, clauseScore, overlap: proximity };
+        }
+
+        // Strong exact anchors can stand alone. Generic concepts require multiple independent
+        // terms, preventing a shared word like "combat" or "trigger" from linking unrelated mechanics.
+        const hasDistinctiveExactAnchor = [...signature].some(anchor => textAnchors.has(anchor) && semanticBridgeAnchorSpecificity(anchor) >= 1.30);
+        const directAccepted = hasDistinctiveExactAnchor || direct.exact >= 0.42 || (direct.score >= 0.48 && direct.matchedTerms >= 2);
+        const contextualAccepted = best.score >= 0.52 && (best.clauseScore >= 0.56 || best.overlap >= 0.58);
+        if (directAccepted || contextualAccepted) {
+            inferred.add(keyword);
+            evidence.set(keyword, {
+                score: Math.max(direct.score, best.score),
+                reason: directAccepted ? 'highlight-structural-match' : 'full-card-clause-context',
+                direct,
+                clause: best
+            });
+        }
+    }
+    return { inferred, evidence };
+}
+
+const SEMANTIC_MECHANIC_BRIDGE_TEXT_RULES = [
+    // Casting/timing/cost templates
+    [/\byou may cast (?:this spell|this card) any time you could cast an instant\b/i, ['cast:instant_timing']],
+    [/\bas an additional cost to cast\b[\s\S]*\byou may pay\b/i, ['cost:optional_additional_cost']],
+    [/\bpay an additional \{[^}]+\}\b.*\bcast this spell\b|\bas an additional cost\b[\s\S]*\bpay\b/i, ['cost:optional_additional_cost']],
+    [/\bfor each time (?:you|this spell) was kicked\b/i, ['cost:repeatable_optional_additional_cost']],
+    [/\bchoose any number of modes?\b|\bchoose two or more modes?\b/i, ['choice:choose_multiple_modes']],
+    [/\bchoose one or more\b[\s\S]*\b(?:modes?|options?)\b/i, ['choice:choose_multiple_modes']],
+    [/\bchoose both\b/i, ['choice:choose_multiple_modes']],
+    [/\bcopy (?:that|the) spell\b[\s\S]*\bfor each\b/i, ['spell:copy_per_spell_cast']],
+    [/\bcopy (?:that|the) spell\b/i, ['spell:copy']],
+    [/\breturn this spell\b[\s\S]*\bto its owner's hand\b/i, ['zone:return_to_hand']],
+    [/\bexile this spell\b[\s\S]*\bcast a copy\b/i, ['spell:copy_from_exile']],
+    [/\bcast a copy of this spell\b[\s\S]*\bwithout paying its mana cost\b/i, ['spell:copy_without_paying']],
+    [/\bcast a copy of it\b[\s\S]*\bwithout paying its mana cost\b/i, ['spell:copy_without_paying']],
+    [/\bat the beginning of each of your first main phases\b[\s\S]*\bcopy\b/i, ['trigger:first_main_phase', 'spell:repeat_each_turn']],
+
+    // Alternate-cost / face-change templates
+    [/\bexile (?:it|this card)\b[\s\S]*\bcast (?:it|this card)\b[\s\S]*\blater\b/i, ['cast:exile_for_later', 'cast:cast_later']],
+    [/\bcast (?:it|this spell|this card)\b[\s\S]*\bfor an alternate cost\b|\bcast .* instead of its mana cost\b/i, ['cast:alternative_cost']],
+    [/\bcast (?:it|this spell)\b[\s\S]*\bwithout paying its mana cost\b/i, ['cast:cast_without_paying']],
+    [/\bturn (?:it|this card|this permanent) face up\b/i, ['card:turn_face_up']],
+    [/\bface-down\b[\s\S]*\bturn (?:it|this) face up\b|\bface down\b/i, ['card:face_down']],
+    [/\btransform (?:it|this permanent|this card)\b/i, ['card:change_face']],
+    [/\bcopy of (?:this|that) creature\b[\s\S]*\btoken\b/i, ['token:create_token_copy']],
+
+    [/\btap (?:any number of )?creatures? you control to help pay\b/i, ['cost:tap_creatures', 'cost:mana_substitute']],
+    [/\btap an? (?:untapped )?artifact(?:s)? you control\b[\s\S]*\bpay\b/i, ['cost:tap_artifacts', 'cost:mana_substitute']],
+    [/\bexile (?:cards|card) from your graveyard\b[\s\S]*\bcosts? .* less to cast\b/i, ['cost:exile_graveyard_cards', 'cost:mana_substitute']],
+    [/\banother player may pay\b[\s\S]*\bcost\b/i, ['cost:other_player_may_help_pay']],
+    [/\bsacrifice a creature\b[\s\S]*\bthis spell costs? .* less\b/i, ['cost:sacrifice_creature', 'cost:conditional_reduction']],
+    [/\bpay \b[\s\S]*\blife\b[\s\S]*\binstead of\b[\s\S]*\bmana\b/i, ['cost:life_or_mana_substitution']],
+    [/\bcan't cast spells or activate abilities\b|\bplayers can't cast spells or activate abilities\b/i, ['stack:cannot_respond_with_spells_or_abilities']],
+
+    // Distinctive spell mechanics
+    [/\bcopy (?:that|this) spell for each other spell cast\b/i, ['spell:copy_per_spell_cast']],
+    [/\bcopy (?:it|that spell|this spell) for each other spell cast\b[\s\S]*\bthis turn\b/i, ['spell:copy_per_spell_cast']],
+    [/\bwhen you cast this spell\b[\s\S]*\bcopy\b[\s\S]*\bfor each\b/i, ['trigger:spell_cast', 'spell:copy']],
+    [/\bexile cards from the top of your library until\b[\s\S]*\bcast\b[\s\S]*\bwithout paying\b/i, ['library:reveal_until_qualifying_spell', 'cast:cast_without_paying']],
+    [/\bwhen you cast this spell, reveal the top\b/i, ['spell:reveal_and_cast_or_add_from_library']],
+    [/\bif you cast this spell from your hand\b[\s\S]*\bcast it from exile\b/i, ['spell:cast_again_from_exile_next_upkeep']],
+    [/\bcopy (?:this|that) spell\b[\s\S]*\bopponent\b[\s\S]*\bcopy\b/i, ['spell:opponent_gets_copy']],
+    [/\bother creatures you control that share a color\b/i, ['effect:shared_targeting_by_color']],
+    [/\bencode\b[\s\S]*\bcombat damage to a player\b/i, ['combat:damage_trigger', 'spell:copy_from_exile']],
+
+    // Cost-by-colors / cast-statistics mechanics
+    [/\bfor each different color of mana spent\b|\bfor each color of mana spent to cast\b/i, ['cost:number_of_colors_spent']],
+    [/\bfor each color among mana spent to cast\b/i, ['counter:number_of_colors_spent']],
+    [/\bif at least (?:two|three|four) different colors of mana were spent\b/i, ['cost:number_of_colors_spent']],
+    [/\bif you spent .* mana to cast this spell\b/i, ['cost:mana_spent_as_value']],
+
+    // Combat-rule templates
+    [/\bthis creature can't be blocked by creatures with\b/i, ['combat:evasion']],
+    [/\bcan block creatures with flying\b/i, ['combat:block_flying']],
+    [/\bcan block as though it had flying\b/i, ['combat:block_flying']],
+    [/\bmust be blocked\b/i, ['combat:force_block']],
+    [/\bwhenever this creature attacks, (?:each|all) .* creature gets\b/i, ['combat:attack_trigger_team_buff']],
+    [/\bwhenever this creature attacks alone\b/i, ['combat:solo_attacker']],
+    [/\bwhenever this creature attacks a player with more life\b/i, ['combat:attacking_player_with_more_life']],
+
+    // Cost substitution / payment templates
+    [/\bcast .* by paying (?:its|their) \b[\s\S]*\bwith life\b/i, ['cost:life_or_mana_substitution']],
+    [/\bpay life instead of mana\b|\bpay .* life rather than .* mana\b/i, ['cost:life_or_mana_substitution']],
+    [/\bthis spell costs? \{?\d+\}? less\b[\s\S]*\bfor each\b/i, ['cost:reduction_by_object_count']],
+    [/\bthis spell costs? \{?\d+\}? less\b[\s\S]*\beach opponent\b|\bthis spell costs? \{?\d+\}? less\b[\s\S]*\bopponent\b/i, ['cost:reduction_by_opponent_count', 'cost:conditional_reduction']],
+    [/\bthis spell costs? \{?\d+\}? less\b[\s\S]*\bcreature\b/i, ['cost:reduction_by_object_count']],
+    [/\bthe spell costs? less to cast\b/i, ['cost:conditional_reduction']],
+
+    // Hand/graveyard templates
+    [/\bdiscard this card:\s*search your library\b/i, ['hand:discard_to_tutor']],
+    [/\bdiscard this card:\s*draw\b/i, ['hand:discard_to_draw']],
+    [/\bdiscard this card:\s*put .* \+1\/\+1 counters?\b/i, ['hand:discard_to_add_counters']],
+    [/\bdiscard this card:\s*target attacking creature gets\b/i, ['hand:discard_to_buff_attacking_creature']],
+    [/\bif you discarded .*\bthis turn\b[\s\S]*\bcast\b/i, ['hand:discard_to_cast_from_exile_or_graveyard']],
+    [/\bif this card was discarded\b[\s\S]*\bcast\b/i, ['hand:discard_to_cast_from_exile_or_graveyard']],
+    [/\breveal .* from your hand\b[\s\S]*\bif\b.*\bcast\b/i, ['hand:reveal_first_draw']],
+    [/\bas you cast .* spell\b[\s\S]*\bcopy\b.*\bfrom your hand\b/i, ['hand:reveal_from_hand_add_to_spell']],
+    [/\byou may cast .* from your graveyard\b/i, ['cast:alternate_from_graveyard']],
+    [/\bcast .* from your graveyard\b/i, ['cast:alternate_from_graveyard']],
+    [/\breturn .* from your graveyard to the battlefield\b/i, ['graveyard:return_to_battlefield']],
+    [/\breturn .* from your graveyard to your hand\b/i, ['graveyard:return_to_hand']],
+    [/\bexile .* from your graveyard\b[\s\S]*\bcast\b/i, ['graveyard:cast_by_exiling_cards']],
+    [/\bdiscard a land card\b[\s\S]*\bcast .* from your graveyard\b/i, ['graveyard:cast_by_discarding_land']],
+    [/\bmill .* instead of drawing\b[\s\S]*\breturn .* from your graveyard\b/i, ['graveyard:replace_draw_with_mill_and_return']],
+    [/\breturn .* from your graveyard to your hand\b[\s\S]*\bpay\b/i, ['graveyard:return_to_hand']],
+
+    // Token / counter templates
+    [/\bcreate .* treasure token\b/i, ['token:create_treasure']],
+    [/\bcreate .* clue token\b/i, ['token:create_clue']],
+    [/\bcreate .* food token\b/i, ['token:create_food']],
+    [/\bcreate .* incubator token\b/i, ['token:create_incubator']],
+    [/\bcreate .* powerstone token\b/i, ['token:create_powerstone']],
+    [/\bcreate .* role token\b/i, ['token:create_role_aura_token']],
+    [/\bpopulate\b/i, ['token:copy_existing_token']],
+    [/\bput .*\+1\/\+1 counters?\b[\s\S]*\bcreature\b/i, ['counter:+1/+1']],
+    [/\bput .* -1\/-1 counters?\b/i, ['counter:-1/-1']],
+    [/\bremove .*\+1\/\+1 counter\b/i, ['counter:remove_plus_counters']],
+    [/\bgive .* another counter\b|\bput (?:a|one) counter\b[\s\S]*\bon each\b/i, ['counter:add_existing_counter_type']],
+
+    // Combat / attack / blocking templates
+    [/\bmust attack each combat if able\b|\bmust attack if able\b/i, ['combat:must_attack_if_able']],
+    [/\bcan't attack\b[\s\S]*\bunless\b/i, ['combat:attack_requirement']],
+    [/\bcan't block\b/i, ['combat:cannot_block']],
+    [/\bcan't be blocked except by\b/i, ['combat:blocking_restriction']],
+    [/\bcan only be blocked by\b/i, ['combat:blocking_restriction']],
+    [/\bgets? \+\d+\/\+\d+ for each creature attacking\b/i, ['combat:attack_trigger_team_buff']],
+    [/\bwhenever (?:a|an|one or more) creature(?:s)? attacks?\b/i, ['trigger:attack']],
+    [/\bwhenever .* deals combat damage to a player\b/i, ['combat:combat_damage_to_player']],
+    [/\bwhenever .* blocks?\b/i, ['trigger:block']],
+    [/\bwhenever .* becomes blocked\b/i, ['trigger:becomes_blocked']],
+    [/\bwhenever .* becomes unblocked\b/i, ['trigger:becomes_unblocked']],
+
+    // Protection / state-change templates
+    [/\bcan't be the target of\b/i, ['protection:targeting']],
+    [/\bhexproof\b/i, ['protection:opponent_targeting']],
+    [/\bprevent .* damage\b/i, ['protection:damage_prevention']],
+    [/\bregenerate\b/i, ['protection:destruction_replacement']],
+    [/\bphase out\b/i, ['zone:phase_out']],
+    [/\bexile .* instead\b[\s\S]*\bgraveyard\b/i, ['protection:destruction_replacement', 'zone:exile']],
+
+    // Information / library templates
+    [/\blook at the top \d+ cards? of your library\b[\s\S]*\bput .* on the bottom\b/i, ['library:top_manipulation']],
+    [/\breveal the top card of your library\b/i, ['library:reveal_top']],
+    [/\bput .* on top of your library\b/i, ['library:top_manipulation']],
+    [/\bput .* into your library\b[\s\S]*\bshuffle\b/i, ['library:shuffle']],
+
+    // Newer mechanics / ability templates with distinctive rule shapes
+    [/\bwhenever you cast a spell\b[\s\S]*\bgreater than .* power or toughness\b/i, ['condition:mana_spent_greater_than_power_or_toughness', 'trigger:spell_cast']],
+    [/\bpower-up\b[\s\S]*\bactivate only once\b/i, ['activation:once', 'activation:power_up']],
+    [/\bas an additional cost to cast this spell, you may tap any number of creatures\b/i, ['cost:tap_creatures_by_power']],
+    [/\bif this spell was cast using teamwork\b/i, ['spell:conditional_cast_mode']],
+    [/(?:as an additional cost to cast|additional cost to cast).*\bsacrifice\b/i, ['cost:sacrifice_permanent']],
+    [/(?:as an additional cost to cast|additional cost to cast).*\bdiscard\b/i, ['cost:discard']],
+    [/(?:as an additional cost to cast|additional cost to cast).*\btap\b.*\bcreatures?\b/i, ['cost:tap_creatures']],
+    [/(?:as an additional cost to cast|additional cost to cast).*\bexile\b.*\bgraveyard\b/i, ['cost:exile_graveyard_cards']],
+    [/\byou may cast\b.*\bfrom your graveyard\b/i, ['cast:alternate_from_graveyard']],
+    [/\bcast\b.*\bfrom exile\b/i, ['cast:from_exile']],
+    [/\bwithout paying (?:its|their) mana cost\b/i, ['cast:cast_without_paying']],
+    [/\bpay\b.*\binstead of paying\b/i, ['cost:mana_or_life_substitution']],
+    [/\bthis spell costs?\b.*\bless\b.*\bfor each\b/i, ['cost:reduction_by_object_count']],
+    [/\bfor each opponent\b.*\bless\b|\bcost\b.*\bless\b.*\beach opponent\b/i, ['cost:reduction_by_opponent_count']],
+    [/\bchoose one or more\b|\bchoose both\b|\bchoose any number\b.*\boptions\b/i, ['choice:choose_multiple_modes']],
+    [/\bchoose one\b[\s\S]*\b(?:mode|ability|spell)\b/i, ['choice:modal']],
+    [/\bcopy\b.*\bspell\b|\bcopy that spell\b/i, ['spell:copy']],
+    [/\bcreate\b.*\btoken that's a copy\b|\bcreate\b.*\btoken that is a copy\b/i, ['token:create_token_copy']],
+    [/\bcreate\b.*\btreasure token\b/i, ['token:create_treasure']],
+    [/\bcreate\b.*\bclue token\b/i, ['token:create_clue']],
+    [/\bcreate\b.*\bfood token\b/i, ['token:create_food']],
+    [/\bcreate\b.*\bincubator token\b/i, ['token:create_incubator']],
+    [/\bcreate\b.*\bpowerstone token\b/i, ['token:create_powerstone']],
+    [/\bcreate\b.*\brole token\b/i, ['token:create_role_aura_token']],
+    [/\bcopy\b.*\btoken\b.*\battack\b/i, ['token:attacking_copies']],
+    [/\breturn\b.*\bfrom (?:your )?graveyard\b.*\bto the battlefield\b/i, ['graveyard:return_to_battlefield']],
+    [/\bfrom (?:your )?graveyard\b.*\bto (?:your )?hand\b/i, ['graveyard:return_to_hand']],
+    [/\bexile\b.*\b(?:cards|card) from (?:your )?graveyard\b.*\bcast\b/i, ['graveyard:cast_by_exiling_cards']],
+    [/\bdiscard (?:this|a) card\b.*\bdraw\b/i, ['hand:discard_to_draw']],
+    [/\bdiscard (?:this|a) card\b.*\bsearch your library\b/i, ['hand:discard_to_tutor']],
+    [/\breveal (?:this|a card) from your hand\b/i, ['hand:reveal_from_hand']],
+    [/\blook at the top\b.*\bput\b.*\bon the bottom\b/i, ['library:top_manipulation']],
+    [/\bscry\s+\d+/i, ['library:top_manipulation']],
+    [/\bsurveil\s+\d+/i, ['library:top_to_graveyard']],
+    [/\bmill\s+\d+/i, ['library:mill_to_graveyard']],
+    [/\bwhenever\b.*\battacks?\b/i, ['trigger:attack']],
+    [/\bat the beginning of\b.*\bupkeep\b/i, ['trigger:upkeep']],
+    [/\bwhenever\b.*\bdies\b/i, ['trigger:dies']],
+    [/\bwhenever\b.*\bbecomes? untapped\b/i, ['trigger:untap']],
+    [/\bwhenever\b.*\bis dealt damage\b/i, ['trigger:damage_to_permanent']],
+    [/\bwhenever you cast\b/i, ['trigger:spell_cast']],
+    [/\bwhen you cast\b/i, ['trigger:spell_cast']],
+    [/\bif you attacked with (?:a )?creature this turn\b/i, ['condition:attacked_this_turn']],
+    [/\bif a creature died this turn\b|\bif a creature has died this turn\b/i, ['condition:creature_died_this_turn']],
+    [/\bif (?:a|an|one or more) permanents? left the battlefield this turn\b/i, ['condition:permanent_left_battlefield_this_turn']],
+    [/\bif you control\b.*\b(?:artifacts|artifact)\b.*\bthree\b|\bthree or more artifacts?\b/i, ['condition:artifact_count_threshold']],
+    [/\bif you have\b.*\b(?:seven|three|four|five|six|ten)\b.*\bcards? in your graveyard\b/i, ['condition:graveyard_card_count']],
+    [/\bif you have no cards? in your hand\b/i, ['condition:empty_hand']],
+    [/\bif an opponent has\b.*\bpoison counter\b|\bpoison counters?\b.*\bthreshold\b/i, ['condition:poison_counter_threshold']],
+    [/\btarget creature can't attack\b|\bcreatures? can't attack\b/i, ['combat:cannot_attack']],
+    [/\bcan(?:not|not) block\b|\bcan't block\b/i, ['combat:cannot_block']],
+    [/\bmust attack if able\b|\battacks each combat if able\b/i, ['combat:must_attack_if_able']],
+    [/\bcan't be blocked\b|\bunblockable\b/i, ['combat:evasion_unblockable']],
+    [/\bcan only be blocked by\b/i, ['combat:blocking_restriction']],
+    [/\bdeals? excess combat damage\b|\bexcess damage\b.*\bplayer\b/i, ['combat:excess_damage']],
+    [/\bgets? \+1\/\+1 for each\b.*\battacking\b/i, ['combat:attack_trigger_team_buff']],
+    [/\bput\b.*\b\+1\/\+1 counter\b.*\bon it\b/i, ['counter:+1/+1']],
+    [/\bremove\b.*\b\+1\/\+1 counters?\b/i, ['counter:remove_plus_counters']],
+    [/\bproliferate\b/i, ['counter:add_existing_counter_type']],
+    [/\bremove a counter\b.*\bpay\b/i, ['counter:remove_as_cost']],
+    [/\bprevent all damage\b|\bprevent the next\b.*\bdamage\b/i, ['protection:damage_prevention']],
+    [/\bcan't be the target\b.*\bopponent\b/i, ['protection:opponent_targeting']],
+    [/\bward\s+\{?\d*\}?\b/i, ['protection:targeting_tax']],
+    [/\buntap\b.*\bcreature\b.*\badd\b.*\bmana\b/i, ['activation:untap_for_mana']],
+    [/\badd\b.*\b\{[wubrgc]\}\b/i, ['mana:production']],
+    [/\b(?:add|produce)\b.*\bmana\b.*\bfor each\b/i, ['mana:scaling_production']],
+    [/\b(?:creatures?|artifacts?) you control\b.*\bpay\b.*\bspell\b/i, ['cost:tap_permanent_as_mana']],
+    [/\bthe first time\b.*\bthis (?:spell|permanent)\b/i, ['trigger:first_time_only']],
+    [/\bactivate only once\b/i, ['activation:once']],
+    [/\bactivate only any time you could cast a sorcery\b/i, ['activation:sorcery_speed']],
+    [/\bactivate only if\b.*\battacked this turn\b/i, ['activation:only_if_attacked_this_turn']],
+    [/\bwhenever you cast a spell\b.*\bmore mana\b.*\bpower or toughness\b/i, ['condition:mana_spent_greater_than_power_or_toughness']],
+    [/\bfirst main phase\b.*\bcast a copy\b/i, ['trigger:first_main_phase', 'spell:copy_from_exile']],
+    [/\bat the beginning of each of your first main phases\b/i, ['trigger:first_main_phase']],
+    [/\bbecomes monstrous\b|\bmonstrous\b/i, ['activation:become_monstrous']],
+    [/\bif this creature has no \+1\/\+1 counters?\b/i, ['activation:add_counters_if_none']],
+    [/\breturn an unblocked attacker you control to its owner's hand\b/i, ['combat:return_unblocked_attacker']],
+    [/\bput .* onto the battlefield tapped and attacking\b/i, ['battlefield:put_tapped_and_attacking']],
+    [/\bcopy of (?:that|this) spell\b.*\bwithout paying\b/i, ['spell:copy_without_paying']],
+    [/\bcast a copy of it\b.*\beach turn\b/i, ['spell:repeat_each_turn']],
+    [/\bexile it\b.*\bbeginning of each of your\b/i, ['spell:repeat_each_turn']],
+    [/\bif this spell was cast using\b/i, ['spell:conditional_cast_mode']],
+];
+
+function buildSemanticMechanicBridgeProfile(card = null, text = '') {
+    const oracle = String(text || card?.oracle_text || (card?.card_faces ? card.card_faces.map(f => f.oracle_text || '').join('\n\n') : '') || '');
+    const keywords = extractMechanicKeywords(card, oracle);
+    const anchors = new Set();
+    const matchedMechanics = new Set();
+    const matchedByText = new Set();
+
+    for (const keyword of keywords) {
+        const clean = normalizeMechanicBridgeKey(keyword);
+        if (!clean) continue;
+        anchors.add(`bridge:keyword:${clean}`);
+        const mapped = SEMANTIC_MECHANIC_BRIDGE_INDEX[clean];
+        if (mapped) {
+            matchedMechanics.add(clean);
+            mapped.forEach(a => anchors.add(`bridge:${a}`));
+        }
+    }
+
+    for (const [regex, mappedAnchors] of SEMANTIC_MECHANIC_BRIDGE_TEXT_RULES) {
+        regex.lastIndex = 0;
+        if (!regex.test(oracle)) continue;
+        mappedAnchors.forEach(a => anchors.add(`bridge:${normalizeMechanicToken(a)}`));
+        matchedByText.add(mappedAnchors.join('|'));
+    }
+
+    // Highlight-safe contextual inference. The card's complete keyword list is used as candidate
+    // context, but only mechanics whose implementation is supported by this highlighted span (or
+    // its containing full-card clause) are promoted into the bridge profile.
+    const contextual = inferContextualSemanticMechanics(card, oracle, keywords);
+    contextual.inferred.forEach(keyword => {
+        const clean = normalizeMechanicBridgeKey(keyword);
+        if (!clean) return;
+        anchors.add(`bridge:keyword:${clean}`);
+        const mapped = SEMANTIC_MECHANIC_BRIDGE_INDEX[clean];
+        if (mapped) mapped.forEach(a => anchors.add(`bridge:${a}`));
+        if (!keywords.has(clean)) matchedMechanics.add(clean);
+    });
+
+    for (const keyword of contextual.inferred) {
+        const clean = normalizeMechanicBridgeKey(keyword);
+        const mapped = KEYWORD_MECHANIC_ANCHORS[clean];
+        if (mapped) mapped.forEach(a => anchors.add(`bridge:legacy:${normalizeMechanicToken(a)}`));
+    }
+
+    const evidenceScores = [...contextual.evidence.values()]
+        .map(e => Number(e?.score))
+        .filter(Number.isFinite);
+    const contextualConfidence = evidenceScores.length
+        ? evidenceScores.reduce((a, b) => a + b, 0) / evidenceScores.length
+        : (matchedMechanics.size ? 0.82 : 0);
+
+    return {
+        anchors,
+        matchedMechanics,
+        matchedByText,
+        keywordCount: contextual.inferred.size || keywords.size,
+        textRuleCount: matchedByText.size,
+        confidence: Math.min(1, contextualConfidence),
+        contextualMechanics: contextual.inferred,
+        contextualEvidence: contextual.evidence,
+        cardMechanicKeywords: new Set((Array.isArray(card?.keywords) ? card.keywords : [])
+            .map(normalizeMechanicToken).filter(Boolean))
+    };
+}
+
+const SEMANTIC_BRIDGE_ANCHOR_WEIGHTS = Object.freeze({
+    'keyword:': 1.35,
+    'cost:': 1.25,
+    'cast:': 1.25,
+    'spell:': 1.25,
+    'graveyard:': 1.22,
+    'hand:': 1.20,
+    'combat:': 1.15,
+    'trigger:': 1.12,
+    'condition:': 1.12,
+    'counter:': 1.12,
+    'token:': 1.10,
+    'protection:': 1.10,
+    'activation:': 1.08,
+    'library:': 1.08,
+    'attachment:': 1.05,
+    'mana:': 1.05,
+    'permanent:': 1.00,
+    'game_state:': 1.00,
+    'game_component:': 0.95,
+    'game_variant:': 0.92,
+    'condition': 1.0,
+    'legacy:': 0.85
+});
+
+function semanticBridgeAnchorWeight(anchor) {
+    const raw = String(anchor || '');
+    const key = raw.startsWith('bridge:') ? raw.slice(7) : raw;
+    for (const [prefix, weight] of Object.entries(SEMANTIC_BRIDGE_ANCHOR_WEIGHTS)) {
+        if (key.startsWith(prefix)) return weight;
+    }
+    return 1;
+}
+
+function compareSemanticMechanicBridgeSets(a, b) {
+    const aa = a instanceof Set ? a : new Set(a || []);
+    const bb = b instanceof Set ? b : new Set(b || []);
+    if (!aa.size || !bb.size) return 0;
+    let sharedWeight = 0;
+    let aWeight = 0;
+    let bWeight = 0;
+    for (const x of aa) {
+        const w = semanticBridgeAnchorWeight(x);
+        aWeight += w;
+        if (bb.has(x)) sharedWeight += w;
+    }
+    for (const x of bb) bWeight += semanticBridgeAnchorWeight(x);
+    if (aWeight <= 0 || bWeight <= 0 || sharedWeight <= 0) return 0;
+    const sourceCoverage = sharedWeight / aWeight;
+    const candidateCoverage = sharedWeight / bWeight;
+    return Math.sqrt(sourceCoverage * candidateCoverage);
+}
 
 function normalizeMechanicalObject(value) {
     const raw = normalizeMechanicToken(value);
@@ -7829,6 +8930,10 @@ function buildMechanicalEffectGraph(card = null, text = '', parsedEffects = null
     const keywordAnchors = extractKeywordAnchorSet(card, oracle);
     const universalProfile = (effects?._mechanicProfile) || buildUniversalMechanicProfile(card, oracle, effects);
     universalProfile?.atoms?.forEach?.(a => keywordAnchors.add(a));
+    const semanticBridgeProfile = universalProfile?.semanticMechanicBridge || buildSemanticMechanicBridgeProfile(card, oracle);
+    const semanticBridgeAnchors = universalProfile?.semanticBridgeAnchors instanceof Set
+        ? new Set(universalProfile.semanticBridgeAnchors)
+        : new Set(semanticBridgeProfile.anchors || []);
 
     const nodes = effects
         .map((effect, index) => buildMechanicalEffectNode(effect, index))
@@ -7857,6 +8962,8 @@ function buildMechanicalEffectGraph(card = null, text = '', parsedEffects = null
         nodes,
         edges,
         keywordAnchors,
+        semanticBridgeAnchors,
+        semanticBridgeConfidence: Number.isFinite(Number(semanticBridgeProfile?.confidence)) ? Number(semanticBridgeProfile.confidence) : 0.72,
         universalProfile,
         typeCounts,
         nodeCount: nodes.length
@@ -8161,6 +9268,15 @@ function calculateMechanicalGraphSimilarity(graphA, graphB) {
     const keywordAnchorCoverage = (graphA.keywordAnchors?.size && graphB.keywordAnchors?.size)
         ? compareMechanicalSets(graphA.keywordAnchors, graphB.keywordAnchors, 0)
         : 0;
+    const rawSemanticBridgeSimilarity = (graphA.semanticBridgeAnchors?.size && graphB.semanticBridgeAnchors?.size)
+        ? compareSemanticMechanicBridgeSets(graphA.semanticBridgeAnchors, graphB.semanticBridgeAnchors)
+        : 0;
+    const bridgeConfidenceA = Number(graphA.semanticBridgeConfidence);
+    const bridgeConfidenceB = Number(graphB.semanticBridgeConfidence);
+    const bridgeConfidence = (Number.isFinite(bridgeConfidenceA) && Number.isFinite(bridgeConfidenceB))
+        ? Math.max(0, Math.min(1, Math.sqrt(Math.max(0, bridgeConfidenceA) * Math.max(0, bridgeConfidenceB))))
+        : 1;
+    const semanticBridgeSimilarity = rawSemanticBridgeSimilarity * (0.72 + 0.28 * bridgeConfidence);
     const typeCoverage = compareMechanicalSets(Object.keys(graphA.typeCounts || {}), Object.keys(graphB.typeCounts || {}), 1);
     const contradiction = mechanicalGraphContradictionScore(graphA, graphB, sequence.matches);
     const coreCoverage = Math.max(unordered.sourceCoverage, sequence.sourceCoverage);
@@ -8173,6 +9289,7 @@ function calculateMechanicalGraphSimilarity(graphA, graphB) {
         balancedCoverage: balanced,
         orderScore: sequenceAgreement,
         keywordAnchorCoverage,
+        semanticBridgeSimilarity,
         typeCoverage,
         contradiction,
         nodeCountRatio: Math.min(1, Math.min(graphA.nodes.length, graphB.nodes.length) / Math.max(graphA.nodes.length, graphB.nodes.length)),
@@ -8186,20 +9303,22 @@ function calculateMechanicalGraphSimilarity(graphA, graphB) {
     // rather than a claim of a trained ML model. A future benchmark export can fit these same feature
     // columns offline without changing the browser-side graph representation.
     const hasMechanicalMatch = sequence.matches.length > 0 || unordered.matches.length > 0 ||
-        featureVector.keywordAnchorCoverage > 0.05 || featureVector.exactFunctionCoverage > 0.05;
+        featureVector.keywordAnchorCoverage > 0.05 || featureVector.semanticBridgeSimilarity > 0.05 ||
+        featureVector.exactFunctionCoverage > 0.05;
 
     // Never manufacture a nonzero mechanical score from generic shape properties alone. A pair
     // with no shared mechanic may have the same number of parsed nodes and both be one-shot effects,
     // but that is not evidence that they do the same thing.
     const rankerScore = hasMechanicalMatch ? Math.max(0, Math.min(1,
-        featureVector.sourceCoverage * 0.24 +
-        featureVector.balancedCoverage * 0.13 +
-        featureVector.exactFunctionCoverage * 0.14 +
-        featureVector.keywordAnchorCoverage * 0.13 +
-        featureVector.typeCoverage * 0.05 +
-        featureVector.orderScore * 0.08 +
-        featureVector.nodeCountRatio * 0.04 +
-        Math.max(0, 1 - featureVector.contradiction) * 0.19
+        featureVector.sourceCoverage * 0.22 +
+        featureVector.balancedCoverage * 0.12 +
+        featureVector.exactFunctionCoverage * 0.12 +
+        featureVector.keywordAnchorCoverage * 0.08 +
+        featureVector.semanticBridgeSimilarity * 0.15 +
+        featureVector.typeCoverage * 0.04 +
+        featureVector.orderScore * 0.07 +
+        featureVector.nodeCountRatio * 0.03 +
+        Math.max(0, 1 - featureVector.contradiction) * 0.17
     )) : 0;
 
     const score = Math.max(0, Math.min(1,
@@ -8211,6 +9330,7 @@ function calculateMechanicalGraphSimilarity(graphA, graphB) {
     if (featureVector.sourceCoverage >= 0.75) evidence.push('high source-effect coverage');
     if (featureVector.orderScore >= 0.85 && sequence.matches.length > 1) evidence.push('effect sequence agrees');
     if (featureVector.keywordAnchorCoverage >= 0.55) evidence.push('shared mechanic anchors');
+    if (featureVector.semanticBridgeSimilarity >= 0.55) evidence.push('shared semantic mechanic bridge');
     if (featureVector.contradiction >= 0.12) evidence.push('rules-level contradiction detected');
 
     return {
@@ -8226,6 +9346,7 @@ function calculateMechanicalGraphSimilarity(graphA, graphB) {
         unordered,
         sequence,
         keywordAnchorCoverage,
+        semanticBridgeSimilarity,
         typeCoverage
     };
 }
