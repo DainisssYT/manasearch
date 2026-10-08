@@ -4085,7 +4085,7 @@ body.light-theme .search-hint { color: var(--text-muted); }
    Card-art corner cleanup
    Scryfall image files can retain a tiny amount of light/white corner material.
    Clip the result art slightly inside the outer card frame so those pixels never
-   protrude past ManaSearch's rounded card shell.
+   protrude past ManaSearch's rounded card shell. The mask covers all four corners.
    -------------------------------------------------------------------------- */
 .card-item {
     overflow: hidden;
@@ -4093,14 +4093,16 @@ body.light-theme .search-hint { color: var(--text-muted); }
 }
 .card-art-wrap {
     overflow: hidden;
-    border-radius: 10px 10px 0 0;
+    border-radius: 11px 11px 8px 8px;
 }
 .card-art-wrap > img {
-    border-radius: 10px 10px 0 0;
-    clip-path: inset(2px 2px 0 2px round 10px 10px 0 0);
+    border-radius: 11px 11px 8px 8px;
+    /* Some Scryfall scans contain tiny light pixels in their own rounded image corners.
+       Clip all four corners, not just the top pair, so those pixels never show as white wedges. */
+    clip-path: inset(2px 2px 2px 2px round 11px);
 }
 .source-picker-card img {
-    clip-path: inset(2px 2px 0 2px round 10px 10px 0 0);
+    clip-path: inset(2px round 11px);
 }
 
 /* Keep the small DFC Flip control above the clipped art edge. */

@@ -1,6 +1,6 @@
 /* ManaSearch build 20261008-8 */
 // ManaSearch deployment build marker. Bump this whenever app.js changes so cached-module issues are easy to diagnose.
-const MANASEARCH_APP_BUILD = '20261008-10';
+const MANASEARCH_APP_BUILD = '20261008-11';
 console.info(`[ManaSearch] app.js build ${MANASEARCH_APP_BUILD}`);
 
 // State Management
@@ -4241,8 +4241,23 @@ function analyzeManaOutput(text, amount) {
         .filter(token => ['w', 'u', 'b', 'r', 'g', 'c', 's'].includes(token));
     const uniqueColors = [...new Set(fixedColors)];
 
+    // A list such as "Add {W}, {U}, or {B}" describes ONE mana with a choice of color,
+    // not three mana. Detect the common one-symbol choice form explicitly. The previous parser
+    // counted all symbols and therefore treated every Obelisk-style filter as a three-mana rock.
+    const afterAdd = lower.match(/\badd\s+(.+?)(?:\s+to\s+(?:your|the)\s+mana\s+pool)?\s*\.?$/i)?.[1] || '';
+    const choiceSymbols = afterAdd.match(/\{(?:[wubrgcs])\}/gi) || [];
+    const isSimpleSingleManaChoice = /\bor\b/.test(afterAdd)
+        && choiceSymbols.length >= 2
+        && /^[\s,{}wubrgcsor]+$/i.test(afterAdd)
+        && choiceSymbols.every(() => true);
+
     let mode = 'unknown';
-    if (symbols.length) {
+    let semanticAmount = Number.isFinite(Number(amount)) ? Number(amount) : null;
+
+    if (isSimpleSingleManaChoice) {
+        mode = 'choice_single_fixed_color';
+        semanticAmount = 1;
+    } else if (symbols.length) {
         if (uniqueColors.length === 1) {
             mode = uniqueColors[0] === 'c' ? 'fixed_colorless'
                 : uniqueColors[0] === 's' ? 'fixed_snow'
@@ -4263,14 +4278,14 @@ function analyzeManaOutput(text, amount) {
     }
 
     return {
-        amount: Number.isFinite(Number(amount)) ? Number(amount) : null,
+        amount: semanticAmount,
         mode,
         colors: uniqueColors,
         uniqueColorCount: uniqueColors.length,
-        symbolCount: symbols.length
+        symbolCount: symbols.length,
+        isChoice: mode === 'choice_single_fixed_color'
     };
 }
-
 function finalizeManaAbilityEffect(effect) {
     if (!effect || effect.action !== 'add_mana') return effect;
 
@@ -4317,11 +4332,23 @@ function manaNumericSimilarity(a, b) {
 
 function manaColorProfileSimilarity(a, b) {
     if (!a || !b) return null;
-    if (a.mode === b.mode) {
-        if (a.mode.startsWith('fixed')) {
+    const modeA = a.mode || 'unknown';
+    const modeB = b.mode || 'unknown';
+
+    if (modeA === modeB) {
+        if (modeA === 'choice_single_fixed_color') {
+            // Both abilities produce exactly one mana, but let the color-choice sets refine the match.
             const sa = new Set(a.colors || []), sb = new Set(b.colors || []);
             if (!sa.size && !sb.size) return 1;
             if (!sa.size || !sb.size) return 0.55;
+            const union = new Set([...sa, ...sb]);
+            const inter = [...sa].filter(c => sb.has(c)).length;
+            return inter / Math.max(1, union.size);
+        }
+        if (modeA.startsWith('fixed')) {
+            const sa = new Set(a.colors || []), sb = new Set(b.colors || []);
+            if (!sa.size && !sb.size) return 1;
+            if (!sa.size || !sb.size) return 0.35;
             const union = new Set([...sa, ...sb]);
             const inter = [...sa].filter(c => sb.has(c)).length;
             return inter / Math.max(1, union.size);
@@ -4330,18 +4357,20 @@ function manaColorProfileSimilarity(a, b) {
     }
 
     const flexible = new Set(['any_one', 'any_combination', 'any_land_producible']);
-    if (flexible.has(a.mode) && flexible.has(b.mode)) return 0.82;
-    if (a.mode === 'fixed_colorless' && b.mode === 'any_one') return 0.62;
-    if (b.mode === 'fixed_colorless' && a.mode === 'any_one') return 0.62;
-    if (a.mode === 'fixed_single_color' && b.mode === 'any_one') return 0.70;
-    if (b.mode === 'fixed_single_color' && a.mode === 'any_one') return 0.70;
-    if (a.mode === 'fixed_multi_color' && b.mode === 'any_combination') return 0.72;
-    if (b.mode === 'fixed_multi_color' && a.mode === 'any_combination') return 0.72;
-    if (a.mode === 'fixed' && flexible.has(b.mode)) return 0.58;
-    if (b.mode === 'fixed' && flexible.has(a.mode)) return 0.58;
-    return 0.20;
+    if (flexible.has(modeA) && flexible.has(modeB)) return 0.82;
+    if ((modeA === 'choice_single_fixed_color' && modeB === 'any_one') || (modeB === 'choice_single_fixed_color' && modeA === 'any_one')) return 0.90;
+    if ((modeA === 'choice_single_fixed_color' && modeB === 'fixed_single_color') || (modeB === 'choice_single_fixed_color' && modeA === 'fixed_single_color')) return 0.82;
+    if ((modeA === 'choice_single_fixed_color' && modeB === 'fixed_multi_color') || (modeB === 'choice_single_fixed_color' && modeA === 'fixed_multi_color')) return 0.20;
+    if (modeA === 'fixed_colorless' && modeB === 'any_one') return 0.62;
+    if (modeB === 'fixed_colorless' && modeA === 'any_one') return 0.62;
+    if (modeA === 'fixed_single_color' && modeB === 'any_one') return 0.70;
+    if (modeB === 'fixed_single_color' && modeA === 'any_one') return 0.70;
+    if (modeA === 'fixed_multi_color' && modeB === 'any_combination') return 0.72;
+    if (modeB === 'fixed_multi_color' && modeA === 'any_combination') return 0.72;
+    if (modeA === 'fixed' && flexible.has(modeB)) return 0.58;
+    if (modeB === 'fixed' && flexible.has(modeA)) return 0.58;
+    return 0.25;
 }
-
 function manaActivationSimilarity(a, b) {
     if (!a || !b) return null;
     const amin = Number.isFinite(Number(a.manaMin)) ? Number(a.manaMin) : 0;
@@ -4873,12 +4902,18 @@ function parseManaAbilityEffect(clause) {
         }
     }
 
+    const manaOutput = analyzeManaOutput(text, amount);
+    const semanticAmount = Number.isFinite(Number(manaOutput.amount)) ? Number(manaOutput.amount) : amount;
+
     return {
         action: 'add_mana',
         object: 'mana',
         colors: colors.length > 0 ? [...new Set(colors)] : null,
-        amount,
-        manaOutput: analyzeManaOutput(text, amount),
+        // `amount` is the actual mana produced, not the number of alternative symbols listed in
+        // a choice such as "Add {R}, {G}, or {W}". The latter produces one mana, with three color
+        // options, and must therefore canonicalize as amount 1.
+        amount: semanticAmount,
+        manaOutput,
         restriction: extractMTGRestrictions(text)
     };
 }
