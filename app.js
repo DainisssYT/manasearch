@@ -1,6 +1,6 @@
-/* ManaSearch build 20261008-6 */
+/* ManaSearch build 20261008-7 */
 // ManaSearch deployment build marker. Bump this whenever app.js changes so cached-module issues are easy to diagnose.
-const MANASEARCH_APP_BUILD = '20261008-6';
+const MANASEARCH_APP_BUILD = '20261008-7';
 console.info(`[ManaSearch] app.js build ${MANASEARCH_APP_BUILD}`);
 
 // State Management
@@ -16446,7 +16446,7 @@ function renderResults(cards) {
 
         const actions = document.createElement('div');
         actions.className = 'card-actions';
-        actions.style.cssText = 'display: grid; grid-template-columns: 40px minmax(110px, 1fr) auto; align-items: center; gap: 8px; margin-top: 8px;';
+        actions.style.cssText = 'display: grid; align-items: center; gap: 8px; margin-top: 8px;';
         const favoriteBtn = document.createElement('button');
         favoriteBtn.type = 'button';
         favoriteBtn.className = 'result-favorite-btn';
@@ -16463,7 +16463,10 @@ function renderResults(cards) {
         const checkbox = document.createElement('input');
         checkbox.type = 'checkbox';
         checkbox.className = 'related-checkbox';
-        selectLabel.append(checkbox, document.createTextNode(' Select'));
+        const selectText = document.createElement('span');
+        selectText.className = 'result-select-text';
+        selectText.textContent = 'Select';
+        selectLabel.append(checkbox, selectText);
         actions.append(favoriteBtn, compareBtn, selectLabel);
         info.append(titleRow, typeLine, matchLine, breakdown, actions);
         el.append(artWrap, info);

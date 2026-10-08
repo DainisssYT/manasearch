@@ -4906,3 +4906,102 @@ body.reduce-motion *::after {
 .highlight-edit-composer .highlight-add-actions {
     margin-top: 10px;
 }
+
+
+/* --------------------------------------------------------------------------
+   Result-card density polish: score breakdown ON
+   Keep the price readable and exactly one row in both densities. In compact
+   cards, the action row must fit inside the card instead of clipping the
+   Related-Card checkbox/label at the right edge.
+   -------------------------------------------------------------------------- */
+.result-score-breakdown .card-price-label {
+    grid-column: 1 / -1;
+    width: 100%;
+    box-sizing: border-box;
+    height: 22px;
+    min-height: 22px;
+    max-height: 22px;
+    margin: 0;
+    padding: 2px 6px;
+    display: flex;
+    align-items: center;
+    justify-content: flex-start;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+}
+
+.card-actions {
+    grid-template-columns: 40px minmax(0, 1fr) max-content !important;
+    width: 100%;
+    min-width: 0;
+}
+
+.card-actions .result-select-label {
+    min-width: 0;
+    max-width: 100%;
+    overflow: hidden;
+}
+
+.card-actions .result-select-text {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+@media (min-width: 701px) {
+    body.compact-results .card-actions {
+        grid-template-columns: 34px minmax(0, 1fr) 54px !important;
+        gap: 5px !important;
+    }
+
+    body.compact-results .card-actions .result-favorite-btn {
+        width: 34px;
+        min-width: 34px;
+        height: 34px;
+    }
+
+    body.compact-results .card-actions .compare-btn {
+        height: 34px;
+    }
+
+    body.compact-results .card-actions .result-select-label {
+        width: 54px;
+        min-width: 54px;
+        height: 34px;
+        min-height: 34px;
+        font-size: 11px !important;
+        gap: 3px;
+        justify-content: center;
+        box-sizing: border-box;
+    }
+}
+
+@media (max-width: 700px) {
+    .card-actions {
+        grid-template-columns: 36px minmax(0, 1fr) 54px !important;
+        gap: 5px !important;
+    }
+
+    .card-actions .result-favorite-btn {
+        width: 36px;
+        min-width: 36px;
+        height: 36px;
+    }
+
+    .card-actions .compare-btn {
+        height: 36px;
+    }
+
+    .card-actions .result-select-label {
+        width: 54px;
+        min-width: 54px;
+        height: 36px;
+        min-height: 36px;
+        font-size: 11px !important;
+        gap: 3px;
+        justify-content: center;
+        box-sizing: border-box;
+    }
+}
