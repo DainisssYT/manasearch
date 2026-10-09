@@ -1,6 +1,6 @@
-/* ManaSearch build 20261009-31 */
+/* ManaSearch build 20261009-32 */
 // ManaSearch deployment build marker. Bump this whenever app.js changes so cached-module issues are easy to diagnose.
-const MANASEARCH_APP_BUILD = '20261009-31';
+const MANASEARCH_APP_BUILD = '20261009-32';
 console.info(`[ManaSearch] app.js build ${MANASEARCH_APP_BUILD}`);
 
 // State Management
@@ -139,7 +139,13 @@ let lastProgressiveResultRenderAt = 0;
 // for longer slices after real user input, and result DOM updates wait until editing settles.
 const MANASEARCH_INPUT_PRIORITY_WINDOW_MS = 1250;
 const MANASEARCH_INPUT_PRIORITY_YIELD_MS = 45;
+// When the pointer is over a field or a field keeps focus, the user may be about to edit it even
+// if no key event has fired recently. Give the browser a frame-sized breathing window between
+// search slices in that state; otherwise the search resumes full-speed CPU use while the I-beam
+// remains over the field, making the cursor/controls feel choppy.
+const MANASEARCH_CONTROL_INTERACTION_YIELD_MS = 16;
 let lastEditableUserActivityAt = 0;
+let manaPointerOverEditableTarget = null;
 let manaInputResponsivenessInstalled = false;
 let deferredRenderFlushTimer = 0;
 
@@ -172,15 +178,53 @@ function isManaUiPanelOpen() {
     return Boolean(document.querySelector(MANASEARCH_UI_PANEL_OPEN_SELECTOR));
 }
 
+const MANASEARCH_EDITABLE_CONTROL_SELECTOR = 'input:not([type=button]):not([type=submit]):not([type=reset]), textarea, select, [contenteditable="true"], [role="textbox"]';
+
 function isManaEditableControl(target) {
     if (!target || typeof target.matches !== 'function') return false;
-    return target.matches('input:not([type=button]):not([type=submit]):not([type=reset]), textarea, select, [contenteditable="true"], [role="textbox"]');
+    return target.matches(MANASEARCH_EDITABLE_CONTROL_SELECTOR);
+}
+
+function findManaEditableControl(target) {
+    if (!target) return null;
+    if (isManaEditableControl(target)) return target;
+    if (typeof target.closest === 'function') return target.closest(MANASEARCH_EDITABLE_CONTROL_SELECTOR);
+    return null;
+}
+
+function isManaPointerOverEditableControl() {
+    const target = manaPointerOverEditableTarget;
+    return Boolean(target && target.isConnected !== false && isManaEditableControl(target));
+}
+
+// This describes interaction intent, not active typing. Focused fields and a hovered I-beam both
+// keep background work cooperative, but only actual recent input triggers the longer 45ms yield.
+function isManaEditableControlInteractionActive() {
+    if (typeof document === 'undefined') return false;
+    return isManaEditableControl(document.activeElement) || isManaPointerOverEditableControl();
 }
 
 function isManaUserActivelyEditing() {
     if (typeof document === 'undefined' || !isManaEditableControl(document.activeElement) || lastEditableUserActivityAt <= 0) return false;
     const now = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
     return now - lastEditableUserActivityAt <= MANASEARCH_INPUT_PRIORITY_WINDOW_MS;
+}
+
+function noteManaEditablePointerInteraction(event) {
+    if (event?.type === 'pointerout' || event?.type === 'mouseout') {
+        const nextControl = findManaEditableControl(event.relatedTarget);
+        if (nextControl) {
+            manaPointerOverEditableTarget = nextControl;
+            return;
+        }
+        const previous = manaPointerOverEditableTarget;
+        if (previous && (event.target === previous || previous.contains?.(event.target))) {
+            manaPointerOverEditableTarget = null;
+        }
+        return;
+    }
+    const control = findManaEditableControl(event?.target);
+    if (control) manaPointerOverEditableTarget = control;
 }
 
 function scheduleDeferredResultFlushAfterEditing() {
@@ -213,6 +257,10 @@ function installManaInputResponsivenessGuard() {
     // run. `beforeinput` catches the start of typing/paste, while `input` covers browser/IME edits.
     ['keydown', 'beforeinput', 'input', 'change', 'paste', 'cut'].forEach(type =>
         document.addEventListener(type, noteManaEditableActivity, true));
+    // Pointer hover matters independently from typing: a stationary I-beam cursor over an input
+    // must not let background search work revert to uninterrupted CPU saturation.
+    ['pointerover', 'pointerout', 'mouseover', 'mouseout'].forEach(type =>
+        document.addEventListener(type, noteManaEditablePointerInteraction, true));
 }
 
 async function yieldForManaSearchResponsiveness() {
@@ -220,6 +268,12 @@ async function yieldForManaSearchResponsiveness() {
         // A real timer, rather than a zero-delay worker message, lets key/input/change and paint
         // tasks get several opportunities to run while the user is actively editing a value.
         await new Promise(resolve => setTimeout(resolve, MANASEARCH_INPUT_PRIORITY_YIELD_MS));
+        return;
+    }
+    if (isManaEditableControlInteractionActive()) {
+        // Give at least one frame-sized interval to mouse/caret painting and control interactions,
+        // without applying the much longer typing-specific pause when the user is not typing.
+        await new Promise(resolve => setTimeout(resolve, MANASEARCH_CONTROL_INTERACTION_YIELD_MS));
         return;
     }
     await backgroundAwareDelay(0);
@@ -12072,7 +12126,7 @@ async function searchStaticCardCorpus(queryText, options = {}) {
             const score = Math.min(1, coverage * 0.68 + phraseBonus + keywordBonus);
             if (score < 0.18) continue;
             scored.push({ card, score });
-            if (isManaUserActivelyEditing() && i % 96 === 95) await yieldForManaSearchResponsiveness();
+            if ((isManaUserActivelyEditing() || isManaEditableControlInteractionActive()) && i % 96 === 95) await yieldForManaSearchResponsiveness();
         }
         if (endIndex < cards.length) await yieldForManaSearchResponsiveness();
     }
@@ -12311,7 +12365,7 @@ async function runLocalCorpusBatch(context) {
 
         if (candidatePosition + 1 < candidates.length && (
             candidatePosition % 1400 === 1399 ||
-            (isManaUserActivelyEditing() && candidatePosition % 96 === 95)
+            ((isManaUserActivelyEditing() || isManaEditableControlInteractionActive()) && candidatePosition % 96 === 95)
         )) {
             await yieldForManaSearchResponsiveness();
         }
@@ -12890,7 +12944,7 @@ async function findFullSemanticMatches(index, sourceVector, excludeName, limit =
                 const rawCos = approximateQuantizedCosine(sourceVector, vector, index.dim);
                 const calibrated = Math.max(0, Math.min(1, (rawCos - semanticCosineBaseline) / Math.max(0.05, 1 - semanticCosineBaseline)));
                 if (calibrated >= minSimilarity) pushBest({ name, id: chunk.ids?.[i] || null, card: chunk.cards?.[i] || null, similarity: calibrated });
-                if (isManaUserActivelyEditing() && i % 96 === 95) await yieldForManaSearchResponsiveness();
+                if ((isManaUserActivelyEditing() || isManaEditableControlInteractionActive()) && i % 96 === 95) await yieldForManaSearchResponsiveness();
             }
             await yieldForManaSearchResponsiveness();
         }
@@ -13054,7 +13108,8 @@ async function warmEmbeddingCache(texts, extractor, diagnostics, batchSize = 16)
         // Some browser ML backends perform a meaningful amount of synchronous WASM work per
         // inference call. Use smaller calls while someone is actively entering a value so the
         // event loop gets control back more often; the vector results and cache keys are identical.
-        const effectiveBatchSize = isManaUserActivelyEditing() ? Math.min(batchSize, 2) : batchSize;
+        const effectiveBatchSize = (isManaUserActivelyEditing() || isManaEditableControlInteractionActive())
+            ? Math.min(batchSize, 2) : batchSize;
         const chunk = unique.slice(i, i + effectiveBatchSize);
         i += chunk.length;
         try {
@@ -17939,7 +17994,9 @@ async function findSimilarCards() {
                         (a, b) => (b._previewScore || 0) - (a._previewScore || 0)
                     );
                     if (requestId !== searchRequestId) break;
-                    const batch = sortedPending.slice(0, isManaUserActivelyEditing() ? 3 : progressiveRankingBatchSize);
+                    const batch = sortedPending.slice(0,
+                        (isManaUserActivelyEditing() || isManaEditableControlInteractionActive())
+                            ? 3 : progressiveRankingBatchSize);
                     if (!batch.length) break;
                     batch.forEach(card => progressiveRankingPending.delete((card.name||'').toLowerCase()));
                     await scoreCardBatch({
