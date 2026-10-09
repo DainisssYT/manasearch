@@ -5090,3 +5090,101 @@ body.reduce-motion *::after {
         box-sizing: border-box;
     }
 }
+
+
+/* V26: evenly center the Compare label within its actual button box (including on narrow cards). */
+.card-actions .compare-btn {
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    text-align: center !important;
+    padding-left: 0 !important;
+    padding-right: 0 !important;
+    box-sizing: border-box;
+    line-height: 1.2;
+}
+
+/* Per-card on-demand legality view. It stays closed by default so the result grid remains compact. */
+.result-legality-toggle-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 100%;
+    min-height: 28px;
+    margin-top: 6px;
+    padding: 5px 8px;
+    border: 1px solid var(--border-color);
+    border-radius: 7px;
+    background: var(--bg-primary);
+    color: var(--text-main) !important;
+    font-size: 11px;
+    line-height: 1.25;
+    text-align: center;
+}
+
+.result-legality-toggle-btn:hover {
+    border-color: var(--accent-color);
+}
+
+.result-legality-panel {
+    width: 100%;
+    margin-top: 7px;
+    padding: 8px;
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    background: var(--bg-primary);
+    box-sizing: border-box;
+}
+
+.result-legality-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 5px 8px;
+}
+
+.result-legality-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 5px;
+    min-width: 0;
+    padding: 4px 5px;
+    border-radius: 5px;
+    background: var(--bg-secondary);
+    font-size: 10px;
+    line-height: 1.2;
+}
+
+.result-legality-format {
+    min-width: 0;
+    overflow-wrap: anywhere;
+    color: var(--text-muted);
+}
+
+.result-legality-status {
+    flex: 0 0 auto;
+    font-weight: 800;
+    text-align: right;
+}
+
+.result-legality-status.is-legal { color: #22c55e; }
+.result-legality-status.is-illegal { color: #ef4444; }
+.result-legality-status.is-restricted { color: #eab308; }
+.result-legality-status.is-unknown { color: var(--text-muted); }
+
+.legality-unavailable {
+    margin: 0;
+    font-size: 11px;
+    line-height: 1.4;
+    color: var(--text-muted);
+}
+
+.preference-subsection-start {
+    margin-top: 16px;
+    padding-top: 14px;
+    border-top: 1px solid var(--border-color);
+}
+
+@media (max-width: 380px) {
+    .result-legality-grid { grid-template-columns: minmax(0, 1fr); }
+}

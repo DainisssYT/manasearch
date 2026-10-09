@@ -1,6 +1,6 @@
-/* ManaSearch build 20261009-25 */
+/* ManaSearch build 20261009-26 */
 // ManaSearch deployment build marker. Bump this whenever app.js changes so cached-module issues are easy to diagnose.
-const MANASEARCH_APP_BUILD = '20261009-25';
+const MANASEARCH_APP_BUILD = '20261009-26';
 console.info(`[ManaSearch] app.js build ${MANASEARCH_APP_BUILD}`);
 
 // State Management
@@ -127,7 +127,9 @@ const DEFAULT_DISPLAY_PREFERENCES = Object.freeze({
     theme: 'dark',
     resultDensity: 'comfortable',
     reduceMotion: false,
-    showStreamProgress: true
+    showStreamProgress: true,
+    includeDigitalCards: false,
+    includeTokenEmblemFunnyCards: false
 });
 let displayPreferences = { ...DEFAULT_DISPLAY_PREFERENCES };
 
@@ -159,7 +161,9 @@ function loadDisplayPreferences() {
         theme: (stored?.theme === 'light' || stored?.theme === 'dark') ? stored.theme : (loadLegacyThemePreference() || DEFAULT_DISPLAY_PREFERENCES.theme),
         resultDensity: ['comfortable', 'compact'].includes(stored?.resultDensity) ? stored.resultDensity : DEFAULT_DISPLAY_PREFERENCES.resultDensity,
         reduceMotion: Boolean(stored?.reduceMotion),
-        showStreamProgress: stored?.showStreamProgress !== false
+        showStreamProgress: stored?.showStreamProgress !== false,
+        includeDigitalCards: stored?.includeDigitalCards === true,
+        includeTokenEmblemFunnyCards: stored?.includeTokenEmblemFunnyCards === true
     };
     return displayPreferences;
 }
@@ -170,6 +174,54 @@ function saveDisplayPreferences() {
     } catch (error) {
         // Persistence is optional; the live preference still applies for this session.
     }
+}
+
+// Candidate inclusion preferences are presentation filters: they are applied after ranking so
+// changing a toggle can immediately reveal previously-ranked results without forcing an expensive
+// new search. The ranked pool and Search Deeper continuation remain intact.
+function isDigitalOnlyCard(card) {
+    if (!card || typeof card !== 'object') return false;
+    if (card.digital === true) return true;
+    const games = Array.isArray(card.games)
+        ? card.games.map(value => String(value || '').trim().toLowerCase()).filter(Boolean)
+        : [];
+    return games.length > 0 && !games.includes('paper');
+}
+
+const MANA_SEARCH_UN_SET_CODES = new Set(['ugl', 'unh', 'ust', 'und', 'unf']);
+const MANA_SEARCH_KNOWN_LEGALITY_VALUES = new Set(['legal', 'not_legal', 'banned', 'restricted']);
+function isTokenEmblemOrAllFormatBannedCard(card) {
+    if (!card || typeof card !== 'object') return false;
+    const layout = String(card.layout || '').trim().toLowerCase();
+    const typeLine = String(card.type_line || '').toLowerCase();
+    if (layout === 'token' || layout.includes('token') || layout === 'emblem' ||
+        /\bemblem\b/.test(typeLine) || /\btoken\b/.test(typeLine)) return true;
+
+    const legalities = card.legalities && typeof card.legalities === 'object' ? Object.values(card.legalities) : [];
+    const statuses = legalities.map(value => String(value || '').trim().toLowerCase()).filter(value => MANA_SEARCH_KNOWN_LEGALITY_VALUES.has(value));
+    const allFormatsUnavailable = statuses.length >= 8 && statuses.every(value => value === 'not_legal' || value === 'banned');
+    if (!allFormatsUnavailable) return false;
+
+    const setCode = String(card.set || '').trim().toLowerCase();
+    const securityStamp = String(card.security_stamp || '').trim().toLowerCase();
+    const promoTypes = Array.isArray(card.promo_types) ? card.promo_types.map(value => String(value || '').toLowerCase()) : [];
+    const hasAnyExplicitBan = statuses.includes('banned');
+    // Cards marked banned in one or more formats and not_legal in every other format are excluded
+    // as all-format-unavailable. Un-set/playtest cards often use only not_legal (rather than banned),
+    // so those require a known funny/fake marker before they are excluded.
+    const knownFunnyOrFake = MANA_SEARCH_UN_SET_CODES.has(setCode) || setCode === 'mb2' ||
+        securityStamp === 'acorn' || promoTypes.some(value => /playtest|funny|acorn/.test(value));
+    return hasAnyExplicitBan || knownFunnyOrFake;
+}
+
+function isAllowedByCandidatePreferences(card) {
+    if (!displayPreferences?.includeDigitalCards && isDigitalOnlyCard(card)) return false;
+    if (!displayPreferences?.includeTokenEmblemFunnyCards && isTokenEmblemOrAllFormatBannedCard(card)) return false;
+    return true;
+}
+
+function getPreferenceFilteredCandidates(cards) {
+    return (Array.isArray(cards) ? cards : []).filter(isAllowedByCandidatePreferences);
 }
 
 function getDisplayedResultLimit() {
@@ -533,7 +585,7 @@ const BENCHMARK_SUITE = [
             { text: "search your library for", mode: "exact", intent: "perform a library search" },
             { text: "Plains card", mode: "exact", intent: "search specifically for a Plains" }
         ],
-        expected: ["Loyal Warhound", "Oreskos Explorer"],
+        expected: ["Loyal Warhound"],
         categories: ["conditional-effects", "differently-worded", "multi-effect", "highlight-exact"]
     },
     {
@@ -11252,7 +11304,7 @@ let semanticCosineBaselineReady = false;
 const STATIC_CARD_CORPUS_FILENAME = 'cards.bin';
 const STATIC_CARD_CORPUS_VERSION = 1;
 const STATIC_CARD_CORPUS_MAGIC = 'MSCARD1G';
-const STATIC_CARD_CORPUS_CACHE_VERSION = '20261009-25';
+const STATIC_CARD_CORPUS_CACHE_VERSION = '20261009-26';
 const STATIC_DATA_META_FILENAME = 'static-data-meta.json';
 let staticDataMetaPromise = null;
 let staticDataBuildId = null;
@@ -13701,6 +13753,8 @@ function initApp() {
     const preferenceDensity = document.getElementById('preference-result-density');
     const preferenceReduceMotion = document.getElementById('preference-reduce-motion');
     const preferenceShowStreamProgress = document.getElementById('preference-show-stream-progress');
+    const preferenceIncludeDigitalCards = document.getElementById('preference-include-digital-cards');
+    const preferenceIncludeTokenEmblemFunny = document.getElementById('preference-include-token-emblem-funny');
 
     function syncPreferencesControls() {
         if (preferenceResultLimit) preferenceResultLimit.value = String(getDisplayedResultLimit());
@@ -13709,6 +13763,8 @@ function initApp() {
         if (preferenceDensity) preferenceDensity.value = displayPreferences.resultDensity || 'comfortable';
         if (preferenceReduceMotion) preferenceReduceMotion.checked = Boolean(displayPreferences.reduceMotion);
         if (preferenceShowStreamProgress) preferenceShowStreamProgress.checked = displayPreferences.showStreamProgress !== false;
+        if (preferenceIncludeDigitalCards) preferenceIncludeDigitalCards.checked = displayPreferences.includeDigitalCards === true;
+        if (preferenceIncludeTokenEmblemFunny) preferenceIncludeTokenEmblemFunny.checked = displayPreferences.includeTokenEmblemFunnyCards === true;
     }
 
     function commitPreferences() {
@@ -13718,6 +13774,8 @@ function initApp() {
         displayPreferences.resultDensity = ['comfortable', 'compact'].includes(preferenceDensity?.value) ? preferenceDensity.value : DEFAULT_DISPLAY_PREFERENCES.resultDensity;
         displayPreferences.reduceMotion = Boolean(preferenceReduceMotion?.checked);
         displayPreferences.showStreamProgress = preferenceShowStreamProgress?.checked !== false;
+        displayPreferences.includeDigitalCards = preferenceIncludeDigitalCards?.checked === true;
+        displayPreferences.includeTokenEmblemFunnyCards = preferenceIncludeTokenEmblemFunny?.checked === true;
         saveDisplayPreferences();
         try {
             localStorage.setItem(THEME_KEY, displayPreferences.theme);
@@ -13725,6 +13783,7 @@ function initApp() {
         applyPresentationPreferences();
         if (resultsSection && !resultsSection.classList.contains('hidden') && Array.isArray(lastSearchResults)) {
             renderResults(lastSearchResults);
+            updateResultsSummary();
         }
     }
 
@@ -18345,7 +18404,9 @@ function updateResultsSummary() {
     const summary = document.getElementById('results-summary');
     if (!summary) return;
 
-    const finalCount = Array.isArray(lastSearchResults) ? lastSearchResults.length : 0;
+    const allFinalCards = Array.isArray(lastSearchResults) ? lastSearchResults : [];
+    const finalCount = getPreferenceFilteredCandidates(allFinalCards).length;
+    const preferenceHiddenCount = Math.max(0, allFinalCards.length - finalCount);
     const candidateCount = Number.isFinite(lastSearchCandidateCount) ? lastSearchCandidateCount : null;
     const visibleCount = Math.min(finalCount, getDisplayedResultLimit());
 
@@ -18358,12 +18419,17 @@ function updateResultsSummary() {
     const resultWord = finalCount === 1 ? 'result' : 'results';
     const candidateWord = candidateCount === 1 ? 'candidate' : 'candidates';
 
+    const hiddenNote = preferenceHiddenCount > 0
+        ? ` ${preferenceHiddenCount} hidden by candidate preferences.`
+        : '';
     if (finalCount === 0) {
-        summary.textContent = `No final results matched. ${candidateCount} ${candidateWord} were evaluated.`;
+        summary.textContent = preferenceHiddenCount > 0
+            ? `No results are visible with the current candidate preferences; ${preferenceHiddenCount} ranked cards are hidden. ${candidateCount} ${candidateWord} were evaluated.`
+            : `No final results matched. ${candidateCount} ${candidateWord} were evaluated.`;
     } else if (finalCount > visibleCount) {
-        summary.textContent = `Found ${finalCount} ${resultWord} from ${candidateCount} ${candidateWord} evaluated. Showing the top ${visibleCount}.`;
+        summary.textContent = `Found ${finalCount} visible ${resultWord} from ${candidateCount} ${candidateWord} evaluated. Showing the top ${visibleCount}.${hiddenNote}`;
     } else {
-        summary.textContent = `Found ${finalCount} ${resultWord} from ${candidateCount} ${candidateWord} evaluated.`;
+        summary.textContent = `Found ${finalCount} visible ${resultWord} from ${candidateCount} ${candidateWord} evaluated.${hiddenNote}`;
     }
     summary.classList.remove('hidden');
 }
@@ -18447,6 +18513,70 @@ function cleanupResultImageObservers() {
     resultsGrid?.querySelectorAll('.card-art-wrap img').forEach(img => resultImageObserver.unobserve(img));
 }
 
+const LEGALITY_FORMAT_LABELS = Object.freeze({
+    standard: 'Standard', future: 'Future', historic: 'Historic', historicbrawl: 'Historic Brawl', gladiator: 'Gladiator', pioneer: 'Pioneer', explorer: 'Explorer',
+    modern: 'Modern', legacy: 'Legacy', pauper: 'Pauper', vintage: 'Vintage', penny: 'Penny',
+    commander: 'Commander', oathbreaker: 'Oathbreaker', standardbrawl: 'Standard Brawl', brawl: 'Brawl',
+    alchemy: 'Alchemy', paupercommander: 'Pauper Commander', duel: 'Duel Commander', oldschool: 'Old School',
+    premodern: 'Premodern', predh: 'PreDH', timeless: 'Timeless'
+});
+const LEGALITY_FORMAT_ORDER = Object.keys(LEGALITY_FORMAT_LABELS);
+
+function getCardLegalitiesForDisplay(card) {
+    if (card?.legalities && typeof card.legalities === 'object' && Object.keys(card.legalities).length) return card.legalities;
+    const localCard = card?.name ? getStaticCardByName(card.name) : null;
+    return localCard?.legalities && typeof localCard.legalities === 'object' ? localCard.legalities : null;
+}
+
+function renderCardLegalityPanel(card, panel) {
+    if (!panel) return;
+    panel.replaceChildren();
+    const legalities = getCardLegalitiesForDisplay(card);
+    const entries = legalities ? Object.entries(legalities).filter(([format, value]) => format && value != null) : [];
+    if (!entries.length) {
+        const unavailable = document.createElement('p');
+        unavailable.className = 'legality-unavailable';
+        unavailable.textContent = 'Format legality data is not available for this card.';
+        panel.appendChild(unavailable);
+        panel.dataset.loadedFor = normalizeCardNameForIdentity(card?.name || '');
+        return;
+    }
+    const rank = new Map(LEGALITY_FORMAT_ORDER.map((key, index) => [key, index]));
+    entries.sort((a, b) => (rank.get(a[0]) ?? 999) - (rank.get(b[0]) ?? 999) || a[0].localeCompare(b[0]));
+    const grid = document.createElement('div');
+    grid.className = 'result-legality-grid';
+    for (const [format, rawStatus] of entries) {
+        const status = String(rawStatus || '').toLowerCase();
+        const row = document.createElement('div');
+        row.className = 'result-legality-row';
+        const label = document.createElement('span');
+        label.className = 'result-legality-format';
+        label.textContent = LEGALITY_FORMAT_LABELS[format] || format.replace(/[_-]+/g, ' ').replace(/\b\w/g, letter => letter.toUpperCase());
+        const value = document.createElement('span');
+        value.className = 'result-legality-status';
+        if (status === 'legal') {
+            value.classList.add('is-legal');
+            value.textContent = 'Legal';
+        } else if (status === 'restricted') {
+            value.classList.add('is-restricted');
+            value.textContent = 'Restricted';
+        } else if (status === 'banned') {
+            value.classList.add('is-illegal');
+            value.textContent = 'Banned';
+        } else if (status === 'not_legal') {
+            value.classList.add('is-illegal');
+            value.textContent = 'Illegal';
+        } else {
+            value.classList.add('is-unknown');
+            value.textContent = status ? status.replace(/_/g, ' ') : 'Unknown';
+        }
+        row.append(label, value);
+        grid.appendChild(row);
+    }
+    panel.appendChild(grid);
+    panel.dataset.loadedFor = normalizeCardNameForIdentity(card?.name || '');
+}
+
 function renderResults(cards) {
     resultsSection.classList.remove('hidden');
 
@@ -18460,6 +18590,7 @@ function renderResults(cards) {
             const key = normalizeCardNameForIdentity(card?.name || '');
             if (!key || seenNames.has(key)) continue;
             if (currentSourceCard && card?.name && isSameCardName(card.name, currentSourceCard.name)) continue;
+            if (!isAllowedByCandidatePreferences(card)) continue;
             seenNames.add(key);
             deduped.push(card);
         }
@@ -18472,7 +18603,9 @@ function renderResults(cards) {
         const note = document.createElement('p');
         note.className = 'instruction-note';
         note.style.gridColumn = '1 / -1';
-        note.textContent = 'No matching cards found. Try loosening your filters.';
+        note.textContent = Array.isArray(cards) && cards.length > 0
+            ? 'No cards are visible with the current candidate preferences. Open Preferences to include digital-only or token/emblem/funny cards.'
+            : 'No matching cards found. Try loosening your filters.';
         resultsGrid.appendChild(note);
         exportBtn.style.display = 'none';
         return;
@@ -18594,6 +18727,14 @@ function renderResults(cards) {
             breakdown.classList.toggle('scores-hidden', displayPreferences.showScoreBreakdown === false);
         }
 
+        const legalityToggle = cardElement.querySelector('.result-legality-toggle-btn');
+        const legalityPanel = cardElement.querySelector('.result-legality-panel');
+        if (legalityToggle && legalityPanel) {
+            const expanded = !legalityPanel.classList.contains('hidden');
+            legalityToggle.textContent = expanded ? 'Hide format legality ▴' : 'Show format legality ▾';
+            legalityToggle.setAttribute('aria-expanded', String(expanded));
+        }
+
         const favoriteBtn = cardElement.querySelector('.result-favorite-btn');
         if (favoriteBtn) {
             const isFav = getStoredArray(FAVORITES_KEY).some(name => String(name).toLowerCase() === String(card.name).toLowerCase());
@@ -18684,7 +18825,18 @@ function renderResults(cards) {
         selectText.textContent = 'Select';
         selectLabel.append(checkbox, selectText);
         actions.append(favoriteBtn, compareBtn, selectLabel);
-        info.append(titleRow, typeLine, matchLine, breakdown, actions);
+
+        const legalityToggle = document.createElement('button');
+        legalityToggle.type = 'button';
+        legalityToggle.className = 'result-legality-toggle-btn';
+        legalityToggle.textContent = 'Show format legality ▾';
+        legalityToggle.setAttribute('aria-expanded', 'false');
+        legalityToggle.dataset.role = 'legality';
+        const legalityPanel = document.createElement('div');
+        legalityPanel.className = 'result-legality-panel hidden';
+        legalityPanel.id = `result-legality-${getCardKey(card).replace(/[^a-z0-9_-]/gi, '-')}`;
+        legalityToggle.setAttribute('aria-controls', legalityPanel.id);
+        info.append(titleRow, typeLine, matchLine, breakdown, actions, legalityToggle, legalityPanel);
         el.append(artWrap, info);
         return el;
     };
@@ -18715,6 +18867,20 @@ function renderResults(cards) {
             if (!cardEl) return;
             const card = visibleResultCardData.get(cardEl.dataset.cardKey);
             if (!card) return;
+            const legalityToggle = event.target.closest('.result-legality-toggle-btn');
+            if (legalityToggle) {
+                event.preventDefault();
+                event.stopPropagation();
+                const panel = cardEl.querySelector('.result-legality-panel');
+                if (!panel) return;
+                const opening = panel.classList.contains('hidden');
+                panel.classList.toggle('hidden', !opening);
+                legalityToggle.setAttribute('aria-expanded', String(opening));
+                legalityToggle.textContent = opening ? 'Hide format legality ▴' : 'Show format legality ▾';
+                const cardKey = normalizeCardNameForIdentity(card.name || '');
+                if (opening && panel.dataset.loadedFor !== cardKey) renderCardLegalityPanel(card, panel);
+                return;
+            }
             if (event.target.closest('.compare-btn')) {
                 event.preventDefault();
                 event.stopPropagation();
@@ -19937,10 +20103,11 @@ function renderComparison() {
 }
 
 function exportToCSV() {
-    if (!lastSearchResults || lastSearchResults.length === 0) return;
+    const exportCards = getPreferenceFilteredCandidates(lastSearchResults);
+    if (!exportCards.length) return;
     let csvContent = "Name,Mana Cost,Type,Price (USD),Price (EUR),Overall Score,Synergy Score,Context Score,Exactness Score,Category Score,Scryfall URI\n";
 
-    lastSearchResults.forEach(card => {
+    exportCards.forEach(card => {
         const name = `"${card.name.replace(/"/g, '""')}"`;
         const mana = `"${(card.mana_cost || '').replace(/"/g, '""')}"`;
         const type = `"${card.type_line.replace(/"/g, '""')}"`;

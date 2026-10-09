@@ -578,7 +578,7 @@
                 <button type="button" id="close-preferences-modal" class="close-btn" aria-label="Close preferences">&times;</button>
             </div>
             <div class="modal-body preferences-body">
-                <p class="modal-intro">Customize how ManaSearch looks and how much information it shows. Search quality and the internal candidate pool are not reduced by these display settings.</p>
+                <p class="modal-intro">Customize how ManaSearch looks and which card types are allowed to appear among candidate results. These settings are saved in this browser.</p>
 
                 <div class="preference-setting">
                     <div class="preference-setting-copy">
@@ -651,6 +651,28 @@
                     </label>
                 </div>
 
+                <div class="preference-setting preference-toggle-setting preference-subsection-start">
+                    <div class="preference-setting-copy">
+                        <label for="preference-include-digital-cards"><strong>Include digital-only cards</strong></label>
+                        <span>Allow cards that exist only on Arena, MTGO, or another digital platform to appear in candidate results.</span>
+                    </div>
+                    <label class="preference-switch">
+                        <input type="checkbox" id="preference-include-digital-cards">
+                        <span class="preference-switch-track" aria-hidden="true"></span>
+                    </label>
+                </div>
+
+                <div class="preference-setting preference-toggle-setting">
+                    <div class="preference-setting-copy">
+                        <label for="preference-include-token-emblem-funny"><strong>Include tokens, emblems, and all-format-banned funny cards</strong></label>
+                        <span>Allow token/emblem entries and fake, playtest, or Un-set cards that are not legal in any format.</span>
+                    </div>
+                    <label class="preference-switch">
+                        <input type="checkbox" id="preference-include-token-emblem-funny">
+                        <span class="preference-switch-track" aria-hidden="true"></span>
+                    </label>
+                </div>
+
                 <div class="preference-info-row">
                     <strong>Saved locally</strong>
                     <span>These preferences are stored in this browser and do not affect other ManaSearch users.</span>
@@ -680,6 +702,6 @@
         import * as transformers from "https://cdn.jsdelivr.net/npm/@xenova/transformers@2.16.0";
         window.transformers = transformers;
     </script>
-    <script type="module" src="app.js?v=20261009-25"></script>
+    <script type="module" src="app.js?v=20261009-26"></script>
 </body>
 </html>
