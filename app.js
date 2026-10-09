@@ -1,6 +1,6 @@
 /* ManaSearch build 20261008-8 */
 // ManaSearch deployment build marker. Bump this whenever app.js changes so cached-module issues are easy to diagnose.
-const MANASEARCH_APP_BUILD = '20261008-23';
+const MANASEARCH_APP_BUILD = '20261009-24';
 console.info(`[ManaSearch] app.js build ${MANASEARCH_APP_BUILD}`);
 
 // State Management
@@ -1710,18 +1710,26 @@ function validateBenchmarkRuntimeInApp() {
         result.tests = cfg.tests;
         result.warnings = cfg.warnings || [];
 
+        // app.js is an ES module, so its top-level function declarations are module-scoped and
+        // are not required to be properties of window/globalThis. Check the actual lexical
+        // bindings instead; the old window/globalThis test reported false warnings for functions
+        // that the benchmark calls successfully from this same module.
         const requiredFunctions = [
-            'runBenchmarkSuite', 'runBenchmarkPass', 'resetBenchmarkColdState',
-            'buildBenchmarkHighlightState', 'renderBenchmarkHighlightPreview',
-            'findSessionSemanticMatches', 'findFullSemanticMatches', 'findFullSemanticExactMatches',
-            'calculateRecallAtK', 'calculateMRR', 'calculateNDCGAtK', 'calculatePrecisionAtK'
+            ['runBenchmarkSuite', typeof runBenchmarkSuite === 'function'],
+            ['runBenchmarkPass', typeof runBenchmarkPass === 'function'],
+            ['resetBenchmarkColdState', typeof resetBenchmarkColdState === 'function'],
+            ['buildBenchmarkHighlightState', typeof buildBenchmarkHighlightState === 'function'],
+            ['renderBenchmarkHighlightPreview', typeof renderBenchmarkHighlightPreview === 'function'],
+            ['findSessionSemanticMatches', typeof findSessionSemanticMatches === 'function'],
+            ['findFullSemanticMatches', typeof findFullSemanticMatches === 'function'],
+            ['findFullSemanticExactMatches', typeof findFullSemanticExactMatches === 'function'],
+            ['calculateRecallAtK', typeof calculateRecallAtK === 'function'],
+            ['calculateMRR', typeof calculateMRR === 'function'],
+            ['calculateNDCGAtK', typeof calculateNDCGAtK === 'function'],
+            ['calculatePrecisionAtK', typeof calculatePrecisionAtK === 'function']
         ];
-        for (const name of requiredFunctions) {
-            if (typeof window !== 'undefined' && typeof window[name] === 'undefined' && typeof globalThis[name] !== 'function') {
-                // Top-level lexical function bindings are not necessarily properties of window.
-                // The typeof check above is therefore intentionally supplemented by globalThis.
-                result.warnings.push(`Benchmark function is not exposed on window: ${name}`);
-            }
+        for (const [name, available] of requiredFunctions) {
+            if (!available) result.warnings.push(`Benchmark function is unavailable in app module: ${name}`);
         }
 
         if (typeof document !== 'undefined') {
@@ -8310,7 +8318,11 @@ function inferContextualSemanticMechanics(card, text, directKeywords = new Set()
     const evidence = new Map();
 
     for (const keyword of allKeywords) {
-        if (directKeywords.has(keyword)) {
+        const escapedKeyword = escapeMechanicRegexTerm(keyword).replace(/\s+/g, '\\s+');
+        const explicitlyNamedInHighlight = Boolean(escapedKeyword) && new RegExp(
+            `(?:^|[^a-z0-9])${escapedKeyword}(?=$|[^a-z0-9])`, 'i'
+        ).test(highlighted);
+        if (directKeywords.has(keyword) || explicitlyNamedInHighlight) {
             inferred.add(keyword);
             evidence.set(keyword, { score: 1, reason: 'keyword-in-highlight' });
             continue;
@@ -8336,7 +8348,10 @@ function inferContextualSemanticMechanics(card, text, directKeywords = new Set()
         // terms, preventing a shared word like "combat" or "trigger" from linking unrelated mechanics.
         const hasDistinctiveExactAnchor = [...signature].some(anchor => textAnchors.has(anchor) && semanticBridgeAnchorSpecificity(anchor) >= 1.30);
         const directAccepted = hasDistinctiveExactAnchor || direct.exact >= 0.42 || (direct.score >= 0.48 && direct.matchedTerms >= 2);
-        const contextualAccepted = best.score >= 0.52 && (best.clauseScore >= 0.56 || best.overlap >= 0.58);
+        // Contextual fallback must be locally connected to the highlighted span. A strong
+        // mechanic signature elsewhere on the same card is not enough on its own; otherwise the
+        // Cycling clause can be inferred from a separate Flying-only highlight.
+        const contextualAccepted = best.score >= 0.52 && best.clauseScore >= 0.56 && best.overlap >= 0.42;
         if (directAccepted || contextualAccepted) {
             inferred.add(keyword);
             evidence.set(keyword, {
@@ -9062,10 +9077,18 @@ const OPPOSITE_MECHANICS = new Set([
     'reanimate|mill','mill|reanimate'
 ]);
 
+function hasOppositeMechanicalSignature(a, b) {
+    // Canonical function and family labels can be broader than the action (e.g. both Tap and
+    // Untap map into board-state). Check all available semantic levels, not just function || action.
+    const signatures = node => [node?.function, node?.action, node?.outcome]
+        .map(normalizeMechanicToken).filter(Boolean);
+    const left = signatures(a), right = signatures(b);
+    return left.some(x => right.some(y => OPPOSITE_MECHANICS.has(`${x}|${y}`)));
+}
+
 function mechanicalNodeContradiction(a, b) {
     let penalty = 0;
-    const key = `${a?.function || a?.action || ''}|${b?.function || b?.action || ''}`;
-    if (OPPOSITE_MECHANICS.has(key)) penalty += 0.30;
+    if (hasOppositeMechanicalSignature(a, b)) penalty += 0.30;
 
     const zoneOpposite = a?.from && a?.to && b?.from && b?.to && a.from === b.to && a.to === b.from && a.from !== a.to;
     if (zoneOpposite) penalty += 0.22;
@@ -9259,8 +9282,7 @@ function mechanicalGraphContradictionScore(graphA, graphB, matches = []) {
     // Look for strong candidate-wide opposite mechanics as a secondary contradiction signal.
     const functionPairs = [];
     a.forEach(x => b.forEach(y => {
-        const k = `${x.function || x.action}|${y.function || y.action}`;
-        if (OPPOSITE_MECHANICS.has(k)) functionPairs.push(k);
+        if (hasOppositeMechanicalSignature(x, y)) functionPairs.push(`${x.function || x.action}|${y.function || y.action}`);
     }));
     if (functionPairs.length) penalty += Math.min(0.25, functionPairs.length * 0.06);
     return Math.min(0.60, checked ? penalty / checked : penalty);
@@ -9414,6 +9436,89 @@ function buildMechanicalFeatureVector(cardOrGraphA, graphB = null) {
     return calculateMechanicalGraphSimilarity(graphA, graph).featureVector;
 }
 
+// Explicit high-confidence contrast checks are a calibration guard, not a replacement parser.
+// They activate only when both texts resolve to one principal effect, so compound cards keep their
+// full graph/semantic treatment rather than being punished for containing different sub-effects.
+function getMechanicalContrastText(parsedEffects = []) {
+    return (Array.isArray(parsedEffects) ? parsedEffects : [])
+        .map(effect => String(effect?.raw || effect?.text || effect?.oracle_text || '').trim())
+        .filter(Boolean).join(' ');
+}
+
+function getSinglePrimaryEffectSignature(text) {
+    const input = String(text || '').toLowerCase();
+    const found = new Set();
+    const add = (pattern, key) => { if (pattern.test(input)) found.add(key); };
+
+    // Order-independent signatures deliberately prefer the actual destination/action over generic
+    // words such as "return" or "target".
+    add(/\b(?:return|put)\b[\s\S]*\bfrom (?:your )?graveyard\b[\s\S]*\b(?:to|onto) the battlefield\b|\bfrom (?:your )?graveyard\b[\s\S]*\b(?:return|put)\b[\s\S]*\b(?:to|onto) the battlefield\b/, 'reanimate');
+    add(/\breturn\b[\s\S]*\bto (?:its owner's|their owner's|your) hand\b/, 'bounce');
+    add(/\bdestroy\b/, 'destroy');
+    add(/\bexile\b/, 'exile');
+    add(/\bdraw\s+(?:a|one|two|three|four|five|\d+)\s+cards?\b/, 'draw');
+    add(/\buntap\b/, 'untap');
+    add(/\btap\b/, 'tap');
+    add(/\byou gain\s+(?:\d+|x|that much|life equal to)\s+life\b|\bgain\s+\d+\s+life\b/, 'gain_life');
+    add(/\byou lose\s+(?:\d+|x|that much)\s+life\b|\blose\s+\d+\s+life\b/, 'lose_life');
+    add(/\bcounter target (?:noncreature )?spell\b/, 'counter_spell');
+    add(/\badd\s+(?:\{[wubrgc]\}|\{\d+\})(?:\s*,\s*\{[wubrgc]\})*(?:\s*,?\s*or\s+\{[wubrgc]\})*/i, 'mana_production');
+    add(/\bdiscard\b/, 'discard');
+    add(/\bmill\b/, 'mill');
+    add(/\bcreate\b[\s\S]*\btoken/, 'create_token');
+    add(/\bdeals?\s+(?:\d+|x)\s+damage\b/, 'damage');
+    add(/\bput\b[\s\S]*\bcounters?\b/, 'put_counters');
+    add(/\bgain control of\b/, 'gain_control');
+    add(/\bsearch your library\b/, 'search_library');
+    add(/\bsacrifice\b/, 'sacrifice');
+
+    if (found.size !== 1) return null;
+    return [...found][0];
+}
+
+function mechanicalEffectFamily(signature) {
+    if (['destroy', 'exile', 'sacrifice'].includes(signature)) return 'removal';
+    if (signature === 'reanimate') return 'recursion';
+    if (signature === 'bounce') return 'tempo';
+    if (signature === 'draw' || signature === 'search_library') return 'card_advantage';
+    if (signature === 'tap' || signature === 'untap') return 'board_state';
+    if (signature === 'gain_life' || signature === 'lose_life') return 'life';
+    if (signature === 'counter_spell') return 'counter';
+    if (signature === 'mana_production') return 'mana';
+    if (signature === 'discard' || signature === 'mill') return 'disruption';
+    if (signature === 'create_token') return 'tokens';
+    if (signature === 'damage') return 'damage';
+    if (signature === 'put_counters') return 'counters';
+    if (signature === 'gain_control') return 'control';
+    return signature;
+}
+
+function inferExplicitMechanicalContrast(parsedA = [], parsedB = []) {
+    const textA = getMechanicalContrastText(parsedA);
+    const textB = getMechanicalContrastText(parsedB);
+    if (!textA || !textB) return { kind: 'none', signatures: [] };
+    const a = getSinglePrimaryEffectSignature(textA);
+    const b = getSinglePrimaryEffectSignature(textB);
+    if (a && b) {
+        const key = `${a}|${b}`;
+        if (OPPOSITE_MECHANICS.has(key)) return { kind: 'opposite', signatures: [a, b], reason: 'opposite primary actions' };
+        if (mechanicalEffectFamily(a) !== mechanicalEffectFamily(b)) {
+            return { kind: 'different-primary-effects', signatures: [a, b], reason: 'single primary effects belong to different mechanical families' };
+        }
+        if (a === 'mana_production' && b === 'mana_production') {
+            const manaPart = input => (input.match(/\badd\s+([^.;\n]+)/i) || [])[1] || '';
+            const exprA = manaPart(textA), exprB = manaPart(textB);
+            const choiceA = /,|\bor\b/i.test(exprA), choiceB = /,|\bor\b/i.test(exprB);
+            const outputsA = (exprA.match(/\{[wubrgc]\}/gi) || []).length;
+            const outputsB = (exprB.match(/\{[wubrgc]\}/gi) || []).length;
+            if (choiceA !== choiceB && outputsA > 1 && outputsB > 1) {
+                return { kind: 'mana-choice-vs-simultaneous', signatures: [a, b], reason: 'choice of one color versus simultaneous production', choiceA, outputsA, choiceB, outputsB };
+            }
+        }
+    }
+    return { kind: 'none', signatures: [a, b].filter(Boolean) };
+}
+
 function calculateMechanicalSimilarityDetailed(parsedA, parsedB, profileA = null, profileB = null) {
     const safeA = Array.isArray(parsedA) ? parsedA : [];
     const safeB = Array.isArray(parsedB) ? parsedB : [];
@@ -9453,13 +9558,20 @@ function calculateMechanicalSimilarityDetailed(parsedA, parsedB, profileA = null
         ? Math.max(0, universal.score * (0.92 + Math.min(0.08, universal.keywordParameterCoverage * 0.08)))
         : 0;
     const contradictionPenalty = graph.contradiction || 0;
-    const score = Math.max(0, Math.min(1,
+    const rawScore = Math.max(0, Math.min(1,
         Math.max(structuredBlend, keywordRescue * 0.92, universal.score * 0.62)
         * (1 - Math.min(0.42, contradictionPenalty * 0.72))
     ));
+    const explicitContrast = inferExplicitMechanicalContrast(safeA, safeB);
+    let score = rawScore;
+    if (explicitContrast.kind === 'opposite') score = Math.min(score, 0.55);
+    else if (explicitContrast.kind === 'different-primary-effects') score = Math.min(score, 0.38);
+    else if (explicitContrast.kind === 'mana-choice-vs-simultaneous') score = Math.min(0.89, score * 0.94);
 
     return {
         score,
+        rawScore,
+        explicitContrast,
         structuralScore: structural,
         graphScore: graph.score,
         graphSourceCoverage: graph.sourceCoverage,
@@ -9514,7 +9626,8 @@ const MANASEARCH_MECHANICAL_REGRESSION_CASES = Object.freeze([
         b: 'Draw two cards.',
         min: 0,
         max: 0.40,
-        negative: true
+        negative: true,
+        contrastKind: 'different-primary-effects'
     },
     {
         id: 'tap-vs-untap',
@@ -9522,7 +9635,9 @@ const MANASEARCH_MECHANICAL_REGRESSION_CASES = Object.freeze([
         b: 'Untap target creature.',
         min: 0,
         max: 0.60,
-        negative: true
+        negative: true,
+        contrastKind: 'opposite',
+        minGraphContradiction: 0.05
     },
     {
         id: 'gain-vs-lose-life',
@@ -9530,14 +9645,17 @@ const MANASEARCH_MECHANICAL_REGRESSION_CASES = Object.freeze([
         b: 'You lose 5 life.',
         min: 0,
         max: 0.60,
-        negative: true
+        negative: true,
+        contrastKind: 'opposite',
+        minGraphContradiction: 0.05
     },
     {
         id: 'mana-choice-vs-three-mana',
         a: '{T}: Add {R}, {G}, or {W}.',
         b: '{T}: Add {R}{G}{W}.',
         min: 0.25,
-        max: 0.90
+        max: 0.90,
+        contrastKind: 'mana-choice-vs-simultaneous'
     }
 ]);
 
@@ -9551,15 +9669,22 @@ function runManaSearchMechanicalRegressionSuite({ log = true } = {}) {
             const profileB = buildUniversalMechanicProfile(null, test.b, parsedB);
             const detail = calculateMechanicalSimilarityDetailed(parsedA, parsedB, profileA, profileB);
             const score = Number(detail?.score) || 0;
-            const pass = score >= test.min && score <= test.max;
+            const contrast = detail?.explicitContrast || { kind: 'none' };
+            const graphContradiction = Number(detail?.graphContradiction) || 0;
+            const pass = score >= test.min && score <= test.max &&
+                (!test.contrastKind || contrast.kind === test.contrastKind) &&
+                (test.minGraphContradiction == null || graphContradiction >= test.minGraphContradiction);
             results.push({
                 id: test.id,
                 score,
                 expected: [test.min, test.max],
                 pass,
                 graph: Number(detail?.graphScore) || 0,
+                graphContradiction,
                 universal: Number(detail?.universalScore) || 0,
-                structural: Number(detail?.structuralScore) || 0
+                structural: Number(detail?.structuralScore) || 0,
+                rawScore: Number(detail?.rawScore) || 0,
+                contrast: detail?.explicitContrast || null
             });
         } catch (error) {
             results.push({ id: test.id, score: 0, expected: [test.min, test.max], pass: false, error: error?.message || String(error) });
@@ -9581,7 +9706,7 @@ function runManaSearchMechanicalRegressionSuite({ log = true } = {}) {
 // Available for development/benchmark diagnostics without changing the public UI.
 try { window.runManaSearchMechanicalRegressionSuite = runManaSearchMechanicalRegressionSuite; } catch (_) {}
 
-// V23: highlighted-mechanic isolation checks. These specifically guard against a common semantic
+// V24: highlighted-mechanic isolation checks. These specifically guard against a common semantic
 // ranking failure: copying every keyword from a multi-mechanic source card into a short highlight.
 // They use the production inference function and are opt-in diagnostics, so they add no runtime
 // cost to ordinary searches.
@@ -9607,6 +9732,13 @@ function runManaSearchHighlightIsolationSuite({ log = true } = {}) {
             highlight: 'Whenever this creature attacks with another creature with greater power, put a +1/+1 counter on this creature.',
             mustInclude: ['training'],
             mustExclude: ['flying']
+        },
+        {
+            id: 'semicolon-fragment-does-not-leak-unrelated-mechanic',
+            card: { keywords: ['Flying', 'Cycling'], oracle_text: 'Flying; Cycling {2} ({2}, Discard this card: Draw a card.)' },
+            highlight: 'Flying',
+            mustInclude: ['flying'],
+            mustExclude: ['cycling']
         }
     ];
     const results = cases.map(test => {
@@ -11009,7 +11141,7 @@ let semanticCosineBaselineReady = false;
 const STATIC_CARD_CORPUS_FILENAME = 'cards.bin';
 const STATIC_CARD_CORPUS_VERSION = 1;
 const STATIC_CARD_CORPUS_MAGIC = 'MSCARD1G';
-const STATIC_CARD_CORPUS_CACHE_VERSION = '20261008-23';
+const STATIC_CARD_CORPUS_CACHE_VERSION = '20261009-24';
 const STATIC_DATA_META_FILENAME = 'static-data-meta.json';
 let staticDataMetaPromise = null;
 let staticDataBuildId = null;
