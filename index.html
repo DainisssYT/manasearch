@@ -695,6 +695,17 @@
         </div>
     </div>
 
+
+    <!-- FORMAT LEGALITY MODAL -->
+    <div id="format-legality-modal" class="hidden" role="dialog" aria-modal="true" aria-labelledby="format-legality-modal-title">
+        <div class="modal-content format-legality-modal-content">
+            <button type="button" id="close-format-legality-modal" class="format-legality-close" aria-label="Close format legality">&times;</button>
+            <h2 id="format-legality-modal-title">Format Legality</h2>
+            <p class="instruction-note" id="format-legality-modal-subtitle">Legality by format, based on the card data available to ManaSearch.</p>
+            <div id="format-legality-modal-body" class="format-legality-modal-body"></div>
+        </div>
+    </div>
+
     <script>
         window.transformersConfig = { allowLocalModels: false };
     </script>
@@ -702,6 +713,6 @@
         import * as transformers from "https://cdn.jsdelivr.net/npm/@xenova/transformers@2.16.0";
         window.transformers = transformers;
     </script>
-    <script type="module" src="app.js?v=20261009-26"></script>
+    <script type="module" src="app.js?v=20261009-27"></script>
 </body>
 </html>

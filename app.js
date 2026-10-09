@@ -1,6 +1,6 @@
 /* ManaSearch build 20261009-26 */
 // ManaSearch deployment build marker. Bump this whenever app.js changes so cached-module issues are easy to diagnose.
-const MANASEARCH_APP_BUILD = '20261009-26';
+const MANASEARCH_APP_BUILD = '20261009-27';
 console.info(`[ManaSearch] app.js build ${MANASEARCH_APP_BUILD}`);
 
 // State Management
@@ -252,6 +252,7 @@ let staticSearchStatus, staticSearchStatusText, staticSearchStatusSpinner, stati
 let loadingIndicator, resultsSection, resultsGrid, themeToggle, historyList;
 let systemThemeMediaQuery = null;
 let favoritesList, favoriteBtn, exportBtn, compareModal, compareContainer, compareStatus;
+let legalityModalReturnFocus = null;
 let sourceCardEmpty, sourceCardLoaded, sourceCardAddBtn, sourceCardPickerModal, sourceCardPickerInput, sourceCardPickerResults, sourceCardPickerStatus, closeSourceCardPickerBtn;
 let sourceCardPickerRequestId = 0;
 let sourceCardPickerDebounce = null;
@@ -11304,7 +11305,7 @@ let semanticCosineBaselineReady = false;
 const STATIC_CARD_CORPUS_FILENAME = 'cards.bin';
 const STATIC_CARD_CORPUS_VERSION = 1;
 const STATIC_CARD_CORPUS_MAGIC = 'MSCARD1G';
-const STATIC_CARD_CORPUS_CACHE_VERSION = '20261009-26';
+const STATIC_CARD_CORPUS_CACHE_VERSION = '20261009-27';
 const STATIC_DATA_META_FILENAME = 'static-data-meta.json';
 let staticDataMetaPromise = null;
 let staticDataBuildId = null;
@@ -14019,6 +14020,22 @@ function initApp() {
     }
 
     ensureComparePresentationStyles();
+
+    const legalityModal = document.getElementById('format-legality-modal');
+    const closeLegalityModalBtn = document.getElementById('close-format-legality-modal');
+    if (legalityModal && closeLegalityModalBtn && !legalityModal.dataset.eventsBound) {
+        legalityModal.dataset.eventsBound = 'true';
+        closeLegalityModalBtn.addEventListener('click', () => closeCardLegalityModal());
+        legalityModal.addEventListener('click', event => {
+            if (event.target === legalityModal) closeCardLegalityModal();
+        });
+        document.addEventListener('keydown', event => {
+            if (event.key === 'Escape' && !legalityModal.classList.contains('hidden')) {
+                event.preventDefault();
+                closeCardLegalityModal();
+            }
+        });
+    }
 
     const closeModalBtn = document.getElementById('close-modal');
     if (closeModalBtn) {
@@ -18528,6 +18545,32 @@ function getCardLegalitiesForDisplay(card) {
     return localCard?.legalities && typeof localCard.legalities === 'object' ? localCard.legalities : null;
 }
 
+function openCardLegalityModal(card, trigger = null) {
+    const modal = document.getElementById('format-legality-modal');
+    const title = document.getElementById('format-legality-modal-title');
+    const subtitle = document.getElementById('format-legality-modal-subtitle');
+    const body = document.getElementById('format-legality-modal-body');
+    if (!modal || !title || !subtitle || !body) return false;
+
+    legalityModalReturnFocus = trigger || document.activeElement || null;
+    title.textContent = `${card?.name || 'Card'} — Format Legality`;
+    subtitle.textContent = 'Legality by format, based on the card data available to ManaSearch.';
+    renderCardLegalityPanel(card, body);
+    modal.classList.remove('hidden');
+    document.getElementById('close-format-legality-modal')?.focus({ preventScroll: true });
+    return true;
+}
+
+function closeCardLegalityModal({ restoreFocus = true } = {}) {
+    const modal = document.getElementById('format-legality-modal');
+    if (!modal || modal.classList.contains('hidden')) return;
+    modal.classList.add('hidden');
+    if (restoreFocus && legalityModalReturnFocus?.isConnected) {
+        legalityModalReturnFocus.focus({ preventScroll: true });
+    }
+    legalityModalReturnFocus = null;
+}
+
 function renderCardLegalityPanel(card, panel) {
     if (!panel) return;
     panel.replaceChildren();
@@ -18728,11 +18771,10 @@ function renderResults(cards) {
         }
 
         const legalityToggle = cardElement.querySelector('.result-legality-toggle-btn');
-        const legalityPanel = cardElement.querySelector('.result-legality-panel');
-        if (legalityToggle && legalityPanel) {
-            const expanded = !legalityPanel.classList.contains('hidden');
-            legalityToggle.textContent = expanded ? 'Hide format legality ▴' : 'Show format legality ▾';
-            legalityToggle.setAttribute('aria-expanded', String(expanded));
+        if (legalityToggle) {
+            legalityToggle.textContent = 'Show format legality';
+            legalityToggle.setAttribute('aria-haspopup', 'dialog');
+            legalityToggle.removeAttribute('aria-expanded');
         }
 
         const favoriteBtn = cardElement.querySelector('.result-favorite-btn');
@@ -18829,14 +18871,10 @@ function renderResults(cards) {
         const legalityToggle = document.createElement('button');
         legalityToggle.type = 'button';
         legalityToggle.className = 'result-legality-toggle-btn';
-        legalityToggle.textContent = 'Show format legality ▾';
-        legalityToggle.setAttribute('aria-expanded', 'false');
+        legalityToggle.textContent = 'Show format legality';
+        legalityToggle.setAttribute('aria-haspopup', 'dialog');
         legalityToggle.dataset.role = 'legality';
-        const legalityPanel = document.createElement('div');
-        legalityPanel.className = 'result-legality-panel hidden';
-        legalityPanel.id = `result-legality-${getCardKey(card).replace(/[^a-z0-9_-]/gi, '-')}`;
-        legalityToggle.setAttribute('aria-controls', legalityPanel.id);
-        info.append(titleRow, typeLine, matchLine, breakdown, actions, legalityToggle, legalityPanel);
+        info.append(titleRow, typeLine, matchLine, breakdown, actions, legalityToggle);
         el.append(artWrap, info);
         return el;
     };
@@ -18871,14 +18909,7 @@ function renderResults(cards) {
             if (legalityToggle) {
                 event.preventDefault();
                 event.stopPropagation();
-                const panel = cardEl.querySelector('.result-legality-panel');
-                if (!panel) return;
-                const opening = panel.classList.contains('hidden');
-                panel.classList.toggle('hidden', !opening);
-                legalityToggle.setAttribute('aria-expanded', String(opening));
-                legalityToggle.textContent = opening ? 'Hide format legality ▴' : 'Show format legality ▾';
-                const cardKey = normalizeCardNameForIdentity(card.name || '');
-                if (opening && panel.dataset.loadedFor !== cardKey) renderCardLegalityPanel(card, panel);
+                openCardLegalityModal(card, legalityToggle);
                 return;
             }
             if (event.target.closest('.compare-btn')) {

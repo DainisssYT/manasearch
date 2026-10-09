@@ -5126,16 +5126,6 @@ body.reduce-motion *::after {
     border-color: var(--accent-color);
 }
 
-.result-legality-panel {
-    width: 100%;
-    margin-top: 7px;
-    padding: 8px;
-    border: 1px solid var(--border-color);
-    border-radius: 8px;
-    background: var(--bg-primary);
-    box-sizing: border-box;
-}
-
 .result-legality-grid {
     display: grid;
     grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -5187,4 +5177,128 @@ body.reduce-motion *::after {
 
 @media (max-width: 380px) {
     .result-legality-grid { grid-template-columns: minmax(0, 1fr); }
+}
+
+
+/* V27: format legality opens in a dedicated dialog, matching the Compare modal's interaction. */
+#format-legality-modal {
+    position: fixed;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    padding: 18px;
+    box-sizing: border-box;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    overflow-y: auto;
+    background: rgba(0, 0, 0, 0.8);
+    z-index: 1100;
+}
+
+#format-legality-modal.hidden { display: none !important; }
+
+#format-legality-modal .format-legality-modal-content {
+    position: relative;
+    width: min(820px, calc(100vw - 28px));
+    max-width: 820px;
+    max-height: calc(100vh - 36px);
+    overflow-y: auto;
+    box-sizing: border-box;
+    padding: 24px;
+    border: 1px solid var(--border-color);
+    border-radius: 12px;
+    background: var(--bg-secondary);
+    box-shadow: 0 18px 60px rgba(0, 0, 0, 0.35);
+}
+
+#format-legality-modal #format-legality-modal-title {
+    margin: 0 48px 8px 0;
+    font-size: clamp(20px, 3vw, 26px);
+    line-height: 1.25;
+    overflow-wrap: anywhere;
+}
+
+#format-legality-modal #format-legality-modal-subtitle {
+    margin: 0 0 18px;
+    color: var(--text-muted);
+    font-size: 13px;
+    line-height: 1.5;
+}
+
+#format-legality-modal .format-legality-close {
+    position: absolute;
+    top: 12px;
+    right: 14px;
+    z-index: 2;
+    border: 0;
+    background: transparent;
+    color: var(--text-muted);
+    padding: 4px 8px;
+    font-size: 30px;
+    line-height: 1;
+    cursor: pointer;
+}
+
+#format-legality-modal .format-legality-close:hover {
+    color: var(--text-main);
+    background: transparent;
+}
+
+#format-legality-modal .format-legality-modal-body {
+    padding-top: 2px;
+}
+
+#format-legality-modal .result-legality-grid {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 8px;
+}
+
+#format-legality-modal .result-legality-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    min-width: 0;
+    padding: 9px 10px;
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    background: var(--bg-primary);
+    font-size: 13px;
+    line-height: 1.3;
+}
+
+#format-legality-modal .result-legality-format {
+    color: var(--text-main);
+    overflow-wrap: anywhere;
+}
+
+#format-legality-modal .result-legality-status {
+    flex: 0 0 auto;
+    font-weight: 800;
+    text-align: right;
+}
+
+#format-legality-modal .legality-unavailable {
+    padding: 14px;
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    background: var(--bg-primary);
+    font-size: 13px;
+}
+
+@media (max-width: 760px) {
+    #format-legality-modal { padding: 12px; }
+    #format-legality-modal .format-legality-modal-content {
+        width: calc(100vw - 24px);
+        max-height: calc(100vh - 24px);
+        padding: 18px 14px 16px;
+    }
+    #format-legality-modal .result-legality-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    #format-legality-modal .result-legality-row { padding: 8px; font-size: 12px; }
+}
+
+@media (max-width: 420px) {
+    #format-legality-modal .result-legality-grid { grid-template-columns: minmax(0, 1fr); }
 }
