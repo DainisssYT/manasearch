@@ -1,6 +1,6 @@
-/* ManaSearch build 20261009-30 */
+/* ManaSearch build 20261009-31 */
 // ManaSearch deployment build marker. Bump this whenever app.js changes so cached-module issues are easy to diagnose.
-const MANASEARCH_APP_BUILD = '20261009-30';
+const MANASEARCH_APP_BUILD = '20261009-31';
 console.info(`[ManaSearch] app.js build ${MANASEARCH_APP_BUILD}`);
 
 // State Management
@@ -133,6 +133,16 @@ let progressiveResultRenderCards = null;
 let progressiveResultRenderRequestId = 0;
 let lastProgressiveResultRenderAt = 0;
 
+// Give active form editing temporary priority over background search work. This specifically
+// addresses the input-jank report: number/text fields were receiving keystrokes while retrieval
+// and scoring kept using the same main thread at full speed. Search continues, but its loops yield
+// for longer slices after real user input, and result DOM updates wait until editing settles.
+const MANASEARCH_INPUT_PRIORITY_WINDOW_MS = 1250;
+const MANASEARCH_INPUT_PRIORITY_YIELD_MS = 45;
+let lastEditableUserActivityAt = 0;
+let manaInputResponsivenessInstalled = false;
+let deferredRenderFlushTimer = 0;
+
 function cancelScheduledProgressiveResultRender() {
     if (progressiveResultRenderTimer) clearTimeout(progressiveResultRenderTimer);
     progressiveResultRenderTimer = 0;
@@ -162,15 +172,114 @@ function isManaUiPanelOpen() {
     return Boolean(document.querySelector(MANASEARCH_UI_PANEL_OPEN_SELECTOR));
 }
 
+function isManaEditableControl(target) {
+    if (!target || typeof target.matches !== 'function') return false;
+    return target.matches('input:not([type=button]):not([type=submit]):not([type=reset]), textarea, select, [contenteditable="true"], [role="textbox"]');
+}
+
+function isManaUserActivelyEditing() {
+    if (typeof document === 'undefined' || !isManaEditableControl(document.activeElement) || lastEditableUserActivityAt <= 0) return false;
+    const now = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+    return now - lastEditableUserActivityAt <= MANASEARCH_INPUT_PRIORITY_WINDOW_MS;
+}
+
+function scheduleDeferredResultFlushAfterEditing() {
+    if (deferredRenderFlushTimer) clearTimeout(deferredRenderFlushTimer);
+    deferredRenderFlushTimer = setTimeout(() => {
+        deferredRenderFlushTimer = 0;
+        if (isManaUserActivelyEditing()) {
+            scheduleDeferredResultFlushAfterEditing();
+            return;
+        }
+        flushDeferredResultRender();
+    }, MANASEARCH_INPUT_PRIORITY_WINDOW_MS + 40);
+}
+
+function noteManaEditableActivity(event) {
+    const target = event?.target;
+    if (!isManaEditableControl(target)) return;
+    if ((event.type === 'keydown') && (event.ctrlKey || event.metaKey || event.altKey) &&
+        !['v', 'x', 'z', 'y', 'a', 'Backspace', 'Delete'].includes(event.key)) return;
+    lastEditableUserActivityAt = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+    // Avoid allocating/resetting an idle timer for every keystroke when no render is waiting.
+    // If a deferred snapshot already exists, move its flush deadline to the end of editing.
+    if (deferredResultRenderPending || deferredRenderFlushTimer) scheduleDeferredResultFlushAfterEditing();
+}
+
+function installManaInputResponsivenessGuard() {
+    if (manaInputResponsivenessInstalled || typeof document === 'undefined') return;
+    manaInputResponsivenessInstalled = true;
+    // Capture phase ensures the activity timestamp is updated before control-specific listeners
+    // run. `beforeinput` catches the start of typing/paste, while `input` covers browser/IME edits.
+    ['keydown', 'beforeinput', 'input', 'change', 'paste', 'cut'].forEach(type =>
+        document.addEventListener(type, noteManaEditableActivity, true));
+}
+
+async function yieldForManaSearchResponsiveness() {
+    if (isManaUserActivelyEditing()) {
+        // A real timer, rather than a zero-delay worker message, lets key/input/change and paint
+        // tasks get several opportunities to run while the user is actively editing a value.
+        await new Promise(resolve => setTimeout(resolve, MANASEARCH_INPUT_PRIORITY_YIELD_MS));
+        return;
+    }
+    await backgroundAwareDelay(0);
+}
+
+// Stable merge-sort for the larger ranking-lane sorts. Native Array.sort is very fast, but it
+// monopolizes the main thread for the entire sort. The merge version preserves stable tie ordering
+// while opening event-loop opportunities every ~8 ms, especially important while the user edits a
+// numeric/text control during a large search.
+async function sortManaArrayResponsively(items, comparator) {
+    const count = items.length;
+    if (count < 900) return items.slice().sort(comparator);
+    let source = items.slice();
+    let target = new Array(count);
+    let sliceStartedAt = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+    let operations = 0;
+    for (let width = 1; width < count; width *= 2) {
+        for (let start = 0; start < count; start += width * 2) {
+            const middle = Math.min(start + width, count);
+            const end = Math.min(start + width * 2, count);
+            let left = start;
+            let right = middle;
+            let out = start;
+            while (left < middle && right < end) {
+                const rawOrder = comparator(source[left], source[right]);
+                const order = Number.isNaN(rawOrder) ? 0 : rawOrder;
+                if (order <= 0) target[out++] = source[left++];
+                else target[out++] = source[right++];
+                operations++;
+                if ((operations & 1023) === 0) {
+                    const now = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+                    if (now - sliceStartedAt >= 8 || isManaUserActivelyEditing()) {
+                        await yieldForManaSearchResponsiveness();
+                        sliceStartedAt = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+                    }
+                }
+            }
+            while (left < middle) target[out++] = source[left++];
+            while (right < end) target[out++] = source[right++];
+        }
+        const swap = source;
+        source = target;
+        target = swap;
+    }
+    return source;
+}
+
+function shouldDeferManaResultRender() {
+    return isManaUiPanelOpen() || isManaUserActivelyEditing();
+}
+
 function flushDeferredResultRender() {
-    if (!deferredResultRenderPending || isManaUiPanelOpen()) return;
+    if (!deferredResultRenderPending || shouldDeferManaResultRender()) return;
     if (deferredResultRenderFrame) {
         cancelAnimationFrame(deferredResultRenderFrame);
         deferredResultRenderFrame = 0;
     }
     deferredResultRenderFrame = requestAnimationFrame(() => {
         deferredResultRenderFrame = 0;
-        if (isManaUiPanelOpen()) return;
+        if (shouldDeferManaResultRender()) return;
         if (!deferredResultRenderPending) return;
         const cards = deferredResultRenderCards;
         deferredResultRenderCards = null;
@@ -11963,8 +12072,9 @@ async function searchStaticCardCorpus(queryText, options = {}) {
             const score = Math.min(1, coverage * 0.68 + phraseBonus + keywordBonus);
             if (score < 0.18) continue;
             scored.push({ card, score });
+            if (isManaUserActivelyEditing() && i % 96 === 95) await yieldForManaSearchResponsiveness();
         }
-        if (endIndex < cards.length) await backgroundAwareDelay(0);
+        if (endIndex < cards.length) await yieldForManaSearchResponsiveness();
     }
     scored.sort((a, b) => b.score - a.score || String(a.card.name).localeCompare(String(b.card.name)));
     return scored.slice(0, limit).map(({ card, score }) => ({
@@ -12108,6 +12218,8 @@ async function runLocalCorpusBatch(context) {
     const globalCandidateIndexes = new Set();
     const tokenIndex = corpus.tokenIndex;
     const postingData = corpus.postingData;
+    let indexBuildOps = 0;
+    let indexBuildSliceStartedAt = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
     if (tokenIndex instanceof Map && postingData instanceof Uint32Array) {
         for (const state of requestStates) {
             for (const descriptor of state.descriptors) {
@@ -12119,6 +12231,14 @@ async function runLocalCorpusBatch(context) {
                         const cardIndex = postingData[posting];
                         state.candidateIndexes.add(cardIndex);
                         globalCandidateIndexes.add(cardIndex);
+                        indexBuildOps++;
+                        if ((indexBuildOps & 2047) === 0) {
+                            const now = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+                            if (now - indexBuildSliceStartedAt >= 8 || isManaUserActivelyEditing()) {
+                                await yieldForManaSearchResponsiveness();
+                                indexBuildSliceStartedAt = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+                            }
+                        }
                     }
                 }
             }
@@ -12137,9 +12257,11 @@ async function runLocalCorpusBatch(context) {
     const requiresFullCorpus = requestStates.some(state => state.candidateIndexes.size === 0);
     const candidates = requiresFullCorpus
         ? Array.from({ length: corpus.cards.length }, (_, i) => i)
-        : Array.from(globalCandidateIndexes).sort((a, b) => a - b);
+        : await sortManaArrayResponsively(Array.from(globalCandidateIndexes), (a, b) => a - b);
 
     const statesByCard = new Map();
+    let statesBuildOps = 0;
+    let statesBuildSliceStartedAt = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
     for (const state of requestStates) {
         const selected = state.candidateIndexes.size ? state.candidateIndexes : new Set(candidates);
         state.candidateIndexes = selected;
@@ -12147,6 +12269,14 @@ async function runLocalCorpusBatch(context) {
             let list = statesByCard.get(cardIndex);
             if (!list) statesByCard.set(cardIndex, list = []);
             list.push(state);
+            statesBuildOps++;
+            if ((statesBuildOps & 2047) === 0) {
+                const now = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+                if (now - statesBuildSliceStartedAt >= 8 || isManaUserActivelyEditing()) {
+                    await yieldForManaSearchResponsiveness();
+                    statesBuildSliceStartedAt = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+                }
+            }
         }
     }
 
@@ -12179,8 +12309,11 @@ async function runLocalCorpusBatch(context) {
             }
         }
 
-        if (candidatePosition + 1 < candidates.length && candidatePosition % 1400 === 1399) {
-            await backgroundAwareDelay(0);
+        if (candidatePosition + 1 < candidates.length && (
+            candidatePosition % 1400 === 1399 ||
+            (isManaUserActivelyEditing() && candidatePosition % 96 === 95)
+        )) {
+            await yieldForManaSearchResponsiveness();
         }
     }
 
@@ -12757,8 +12890,9 @@ async function findFullSemanticMatches(index, sourceVector, excludeName, limit =
                 const rawCos = approximateQuantizedCosine(sourceVector, vector, index.dim);
                 const calibrated = Math.max(0, Math.min(1, (rawCos - semanticCosineBaseline) / Math.max(0.05, 1 - semanticCosineBaseline)));
                 if (calibrated >= minSimilarity) pushBest({ name, id: chunk.ids?.[i] || null, card: chunk.cards?.[i] || null, similarity: calibrated });
+                if (isManaUserActivelyEditing() && i % 96 === 95) await yieldForManaSearchResponsiveness();
             }
-            await backgroundAwareDelay(0);
+            await yieldForManaSearchResponsiveness();
         }
         const seen = new Set();
         return best
@@ -12915,8 +13049,14 @@ async function embedTextBatch(texts, extractor) {
 
 async function warmEmbeddingCache(texts, extractor, diagnostics, batchSize = 16) {
     const unique = [...new Set(texts.filter(Boolean))].filter(t => !embeddingCache.has(t));
-    for (let i = 0; i < unique.length; i += batchSize) {
-        const chunk = unique.slice(i, i + batchSize);
+    let i = 0;
+    while (i < unique.length) {
+        // Some browser ML backends perform a meaningful amount of synchronous WASM work per
+        // inference call. Use smaller calls while someone is actively entering a value so the
+        // event loop gets control back more often; the vector results and cache keys are identical.
+        const effectiveBatchSize = isManaUserActivelyEditing() ? Math.min(batchSize, 2) : batchSize;
+        const chunk = unique.slice(i, i + effectiveBatchSize);
+        i += chunk.length;
         try {
             const vectors = await embedTextBatch(chunk, extractor);
             chunk.forEach((t, idx) => {
@@ -12926,7 +13066,7 @@ async function warmEmbeddingCache(texts, extractor, diagnostics, batchSize = 16)
         } catch (batchErr) {
             await Promise.all(chunk.map(t => getCachedEmbedding(t, extractor, diagnostics)));
         }
-        await backgroundAwareDelay(0);
+        await yieldForManaSearchResponsiveness();
     }
 }
 
@@ -13908,6 +14048,7 @@ function extractRepeatingPatterns(cards) {
 
 // --- INITIALIZATION ---
 function initApp() {
+    installManaInputResponsivenessGuard();
     installManaPanelResponsivenessGuard();
     cardSearchInput = document.getElementById('card-search-input');
     searchBtn = document.getElementById('search-btn');
@@ -14028,8 +14169,7 @@ function initApp() {
         } else {
             depthControl.value = String(DEFAULT_SEARCH_DEPTH_PERCENT);
         }
-        depthControl.dispatchEvent(new Event('input', { bubbles: true }));
-        depthControl.addEventListener('input', () => {
+        const commitSearchDepthValue = () => {
             let value = parseFloat(depthControl.value);
             if (Number.isNaN(value)) return;
             value = Math.max(1, Math.min(MAX_SEARCH_DEPTH_PERCENT, Math.round(value)));
@@ -14039,6 +14179,13 @@ function initApp() {
             } catch (err) {
                 // Persistence is optional; the live control still works without it.
             }
+        };
+        // Do not normalize or persist on every digit: it creates avoidable work during active
+        // search and can interfere with editing multi-digit percentages. Commit on blur/change.
+        depthControl.addEventListener('change', commitSearchDepthValue);
+        depthControl.addEventListener('blur', commitSearchDepthValue);
+        depthControl.addEventListener('keydown', event => {
+            if (event.key === 'Enter') commitSearchDepthValue();
         });
     }
 
@@ -15614,7 +15761,7 @@ async function scoreCardBatch({
         // lets input, paints, and modal interaction run during long searches without changing score math.
         const structuralNow = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
         if (structuralNow - structuralYieldStartedAt >= 8) {
-            await backgroundAwareDelay(0);
+            await yieldForManaSearchResponsiveness();
             structuralYieldStartedAt = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
         }
     }
@@ -15667,12 +15814,12 @@ async function scoreCardBatch({
             + searchFAgreement * 0.10;
     };
 
-    const scoredByCheapEvidence = cards
-        .map(card => ({ card, triage: cheapTriageScore(card) }))
-        .sort((a, b) => b.triage - a.triage);
-
+    // (The older `scoredByCheapEvidence` map/sort was unused by every downstream branch. It
+    // added a full synchronous map + sort to each batch, so remove that redundant work entirely.)
     let semanticEligible = cards;
-    const triageDetails = cards.map(card => {
+    const triageDetails = [];
+    let triageSliceStartedAt = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+    for (const card of cards) {
         const retrievalCount = Math.min(4, card.retrievalEvidence?.length || 0);
         const retrievalAgreement = retrievalCount / 4;
         const searchFAgreement = card.retrievalEvidence?.includes('Search F') ? 1 : 0;
@@ -15682,8 +15829,14 @@ async function scoreCardBatch({
         const lexical = calculateSimpleSimilarity(targetText, strategicRoleCardText(card));
         const semanticRetrieval = card._semanticRetrievalSimilarity || (card.retrievalEvidence?.includes('Search G') ? 0.58 : 0);
         const triage = mechanical * 0.35 + role * 0.15 + exactness * 0.12 + lexical * 0.10 + retrievalAgreement * 0.04 + searchFAgreement * 0.04 + semanticRetrieval * 0.20;
-        return { card, triage, mechanical, role, exactness, lexical, retrievalCount, searchFAgreement, semanticRetrieval };
-    });
+        triageDetails.push({ card, triage, mechanical, role, exactness, lexical, retrievalCount, searchFAgreement, semanticRetrieval });
+        const triageNow = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+        if (triageNow - triageSliceStartedAt >= 8) {
+            throwIfSearchCancelled(isCancelled);
+            await yieldForManaSearchResponsiveness();
+            triageSliceStartedAt = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+        }
+    }
 
     if (cards.length > MIN_SEMANTIC_SCORING_CANDIDATES) {
         const budget = Math.min(MAX_SEMANTIC_SCORING_CANDIDATES, cards.length);
@@ -15697,21 +15850,18 @@ async function scoreCardBatch({
             semantic: Math.max(72, Math.floor(budget * 0.34)),
             exploratory: Math.max(22, Math.floor(budget * 0.10))
         };
-        const by = (fn) => triageDetails.slice().sort((a, b) => fn(b) - fn(a));
-        const lanes = [
-            by(x => x.mechanical).slice(0, laneSizes.mechanical),
-            by(x => x.role).filter(x => x.role >= 0.55).slice(0, laneSizes.role),
-            by(x => x.lexical).slice(0, laneSizes.lexical),
-            by(x => (x.retrievalCount * 0.12) + (x.searchFAgreement * 0.16) + (x.mechanical * 0.22) + (x.role * 0.20) + (x.lexical * 0.30)).slice(0, laneSizes.retrieval),
-            // Semantic lane: cards already surfaced by meaning-only Search G are protected even
-            // when mechanical/lexical evidence is weak. This is the in-session equivalent of a
-            // semantic nearest-neighbor retrieval stream and prevents the cheap triage lanes from
-            // completely starving differently-worded candidates.
-            by(x => (x.card._semanticRetrievalSimilarity || 0) + (x.role * 0.03) + (x.mechanical * 0.02)).slice(0, laneSizes.semantic),
-            // Exploration lane: favor cards that are structurally plausible but not already owned
-            // by the strongest lanes. This is the safety valve for semantic-analogy discoveries.
-            by(x => Math.max(x.role * 0.8, x.lexical * 0.6, x.retrievalCount / 4) + (x.mechanical < 0.35 ? 0.12 : 0)).slice(0, laneSizes.exploratory)
-        ];
+        const by = async (fn) => sortManaArrayResponsively(triageDetails, (a, b) => fn(b) - fn(a));
+        const mechanicalLane = (await by(x => x.mechanical)).slice(0, laneSizes.mechanical);
+        const roleLane = (await by(x => x.role)).filter(x => x.role >= 0.55).slice(0, laneSizes.role);
+        const lexicalLane = (await by(x => x.lexical)).slice(0, laneSizes.lexical);
+        const retrievalLane = (await by(x => (x.retrievalCount * 0.12) + (x.searchFAgreement * 0.16) + (x.mechanical * 0.22) + (x.role * 0.20) + (x.lexical * 0.30))).slice(0, laneSizes.retrieval);
+        // Semantic lane: cards already surfaced by meaning-only Search G are protected even
+        // when mechanical/lexical evidence is weak. This prevents the triage lanes starving
+        // differently-worded candidates.
+        const semanticLane = (await by(x => (x.card._semanticRetrievalSimilarity || 0) + (x.role * 0.03) + (x.mechanical * 0.02))).slice(0, laneSizes.semantic);
+        // Exploration lane is the safety valve for plausible candidates missed by the strongest lanes.
+        const exploratoryLane = (await by(x => Math.max(x.role * 0.8, x.lexical * 0.6, x.retrievalCount / 4) + (x.mechanical < 0.35 ? 0.12 : 0))).slice(0, laneSizes.exploratory);
+        const lanes = [mechanicalLane, roleLane, lexicalLane, retrievalLane, semanticLane, exploratoryLane];
 
         const merged = [];
         const seen = new Set();
@@ -15727,9 +15877,10 @@ async function scoreCardBatch({
 
         // Full-pool semantic retrieval is a first-class retrieval lane, not a weak rerank hint.
         // Protect every semantic-index hit with a real similarity value before the fallback fill.
-        const protectedSemanticHits = triageDetails
-            .filter(x => Number.isFinite(x.card._semanticRetrievalSimilarity))
-            .sort((a,b) => (b.card._semanticRetrievalSimilarity || 0) - (a.card._semanticRetrievalSimilarity || 0));
+        const protectedSemanticHits = await sortManaArrayResponsively(
+            triageDetails.filter(x => Number.isFinite(x.card._semanticRetrievalSimilarity)),
+            (a,b) => (b.card._semanticRetrievalSimilarity || 0) - (a.card._semanticRetrievalSimilarity || 0)
+        );
         for (const item of protectedSemanticHits) {
             if (merged.length >= budget) break;
             if (seen.has(item.card)) continue;
@@ -15738,7 +15889,7 @@ async function scoreCardBatch({
         }
 
         // Strong evidence still gets protected if the lane union under-fills the budget.
-        const fallback = triageDetails.slice().sort((a, b) => b.triage - a.triage);
+        const fallback = await sortManaArrayResponsively(triageDetails, (a, b) => b.triage - a.triage);
         for (const item of fallback) {
             if (merged.length >= budget) break;
             if (seen.has(item.card)) continue;
@@ -15831,7 +15982,7 @@ async function scoreCardBatch({
         const semanticNow = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
         if (semanticNow - semanticYieldStartedAt >= 8) {
             throwIfSearchCancelled(isCancelled);
-            await backgroundAwareDelay(0);
+            await yieldForManaSearchResponsiveness();
             semanticYieldStartedAt = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
         }
     }
@@ -15994,7 +16145,7 @@ async function scoreCardBatch({
         const finalRankNow = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
         if (finalRankNow - finalRankYieldStartedAt >= 8) {
             throwIfSearchCancelled(isCancelled);
-            await backgroundAwareDelay(0);
+            await yieldForManaSearchResponsiveness();
             finalRankYieldStartedAt = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
         }
     }
@@ -17377,6 +17528,7 @@ async function findSimilarCards() {
         const PREVIEW_RENDER_MIN_INTERVAL_MS = 300;
         let previewRenderTimer = null;
         let previewRenderDirty = false;
+        let previewRenderFlushing = false;
         let previewRenderLabel = '';
         let previewLastRenderedAt = 0;
 
@@ -17394,22 +17546,28 @@ async function findSimilarCards() {
             return (mech * 0.55) + (cat * 0.25) + (syn * 0.20);
         }
 
-        function flushPreviewRender() {
-            if (requestId !== searchRequestId || !previewRenderDirty || previewPool.size < MIN_PREVIEW_RESULTS) return;
+        async function flushPreviewRender() {
+            if (requestId !== searchRequestId || !previewRenderDirty || previewPool.size < MIN_PREVIEW_RESULTS || previewRenderFlushing) return;
             previewRenderDirty = false;
-            previewLastRenderedAt = Date.now();
-            const sorted = Array.from(previewPool.values())
-                .sort((a, b) => (b._previewScore || 0) - (a._previewScore || 0))
-                .slice(0, PREVIEW_RENDER_CAP);
-            // Progressive rendering must not flash/recolor cards as they re-enter the visible
-            // top-N pool. The old newly-added animation caused cards to appear to flicker between
-            // the normal gray border and a purple outline whenever a score update reran this pass.
-            sorted.forEach(c => { c._isNewlyAdded = false; });
-            if (requestId !== searchRequestId || activeResultView.mode !== 'main' || activeResultView.requestId !== requestId) return;
-            updateProgress(1, totalSteps, `First look: ${sorted.length} match${sorted.length === 1 ? '' : 'es'} found so far (just updated by ${previewRenderLabel || 'another search stage'}) - still searching further sources...`);
-            document.getElementById('provisional-results-banner')?.classList.remove('hidden');
-            renderResults(sorted);
-            if (typeof requestProgressiveRanking === 'function') requestProgressiveRanking();
+            previewRenderFlushing = true;
+            const renderLabel = previewRenderLabel;
+            try {
+                const sorted = (await sortManaArrayResponsively(
+                    Array.from(previewPool.values()),
+                    (a, b) => (b._previewScore || 0) - (a._previewScore || 0)
+                )).slice(0, PREVIEW_RENDER_CAP);
+                if (requestId !== searchRequestId || activeResultView.mode !== 'main' || activeResultView.requestId !== requestId) return;
+                previewLastRenderedAt = Date.now();
+                // Progressive rendering remains stable while the latest sort yields for user input.
+                sorted.forEach(c => { c._isNewlyAdded = false; });
+                updateProgress(1, totalSteps, `First look: ${sorted.length} match${sorted.length === 1 ? '' : 'es'} found so far (just updated by ${renderLabel || 'another search stage'}) - still searching further sources...`);
+                document.getElementById('provisional-results-banner')?.classList.remove('hidden');
+                renderResults(sorted);
+                if (typeof requestProgressiveRanking === 'function') requestProgressiveRanking();
+            } finally {
+                previewRenderFlushing = false;
+                if (previewRenderDirty && !previewRenderTimer && requestId === searchRequestId) schedulePreviewRender(previewRenderLabel || 'updates');
+            }
         }
 
         function schedulePreviewRender(label) {
@@ -17420,31 +17578,37 @@ async function findSimilarCards() {
             const delay = Math.max(0, PREVIEW_RENDER_MIN_INTERVAL_MS - elapsed);
             previewRenderTimer = setTimeout(() => {
                 previewRenderTimer = null;
-                flushPreviewRender();
+                void flushPreviewRender();
             }, delay);
         }
 
-        function mergeIntoPreview(newResults, label) {
+        async function mergeIntoPreview(newResults, label) {
             if (requestId !== searchRequestId || !newResults || newResults.length === 0) return;
-            const filtered = newResults.filter(c =>
-                c && c.name &&
-                !isSameCardName(c.name, currentSourceCard.name) &&
-                matchesExactHighlightConstraints(c, manualHighlights) &&
-                matchesActiveFilters(c, filters, broadFallbackFilters)
-            );
             let addedAny = false;
-            filtered.forEach(c => {
+            let mergeSliceStartedAt = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+            for (const c of newResults) {
+                if (requestId !== searchRequestId) return;
+                if (!c || !c.name || isSameCardName(c.name, currentSourceCard.name) ||
+                    !matchesExactHighlightConstraints(c, manualHighlights) ||
+                    !matchesActiveFilters(c, filters, broadFallbackFilters)) continue;
                 const key = c.name.toLowerCase();
-                if (previewPool.has(key)) return;
-                c._previewScore = computePreviewScore(c);
-                c.similarityScore = c._previewScore;
-                c._isProvisionalScore = true;
-                previewPool.set(key, c);
-                addedAny = true;
-            });
-            if (!addedAny || previewPool.size < MIN_PREVIEW_RESULTS) return;
+                if (!previewPool.has(key)) {
+                    c._previewScore = computePreviewScore(c);
+                    c.similarityScore = c._previewScore;
+                    c._isProvisionalScore = true;
+                    previewPool.set(key, c);
+                    addedAny = true;
+                }
+                const mergeNow = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+                if (mergeNow - mergeSliceStartedAt >= 8) {
+                    await yieldForManaSearchResponsiveness();
+                    mergeSliceStartedAt = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+                }
+            }
+            if (!addedAny || previewPool.size < MIN_PREVIEW_RESULTS || requestId !== searchRequestId) return;
             schedulePreviewRender(label);
         }
+
         streamAPromise.then(r => mergeIntoPreview(r, "exact phrase")).catch(() => {});
 
         // Wall-clock safety net (user request): even with the retrieval/rate-limit fixes, a
@@ -17457,9 +17621,10 @@ async function findSimilarCards() {
         // running in the background, and the normal unconditional final render still replaces
         // this once it completes, exactly as if the timeout had never fired.
         const SEARCH_TIMEOUT_MS = 20000;
-        searchTimeoutId = setTimeout(() => {
+        searchTimeoutId = setTimeout(async () => {
             if (pipelineCompleted || requestId !== searchRequestId || activeResultView.mode !== 'main' || activeResultView.requestId !== requestId) return;
-            const partial = Array.from(previewPool.values()).sort((a, b) => (b._previewScore || 0) - (a._previewScore || 0));
+            const partial = await sortManaArrayResponsively(Array.from(previewPool.values()), (a, b) => (b._previewScore || 0) - (a._previewScore || 0));
+            if (pipelineCompleted || requestId !== searchRequestId || activeResultView.mode !== 'main' || activeResultView.requestId !== requestId) return;
             if (partial.length > 0) {
                 updateProgress(1, totalSteps, `Still searching - this one's taking a while. Showing ${partial.length} match${partial.length === 1 ? '' : 'es'} found so far while the rest of the search keeps running...`);
                 document.getElementById('provisional-results-banner')?.classList.remove('hidden');
@@ -17769,9 +17934,12 @@ async function findSimilarCards() {
                 if (!ex || requestId !== searchRequestId) return;
                 const targetVector = await getProgressiveTargetVector();
                 while (progressiveRankingPending.size && requestId === searchRequestId) {
-                    const batch = Array.from(progressiveRankingPending.values())
-                        .sort((a,b)=>(b._previewScore||0)-(a._previewScore||0))
-                        .slice(0, progressiveRankingBatchSize);
+                    const sortedPending = await sortManaArrayResponsively(
+                        Array.from(progressiveRankingPending.values()),
+                        (a, b) => (b._previewScore || 0) - (a._previewScore || 0)
+                    );
+                    if (requestId !== searchRequestId) break;
+                    const batch = sortedPending.slice(0, isManaUserActivelyEditing() ? 3 : progressiveRankingBatchSize);
                     if (!batch.length) break;
                     batch.forEach(card => progressiveRankingPending.delete((card.name||'').toLowerCase()));
                     await scoreCardBatch({
@@ -17787,12 +17955,14 @@ async function findSimilarCards() {
                     // Related Search may intentionally own the Results grid while this main
                     // search continues in the background. Do not repaint the user's active view.
                     if (activeResultView.mode !== 'main' || activeResultView.requestId !== requestId) break;
-                    const ranked=Array.from(previewPool.values()).sort((a,b)=>{
-                        const as=Number.isFinite(a.similarityScore)?a.similarityScore:(a._previewScore||0);
-                        const bs=Number.isFinite(b.similarityScore)?b.similarityScore:(b._previewScore||0); return bs-as;
+                    const ranked = await sortManaArrayResponsively(Array.from(previewPool.values()), (a, b) => {
+                        const as = Number.isFinite(a.similarityScore) ? a.similarityScore : (a._previewScore || 0);
+                        const bs = Number.isFinite(b.similarityScore) ? b.similarityScore : (b._previewScore || 0);
+                        return bs - as;
                     });
+                    if (requestId !== searchRequestId) break;
                     scheduleProgressiveResultRender(ranked, requestId);
-                    await backgroundAwareDelay(0);
+                    await yieldForManaSearchResponsiveness();
                 }
             } catch(error) { console.info('Progressive ranking paused; final ranking continues:', error?.message||error); }
             finally { progressiveRankingRunning=false; }
@@ -17915,33 +18085,30 @@ const sourceNameLower = normalizeCardNameForIdentity(currentSourceCard.name);
 // filtered-out expected card immediately shows whether the engine or the test case is wrong
 // (review Priority 6).
 const filterFailureReasons = new Map();
-const filteredCandidates = rawCandidates.filter(card => {
-    if (!card || !card.id || !card.name) return false;
-    // isSameCardName (not a bare .toLowerCase() comparison) so the source card is excluded even
-    // when whitespace formatting differs between how it was loaded and how a search result came
-    // back, or when a double-faced/split card's combined "Front // Back" name is compared against
-    // just its front face - a bug report showed the source card itself appearing as its own top
-    // "similar" result, which a plain string comparison mismatch like this would explain.
-    if (card.id === currentSourceCard.id || isSameCardName(card.name, currentSourceCard.name)) return false;
-
-    // Exact highlight = mandatory text constraint. Semantic retrieval is allowed to find candidates
-    // that read differently, but it is never allowed to override an explicit Exact highlight.
-    if (!matchesExactHighlightConstraints(card, manualHighlights)) {
-        const nameKey = card.name.toLowerCase();
-        if (!filterFailureReasons.has(nameKey)) {
-            filterFailureReasons.set(nameKey, explainExactHighlightFailures(card, manualHighlights));
+const filteredCandidates = [];
+let hardFilterSliceStartedAt = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+let hardFilterOps = 0;
+for (const card of rawCandidates) {
+    if (card && card.id && card.name && card.id !== currentSourceCard.id && !isSameCardName(card.name, currentSourceCard.name)) {
+        // Exact highlight = mandatory text constraint. Semantic retrieval never overrides it.
+        if (!matchesExactHighlightConstraints(card, manualHighlights)) {
+            const nameKey = card.name.toLowerCase();
+            if (!filterFailureReasons.has(nameKey)) filterFailureReasons.set(nameKey, explainExactHighlightFailures(card, manualHighlights));
+        } else if (matchesActiveFilters(card, filters, broadFallbackFilters)) {
+            filteredCandidates.push(card);
+        } else {
+            const nameKey = card.name.toLowerCase();
+            if (!filterFailureReasons.has(nameKey)) filterFailureReasons.set(nameKey, explainFilterFailures(card, filters, broadFallbackFilters));
         }
-        return false;
     }
-
-    if (matchesActiveFilters(card, filters, broadFallbackFilters)) return true;
-
-    const nameKey = card.name.toLowerCase();
-    if (!filterFailureReasons.has(nameKey)) {
-        filterFailureReasons.set(nameKey, explainFilterFailures(card, filters, broadFallbackFilters));
+    if ((++hardFilterOps & 31) === 0) {
+        const now = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+        if (now - hardFilterSliceStartedAt >= 8 || isManaUserActivelyEditing()) {
+            await yieldForManaSearchResponsiveness();
+            hardFilterSliceStartedAt = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+        }
     }
-    return false;
-});
+}
 
 // Stage 2: Passed hard filters set
 const passedFilterNames = new Set(filteredCandidates.map(c => (c.name || '').toLowerCase()));
@@ -17957,10 +18124,19 @@ const preferBetterPrinting = (existing, incoming) => {
     return existing;
 };
 const candidateMap = new Map();
+let dedupeSliceStartedAt = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+let dedupeOps = 0;
 for (const card of filteredCandidates) {
     const dedupeKey = card.name.toLowerCase();
     const existing = candidateMap.get(dedupeKey);
     candidateMap.set(dedupeKey, existing ? preferBetterPrinting(existing, card) : card);
+    if ((++dedupeOps & 63) === 0) {
+        const now = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+        if (now - dedupeSliceStartedAt >= 8 || isManaUserActivelyEditing()) {
+            await yieldForManaSearchResponsiveness();
+            dedupeSliceStartedAt = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+        }
+    }
 }
 let candidates = Array.from(candidateMap.values());
 const countAfterHardFilters = candidates.length;
@@ -17970,12 +18146,22 @@ const countAfterHardFilters = candidates.length;
 // Search F happened to find it. Recording it as its own field keeps it available for diagnostics
 // and debugging without letting retrieval origin leak into ranking as a hidden bias
 // (review Priority 14). Nothing in scoreCardBatch reads this.
-candidates.forEach(card => {
+let retrievalEvidenceSliceStartedAt = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+for (let candidateIndex = 0; candidateIndex < candidates.length; candidateIndex++) {
+    const card = candidates[candidateIndex];
     const nameLower = (card.name || '').toLowerCase();
     card.retrievalEvidence = Object.entries(streamDiagnostics)
         .filter(([, nameSet]) => nameSet.has(nameLower))
         .map(([streamName]) => streamName);
-});
+    if ((candidateIndex & 63) === 63) {
+        const now = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+        if (now - retrievalEvidenceSliceStartedAt >= 8 || isManaUserActivelyEditing()) {
+            await yieldForManaSearchResponsiveness();
+            retrievalEvidenceSliceStartedAt = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+        }
+    }
+}
+
 // Stage 3: post-dedup set (same names as passedFilterNames, but this is the explicit "one
 // entry per unique card" stage the funnel is supposed to show, rather than leaving dedup as an
 // invisible side effect of the filter step (project spec Priority 7).
@@ -18030,12 +18216,21 @@ if (candidates.length > 0) {
     // above (keyed by the exact text that was embedded), so this is a cache read, not new work.
     if (extractor && extractor.type !== 'fallback') {
         recordInSessionSemanticCorpus(currentSourceCard, sourceFunctionVector, sourceOracleVector);
-        for (const card of candidates) {
-            const cardText = card.oracle_text || (card.card_faces ? card.card_faces.map(f => f.oracle_text).join(' ') : '');
+        let semanticCorpusSliceStartedAt = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+        for (let candidateIndex = 0; candidateIndex < candidates.length; candidateIndex++) {
+            const card = candidates[candidateIndex];
+            const cardText = card.oracle_text || (card.card_faces ? card.card_faces.map(f => f.oracle_text || '').join(' ') : '');
             const candidateFunctionText = card._parsedEffects ? canonicalFunctionToText(getCanonicalFunctions(card._parsedEffects)) : null;
             const functionVector = candidateFunctionText ? (embeddingCache.get(candidateFunctionText) || null) : null;
             const oracleVector = cardText ? (embeddingCache.get(normalizeOracleForEmbedding(cardText, card.name)) || null) : null;
             if (functionVector || oracleVector) recordInSessionSemanticCorpus(card, functionVector, oracleVector);
+            if ((candidateIndex & 63) === 63) {
+                const now = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+                if (now - semanticCorpusSliceStartedAt >= 8 || isManaUserActivelyEditing()) {
+                    await yieldForManaSearchResponsiveness();
+                    semanticCorpusSliceStartedAt = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+                }
+            }
         }
     }
 
@@ -18057,7 +18252,7 @@ if (candidates.length > 0) {
     // Overall Match score so selecting e.g. Category or Strategic Role does not accidentally turn
     // those secondary channels into hard eligibility tests.
     const scoreKey = 'similarityScore';
-    candidates.sort((a, b) => (b[scoreKey] || 0) - (a[scoreKey] || 0));
+    candidates = await sortManaArrayResponsively(candidates, (a, b) => (b[scoreKey] || 0) - (a[scoreKey] || 0));
 
     // Stage 5: Relevance Floor.
     //
@@ -18110,9 +18305,10 @@ if (candidates.length > 0) {
     const passesAbsoluteFloor = c => (c[scoreKey] || 0) >= ABSOLUTE_RELEVANCE_FLOOR || (Number.isFinite(c._semanticRetrievalSimilarity) && c._semanticRetrievalSimilarity >= 0.70);
     const passesRelativeFloor = c => (c[scoreKey] || 0) >= relativeFloor || (Number.isFinite(c._semanticRetrievalSimilarity) && c._semanticRetrievalSimilarity >= 0.64);
 
-    const strictQualified = candidates
-        .filter(c => passesAbsoluteFloor(c) && (passesRelativeFloor(c) || hasStrongDirectEvidence(c)))
-        .sort((a, b) => (b[scoreKey] || 0) - (a[scoreKey] || 0));
+    const strictQualified = await sortManaArrayResponsively(
+        candidates.filter(c => passesAbsoluteFloor(c) && (passesRelativeFloor(c) || hasStrongDirectEvidence(c))),
+        (a, b) => (b[scoreKey] || 0) - (a[scoreKey] || 0)
+    );
 
     // Catastrophic-empty guard. A relevance floor must control noisy results, not make a valid
     // search disappear completely. This can happen when semantic calibration lowers the absolute
@@ -18122,8 +18318,8 @@ if (candidates.length > 0) {
     // activates when the strict floor would return zero cards.
     let qualified = strictQualified;
     if (qualified.length === 0 && candidates.length > 0) {
-        const evidenceBearing = candidates
-            .filter(c => {
+        const evidenceBearing = await sortManaArrayResponsively(
+            candidates.filter(c => {
                 const structural = Number(c.mechanicalScore) || 0;
                 const semantic = Number(c.oracleSemanticScore) || 0;
                 const fn = Number(c.functionScore) || 0;
@@ -18132,22 +18328,25 @@ if (candidates.length > 0) {
                 const rel = Number(c.relevanceEvidenceScore) || 0;
                 const retrieval = Number(c._semanticRetrievalSimilarity) || 0;
                 return Math.max(structural, semantic, fn, role, exact, rel, retrieval) > 0.02;
-            })
-            .sort((a, b) => {
+            }),
+            (a, b) => {
                 const signal = c => Math.max(
                     Number(c[scoreKey]) || 0,
                     (Number(c.relevanceEvidenceScore) || 0) * 0.92,
                     (Number(c._semanticRetrievalSimilarity) || 0) * 0.78
                 );
                 return signal(b) - signal(a);
-            });
+            }
+        );
 
         // Keep enough of the scored pool for meaningful top-k ranking, while still bounding the
         // rescue pool so a broad search cannot flood the UI. Eight is the normal display target;
         // twenty preserves enough headroom for ranking/tie-breaking and benchmark Recall@20.
         const CATASTROPHIC_EMPTY_RESCUE_CAP = 20;
-        qualified = (evidenceBearing.length > 0 ? evidenceBearing : candidates.slice().sort((a,b) => (b[scoreKey] || 0) - (a[scoreKey] || 0)))
-            .slice(0, Math.min(CATASTROPHIC_EMPTY_RESCUE_CAP, candidates.length));
+        const rescueOrder = evidenceBearing.length > 0
+            ? evidenceBearing
+            : await sortManaArrayResponsively(candidates, (a, b) => (b[scoreKey] || 0) - (a[scoreKey] || 0));
+        qualified = rescueOrder.slice(0, Math.min(CATASTROPHIC_EMPTY_RESCUE_CAP, candidates.length));
 
         qualified.forEach(c => { c._catastrophicEmptyRescue = true; });
         embeddingDiagnostics.relevanceFloorRescue = qualified.length;
@@ -18159,7 +18358,9 @@ if (candidates.length > 0) {
         c._isProvisionalScore = false;
     });
 
-    candidates = applyResultOrdering(candidates, priorityValue);
+    candidates = (activeOrderFeatureFlags.diverse || activeOrderFeatureFlags.matrix)
+        ? applyResultOrdering(candidates, priorityValue)
+        : await sortManaArrayResponsively(candidates, (a, b) => getRankingScoreForCriteria(b, validOrderCriteriaForOrdering(priorityValue)) - getRankingScoreForCriteria(a, validOrderCriteriaForOrdering(priorityValue)));
 
     const countAfterRelevanceFloor = candidates.length;
     const relevanceFloorRescued = candidates.filter(c => c._catastrophicEmptyRescue).length;
@@ -18949,9 +19150,10 @@ function renderResults(cards, internalOptions = {}) {
     if (internalOptions?.progressive !== true) cancelScheduledProgressiveResultRender();
     // Panel controls must remain interactive while progressive scoring continues. Do not repeatedly
     // touch every visible card behind an open modal; the most recent snapshot is painted on close.
-    if (document.body?.classList.contains('mana-panel-open') || isManaUiPanelOpen()) {
+    if (document.body?.classList.contains('mana-panel-open') || shouldDeferManaResultRender()) {
         deferredResultRenderCards = cards;
         deferredResultRenderPending = true;
+        if (isManaUserActivelyEditing()) scheduleDeferredResultFlushAfterEditing();
         return;
     }
     resultsSection.classList.remove('hidden');
