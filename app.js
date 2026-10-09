@@ -1,6 +1,6 @@
-/* ManaSearch build 20261009-29 */
+/* ManaSearch build 20261009-30 */
 // ManaSearch deployment build marker. Bump this whenever app.js changes so cached-module issues are easy to diagnose.
-const MANASEARCH_APP_BUILD = '20261009-29';
+const MANASEARCH_APP_BUILD = '20261009-30';
 console.info(`[ManaSearch] app.js build ${MANASEARCH_APP_BUILD}`);
 
 // State Management
@@ -121,6 +121,42 @@ let manaPanelMutationObserver = null;
 let deferredResultRenderPending = false;
 let deferredResultRenderCards = null;
 let deferredResultRenderFrame = 0;
+
+// Progressive scoring can produce a new ordering several times per second. Painting every batch
+// forces the browser to update scores, re-order cards, service image observers, and recalculate
+// layout while the scoring pipeline is also doing CPU-heavy mechanical work. Keep scoring
+// progressive, but coalesce visual updates to a steady cadence. Any authoritative/final render
+// cancels a queued preview so an older snapshot can never paint over final results.
+const PROGRESSIVE_RESULT_RENDER_INTERVAL_MS = 160;
+let progressiveResultRenderTimer = 0;
+let progressiveResultRenderCards = null;
+let progressiveResultRenderRequestId = 0;
+let lastProgressiveResultRenderAt = 0;
+
+function cancelScheduledProgressiveResultRender() {
+    if (progressiveResultRenderTimer) clearTimeout(progressiveResultRenderTimer);
+    progressiveResultRenderTimer = 0;
+    progressiveResultRenderCards = null;
+    progressiveResultRenderRequestId = 0;
+}
+
+function scheduleProgressiveResultRender(cards, requestId) {
+    progressiveResultRenderCards = cards;
+    progressiveResultRenderRequestId = requestId;
+    if (progressiveResultRenderTimer) return;
+    const elapsed = Date.now() - lastProgressiveResultRenderAt;
+    const wait = Math.max(0, PROGRESSIVE_RESULT_RENDER_INTERVAL_MS - elapsed);
+    progressiveResultRenderTimer = setTimeout(() => {
+        progressiveResultRenderTimer = 0;
+        const snapshot = progressiveResultRenderCards;
+        const scheduledRequestId = progressiveResultRenderRequestId;
+        progressiveResultRenderCards = null;
+        progressiveResultRenderRequestId = 0;
+        if (!snapshot || scheduledRequestId !== searchRequestId) return;
+        lastProgressiveResultRenderAt = Date.now();
+        renderResults(snapshot, { progressive: true });
+    }, wait);
+}
 
 function isManaUiPanelOpen() {
     return Boolean(document.querySelector(MANASEARCH_UI_PANEL_OPEN_SELECTOR));
@@ -15447,6 +15483,7 @@ async function scoreCardBatch({
         ? buildMechanicalConsensusGraph(referenceMechanicalGraphs)
         : null;
 
+    let structuralYieldStartedAt = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
     for (let i = 0; i < cards.length; i++) {
         throwIfSearchCancelled(isCancelled);
         const card = cards[i];
@@ -15573,8 +15610,12 @@ async function scoreCardBatch({
 
         card.categoryScore = calculateCategoryScore(card, tags, sourceCard, parsedSourceCard);
 
-        if (i % 50 === 0) {
+        // Yield after roughly an 8 ms slice. The time budget adapts to card-text complexity and
+        // lets input, paints, and modal interaction run during long searches without changing score math.
+        const structuralNow = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+        if (structuralNow - structuralYieldStartedAt >= 8) {
             await backgroundAwareDelay(0);
+            structuralYieldStartedAt = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
         }
     }
 
@@ -15733,6 +15774,7 @@ async function scoreCardBatch({
         await warmEmbeddingCache(textsToEmbed, extractor, embeddingDiagnostics);
     }
 
+    let semanticYieldStartedAt = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
     for (let i = 0; i < cards.length; i++) {
         const card = cards[i];
         const cardText = card.oracle_text || (card.card_faces ? card.card_faces.map(f => f.oracle_text || '').join(' ') : '');
@@ -15784,11 +15826,13 @@ async function scoreCardBatch({
             if (card.oracleSemanticScore === undefined) card.oracleSemanticScore = 0;
         }
 
-        // Embedding calls are async network/CPU work per-card now, so yield more often to keep
-        // the UI responsive during a large candidate batch.
-        if (i % 25 === 0) {
+        // Embedding calls yield naturally when asynchronous, but cache-hit-only candidates can
+        // otherwise run uninterrupted. Check the time budget periodically to keep long batches fluid.
+        const semanticNow = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+        if (semanticNow - semanticYieldStartedAt >= 8) {
             throwIfSearchCancelled(isCancelled);
             await backgroundAwareDelay(0);
+            semanticYieldStartedAt = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
         }
     }
 
@@ -15826,6 +15870,7 @@ async function scoreCardBatch({
     const semanticW = rawChannels[1] / channelDenom;
     const functionRoleW = rawChannels[2] / channelDenom;
 
+    let finalRankYieldStartedAt = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
     for (let i = 0; i < cards.length; i++) {
         const card = cards[i];
         const cardText = card.oracle_text || (card.card_faces ? card.card_faces.map(f => f.oracle_text || '').join(' ') : '');
@@ -15946,9 +15991,11 @@ async function scoreCardBatch({
             (channelScore + agreementBonus + rankingRefinement) * evidenceGate * contradictionPenalty * relatedConsensusGate
         ));
 
-        if (i % 100 === 0) {
+        const finalRankNow = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+        if (finalRankNow - finalRankYieldStartedAt >= 8) {
             throwIfSearchCancelled(isCancelled);
             await backgroundAwareDelay(0);
+            finalRankYieldStartedAt = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
         }
     }
 
@@ -17744,7 +17791,7 @@ async function findSimilarCards() {
                         const as=Number.isFinite(a.similarityScore)?a.similarityScore:(a._previewScore||0);
                         const bs=Number.isFinite(b.similarityScore)?b.similarityScore:(b._previewScore||0); return bs-as;
                     });
-                    renderResults(ranked);
+                    scheduleProgressiveResultRender(ranked, requestId);
                     await backgroundAwareDelay(0);
                 }
             } catch(error) { console.info('Progressive ranking paused; final ranking continues:', error?.message||error); }
@@ -18719,7 +18766,36 @@ const RESULT_IMAGE_PLACEHOLDER = 'data:image/svg+xml;charset=utf-8,' + encodeURI
     '<svg xmlns="http://www.w3.org/2000/svg" width="630" height="880" viewBox="0 0 630 880"><rect width="630" height="880" fill="none"/></svg>'
 );
 let resultImageObserver = null;
-const resultImageLoadQueue = new Set();
+// Limit concurrent image source changes/decode requests. IntersectionObserver can report dozens of
+// cards at once when the user opens Results; scheduling every image in the same animation frame
+// creates a short burst of image decoding that competes with scoring and scrolling.
+const resultImageLoadQueue = new Map();
+let resultImageHydrationFrame = 0;
+const RESULT_IMAGE_HYDRATION_BATCH_SIZE = 3;
+
+function scheduleResultImageHydration() {
+    if (resultImageHydrationFrame || !resultImageLoadQueue.size) return;
+    const run = () => {
+        resultImageHydrationFrame = 0;
+        let started = 0;
+        for (const [img, desiredSrc] of resultImageLoadQueue) {
+            resultImageLoadQueue.delete(img);
+            if (!img.isConnected) continue;
+            if (img.dataset.cardImageLoaded === desiredSrc && img.getAttribute('src') === desiredSrc) continue;
+            img.dataset.cardImageLoaded = desiredSrc;
+            img.src = desiredSrc;
+            try { img.decode?.().catch?.(() => {}); } catch (_) {}
+            started++;
+            if (started >= RESULT_IMAGE_HYDRATION_BATCH_SIZE) break;
+        }
+        if (resultImageLoadQueue.size) scheduleResultImageHydration();
+    };
+    if (typeof requestAnimationFrame === 'function') {
+        resultImageHydrationFrame = requestAnimationFrame(run);
+    } else {
+        resultImageHydrationFrame = setTimeout(run, 16);
+    }
+}
 
 function ensureResultImageObserver() {
     if (resultImageObserver || typeof IntersectionObserver === 'undefined') return resultImageObserver;
@@ -18733,7 +18809,7 @@ function ensureResultImageObserver() {
     }, {
         root: null,
         // Start downloading before the card enters view, but not hundreds of cards ahead.
-        rootMargin: '900px 0px 1100px 0px',
+        rootMargin: '650px 0px 750px 0px',
         threshold: 0.01
     });
     return resultImageObserver;
@@ -18743,23 +18819,15 @@ function hydrateResultImage(img, explicitSrc = null) {
     if (!img) return;
     const desiredSrc = explicitSrc || img.dataset.cardImageSrc || '';
     if (!desiredSrc) return;
-    if (img.dataset.cardImageLoaded === desiredSrc && img.getAttribute('src') === desiredSrc) return;
-
-    // Avoid starting dozens of decodes in the same task. The browser gets a chance to paint between
-    // small batches, which makes scrolling and buttons remain responsive while the result grid is
-    // being progressively filled.
-    if (resultImageLoadQueue.has(img)) return;
-    resultImageLoadQueue.add(img);
-    const start = () => {
+    if (img.dataset.cardImageLoaded === desiredSrc && img.getAttribute('src') === desiredSrc) {
         resultImageLoadQueue.delete(img);
-        if (!img.isConnected) return;
-        img.dataset.cardImageLoaded = desiredSrc;
-        img.src = desiredSrc;
-        // async decode keeps the image decode off the critical layout path where supported.
-        try { img.decode?.().catch?.(() => {}); } catch (_) {}
-    };
-    if (typeof requestAnimationFrame === 'function') requestAnimationFrame(start);
-    else setTimeout(start, 0);
+        return;
+    }
+
+    // Map.set also replaces a queued URL when a reused double-faced card is flipped before its
+    // previous face has begun loading. Only a few images begin loading per frame.
+    resultImageLoadQueue.set(img, desiredSrc);
+    scheduleResultImageHydration();
 }
 
 function prepareResultImage(img, desiredSrc) {
@@ -18875,7 +18943,10 @@ function renderCardLegalityPanel(card, panel) {
     panel.dataset.loadedFor = normalizeCardNameForIdentity(card?.name || '');
 }
 
-function renderResults(cards) {
+function renderResults(cards, internalOptions = {}) {
+    // A final/search-deeper/user-triggered render is authoritative. Drop any queued progressive
+    // snapshot before painting, otherwise a timer could repaint an older partial order afterward.
+    if (internalOptions?.progressive !== true) cancelScheduledProgressiveResultRender();
     // Panel controls must remain interactive while progressive scoring continues. Do not repeatedly
     // touch every visible card behind an open modal; the most recent snapshot is painted on close.
     if (document.body?.classList.contains('mana-panel-open') || isManaUiPanelOpen()) {
@@ -18933,9 +19004,36 @@ function renderResults(cards) {
     const getCardKey = card => normalizeCardNameForIdentity(card?.name || '') || getResultCardStateKey(card);
     const existingNodes = new Map();
     resultsGrid.querySelectorAll('.card-item[data-card-key]').forEach(node => existingNodes.set(node.dataset.cardKey, node));
-    const fragment = document.createDocumentFragment();
+    const orderedNodes = new Set();
     // Avoid repeating synchronous localStorage parsing once per card in a 50-200 card repaint.
     const favoriteNameSet = new Set(getStoredArray(FAVORITES_KEY).map(name => String(name).toLowerCase()));
+
+    const getResultCardRenderSignature = (card) => {
+        const valueAsPercent = value => Number.isFinite(Number(value))
+            ? Math.round(Math.max(0, Math.min(1, Number(value))) * 100)
+            : 0;
+        const key = normalizeCardNameForIdentity(card?.name || '') || getResultCardStateKey(card);
+        const image = card.image_uris?.normal || card.card_faces?.[0]?.image_uris?.normal || '';
+        const stateKey = getResultCardStateKey(card);
+        const faces = Array.isArray(card.card_faces) ? card.card_faces.filter(face => face?.image_uris?.normal) : [];
+        const faceIndex = faces.length > 1
+            ? Math.max(0, Math.min(faces.length - 1, Number(resultCardFaceState.get(stateKey)) || 0))
+            : 0;
+        return JSON.stringify([
+            key, card.id || '', card.name || '', card.type_line || '', image,
+            faces.length > 1 ? (faces[faceIndex]?.image_uris?.normal || '') : '', faceIndex,
+            valueAsPercent(card.similarityScore ?? card._previewScore),
+            valueAsPercent(card.mechanicalScore),
+            valueAsPercent(card.functionScore ?? card.functionalSimilarityScore),
+            valueAsPercent(card.oracleSemanticScore ?? card.contextScore),
+            valueAsPercent(card.roleScore), valueAsPercent(card.synergyScore),
+            valueAsPercent(card.exactnessScore), valueAsPercent(card.categoryScore),
+            valueAsPercent(card.quantitySimilarityScore), valueAsPercent(card.relatedConsensusScore),
+            card.prices?.usd ?? '', card.prices?.eur ?? '', Boolean(card._weakBackfillMatch),
+            selectedRelatedCards.has(card.id), favoriteNameSet.has(String(card.name || '').toLowerCase()),
+            displayPreferences.showScoreBreakdown !== false
+        ]);
+    };
 
     const updateResultCard = (cardElement, card) => {
         const isSelected = selectedRelatedCards.has(card.id);
@@ -18974,13 +19072,13 @@ function renderResults(cards) {
         const desiredSrc = hasMultipleFaces ? faceImages[faceIndex].image_uris.normal : cardImg;
         if (img) {
             const previousDesired = img.dataset.cardImageSrc || '';
-            prepareResultImage(img, desiredSrc);
-            if (previousDesired && previousDesired !== desiredSrc && img.getAttribute('src') !== RESULT_IMAGE_PLACEHOLDER) {
-                // A result node can be reused for a different printing/face during progressive
-                // re-ranking. For an image that is already on screen, switch immediately; for an
-                // off-screen image the observer will hydrate the new URL when needed.
-                if (img.dataset.cardImageLoaded === previousDesired) {
-                    hydrateResultImage(img, desiredSrc);
+            if (previousDesired !== desiredSrc || !img.getAttribute('src')) {
+                prepareResultImage(img, desiredSrc);
+                if (previousDesired && previousDesired !== desiredSrc && img.getAttribute('src') !== RESULT_IMAGE_PLACEHOLDER) {
+                    // A result node can be reused for a different printing/face during progressive
+                    // re-ranking. For an image already on screen, switch immediately; for an
+                    // off-screen image the observer hydrates the new URL only when needed.
+                    if (img.dataset.cardImageLoaded === previousDesired) hydrateResultImage(img, desiredSrc);
                 }
             }
         }
@@ -19143,22 +19241,32 @@ function renderResults(cards) {
         return el;
     };
 
-    for (const card of topCards) {
+    for (let index = 0; index < topCards.length; index++) {
+        const card = topCards[index];
         const key = getCardKey(card);
         let node = existingNodes.get(key);
         if (!node) node = createResultCard(card);
-        updateResultCard(node, card);
-        fragment.appendChild(node);
+        const renderSignature = getResultCardRenderSignature(card);
+        if (node.dataset.renderSignature !== renderSignature) {
+            updateResultCard(node, card);
+            node.dataset.renderSignature = renderSignature;
+        }
+        orderedNodes.add(node);
+
+        // Keep stable nodes connected. replaceChildren(fragment) detached every card on every
+        // score update, causing avoidable style/layout work and interrupting image observation.
+        const currentAtIndex = resultsGrid.children[index] || null;
+        if (currentAtIndex !== node) resultsGrid.insertBefore(node, currentAtIndex);
     }
-    cleanupResultImageObservers();
-    resultsGrid.replaceChildren(fragment);
-    // Re-observe current nodes after the previous grid was cleared. This matters when a stable card
-    // node is reused during progressive ranking: cleanup intentionally unobserves the old grid, so
-    // the new visible set must be registered again.
-    const observer = ensureResultImageObserver();
-    if (observer) {
-        resultsGrid.querySelectorAll('.card-art-wrap img[data-card-image-src]').forEach(img => observer.observe(img));
-    }
+    // Remove only cards that have left the visible result window (or transient status notes),
+    // rather than clearing every child. Unobserve only images that are actually being removed.
+    Array.from(resultsGrid.children).forEach(node => {
+        if (orderedNodes.has(node)) return;
+        const img = node.matches?.('.card-item') ? node.querySelector('.card-art-wrap img') : null;
+        if (img && resultImageObserver) resultImageObserver.unobserve(img);
+        if (img) resultImageLoadQueue.delete(img);
+        node.remove();
+    });
 
     // One delegated listener set handles both stable/reused nodes and newly-created nodes. This
     // avoids index-based closures becoming stale when progressive ranking reorders the grid.
