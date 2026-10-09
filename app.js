@@ -1,6 +1,6 @@
 /* ManaSearch build 20261008-8 */
 // ManaSearch deployment build marker. Bump this whenever app.js changes so cached-module issues are easy to diagnose.
-const MANASEARCH_APP_BUILD = '20261008-17';
+const MANASEARCH_APP_BUILD = '20261008-23';
 console.info(`[ManaSearch] app.js build ${MANASEARCH_APP_BUILD}`);
 
 // State Management
@@ -8297,8 +8297,13 @@ function inferContextualSemanticMechanics(card, text, directKeywords = new Set()
         evidence: new Map([...allKeywords].map(k => [k, { score: 1, reason: 'full-card' }]))
     };
 
+    // Treat semicolon-separated rules fragments as separate contextual units too. Oracle text
+    // frequently puts a second effect after a semicolon on the same line; keeping the entire line
+    // together can let an unrelated mechanic on that fragment leak into a highlighted search.
+    // Keep the original fullOracle intact for direct matching; this segmentation is only used for
+    // the contextual fallback, where tighter clause locality is safer than broad card-level overlap.
     const clauses = fullOracle
-        .split(/(?:\r?\n)+|(?<=[.!?])\s+(?=[A-Z{])/)
+        .split(/(?:\r?\n)+|;|(?<=[.!?])\s+(?=[A-Z{])/)
         .map(x => x.trim())
         .filter(Boolean);
     const inferred = new Set();
@@ -9473,6 +9478,159 @@ function calculateMechanicalSimilarityDetailed(parsedA, parsedB, profileA = null
 function calculateMechanicalSimilarity(parsedA, parsedB, profileA = null, profileB = null) {
     return calculateMechanicalSimilarityDetailed(parsedA, parsedB, profileA, profileB).score;
 }
+
+
+// V22: mechanical regression/invariant layer. These checks are intentionally deterministic and
+// operate on the same parser/profile/ranker used by live searches. They are exposed as a small
+// diagnostic API rather than being run automatically for visitors, so they add no search latency.
+// The suite focuses on equivalence and contradiction cases that are easy for lexical similarity
+// to get wrong: differently worded removal, countering, reanimation, mana choices, and opposite
+// actions. A regression failure is diagnostic only; it never changes live ranking behavior.
+const MANASEARCH_MECHANICAL_REGRESSION_CASES = Object.freeze([
+    {
+        id: 'destroy-all-wording',
+        a: 'Destroy all creatures.',
+        b: 'Destroy all creatures.',
+        min: 0.85,
+        max: 1.01
+    },
+    {
+        id: 'counter-spell-wording',
+        a: 'Counter target spell.',
+        b: 'Counter target noncreature spell.',
+        min: 0.55,
+        max: 1.01
+    },
+    {
+        id: 'reanimate-wording',
+        a: 'Return target creature card from your graveyard to the battlefield.',
+        b: 'Put target creature card from your graveyard onto the battlefield.',
+        min: 0.55,
+        max: 1.01
+    },
+    {
+        id: 'destroy-vs-draw',
+        a: 'Destroy target creature.',
+        b: 'Draw two cards.',
+        min: 0,
+        max: 0.40,
+        negative: true
+    },
+    {
+        id: 'tap-vs-untap',
+        a: 'Tap target creature.',
+        b: 'Untap target creature.',
+        min: 0,
+        max: 0.60,
+        negative: true
+    },
+    {
+        id: 'gain-vs-lose-life',
+        a: 'You gain 5 life.',
+        b: 'You lose 5 life.',
+        min: 0,
+        max: 0.60,
+        negative: true
+    },
+    {
+        id: 'mana-choice-vs-three-mana',
+        a: '{T}: Add {R}, {G}, or {W}.',
+        b: '{T}: Add {R}{G}{W}.',
+        min: 0.25,
+        max: 0.90
+    }
+]);
+
+function runManaSearchMechanicalRegressionSuite({ log = true } = {}) {
+    const results = [];
+    for (const test of MANASEARCH_MECHANICAL_REGRESSION_CASES) {
+        try {
+            const parsedA = parseMTGEffect(test.a);
+            const parsedB = parseMTGEffect(test.b);
+            const profileA = buildUniversalMechanicProfile(null, test.a, parsedA);
+            const profileB = buildUniversalMechanicProfile(null, test.b, parsedB);
+            const detail = calculateMechanicalSimilarityDetailed(parsedA, parsedB, profileA, profileB);
+            const score = Number(detail?.score) || 0;
+            const pass = score >= test.min && score <= test.max;
+            results.push({
+                id: test.id,
+                score,
+                expected: [test.min, test.max],
+                pass,
+                graph: Number(detail?.graphScore) || 0,
+                universal: Number(detail?.universalScore) || 0,
+                structural: Number(detail?.structuralScore) || 0
+            });
+        } catch (error) {
+            results.push({ id: test.id, score: 0, expected: [test.min, test.max], pass: false, error: error?.message || String(error) });
+        }
+    }
+    const passed = results.filter(r => r.pass).length;
+    const summary = { passed, total: results.length, passRate: results.length ? passed / results.length : 1, results };
+    if (log) {
+        console.groupCollapsed(`ManaSearch mechanical regression: ${passed}/${results.length} passed`);
+        for (const result of results) {
+            const label = result.pass ? 'PASS' : 'FAIL';
+            console.log(`${label} ${result.id}: ${(result.score * 100).toFixed(1)}%`, result);
+        }
+        console.groupEnd();
+    }
+    return summary;
+}
+
+// Available for development/benchmark diagnostics without changing the public UI.
+try { window.runManaSearchMechanicalRegressionSuite = runManaSearchMechanicalRegressionSuite; } catch (_) {}
+
+// V23: highlighted-mechanic isolation checks. These specifically guard against a common semantic
+// ranking failure: copying every keyword from a multi-mechanic source card into a short highlight.
+// They use the production inference function and are opt-in diagnostics, so they add no runtime
+// cost to ordinary searches.
+function runManaSearchHighlightIsolationSuite({ log = true } = {}) {
+    const cases = [
+        {
+            id: 'flying-highlight-does-not-inherit-cycling',
+            card: { keywords: ['Flying', 'Cycling'], oracle_text: 'Flying\nCycling {2} ({2}, Discard this card: Draw a card.)' },
+            highlight: 'Flying',
+            mustInclude: ['flying'],
+            mustExclude: ['cycling']
+        },
+        {
+            id: 'cycling-highlight-does-not-inherit-flying',
+            card: { keywords: ['Flying', 'Cycling'], oracle_text: 'Flying\nCycling {2} ({2}, Discard this card: Draw a card.)' },
+            highlight: 'Cycling {2} ({2}, Discard this card: Draw a card.)',
+            mustInclude: ['cycling'],
+            mustExclude: ['flying']
+        },
+        {
+            id: 'training-highlight-is-local-to-attack-growth',
+            card: { keywords: ['Training', 'Flying'], oracle_text: 'Flying\nWhenever this creature attacks with another creature with greater power, put a +1/+1 counter on this creature.' },
+            highlight: 'Whenever this creature attacks with another creature with greater power, put a +1/+1 counter on this creature.',
+            mustInclude: ['training'],
+            mustExclude: ['flying']
+        }
+    ];
+    const results = cases.map(test => {
+        try {
+            const direct = new Set();
+            const result = inferContextualSemanticMechanics(test.card, test.highlight, direct);
+            const inferred = new Set([...result.inferred].map(normalizeMechanicBridgeKey));
+            const missing = test.mustInclude.filter(k => !inferred.has(normalizeMechanicBridgeKey(k)));
+            const leaked = test.mustExclude.filter(k => inferred.has(normalizeMechanicBridgeKey(k)));
+            return { id: test.id, pass: missing.length === 0 && leaked.length === 0, inferred: [...inferred], missing, leaked };
+        } catch (error) {
+            return { id: test.id, pass: false, error: error?.message || String(error) };
+        }
+    });
+    const passed = results.filter(r => r.pass).length;
+    const summary = { passed, total: results.length, passRate: results.length ? passed / results.length : 1, results };
+    if (log) {
+        console.groupCollapsed(`ManaSearch highlight isolation: ${passed}/${results.length} passed`);
+        results.forEach(result => console.log(`${result.pass ? 'PASS' : 'FAIL'} ${result.id}`, result));
+        console.groupEnd();
+    }
+    return summary;
+}
+try { window.runManaSearchHighlightIsolationSuite = runManaSearchHighlightIsolationSuite; } catch (_) {}
 
 // Cache tag extraction to prevent running ~70 regex operations repeatedly per card
 function calculateCategoryScore(targetCard, tags, sourceCard = null, sourceEffects = null) {
@@ -10851,7 +11009,7 @@ let semanticCosineBaselineReady = false;
 const STATIC_CARD_CORPUS_FILENAME = 'cards.bin';
 const STATIC_CARD_CORPUS_VERSION = 1;
 const STATIC_CARD_CORPUS_MAGIC = 'MSCARD1G';
-const STATIC_CARD_CORPUS_CACHE_VERSION = '20261008-8';
+const STATIC_CARD_CORPUS_CACHE_VERSION = '20261008-23';
 const STATIC_DATA_META_FILENAME = 'static-data-meta.json';
 let staticDataMetaPromise = null;
 let staticDataBuildId = null;
@@ -10859,6 +11017,12 @@ let staticDataBuildCacheKey = null;
 let staticCardCorpusPromise = null;
 let staticCardCorpusMemory = null;
 let staticCardCorpusLoadError = null;
+// V19: one-pass local retrieval broker plus a compact in-memory inverted token index.
+// cards.bin is still downloaded/decompressed/parsed once; the index is built once from that
+// in-memory corpus. Searches then visit only cards referenced by their query tokens, while all
+// registered retrieval streams still share one candidate traversal. Search Depth (%) controls
+// each stream's candidate budget, not how many times the corpus is read.
+let activeLocalCorpusBatchContext = null;
 
 // The Similar Cards button is intentionally locked until BOTH static search assets are ready.
 // These assets are the production full-corpus sources for local lexical/mechanical and semantic
@@ -11178,6 +11342,34 @@ function parseStaticCardCorpusBinary(buffer) {
         }
         const cards = sourceCards.map(prepareStaticCardRecord).filter(Boolean);
         if (!cards.length) throw new Error('Static card corpus contains no usable cards.');
+
+        // Build the local lexical index once, after cards.bin has been decoded. We deliberately
+        // use a packed Uint32 posting array instead of Map<string, Set<number>> so mobile devices
+        // do not pay a large per-entry Set allocation cost. Each token maps to a contiguous range
+        // in postingData containing card indexes.
+        const tokenCounts = new Map();
+        for (let cardIndex = 0; cardIndex < cards.length; cardIndex++) {
+            const tokens = getLocalCorpusIndexTokens(cards[cardIndex]?._localSearchText || '');
+            for (const token of tokens) tokenCounts.set(token, (tokenCounts.get(token) || 0) + 1);
+        }
+        let postingCount = 0;
+        const tokenIndex = new Map();
+        for (const [token, count] of tokenCounts) {
+            tokenIndex.set(token, { offset: postingCount, length: count });
+            postingCount += count;
+        }
+        const postingData = new Uint32Array(postingCount);
+        const tokenWriteOffsets = new Map();
+        for (const [token, meta] of tokenIndex) tokenWriteOffsets.set(token, meta.offset);
+        for (let cardIndex = 0; cardIndex < cards.length; cardIndex++) {
+            const tokens = getLocalCorpusIndexTokens(cards[cardIndex]?._localSearchText || '');
+            for (const token of tokens) {
+                const writeAt = tokenWriteOffsets.get(token);
+                if (writeAt == null) continue;
+                postingData[writeAt] = cardIndex;
+                tokenWriteOffsets.set(token, writeAt + 1);
+            }
+        }
         const byName = new Map();
         cards.forEach(card => byName.set(normalizeCardNameForIdentity(card.name), card));
         return {
@@ -11187,6 +11379,9 @@ function parseStaticCardCorpusBinary(buffer) {
             total: cards.length,
             cards,
             byName,
+            tokenIndex,
+            postingData,
+            indexedPostingCount: postingCount,
             byteLength: buffer.byteLength
         };
     })();
@@ -11240,10 +11435,14 @@ const LOCAL_CORPUS_STOP_WORDS = new Set([
     'gets','get','gain','gains','put','onto','enters','becomes','instead','then','when','whenever','if'
 ]);
 
-function getLocalCorpusQueryTokens(text) {
+function getLocalCorpusIndexTokens(text) {
     return [...new Set(normalizeLocalCorpusText(text).split(/\s+/).filter(token =>
         token.length >= 3 && !LOCAL_CORPUS_STOP_WORDS.has(token)
-    ))].slice(0, 14);
+    ))];
+}
+
+function getLocalCorpusQueryTokens(text) {
+    return getLocalCorpusIndexTokens(text).slice(0, 14);
 }
 
 async function searchStaticCardCorpus(queryText, options = {}) {
@@ -11328,31 +11527,228 @@ function extractLocalRetrievalAlternativesFromScryfallQuery(query) {
 }
 
 async function searchStaticCardCorpusAlternatives(queries, options = {}) {
-    const list = [...new Set((Array.isArray(queries) ? queries : [queries]).map(q => String(q || '').trim()).filter(Boolean))];
+    const list = [...new Set((Array.isArray(queries) ? queries : [queries]).map(q => String(q || '').trim()).filter(Boolean))]
+        .slice(0, 16);
     if (!list.length || !staticCardCorpusMemory?.cards?.length) return [];
+
+    // V21: alternative local queries are now part of the same one-pass broker as ordinary local
+    // retrieval. The previous implementation called searchStaticCardCorpus once per alternative,
+    // which silently brought back repeated 35k-card scans for Related Search and any other caller
+    // that supplied multiple query formulations.
     const requestedLimit = Math.max(1, Math.min(1200, Number(options.limit) || 180));
-    const perQueryLimit = Math.min(1200, Math.max(1, requestedLimit));
-    const merged = new Map();
-    for (const query of list.slice(0, 16)) {
-        const hits = await searchStaticCardCorpus(query, { ...options, limit: perQueryLimit });
-        for (const card of hits) {
-            const key = normalizeCardNameForIdentity(card?.name || '');
-            if (!key) continue;
-            const existing = merged.get(key);
-            if (!existing || (Number(card._localCorpusSimilarity) || 0) > (Number(existing._localCorpusSimilarity) || 0)) {
-                merged.set(key, { ...card, _localRetrievalQueries: [query] });
-            } else if (existing && !existing._localRetrievalQueries.includes(query)) {
-                existing._localRetrievalQueries.push(query);
+    const previousContext = activeLocalCorpusBatchContext;
+    let temporaryContext = null;
+    if (!activeLocalCorpusBatchContext?.corpus?.cards?.length) {
+        temporaryContext = createLocalCorpusBatchContext(staticCardCorpusMemory);
+        activeLocalCorpusBatchContext = temporaryContext;
+    }
+
+    try {
+        const result = await requestUnifiedLocalCorpusSearch(list, options.fallbackQuery || list[0], {
+            ...options,
+            limit: requestedLimit,
+            label: options.label || 'Local Card Corpus Alternatives'
+        });
+        return Array.isArray(result) ? result : [];
+    } finally {
+        if (temporaryContext) activeLocalCorpusBatchContext = previousContext;
+    }
+}
+
+
+function getCurrentSearchDepthPercent() {
+    const input = parseFloat(document.getElementById('filter-depth-percent')?.value);
+    const raw = Number.isFinite(input) && input > 0 ? input : DEFAULT_SEARCH_DEPTH_PERCENT;
+    return Math.max(1, Math.min(MAX_SEARCH_DEPTH_PERCENT, raw));
+}
+
+function getDepthScaledLocalLimit(requestedLimit, depthPercent = getCurrentSearchDepthPercent()) {
+    const base = Math.max(1, Math.min(1200, Number(requestedLimit) || 180));
+    // 25% remains the established default budget. Higher depths widen the local candidate pool,
+    // while very shallow depths retain a useful floor instead of collapsing to a handful of cards.
+    const scale = Math.max(0.20, depthPercent / DEFAULT_SEARCH_DEPTH_PERCENT);
+    return Math.max(12, Math.min(1200, Math.round(base * scale)));
+}
+
+function createLocalCorpusBatchContext(corpus = staticCardCorpusMemory) {
+    return {
+        corpus,
+        requests: [],
+        promise: null,
+        results: new Map(),
+        depthPercent: getCurrentSearchDepthPercent()
+    };
+}
+
+function localCorpusScoreDescriptor(query) {
+    const text = String(query || '').trim();
+    return {
+        query: text,
+        tokens: getLocalCorpusQueryTokens(text),
+        phrase: normalizeLocalCorpusText(text)
+    };
+}
+
+function scoreLocalCorpusCardForDescriptor(card, descriptor) {
+    if (!descriptor?.tokens?.length) return 0;
+    const haystack = card?._localSearchText || '';
+    if (!haystack) return 0;
+    let matched = 0;
+    for (const token of descriptor.tokens) if (haystack.includes(token)) matched++;
+    if (!matched) return 0;
+    const coverage = matched / descriptor.tokens.length;
+    const phraseBonus = descriptor.phrase.length >= 8 && haystack.includes(descriptor.phrase) ? 0.24 : 0;
+    const keywordBonus = Array.isArray(card.keywords) && card.keywords.some(k => descriptor.tokens.includes(normalizeLocalCorpusText(k))) ? 0.08 : 0;
+    const score = Math.min(1, coverage * 0.68 + phraseBonus + keywordBonus);
+    return score >= 0.18 ? score : 0;
+}
+
+async function runLocalCorpusBatch(context) {
+    const ctx = context;
+    const corpus = ctx?.corpus;
+    if (!ctx || !corpus?.cards?.length) return new Map();
+
+    // V20: every request is assigned a stable state index. This avoids requestStates.indexOf(state)
+    // inside the hot candidate loop and, more importantly, keeps the empty-posting fallback local
+    // to that request instead of accidentally scoring every request against every candidate.
+    const requestStates = ctx.requests.map((request, stateIndex) => ({
+        request,
+        stateIndex,
+        descriptors: request.queries.slice(0, 16).map(localCorpusScoreDescriptor).filter(d => d.tokens.length),
+        hits: [],
+        cap: getDepthScaledLocalLimit(request.limit, ctx.depthPercent),
+        candidateIndexes: new Set(),
+        useFilters: Boolean(request.options.filters && hasActiveConstraintFilters(request.options.filters))
+    }));
+
+    const globalCandidateIndexes = new Set();
+    const tokenIndex = corpus.tokenIndex;
+    const postingData = corpus.postingData;
+    if (tokenIndex instanceof Map && postingData instanceof Uint32Array) {
+        for (const state of requestStates) {
+            for (const descriptor of state.descriptors) {
+                for (const token of descriptor.tokens) {
+                    const meta = tokenIndex.get(token);
+                    if (!meta) continue;
+                    const end = meta.offset + meta.length;
+                    for (let posting = meta.offset; posting < end; posting++) {
+                        const cardIndex = postingData[posting];
+                        state.candidateIndexes.add(cardIndex);
+                        globalCandidateIndexes.add(cardIndex);
+                    }
+                }
             }
         }
-        // Explicitly yield between alternative queries. Related Search can have many alternatives,
-        // and without this pause the browser can spend a long uninterrupted stretch on local scans.
-        await backgroundAwareDelay(0);
     }
-    return Array.from(merged.values())
-        .sort((a, b) => (Number(b._localCorpusSimilarity) || 0) - (Number(a._localCorpusSimilarity) || 0) || String(a.name).localeCompare(String(b.name)))
-        .slice(0, requestedLimit)
-        .map(card => ({ ...card, _retrievalSource: 'static-card-corpus' }));
+
+    // If a query has no indexable terms, it gets the same correctness fallback as the old full
+    // corpus scanner, but only that request becomes broad. Other requests still use their indexed
+    // candidate sets. This is important for Search Related/Search Deeper streams that may mix
+    // structured and lexical queries.
+    // A request with no indexed candidates is a correctness fallback and therefore needs the
+    // entire corpus, not merely the union of the other requests' indexed candidates. If even one
+    // state requires that fallback, the shared traversal expands to the full corpus so the broker
+    // never silently drops valid results for that state. Indexed-only searches still traverse only
+    // their union of postings.
+    const requiresFullCorpus = requestStates.some(state => state.candidateIndexes.size === 0);
+    const candidates = requiresFullCorpus
+        ? Array.from({ length: corpus.cards.length }, (_, i) => i)
+        : Array.from(globalCandidateIndexes).sort((a, b) => a - b);
+
+    const statesByCard = new Map();
+    for (const state of requestStates) {
+        const selected = state.candidateIndexes.size ? state.candidateIndexes : new Set(candidates);
+        state.candidateIndexes = selected;
+        for (const cardIndex of selected) {
+            let list = statesByCard.get(cardIndex);
+            if (!list) statesByCard.set(cardIndex, list = []);
+            list.push(state);
+        }
+    }
+
+    for (let candidatePosition = 0; candidatePosition < candidates.length; candidatePosition++) {
+        const cardIndex = candidates[candidatePosition];
+        const card = corpus.cards[cardIndex];
+        if (!card?.name) continue;
+
+        const selectedStates = statesByCard.get(cardIndex);
+        if (!selectedStates?.length) continue;
+        for (const state of selectedStates) {
+            const options = state.request.options;
+            const excludeKey = normalizeCardNameForIdentity(options.excludeName || '');
+            if ((card._localNameKey || normalizeCardNameForIdentity(card.name)) === excludeKey) continue;
+            if (options.highlights?.length && !matchesExactHighlightConstraints(card, options.highlights)) continue;
+            if (state.useFilters && !matchesActiveFilters(card, options.filters, options.broadFallbackFilters)) continue;
+
+            let best = 0;
+            let matchedQueries = null;
+            for (const descriptor of state.descriptors) {
+                const score = scoreLocalCorpusCardForDescriptor(card, descriptor);
+                if (score > best) best = score;
+                if (score > 0) (matchedQueries ||= []).push(descriptor.query);
+            }
+            if (!best) continue;
+            state.hits.push({ card, score: best, queries: matchedQueries || [] });
+            if (state.hits.length > state.cap * 2) {
+                state.hits.sort((a, b) => b.score - a.score || String(a.card.name).localeCompare(String(b.card.name)));
+                state.hits.length = state.cap;
+            }
+        }
+
+        if (candidatePosition + 1 < candidates.length && candidatePosition % 1400 === 1399) {
+            await backgroundAwareDelay(0);
+        }
+    }
+
+    for (const state of requestStates) {
+        state.hits.sort((a, b) => b.score - a.score || String(a.card.name).localeCompare(String(b.card.name)));
+        const merged = new Map();
+        for (const hit of state.hits.slice(0, state.cap)) {
+            const key = normalizeCardNameForIdentity(hit.card.name);
+            const existing = merged.get(key);
+            if (!existing || hit.score > existing._localCorpusSimilarity) {
+                merged.set(key, {
+                    ...hit.card,
+                    _localCorpusSimilarity: hit.score,
+                    _localRetrievalQueries: [...hit.queries]
+                });
+            } else if (existing) {
+                for (const q of hit.queries) {
+                    if (!existing._localRetrievalQueries.includes(q)) existing._localRetrievalQueries.push(q);
+                }
+            }
+        }
+        const output = Array.from(merged.values()).sort((a, b) =>
+            (Number(b._localCorpusSimilarity) || 0) - (Number(a._localCorpusSimilarity) || 0) || String(a.name).localeCompare(String(b.name))
+        ).slice(0, state.cap).map(card => ({ ...card, _retrievalSource: 'static-card-corpus' }));
+        state.request.output = decorateLocalCoverage(output, state.request.label, state.request.queries.join(' | '));
+        state.request.output.coverage.depthPercent = ctx.depthPercent;
+        state.request.output.coverage.corpusPass = requiresFullCorpus ? 'single-fallback' : 'single-indexed';
+        state.request.output.coverage.indexedCandidates = candidates.length;
+        state.request.output.coverage.fullCorpusFallback = requiresFullCorpus;
+        state.request.output.coverage.indexedPostings = Number(corpus.indexedPostingCount) || 0;
+        state.request.output.coverage.requestStateIndex = state.stateIndex;
+        ctx.results.set(state.request.id, state.request.output);
+    }
+    return ctx.results;
+}
+function requestUnifiedLocalCorpusSearch(localQueries, fallbackQuery, options = {}) {
+    const ctx = activeLocalCorpusBatchContext;
+    if (!ctx?.corpus?.cards?.length) return null;
+    const queries = (Array.isArray(localQueries) ? localQueries : [localQueries])
+        .map(q => String(q || '').trim()).filter(Boolean);
+    if (!queries.length) return Promise.resolve([]);
+    const request = {
+        id: `${ctx.requests.length}:${options.label || 'Local Card Corpus'}:${queries.join('|')}`,
+        label: options.label || 'Local Card Corpus',
+        queries,
+        fallbackQuery,
+        limit: options.limit,
+        options
+    };
+    ctx.requests.push(request);
+    if (!ctx.promise) ctx.promise = Promise.resolve().then(() => runLocalCorpusBatch(ctx));
+    return ctx.promise.then(results => results.get(request.id) || decorateLocalCoverage([], request.label, queries.join(' | ')));
 }
 
 function buildSharedLocalSearchQueries(cards) {
@@ -11407,16 +11803,13 @@ async function retrieveLocalFirst(localQueries, fallbackQuery, options = {}) {
     } = options;
     const corpus = staticCardCorpusMemory || await loadStaticCardCorpus();
     if (corpus?.cards?.length) {
-        const queries = (Array.isArray(localQueries) ? localQueries : [localQueries])
-            .map(q => String(q || '').trim())
-            .filter(Boolean);
-        const results = await searchStaticCardCorpusAlternatives(queries, {
-            limit,
-            excludeName,
-            filters,
-            broadFallbackFilters,
-            highlights
+        const unified = requestUnifiedLocalCorpusSearch(localQueries, fallbackQuery, {
+            label, limit, excludeName, filters, broadFallbackFilters, highlights
         });
+        if (unified) return unified;
+        const queries = (Array.isArray(localQueries) ? localQueries : [localQueries])
+            .map(q => String(q || '').trim()).filter(Boolean);
+        const results = await searchStaticCardCorpusAlternatives(queries, { limit, excludeName, filters, broadFallbackFilters, highlights });
         return decorateLocalCoverage(results, label, queries.join(' | '));
     }
     if (!fallbackQuery) return decorateLocalCoverage([], label, '[local corpus unavailable]');
@@ -13123,6 +13516,7 @@ function initApp() {
     compareStatus = document.getElementById('compare-status');
     sortSelect = document.getElementById('sort-results');
     setupSourceCardPicker();
+    runMechanicalRegressionSuite();
 
     // Search Depth defaults to 25% for a new browser profile. Once the user deliberately changes
     // it, remember that choice so the control remains genuinely user-configurable across reloads.
@@ -15870,6 +16264,76 @@ function getSearchIntent(sourceCard, highlights = []) {
     return intent;
 }
 
+
+function runMechanicalRegressionSuite() {
+    const checks = [];
+    const check = (name, condition, detail = '') => checks.push({ name, pass: Boolean(condition), detail });
+
+    try {
+        const source = {
+            name: 'ManaSearch Regression Source',
+            oracle_text: 'Whenever this creature attacks, draw a card.'
+        };
+        const noHighlightIntent = getSearchIntent(source, []);
+        check('No-highlight source keeps full Oracle intent',
+            noHighlightIntent?.targetText === source.oracle_text && Array.isArray(noHighlightIntent?.parsedEffects),
+            `targetText=${String(noHighlightIntent?.targetText || '').slice(0, 80)}`);
+    } catch (error) {
+        check('No-highlight source keeps full Oracle intent', false, error?.message || String(error));
+    }
+
+    try {
+        const trainingCard = {
+            name: 'Training Regression Card',
+            keywords: ['Training'],
+            oracle_text: 'Whenever this creature attacks with another creature with greater power, put a +1/+1 counter on this creature.'
+        };
+        const fullProfile = buildSemanticMechanicBridgeProfile(trainingCard, trainingCard.oracle_text);
+        check('Named mechanic bridge retains explicit keyword identity',
+            fullProfile?.matchedMechanics?.has('training') || fullProfile?.cardMechanicKeywords?.has('training'),
+            `matched=${[...(fullProfile?.matchedMechanics || [])].join(',')}`);
+
+        const highlightedUnrelated = buildSemanticMechanicBridgeProfile(trainingCard, 'Draw a card.');
+        check('Highlighted-text bridge rejects unrelated clause',
+            !highlightedUnrelated?.contextualMechanics?.has('training'),
+            `contextual=${[...(highlightedUnrelated?.contextualMechanics || [])].join(',')}`);
+    } catch (error) {
+        check('Named mechanic bridge retains explicit keyword identity', false, error?.message || String(error));
+        check('Highlighted-text bridge rejects unrelated clause', false, error?.message || String(error));
+    }
+
+    try {
+        const choice = parseManaAbilityEffect('Add {R}, {G}, or {W}.');
+        check('Mana choice produces one mana, not three',
+            choice?.manaOutput?.amount === 1 && choice?.manaOutput?.isChoice === true && choice?.manaOutput?.uniqueColorCount === 3,
+            `amount=${choice?.manaOutput?.amount}, mode=${choice?.manaOutput?.mode}, colors=${choice?.manaOutput?.colors?.join(',')}`);
+
+        const signet = finalizeManaAbilityEffect({
+            action: 'add_mana',
+            raw: 'Add {R}{W}.',
+            amount: 2,
+            manaOutput: analyzeManaOutput('Add {R}{W}.', 2),
+            activationCost: { manaMin: 1, manaMax: 1, manaExact: true }
+        });
+        check('Two-output one-mana activation has net +1 mana',
+            signet?.manaOutputAmount === 2 && signet?.manaNetAmount === 1,
+            `gross=${signet?.manaOutputAmount}, net=${signet?.manaNetAmount}`);
+
+        const trueThree = parseManaAbilityEffect('Add {R}{G}{W}.');
+        check('Three simultaneous mana symbols remain three mana',
+            trueThree?.manaOutput?.amount === 3 && trueThree?.manaOutput?.isChoice !== true,
+            `amount=${trueThree?.manaOutput?.amount}, mode=${trueThree?.manaOutput?.mode}`);
+    } catch (error) {
+        check('Mana production regression cases', false, error?.message || String(error));
+    }
+
+    const failed = checks.filter(item => !item.pass);
+    const report = { pass: failed.length === 0, checks };
+    if (failed.length) console.warn('[ManaSearch] Mechanical regression suite found failures:', report);
+    else console.info('[ManaSearch] Mechanical regression suite passed:', checks.length, 'checks.');
+    return report;
+}
+
 function createSearchCancellationError() {
     const error = new Error('Search superseded by a newer search.');
     error.code = 'SEARCH_CANCELLED';
@@ -16243,6 +16707,15 @@ async function findSimilarCards() {
     // referenced from inside try would be out of scope for cleanup in catch/finally.
     let pipelineCompleted = false;
     let searchTimeoutId = null;
+    const previousLocalCorpusBatchContext = activeLocalCorpusBatchContext;
+    if (!benchmarkUseLocalOracleCorpus) {
+        const localCorpus = staticCardCorpusMemory || await loadStaticCardCorpus();
+        activeLocalCorpusBatchContext = localCorpus?.cards?.length ? createLocalCorpusBatchContext(localCorpus) : null;
+        if (activeLocalCorpusBatchContext) {
+            const depth = activeLocalCorpusBatchContext.depthPercent;
+            updateProgress(1, totalSteps, `Local corpus ready — one-pass retrieval across ${localCorpus.total.toLocaleString()} cards at ${depth}% depth.`);
+        }
+    }
 
     try {
         const localExactQueries = hasHighlight
@@ -17313,6 +17786,7 @@ if (candidates.length > 0) {
             if (typeof alert === 'function') alert(error.message);
         }
     } finally {
+        activeLocalCorpusBatchContext = previousLocalCorpusBatchContext;
         if (requestId === searchRequestId) activeSearchStreamProgressReporter = null;
         clearTimeout(searchTimeoutId);
         if (requestId === searchRequestId && activeResultView.mode === 'main' && activeResultView.requestId === requestId) {
