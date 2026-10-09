@@ -1,6 +1,6 @@
-/* ManaSearch build 20261008-8 */
+/* ManaSearch build 20261009-25 */
 // ManaSearch deployment build marker. Bump this whenever app.js changes so cached-module issues are easy to diagnose.
-const MANASEARCH_APP_BUILD = '20261009-24';
+const MANASEARCH_APP_BUILD = '20261009-25';
 console.info(`[ManaSearch] app.js build ${MANASEARCH_APP_BUILD}`);
 
 // State Management
@@ -470,42 +470,48 @@ const BENCHMARK_SUITE = [
         id: 5,
         name: "Black Cheap Reanimation Engines",
         source: "Reanimate",
-        highlightStyle: "multi-span-line",
+        highlightStyle: "multi-span-line-mixed-mode",
         highlightIntent: "find cheap ways to return a creature from a graveyard to the battlefield",
         constraints: {
             identity: "b",
             format: "legacy",
             cmc: "2"
         },
-        // Anchor the actual source line with short Exact structural pieces that survive wording
-        // changes such as "your/their graveyard" and "return/put". No fabricated phrase is used.
+        // Include the action verb as well as the object and zone transition. The previous
+        // highlight began at "creature card", which removed "Put target" from the parsed source
+        // effect and reduced it to a zone/object fragment. Mixed mode is intentional: Exact anchors
+        // the action/object structure while the transition wording remains flexible. Because the
+        // selections belong to one clause, benchmarkIntentOnly keeps Exact from becoming a hard
+        // literal filter and allows wording-different engines such as Animate Dead.
         highlights: [
-            { text: "creature card", mode: "exact", intent: "restrict the returned object to a creature card" },
-            { text: "graveyard", mode: "exact", intent: "require graveyard-based recursion" },
-            { text: "battlefield", mode: "exact", intent: "require battlefield recursion" }
+            { text: "Put target creature card", mode: "exact", intent: "anchor the action and the creature object" },
+            { text: "from a graveyard onto the battlefield", mode: "variable", intent: "allow equivalent graveyard-to-battlefield wording" }
         ],
         expected: ["Animate Dead", "Exhume", "Persist"],
-        categories: ["differently-worded", "same-outcome-different-function", "graveyard-to-battlefield", "highlight-multi-span"]
+        categories: ["differently-worded", "same-outcome-different-function", "graveyard-to-battlefield", "highlight-mixed-modes"]
     },
     {
         id: 6,
         name: "Blue Merfolk Tribal Lords",
         source: "Lord of Atlantis",
-        highlightStyle: "multi-span-line",
+        highlightStyle: "multi-span-line-mixed-mode",
         highlightIntent: "find a tribal lord effect that specifically boosts other Merfolk",
         constraints: {
             type: "creature",
             format: "commander",
-            identity: "u",
-            cmc: "2"
+            identity: "u"
         },
-        // Mirror a human mixed selection: lock the tribe phrase and keep the stat magnitude
-        // flexible so differently sized tribal bonuses remain relevant.
+        // Mirror a human mixed selection: keep the tribe phrase as the structural anchor, while
+        // allowing the bonus magnitude to differ. The exact anchor is not a hard substring filter
+        // because both selections are inside one mixed benchmark group. Drop the exact 2-mana
+        // constraint so other genuine mono-blue lords (e.g. Merrow Reejerey) remain eligible.
+        // Vodalian Hexcatcher is valuable Merfolk support, but it does not grant a tribal stat buff;
+        // it should not be labeled as a strict target for this specific highlighted effect.
         highlights: [
-            { text: "Other Merfolk", mode: "variable", intent: "focus on an effect centered on other Merfolk" },
-            { text: "get +1/+1", mode: "variable", intent: "focus on a tribal benefit to Merfolk" }
+            { text: "Other Merfolk", mode: "exact", intent: "anchor the tribe being boosted" },
+            { text: "get +1/+1", mode: "variable", intent: "allow a different tribal stat-bonus magnitude" }
         ],
-        expected: ["Master of the Pearl Trident", "Vodalian Hexcatcher"],
+        expected: ["Master of the Pearl Trident", "Merfolk Sovereign", "Merrow Reejerey"],
         categories: ["tribal-effects", "differently-worded", "multi-effect", "highlight-mixed-modes"]
     },
     {
@@ -553,19 +559,23 @@ const BENCHMARK_SUITE = [
         id: 9,
         name: "Recurring Card Advantage For Life (Semantic Analogy)",
         source: "Phyrexian Arena",
-        highlightStyle: "multi-span-line",
+        highlightStyle: "multi-span-effect",
         highlightIntent: "find repeatable card advantage that costs life over time",
         constraints: {
             identity: "b"
         },
-        // These are real source phrases, but both are Flexible because comparable engines may
-        // draw/reveal a different card quantity and may charge a different life amount or timing.
+        // Keep the recurring timing and both linked effects in the highlighted context. Previously
+        // the selection started at "draw a card", stripping the upkeep trigger from the parsed
+        // effect and weakening the card-advantage-engine fingerprint. Flexible mode is deliberate:
+        // semantic analogues may use an upkeep trigger (Dark Confidant) or a repeatable life-paid
+        // activation (Necropotence), so the source's exact timing/wording must not be a hard filter.
         highlights: [
-            { text: "draw a card", mode: "variable", intent: "gain recurring card advantage" },
-            { text: "lose 1 life", mode: "variable", intent: "pay life as the recurring cost" }
+            { text: "At the beginning of your upkeep", mode: "variable", intent: "capture repeated timing" },
+            { text: "draw a card", mode: "variable", intent: "capture card acquisition" },
+            { text: "lose 1 life", mode: "variable", intent: "capture the associated life cost" }
         ],
         expected: ["Dark Confidant", "Necropotence"],
-        categories: ["semantic-analogy", "card-advantage-engine", "same-archetypal-role", "highlight-flexible"]
+        categories: ["semantic-analogy", "card-advantage-engine", "same-archetypal-role", "highlight-flexible", "highlight-recurring-timing"]
     },
     {
         id: 10,
@@ -1730,6 +1740,19 @@ function validateBenchmarkRuntimeInApp() {
         ];
         for (const [name, available] of requiredFunctions) {
             if (!available) result.warnings.push(`Benchmark function is unavailable in app module: ${name}`);
+        }
+
+        // V25: preflight also audits configured benchmark highlight ranges and their grouped
+        // intent. This catches stale/partial snippets before a costly full ranking benchmark.
+        // It is deterministic, does not issue network requests, and restores currentSourceCard.
+        try {
+            const highlightAudit = runManaSearchBenchmarkHighlightSuite({ log: false });
+            result.highlightAudit = { passed: highlightAudit.passed, total: highlightAudit.total };
+            if (highlightAudit.passed !== highlightAudit.total) {
+                result.errors.push(`Benchmark highlight audit failed: ${highlightAudit.passed}/${highlightAudit.total} checks passed.`);
+            }
+        } catch (auditError) {
+            result.errors.push(`Benchmark highlight audit could not run: ${auditError?.message || String(auditError)}`);
         }
 
         if (typeof document !== 'undefined') {
@@ -9764,6 +9787,94 @@ function runManaSearchHighlightIsolationSuite({ log = true } = {}) {
 }
 try { window.runManaSearchHighlightIsolationSuite = runManaSearchHighlightIsolationSuite; } catch (_) {}
 
+// V25: regression checks for benchmark highlight authoring. These inspect the actual configured
+// ranges and the same production grouping used at search time, without network or model requests.
+function runManaSearchBenchmarkHighlightSuite({ log = true } = {}) {
+    const originalSourceCard = currentSourceCard;
+    const sourceCases = [
+        {
+            id: 5,
+            card: { name: 'Reanimate', oracle_text: 'Put target creature card from a graveyard onto the battlefield. You lose life equal to its mana value.' },
+            checks: (groups, highlights, card) => {
+                const text = groups.map(g => g.contextText).join('. ').toLowerCase();
+                const profiles = buildHighlightIntentProfiles(highlights);
+                return [
+                    ['reanimation-action-preserved', text.includes('put target creature card') && text.includes('from a graveyard onto the battlefield')],
+                    ['reanimation-mechanic-parses', profiles.length === 1 && profiles[0].recognizedEffects.some(e => e.action && e.action !== 'generic')],
+                    ['unrelated-life-drawback-excluded', !text.includes('lose life')],
+                    ['mixed-mode-structural-group', groups.length === 1 && groups[0].mode === 'mixed' && groups[0].benchmarkIntentOnly]
+                ];
+            }
+        },
+        {
+            id: 6,
+            card: { name: 'Lord of Atlantis', oracle_text: 'Other Merfolk get +1/+1.\nAll Merfolk have islandwalk.' },
+            checks: (groups, highlights, card) => {
+                const text = groups.map(g => g.contextText).join('. ').toLowerCase();
+                const profiles = buildHighlightIntentProfiles(highlights);
+                const roleProfile = profiles.length ? inferStrategicRoleProfile(card, profiles[0].parsedEffects, text) : [];
+                return [
+                    ['tribe-and-bonus-share-one-effect', groups.length === 1 && text.includes('other merfolk get +1/+1')],
+                    ['tribal-anthem-role-recognized', roleProfile.some(r => r.role === 'tribal_anthem')],
+                    ['unhighlighted-islandwalk-excluded', !text.includes('islandwalk')],
+                    ['tribe-exact-bonus-variable', groups.length === 1 && groups[0].mode === 'mixed' && groups[0].benchmarkIntentOnly]
+                ];
+            }
+        },
+        {
+            id: 9,
+            card: { name: 'Phyrexian Arena', oracle_text: 'At the beginning of your upkeep, you draw a card and you lose 1 life.\nWhenever you cast a spell, each opponent loses 1 life.' },
+            checks: (groups, highlights, card) => {
+                const text = groups.map(g => g.contextText).join('. ').toLowerCase();
+                const profiles = buildHighlightIntentProfiles(highlights);
+                const roleProfile = profiles.length ? inferStrategicRoleProfile(card, profiles[0].parsedEffects, text) : [];
+                return [
+                    ['repeat-timing-preserved', text.includes('at the beginning of your upkeep')],
+                    ['draw-and-life-cost-kept-together', groups.length === 1 && text.includes('draw a card') && text.includes('lose 1 life')],
+                    ['card-advantage-engine-role-recognized', roleProfile.some(r => r.role === 'card_advantage_engine')],
+                    ['separate-opponent-drain-excluded', !text.includes('each opponent')],
+                    ['semantic-flexibility-retained', groups.length === 1 && groups[0].mode === 'variable' && !groups[0].benchmarkIntentOnly]
+                ];
+            }
+        }
+    ];
+    const results = [];
+    try {
+        for (const item of sourceCases) {
+            const testCase = BENCHMARK_SUITE.find(test => test.id === item.id);
+            if (!testCase) {
+                results.push({ id: item.id, check: 'benchmark-case-exists', pass: false });
+                continue;
+            }
+            currentSourceCard = item.card;
+            try {
+                const highlights = buildBenchmarkHighlightState(testCase, item.card);
+                const groups = annotateHighlightGroups(highlights, getCurrentSourceOracleText(item.card));
+                const configuredModes = highlights.map(h => h.mode);
+                const rangeIntegrity = highlights.every(h => Number.isFinite(h.start) && Number.isFinite(h.end) &&
+                    getCurrentSourceOracleText(item.card).slice(h.start, h.end).toLowerCase() === h.text.toLowerCase());
+                results.push({ id: item.id, check: 'highlight-ranges-match-source', pass: rangeIntegrity, modes: configuredModes });
+                for (const [check, pass] of item.checks(groups, highlights, item.card)) {
+                    results.push({ id: item.id, check, pass, context: groups.map(g => g.contextText) });
+                }
+            } catch (error) {
+                results.push({ id: item.id, check: 'suite-execution', pass: false, error: error?.message || String(error) });
+            }
+        }
+    } finally {
+        currentSourceCard = originalSourceCard;
+    }
+    const passed = results.filter(r => r.pass).length;
+    const summary = { passed, total: results.length, passRate: results.length ? passed / results.length : 1, results };
+    if (log) {
+        console.groupCollapsed(`ManaSearch benchmark highlights: ${passed}/${results.length} passed`);
+        results.forEach(result => console.log(`${result.pass ? 'PASS' : 'FAIL'} Test #${result.id} ${result.check}`, result));
+        console.groupEnd();
+    }
+    return summary;
+}
+try { window.runManaSearchBenchmarkHighlightSuite = runManaSearchBenchmarkHighlightSuite; } catch (_) {}
+
 // Cache tag extraction to prevent running ~70 regex operations repeatedly per card
 function calculateCategoryScore(targetCard, tags, sourceCard = null, sourceEffects = null) {
     if (!targetCard) return 0;
@@ -11141,7 +11252,7 @@ let semanticCosineBaselineReady = false;
 const STATIC_CARD_CORPUS_FILENAME = 'cards.bin';
 const STATIC_CARD_CORPUS_VERSION = 1;
 const STATIC_CARD_CORPUS_MAGIC = 'MSCARD1G';
-const STATIC_CARD_CORPUS_CACHE_VERSION = '20261009-24';
+const STATIC_CARD_CORPUS_CACHE_VERSION = '20261009-25';
 const STATIC_DATA_META_FILENAME = 'static-data-meta.json';
 let staticDataMetaPromise = null;
 let staticDataBuildId = null;
