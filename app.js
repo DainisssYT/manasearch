@@ -1,6 +1,6 @@
-/* ManaSearch build 20261009-26 */
+/* ManaSearch build 20261009-29 */
 // ManaSearch deployment build marker. Bump this whenever app.js changes so cached-module issues are easy to diagnose.
-const MANASEARCH_APP_BUILD = '20261009-27';
+const MANASEARCH_APP_BUILD = '20261009-29';
 console.info(`[ManaSearch] app.js build ${MANASEARCH_APP_BUILD}`);
 
 // State Management
@@ -106,6 +106,60 @@ const selectedRelatedCards = new Map();
 // Stable result-card DOM cache. Progressive scoring frequently reorders the same cards; keeping
 // their DOM nodes alive prevents image reload/flicker while still allowing scores/order to update.
 const visibleResultCardData = new Map();
+
+// Modal responsiveness: while a blocking panel is open, keep only the newest requested result
+// snapshot and paint it once after the final panel closes. Search/retrieval continues normally;
+// this only coalesces background DOM work that otherwise competes with panel controls for the
+// main thread during progressive ranking.
+const MANASEARCH_UI_PANEL_SELECTOR = [
+    '.modal-backdrop', '#compare-modal', '#format-legality-modal', '#selected-related-modal',
+    '#sorting-weights-modal'
+].join(', ');
+const MANASEARCH_UI_PANEL_OPEN_SELECTOR = MANASEARCH_UI_PANEL_SELECTOR
+    .split(', ').map(selector => `${selector}:not(.hidden)`).join(', ');
+let manaPanelMutationObserver = null;
+let deferredResultRenderPending = false;
+let deferredResultRenderCards = null;
+let deferredResultRenderFrame = 0;
+
+function isManaUiPanelOpen() {
+    return Boolean(document.querySelector(MANASEARCH_UI_PANEL_OPEN_SELECTOR));
+}
+
+function flushDeferredResultRender() {
+    if (!deferredResultRenderPending || isManaUiPanelOpen()) return;
+    if (deferredResultRenderFrame) {
+        cancelAnimationFrame(deferredResultRenderFrame);
+        deferredResultRenderFrame = 0;
+    }
+    deferredResultRenderFrame = requestAnimationFrame(() => {
+        deferredResultRenderFrame = 0;
+        if (isManaUiPanelOpen()) return;
+        if (!deferredResultRenderPending) return;
+        const cards = deferredResultRenderCards;
+        deferredResultRenderCards = null;
+        deferredResultRenderPending = false;
+        renderResults(cards);
+    });
+}
+
+function syncManaPanelPerformanceState() {
+    const open = isManaUiPanelOpen();
+    document.body?.classList.toggle('mana-panel-open', open);
+    if (!open) flushDeferredResultRender();
+}
+
+function installManaPanelResponsivenessGuard() {
+    if (manaPanelMutationObserver || typeof MutationObserver !== 'function' || !document.body) return;
+    const panels = Array.from(document.querySelectorAll(MANASEARCH_UI_PANEL_SELECTOR));
+    if (!panels.length) return;
+    manaPanelMutationObserver = new MutationObserver(() => syncManaPanelPerformanceState());
+    panels.forEach(panel => manaPanelMutationObserver.observe(panel, {
+        attributes: true,
+        attributeFilter: ['class']
+    }));
+    syncManaPanelPerformanceState();
+}
 
 // Multi-source search context. The first card is the primary source shown in the existing inspector;
 // additional cards participate in the shared-text retrieval lane.
@@ -223,6 +277,104 @@ function isAllowedByCandidatePreferences(card) {
 function getPreferenceFilteredCandidates(cards) {
     return (Array.isArray(cards) ? cards : []).filter(isAllowedByCandidatePreferences);
 }
+
+// Source-card history previews intentionally store only display fields, so they do not contain
+// enough metadata to classify digital-only, token, emblem, or all-format-banned funny cards.
+// When the full static corpus is available, enrich those previews before applying the same
+// preferences used for candidates. A user-selected/source-loaded card is also checked after its
+// full record is resolved, so entering a name manually cannot bypass these preferences.
+function enrichCardForPreferenceEvaluation(card, corpus = staticCardCorpusMemory) {
+    if (!card || typeof card !== 'object' || !card.name) return card;
+    const local = corpus?.byName?.get(normalizeCardNameForIdentity(card.name));
+    if (!local) return card;
+
+    const merged = { ...local, ...card };
+    const isPopulated = (key, value) => {
+        if (key === 'digital') return typeof value === 'boolean';
+        if (Array.isArray(value)) return value.length > 0;
+        if (value && typeof value === 'object') return Object.keys(value).length > 0;
+        return value != null && String(value).trim() !== '';
+    };
+    for (const key of ['digital', 'games', 'layout', 'type_line', 'legalities', 'set', 'security_stamp', 'promo_types']) {
+        if (!isPopulated(key, card[key]) && local[key] != null) merged[key] = local[key];
+    }
+    // Metadata can be present but partial in old history/cache records. Keep whichever games /
+    // legality list contains more information instead of letting an old preview hide it.
+    if (Array.isArray(local.games) && local.games.length > (Array.isArray(card.games) ? card.games.length : 0)) {
+        merged.games = local.games;
+    }
+    if (local.legalities && Object.keys(local.legalities).length > Object.keys(card.legalities || {}).length) {
+        merged.legalities = local.legalities;
+    }
+    if (Array.isArray(local.promo_types) && local.promo_types.length > (Array.isArray(card.promo_types) ? card.promo_types.length : 0)) {
+        merged.promo_types = local.promo_types;
+    }
+    return merged;
+}
+
+function filterSourceCardsByCurrentPreferences(cards, corpus = staticCardCorpusMemory) {
+    return (Array.isArray(cards) ? cards : [])
+        .map(card => enrichCardForPreferenceEvaluation(card, corpus))
+        .filter(isAllowedByCandidatePreferences);
+}
+
+function hasCompleteCardPreferenceMetadata(card) {
+    return Boolean(card && card.name &&
+        (typeof card.digital === 'boolean' || (Array.isArray(card.games) && card.games.length > 0)) &&
+        (String(card.layout || '').trim() || String(card.type_line || '').trim()) &&
+        card.legalities && Object.keys(card.legalities).length > 0 &&
+        String(card.set || '').trim());
+}
+
+function getPreferenceHiddenReason(card) {
+    if (!displayPreferences?.includeDigitalCards && isDigitalOnlyCard(card)) return 'digital-only';
+    if (!displayPreferences?.includeTokenEmblemFunnyCards && isTokenEmblemOrAllFormatBannedCard(card)) {
+        return 'token, emblem, or all-format-banned funny card';
+    }
+    return '';
+}
+
+function runCandidatePreferenceRegressionSuite({ log = true } = {}) {
+    const originalPreferences = displayPreferences;
+    const results = [];
+    const legalities = { standard: 'legal', modern: 'legal', legacy: 'legal', commander: 'legal', pioneer: 'legal', pauper: 'not_legal', vintage: 'legal', historic: 'legal' };
+    const cards = {
+        paper: { name: 'Paper Test Card', games: ['paper', 'mtgo'], layout: 'normal', type_line: 'Creature — Test', legalities, set: 'tst' },
+        digital: { name: 'Digital Test Card', games: ['arena'], layout: 'normal', type_line: 'Creature — Test', legalities: { ...legalities, standard: 'not_legal' }, set: 'digital' },
+        token: { name: 'Test Token', games: ['paper'], layout: 'token', type_line: 'Token Creature — Test', legalities: {}, set: 'tst' },
+        emblem: { name: 'Test Emblem', games: ['paper'], layout: 'emblem', type_line: 'Emblem', legalities: {}, set: 'tst' },
+        funny: { name: 'Funny Test Card', games: ['paper'], layout: 'normal', type_line: 'Creature — Test', legalities: Object.fromEntries(['standard','future','historic','gladiator','pioneer','modern','legacy','pauper','vintage','penny'].map(format => [format, 'not_legal'])), set: 'unf', promo_types: ['funny'] }
+    };
+    const record = (id, pass, details = '') => results.push({ id, pass: Boolean(pass), details });
+    try {
+        displayPreferences = { ...originalPreferences, includeDigitalCards: false, includeTokenEmblemFunnyCards: false };
+        record('paper-card-remains-allowed', isAllowedByCandidatePreferences(cards.paper));
+        record('digital-card-hidden-by-default', !isAllowedByCandidatePreferences(cards.digital));
+        record('token-hidden-by-default', !isAllowedByCandidatePreferences(cards.token));
+        record('emblem-hidden-by-default', !isAllowedByCandidatePreferences(cards.emblem));
+        record('all-format-banned-funny-card-hidden', !isAllowedByCandidatePreferences(cards.funny));
+        const previewCorpus = { byName: new Map(Object.values(cards).map(card => [normalizeCardNameForIdentity(card.name), card])) };
+        record('source-history-digital-preview-hidden', filterSourceCardsByCurrentPreferences([{ name: cards.digital.name }], previewCorpus).length === 0);
+        record('source-history-token-preview-hidden', filterSourceCardsByCurrentPreferences([{ name: cards.token.name }], previewCorpus).length === 0);
+        record('source-history-emblem-preview-hidden', filterSourceCardsByCurrentPreferences([{ name: cards.emblem.name }], previewCorpus).length === 0);
+        record('source-history-funny-preview-hidden', filterSourceCardsByCurrentPreferences([{ name: cards.funny.name }], previewCorpus).length === 0);
+        displayPreferences = { ...displayPreferences, includeDigitalCards: true, includeTokenEmblemFunnyCards: false };
+        record('digital-card-toggle-allows-source-and-candidate', filterSourceCardsByCurrentPreferences([cards.digital]).length === 1);
+        record('token-still-hidden-when-only-digital-enabled', filterSourceCardsByCurrentPreferences([cards.token]).length === 0);
+        displayPreferences = { ...displayPreferences, includeTokenEmblemFunnyCards: true };
+        record('token-and-emblem-toggle-allows-them', filterSourceCardsByCurrentPreferences([cards.token, cards.emblem]).length === 2);
+        record('funny-card-toggle-allows-it', filterSourceCardsByCurrentPreferences([cards.funny]).length === 1);
+        if (log) {
+            console.groupCollapsed(`ManaSearch candidate/source preference regression: ${results.filter(result => result.pass).length}/${results.length} passed`);
+            results.forEach(result => console[result.pass ? 'info' : 'error'](`${result.pass ? 'PASS' : 'FAIL'} ${result.id}${result.details ? ` — ${result.details}` : ''}`));
+            console.groupEnd();
+        }
+        return { passed: results.filter(result => result.pass).length, total: results.length, passRate: results.filter(result => result.pass).length / results.length, results };
+    } finally {
+        displayPreferences = originalPreferences;
+    }
+}
+if (typeof window !== 'undefined') window.runCandidatePreferenceRegressionSuite = runCandidatePreferenceRegressionSuite;
 
 function getDisplayedResultLimit() {
     return clampDisplayResultLimit(displayPreferences?.maxResults);
@@ -13720,6 +13872,7 @@ function extractRepeatingPatterns(cards) {
 
 // --- INITIALIZATION ---
 function initApp() {
+    installManaPanelResponsivenessGuard();
     cardSearchInput = document.getElementById('card-search-input');
     searchBtn = document.getElementById('search-btn');
     sourceCardSection = document.getElementById('source-card-section');
@@ -13785,6 +13938,9 @@ function initApp() {
         if (resultsSection && !resultsSection.classList.contains('hidden') && Array.isArray(lastSearchResults)) {
             renderResults(lastSearchResults);
             updateResultsSummary();
+        }
+        if (sourceCardPickerModal && !sourceCardPickerModal.classList.contains('hidden')) {
+            void searchSourceCardPicker(sourceCardPickerInput?.value || '');
         }
     }
 
@@ -14525,6 +14681,17 @@ async function addAdditionalSourceCard(card) {
             const response=await scryfallThrottledFetch(`https://api.scryfall.com/cards/named?fuzzy=${encodeURIComponent(card.name)}`,{headers:{'User-Agent':'ManaMatch/1.0 (Semantic Magic Search)','Accept':'application/json'}});
             if(!response.ok) throw new Error('Unable to load the additional source card.'); fullCard=await response.json();
         }
+        const corpus = staticCardCorpusMemory || await loadStaticCardCorpus();
+        fullCard = enrichCardForPreferenceEvaluation(fullCard, corpus);
+        if (!hasCompleteCardPreferenceMetadata(fullCard)) {
+            const response = await scryfallThrottledFetch(`https://api.scryfall.com/cards/named?fuzzy=${encodeURIComponent(fullCard.name)}`, { headers: { 'User-Agent': 'ManaMatch/1.0 (Semantic Magic Search)', 'Accept': 'application/json' } });
+            if (!response.ok) throw new Error('Could not verify this source card against the current Preferences. Try again when card data is available.');
+            fullCard = mergeCardRecords(await response.json(), fullCard);
+        }
+        if (!isAllowedByCandidatePreferences(fullCard)) {
+            const reason = getPreferenceHiddenReason(fullCard);
+            throw new Error(`${fullCard.name} is hidden by your current Preferences (${reason}). Enable the relevant option in Preferences to use it as a source card.`);
+        }
         sourceCardCache.set(fullCard.name.toLowerCase(),fullCard); addSourceCardToSet(fullCard); closeSourceCardPicker();
     } catch(error) { alert(error.message||'Unable to add source card.'); }
 }
@@ -14711,7 +14878,7 @@ function getSourceCardPickerMatches() {
         seen.add(key);
         merged.push(card);
     });
-    return merged;
+    return filterSourceCardsByCurrentPreferences(merged);
 }
 
 function renderSourceCardPickerCards(cards, emptyMessage = 'No cards found.') {
@@ -14769,18 +14936,55 @@ function openSourceCardPicker() {
         sourceCardPickerInput.value = '';
         sourceCardPickerInput.focus();
     }
+    const hasLocalCorpus = Boolean(staticCardCorpusMemory?.cards?.length);
     const history = getSourceCardPickerMatches();
-    if (sourceCardPickerStatus) sourceCardPickerStatus.textContent = history.length ? 'Recent cards' : 'Start typing to search the local card database.';
-    renderSourceCardPickerCards(history, 'No recent cards yet. Start typing to search.');
+    if (hasLocalCorpus) {
+        if (sourceCardPickerStatus) sourceCardPickerStatus.textContent = history.length ? 'Recent cards' : 'Start typing to search the local card database.';
+        renderSourceCardPickerCards(history, 'No recent cards match the current preferences. Start typing to search.');
+        return;
+    }
+
+    // Do not briefly show incomplete history previews before they have been checked against the
+    // digital/token/funny-card preferences. The corpus is normally already loaded, but when a
+    // user opens this picker early we wait and then refresh only if it is still showing recents.
+    if (sourceCardPickerStatus) sourceCardPickerStatus.textContent = 'Checking recent cards against Preferences…';
+    renderSourceCardPickerCards([], 'Loading card data to apply source-card preferences…');
+    void loadStaticCardCorpus().then(() => {
+        if (!sourceCardPickerModal || sourceCardPickerModal.classList.contains('hidden') || sourceCardPickerInput?.value.trim()) return;
+        const canClassifyHistory = Boolean(staticCardCorpusMemory?.cards?.length);
+        const currentHistory = canClassifyHistory ? getSourceCardPickerMatches() : [];
+        if (sourceCardPickerStatus) sourceCardPickerStatus.textContent = currentHistory.length
+            ? 'Recent cards'
+            : canClassifyHistory ? 'Start typing to search the card database.' : 'Local card catalog unavailable';
+        renderSourceCardPickerCards(currentHistory, canClassifyHistory
+            ? 'No recent cards match the current preferences. Start typing to search.'
+            : 'Recent cards could not be checked because the local card catalog is unavailable. Type to search instead.');
+    }).catch(() => {
+        if (!sourceCardPickerModal || sourceCardPickerModal.classList.contains('hidden') || sourceCardPickerInput?.value.trim()) return;
+        if (sourceCardPickerStatus) sourceCardPickerStatus.textContent = 'Local card catalog unavailable';
+        renderSourceCardPickerCards([], 'Recent cards could not be checked against Preferences. Type to search using the fallback card search.');
+    });
 }
 
 async function searchSourceCardPicker(query) {
     const requestId = ++sourceCardPickerRequestId;
     const q = String(query || '').trim();
     if (!q) {
-        const history = getSourceCardPickerMatches();
-        if (sourceCardPickerStatus) sourceCardPickerStatus.textContent = history.length ? 'Recent cards' : 'Start typing to search the local card database.';
-        renderSourceCardPickerCards(history, 'No recent cards yet. Start typing to search.');
+        let corpus = staticCardCorpusMemory;
+        if (!corpus?.cards?.length) {
+            if (sourceCardPickerStatus) sourceCardPickerStatus.textContent = 'Checking recent cards against Preferences…';
+            renderSourceCardPickerCards([], 'Loading card data to apply source-card preferences…');
+            corpus = await loadStaticCardCorpus();
+            if (requestId !== sourceCardPickerRequestId) return;
+        }
+        const canClassifyHistory = Boolean(corpus?.cards?.length);
+        const history = canClassifyHistory ? getSourceCardPickerMatches() : [];
+        if (sourceCardPickerStatus) sourceCardPickerStatus.textContent = history.length
+            ? 'Recent cards'
+            : canClassifyHistory ? 'Start typing to search the local card database.' : 'Local card catalog unavailable';
+        renderSourceCardPickerCards(history, canClassifyHistory
+            ? 'No recent cards match the current preferences. Start typing to search.'
+            : 'Recent cards could not be checked against Preferences because the local card catalog is unavailable. Type to search using the fallback card search.');
         return;
     }
     if (q.length < 2) {
@@ -14796,11 +15000,12 @@ async function searchSourceCardPicker(query) {
         if (requestId !== sourceCardPickerRequestId) return;
         if (corpus?.cards?.length) {
             const normalized = normalizeLocalCorpusText(q);
-            const cards = corpus.cards
-                .filter(card => {
-                    const name = normalizeLocalCorpusText(card.name);
-                    return name.includes(normalized) || name.split(/\s+/).some(part => part.startsWith(normalized));
-                })
+            const nameMatches = corpus.cards.filter(card => {
+                const name = normalizeLocalCorpusText(card.name);
+                return name.includes(normalized) || name.split(/\s+/).some(part => part.startsWith(normalized));
+            });
+            const preferenceAllowed = filterSourceCardsByCurrentPreferences(nameMatches, corpus);
+            const cards = preferenceAllowed
                 .sort((a, b) => {
                     const an = normalizeLocalCorpusText(a.name);
                     const bn = normalizeLocalCorpusText(b.name);
@@ -14810,8 +15015,16 @@ async function searchSourceCardPicker(query) {
                 })
                 .slice(0, 12);
             cards.forEach(card => sourceCardCache.set(card.name.toLowerCase(), card));
-            if (sourceCardPickerStatus) sourceCardPickerStatus.textContent = `${cards.length} local result${cards.length === 1 ? '' : 's'}`;
-            renderSourceCardPickerCards(cards, 'No matching cards.');
+            if (sourceCardPickerStatus) {
+                sourceCardPickerStatus.textContent = cards.length
+                    ? `${cards.length} local result${cards.length === 1 ? '' : 's'}`
+                    : nameMatches.length
+                        ? 'Matching cards are hidden by current Preferences'
+                        : 'No matching cards';
+            }
+            renderSourceCardPickerCards(cards, nameMatches.length
+                ? 'Matching cards are hidden by current Preferences. Adjust the Digital-only or Tokens/Emblems/Funny cards preferences to include them.'
+                : 'No matching cards.');
             return;
         }
 
@@ -14829,10 +15042,17 @@ async function searchSourceCardPicker(query) {
         }
         if (!response.ok) throw new Error('Card search is temporarily unavailable.');
         const payload = await response.json();
-        const cards = Array.isArray(payload.data) ? payload.data : [];
+        const fetchedCards = Array.isArray(payload.data) ? payload.data : [];
+        const cards = filterSourceCardsByCurrentPreferences(fetchedCards).slice(0, 12);
         cards.forEach(card => { if (card?.name) sourceCardCache.set(card.name.toLowerCase(), card); });
-        if (sourceCardPickerStatus) sourceCardPickerStatus.textContent = `${cards.length} result${cards.length === 1 ? '' : 's'}`;
-        renderSourceCardPickerCards(cards, 'No matching cards.');
+        if (sourceCardPickerStatus) {
+            sourceCardPickerStatus.textContent = cards.length
+                ? `${cards.length} result${cards.length === 1 ? '' : 's'}`
+                : fetchedCards.length ? 'Matching cards are hidden by current Preferences' : 'No matching cards';
+        }
+        renderSourceCardPickerCards(cards, fetchedCards.length
+            ? 'Matching cards are hidden by current Preferences. Adjust the Digital-only or Tokens/Emblems/Funny cards preferences to include them.'
+            : 'No matching cards.');
     } catch (error) {
         if (requestId !== sourceCardPickerRequestId) return;
         if (sourceCardPickerStatus) sourceCardPickerStatus.textContent = 'Search unavailable';
@@ -14906,6 +15126,19 @@ function clearSourceCard() {
 // --- CORE SEARCH LOGIC ---
 async function loadSourceCard(query, providedCard = null) {
     if (!query) return;
+
+    // If the current static catalog (or a full cached picker record) already proves this source is
+    // excluded, reject it BEFORE clearing the user's existing source/highlights/results. This is
+    // the common path for typed source names and history/favorite clicks.
+    if (!benchmarkColdMode) {
+        const preflightRecord = providedCard || sourceCardCache.get(String(query).trim().toLowerCase()) || getStaticCardByName(query);
+        const evaluatedPreflight = enrichCardForPreferenceEvaluation(preflightRecord);
+        const hiddenReason = getPreferenceHiddenReason(evaluatedPreflight);
+        if (preflightRecord && hiddenReason) {
+            alert(`${evaluatedPreflight.name || query} is hidden by your current Preferences (${hiddenReason}). Enable the relevant option in Preferences to use it as a source card.`);
+            return;
+        }
+    }
 
     ++relatedSearchRequestId;
     const requestId = ++searchRequestId;
@@ -15001,6 +15234,28 @@ async function loadSourceCard(query, providedCard = null) {
         // A newer search started while this fetch was in flight - drop these results
         // so a slow lookup for an earlier query can't overwrite the current card.
         if (requestId !== searchRequestId) return;
+
+        if (!benchmarkColdMode) {
+            const preferenceCorpus = staticCardCorpusMemory || await loadStaticCardCorpus();
+            if (requestId !== searchRequestId) return;
+            cardData = enrichCardForPreferenceEvaluation(cardData, preferenceCorpus);
+            // Older sidebar/history previews do not retain classification fields. Resolve a full
+            // Scryfall record before allowing them to become a source card so the preferences
+            // cannot be bypassed by clicking a stale history/favorite item or typing its name.
+            if (!hasCompleteCardPreferenceMetadata(cardData)) {
+                const response = await scryfallThrottledFetch(
+                    `https://api.scryfall.com/cards/named?fuzzy=${encodeURIComponent(cardData.name || query)}`,
+                    { headers: { 'User-Agent': 'ManaMatch/1.0 (Semantic Magic Search)', 'Accept': 'application/json' } }
+                );
+                if (requestId !== searchRequestId) return;
+                if (!response.ok) throw new Error('Could not verify this card against your current source-card Preferences. Please retry when card data is available.');
+                cardData = mergeCardRecords(await response.json(), cardData);
+            }
+            if (!isAllowedByCandidatePreferences(cardData)) {
+                const reason = getPreferenceHiddenReason(cardData);
+                throw new Error(`${cardData.name} is hidden by your current Preferences (${reason}). Enable the relevant option in Preferences to use it as a source card.`);
+            }
+        }
 
         currentSourceCard = cardData;
         sourceCards.clear();
@@ -18621,6 +18876,13 @@ function renderCardLegalityPanel(card, panel) {
 }
 
 function renderResults(cards) {
+    // Panel controls must remain interactive while progressive scoring continues. Do not repeatedly
+    // touch every visible card behind an open modal; the most recent snapshot is painted on close.
+    if (document.body?.classList.contains('mana-panel-open') || isManaUiPanelOpen()) {
+        deferredResultRenderCards = cards;
+        deferredResultRenderPending = true;
+        return;
+    }
     resultsSection.classList.remove('hidden');
 
     // Final safety-net filtering, right before anything touches the DOM. Keep this local to the
@@ -18672,6 +18934,8 @@ function renderResults(cards) {
     const existingNodes = new Map();
     resultsGrid.querySelectorAll('.card-item[data-card-key]').forEach(node => existingNodes.set(node.dataset.cardKey, node));
     const fragment = document.createDocumentFragment();
+    // Avoid repeating synchronous localStorage parsing once per card in a 50-200 card repaint.
+    const favoriteNameSet = new Set(getStoredArray(FAVORITES_KEY).map(name => String(name).toLowerCase()));
 
     const updateResultCard = (cardElement, card) => {
         const isSelected = selectedRelatedCards.has(card.id);
@@ -18779,7 +19043,7 @@ function renderResults(cards) {
 
         const favoriteBtn = cardElement.querySelector('.result-favorite-btn');
         if (favoriteBtn) {
-            const isFav = getStoredArray(FAVORITES_KEY).some(name => String(name).toLowerCase() === String(card.name).toLowerCase());
+            const isFav = favoriteNameSet.has(String(card.name).toLowerCase());
             favoriteBtn.textContent = isFav ? '★' : '☆';
             favoriteBtn.classList.toggle('is-favorited', isFav);
             favoriteBtn.title = isFav ? `Remove ${card.name} from favorites` : `Add ${card.name} to favorites`;
@@ -20075,6 +20339,8 @@ function renderComparison() {
         if (insight.differences.length) {
             const table = document.createElement('div');
             table.className = 'compare-diff-table';
+            const header = document.createElement('div');
+            header.className = 'compare-diff-header';
             const headerLabel = document.createElement('div');
             headerLabel.className = 'compare-diff-label';
             headerLabel.textContent = 'Aspect';
@@ -20084,19 +20350,27 @@ function renderComparison() {
             const headerB = document.createElement('div');
             headerB.className = 'compare-diff-card-name';
             headerB.textContent = cardB.name;
-            table.append(headerLabel, headerA, headerB);
+            header.append(headerLabel, headerA, headerB);
+            table.appendChild(header);
 
             insight.differences.slice(0, 8).forEach(diff => {
+                const row = document.createElement('div');
+                row.className = 'compare-diff-row';
                 const label = document.createElement('div');
                 label.className = 'compare-diff-label';
                 label.textContent = diff.label;
                 const aCell = document.createElement('div');
                 aCell.className = 'compare-diff-value';
+                aCell.dataset.cardName = cardA.name;
+                aCell.dataset.cardSide = 'a';
                 aCell.textContent = diff.a;
                 const bCell = document.createElement('div');
                 bCell.className = 'compare-diff-value';
+                bCell.dataset.cardName = cardB.name;
+                bCell.dataset.cardSide = 'b';
                 bCell.textContent = diff.b;
-                table.append(label, aCell, bCell);
+                row.append(label, aCell, bCell);
+                table.appendChild(row);
             });
             diffSection.appendChild(table);
         }

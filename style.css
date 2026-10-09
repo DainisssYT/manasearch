@@ -2961,6 +2961,10 @@ section {
     --status-positive: #10b981;
     --status-negative: #ef4444;
     --status-warning: #b8860b;
+    /* Low-saturation status colors are easier on the eyes in dark mode. */
+    --legality-legal: #8bc6a2;
+    --legality-illegal: #d59a9f;
+    --legality-restricted: #d8c68c;
     --benchmark-exact-color: #f87171;
     --benchmark-flexible-color: #60a5fa;
 }
@@ -2972,6 +2976,9 @@ body.light-theme {
     --status-positive: #047857;
     --status-negative: #b91c1c;
     --status-warning: #9a6700;
+    --legality-legal: #166534;
+    --legality-illegal: #b4232f;
+    --legality-restricted: #8a6700;
     --benchmark-exact-color: #b91c1c;
     --benchmark-flexible-color: #2563eb;
 }
@@ -5157,9 +5164,9 @@ body.reduce-motion *::after {
     text-align: right;
 }
 
-.result-legality-status.is-legal { color: #22c55e; }
-.result-legality-status.is-illegal { color: #ef4444; }
-.result-legality-status.is-restricted { color: #eab308; }
+.result-legality-status.is-legal { color: var(--legality-legal); }
+.result-legality-status.is-illegal { color: var(--legality-illegal); }
+.result-legality-status.is-restricted { color: var(--legality-restricted); }
 .result-legality-status.is-unknown { color: var(--text-muted); }
 
 .legality-unavailable {
@@ -5301,4 +5308,109 @@ body.reduce-motion *::after {
 
 @media (max-width: 420px) {
     #format-legality-modal .result-legality-grid { grid-template-columns: minmax(0, 1fr); }
+}
+
+
+/* V28: muted legality colors on dark backgrounds; retain darker, high-contrast shades in light mode. */
+.result-legality-status.is-legal { color: var(--legality-legal) !important; }
+.result-legality-status.is-illegal { color: var(--legality-illegal) !important; }
+.result-legality-status.is-restricted { color: var(--legality-restricted) !important; }
+#format-legality-modal .result-legality-status { font-weight: 700; }
+
+/* V28: explicit rows make the Key differences table readable at narrow widths. */
+#compare-modal .compare-analysis,
+#compare-modal .compare-insight-section,
+#compare-modal .compare-diff-table { min-width: 0; max-width: 100%; }
+#compare-modal .compare-diff-table {
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    border: 1px solid var(--border-color);
+    border-radius: 9px;
+}
+#compare-modal .compare-diff-header,
+#compare-modal .compare-diff-row {
+    display: grid;
+    grid-template-columns: minmax(95px, .62fr) minmax(0, 1.19fr) minmax(0, 1.19fr);
+    min-width: 0;
+}
+#compare-modal .compare-diff-header > div,
+#compare-modal .compare-diff-row > div {
+    min-width: 0;
+    padding: 9px 10px;
+    border-right: 1px solid var(--border-color);
+    border-bottom: 1px solid var(--border-color);
+    font-size: 12px;
+    line-height: 1.45;
+    overflow-wrap: anywhere;
+    word-break: normal;
+}
+#compare-modal .compare-diff-header > div:last-child,
+#compare-modal .compare-diff-row > div:last-child { border-right: 0; }
+#compare-modal .compare-diff-header { background: var(--bg-primary); }
+#compare-modal .compare-diff-header > div { color: var(--text-main); font-weight: 700; }
+#compare-modal .compare-diff-row:last-child > div { border-bottom: 0; }
+#compare-modal .compare-diff-row .compare-diff-label { color: var(--text-main); font-weight: 700; }
+#compare-modal .compare-diff-row .compare-diff-value { color: var(--text-muted); }
+#compare-modal .compare-diff-value::before { content: none; }
+@media (max-width: 600px) {
+    #compare-modal .compare-diff-header { display: none; }
+    #compare-modal .compare-diff-row {
+        grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    }
+    #compare-modal .compare-diff-row > .compare-diff-label {
+        grid-column: 1 / -1;
+        border-right: 0;
+        padding-bottom: 6px;
+        background: var(--bg-primary);
+    }
+    #compare-modal .compare-diff-row > .compare-diff-value {
+        display: flex;
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 4px;
+        border-bottom: 0;
+    }
+    #compare-modal .compare-diff-row > .compare-diff-value[data-card-side="a"] { border-right: 1px solid var(--border-color); }
+    #compare-modal .compare-diff-value::before {
+        content: attr(data-card-name);
+        display: block;
+        color: var(--text-main);
+        font-size: 10px;
+        line-height: 1.35;
+        font-weight: 700;
+    }
+    #compare-modal .compare-diff-row { border-bottom: 1px solid var(--border-color); }
+    #compare-modal .compare-diff-row:last-child { border-bottom: 0; }
+}
+@media (max-width: 420px) {
+    #compare-modal .compare-diff-row { grid-template-columns: minmax(0, 1fr); }
+    #compare-modal .compare-diff-row > .compare-diff-value[data-card-side="a"] { border-right: 0; }
+    #compare-modal .compare-diff-row > .compare-diff-value {
+        border-right: 0;
+        padding-top: 7px;
+        padding-bottom: 7px;
+    }
+    #compare-modal .compare-diff-row > .compare-diff-value + .compare-diff-value {
+        border-top: 1px dashed var(--border-color);
+    }
+}
+
+
+/* V29: keep modal controls responsive during progressive searches. Translucent blur forces the
+   browser to repeatedly re-rasterize the changing result grid beneath the dialog; a simple dim
+   scrim is visually consistent with ManaSearch's existing style and substantially cheaper. */
+.modal-backdrop {
+    -webkit-backdrop-filter: none !important;
+    backdrop-filter: none !important;
+    overscroll-behavior: contain;
+}
+#compare-modal,
+#format-legality-modal,
+#selected-related-modal {
+    overscroll-behavior: contain;
+}
+body.mana-panel-open .card-item {
+    transition: none !important;
+    animation: none !important;
 }
