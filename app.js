@@ -1,6 +1,6 @@
-/* ManaSearch build 20261010-42 */
+/* ManaSearch build 20261010-43 */
 // ManaSearch deployment build marker. Bump this whenever app.js changes so cached-module issues are easy to diagnose.
-const MANASEARCH_APP_BUILD = '20261010-42';
+const MANASEARCH_APP_BUILD = '20261010-43';
 console.info(`[ManaSearch] app.js build ${MANASEARCH_APP_BUILD}`);
 
 // State Management
@@ -57,9 +57,9 @@ const mechanicalProfileCache = new Map();
 // stable signature rather than only on the individual card object. This does not cache scores or
 // source-dependent comparisons; it only reuses the deterministic graph representation.
 const mechanicalGraphCache = new Map();
-const MECHANICAL_GRAPH_CACHE_MAX = 2400;
+const MECHANICAL_GRAPH_CACHE_MAX = 4600;
 const SEARCH_INTENT_CACHE_MAX = 96;
-const MECHANICAL_PROFILE_CACHE_MAX = 2500;
+const MECHANICAL_PROFILE_CACHE_MAX = 9000;
 // Session semantic corpus: every card this session has actually scored (plus each search's
 // source card) gets its function/oracle embedding vectors kept here, keyed by name. A new
 // retrieval stream (Search G) queries this corpus by cosine similarity against the CURRENT
@@ -2613,6 +2613,10 @@ async function runBenchmarkSuite(searchFn) {
                     if (st.pairCache) {
                         const pc = st.pairCache;
                         console.log(`  Pair-cache reuse: effect pairs ${pc.directionalHits.toLocaleString()} reused / ${pc.directionalComputed.toLocaleString()} computed | graph-node pairs ${pc.graphNodeHits.toLocaleString()} reused / ${pc.graphNodeComputed.toLocaleString()} computed`);
+                    }
+                    if (lastSearchDiagnostics.previewOptimization) {
+                        const pv = lastSearchDiagnostics.previewOptimization;
+                        console.log(`  Progressive preview work: ${pv.lightweightCandidates.toLocaleString()} cheap previews | ${pv.progressiveFullScored.toLocaleString()} full provisional scores (cap ${pv.progressiveFullScoreCap}) | ${pv.remainingQueuedForFinalPass.toLocaleString()} deferred to authoritative pass`);
                     }
                 }
             }
@@ -7223,27 +7227,111 @@ function scoreHighlightEffectMatch(highlightEffect, candidateEffect, mode) {
 function maxOneToOneHighlightAssignment(sourceEffects, candidateEffects, mode) {
     const sources = sourceEffects || [], candidates = candidateEffects || [];
     if (!sources.length || !candidates.length) return { score: 0, matches: [] };
-    const memo = new Map();
-    function solve(i, usedMask) {
-        if (i >= sources.length) return { score: 0, matches: [] };
-        const key = `${i}|${usedMask}`;
-        if (memo.has(key)) return memo.get(key);
-        let best = solve(i + 1, usedMask); // source effect may remain unmatched
-        for (let j = 0; j < candidates.length; j++) {
-            const bit = (1n << BigInt(j));
-            if (usedMask & bit) continue;
-            const pair = scoreHighlightEffectMatch(sources[i], candidates[j], mode);
-            if (pair <= 0) continue;
-            const rest = solve(i + 1, usedMask | bit);
-            const candidate = { score: pair + rest.score, matches: [[i,j,pair], ...rest.matches] };
-            if (candidate.score > best.score) best = candidate;
-        }
-        memo.set(key, best);
-        return best;
+
+    // Highlight/effect pair similarity is independent of the assignment state. The old recursive
+    // DP recomputed these expensive structural comparisons from many branches; precompute the
+    // score matrix once and reuse it in both assignment and normalization.
+    const pairScores = sources.map(source => candidates.map(candidate =>
+        Math.max(0, Number(scoreHighlightEffectMatch(source, candidate, mode)) || 0)
+    ));
+    const rowMaxima = pairScores.map(row => row.reduce((max, value) => Math.max(max, value), 0));
+    const maxPossible = rowMaxima.reduce((sum, value) => sum + value, 0) || 1;
+    const n = sources.length;
+    const m = candidates.length;
+
+    // Keep the old DP for ordinary card texts so its tie order and exact output remain identical.
+    // Estimate its state count first: with many candidate effects, the used-mask state space grows
+    // combinatorially and can dominate a broad/highlights search even though each pair score is
+    // straightforward. Those pathological cases use an exact maximum-weight assignment instead.
+    let combination = 1;
+    let estimatedStates = 1;
+    for (let k = 1; k <= Math.min(n, m); k++) {
+        combination = combination * (m - k + 1) / k;
+        estimatedStates += combination;
+        if (estimatedStates * Math.max(1, m) > 50000) break;
     }
-    const result = solve(0, 0n);
-    const maxPossible = sources.reduce((sum, e) => sum + Math.max(...candidates.map(c => scoreHighlightEffectMatch(e,c,mode)), 0), 0) || 1;
-    return { score: result.score / maxPossible, matches: result.matches };
+    if (estimatedStates * Math.max(1, m) <= 50000) {
+        const memo = new Map();
+        function solve(i, usedMask) {
+            if (i >= n) return { score: 0, matches: [] };
+            const key = `${i}|${usedMask}`;
+            const cached = memo.get(key);
+            if (cached) return cached;
+            let best = solve(i + 1, usedMask); // Preserve historical tie behavior: unmatched first.
+            for (let j = 0; j < m; j++) {
+                const pair = pairScores[i][j];
+                if (pair <= 0) continue;
+                const bit = 1n << BigInt(j);
+                if (usedMask & bit) continue;
+                const rest = solve(i + 1, usedMask | bit);
+                const candidate = { score: pair + rest.score, matches: [[i, j, pair], ...rest.matches] };
+                if (candidate.score > best.score) best = candidate;
+            }
+            memo.set(key, best);
+            return best;
+        }
+        const result = solve(0, 0n);
+        return { score: result.score / maxPossible, matches: result.matches };
+    }
+
+    // Exact polynomial-time maximum-weight bipartite assignment (Hungarian algorithm). Each source
+    // effect receives either one candidate effect or one of n dummy columns (unmatched, zero score).
+    // The objective is the same maximum sum of pair scores as the DP, without enumerating candidate
+    // masks. This changes execution strategy only for unusually long rules texts.
+    const rows = n;
+    const realCols = m;
+    const cols = m + n;
+    const u = new Array(rows + 1).fill(0);
+    const v = new Array(cols + 1).fill(0);
+    const p = new Array(cols + 1).fill(0);
+    const way = new Array(cols + 1).fill(0);
+    const cost = (i, j) => j > realCols ? 0 : -(pairScores[i - 1][j - 1] || 0);
+
+    for (let i = 1; i <= rows; i++) {
+        p[0] = i;
+        let j0 = 0;
+        const minv = new Array(cols + 1).fill(Infinity);
+        const used = new Array(cols + 1).fill(false);
+        do {
+            used[j0] = true;
+            const i0 = p[j0];
+            let delta = Infinity;
+            let j1 = 0;
+            for (let j = 1; j <= cols; j++) {
+                if (used[j]) continue;
+                const cur = cost(i0, j) - u[i0] - v[j];
+                if (cur < minv[j]) { minv[j] = cur; way[j] = j0; }
+                if (minv[j] < delta) { delta = minv[j]; j1 = j; }
+            }
+            for (let j = 0; j <= cols; j++) {
+                if (used[j]) { u[p[j]] += delta; v[j] -= delta; }
+                else minv[j] -= delta;
+            }
+            j0 = j1;
+        } while (p[j0] !== 0);
+        do {
+            const j1 = way[j0];
+            p[j0] = p[j1];
+            j0 = j1;
+        } while (j0 !== 0);
+    }
+
+    const assignedColumn = new Array(rows).fill(-1);
+    for (let j = 1; j <= cols; j++) if (p[j] > 0) assignedColumn[p[j] - 1] = j - 1;
+    const matches = [];
+    let score = 0;
+    for (let i = 0; i < rows; i++) {
+        const j = assignedColumn[i];
+        if (j >= 0 && j < realCols) {
+            const pair = pairScores[i][j];
+            if (pair > 0) {
+                score += pair;
+                matches.push([i, j, pair]);
+            }
+        }
+    }
+    matches.sort((a, b) => a[0] - b[0]);
+    return { score: score / maxPossible, matches };
 }
 
 // Group multiple UI selections that belong to one grammatical effect. The source text between
@@ -9559,16 +9647,30 @@ function buildMechanicalEffectNode(effect, index = 0, graphAnchors = new Set()) 
 function getCachedParsedEffects(card = null, text = '') {
     const oracle = String(text || card?.oracle_text || (card?.card_faces ? card.card_faces.map(f => f.oracle_text || '').join('\n\n') : '') || '');
     const key = `${normalizeCardNameForIdentity(card?.name || '')}|${oracle}`;
-    const cached = mechanicalProfileCache.get(`parsed|${key}`);
+    // Fast per-object reuse protects the current card from LRU eviction while a large pool is
+    // being scored. The global cache remains the cross-stream/cross-search source of truth.
+    if (card && card._manaParsedEffectsCacheKey === key && Array.isArray(card._manaParsedEffectsCacheValue)) {
+        return card._manaParsedEffectsCacheValue;
+    }
+    const cacheKey = `parsed|${key}`;
+    const cached = mechanicalProfileCache.get(cacheKey);
     if (cached) {
-        mechanicalProfileCache.delete(`parsed|${key}`);
-        mechanicalProfileCache.set(`parsed|${key}`, cached);
+        mechanicalProfileCache.delete(cacheKey);
+        mechanicalProfileCache.set(cacheKey, cached);
+        if (card) {
+            card._manaParsedEffectsCacheKey = key;
+            card._manaParsedEffectsCacheValue = cached;
+        }
         return cached;
     }
     const parsed = parseMTGEffect(oracle);
-    mechanicalProfileCache.set(`parsed|${key}`, parsed);
+    mechanicalProfileCache.set(cacheKey, parsed);
     while (mechanicalProfileCache.size > MECHANICAL_PROFILE_CACHE_MAX) {
         mechanicalProfileCache.delete(mechanicalProfileCache.keys().next().value);
+    }
+    if (card) {
+        card._manaParsedEffectsCacheKey = key;
+        card._manaParsedEffectsCacheValue = parsed;
     }
     return parsed;
 }
@@ -9576,17 +9678,28 @@ function getCachedParsedEffects(card = null, text = '') {
 function getCachedMechanicalProfile(card = null, text = '', parsedEffects = null) {
     const oracle = String(text || card?.oracle_text || (card?.card_faces ? card.card_faces.map(f => f.oracle_text || '').join('\n\n') : '') || '');
     const key = `${normalizeCardNameForIdentity(card?.name || '')}|${oracle}`;
+    if (card && card._manaMechanicProfileCacheKey === key && card._manaMechanicProfileCacheValue) {
+        return card._manaMechanicProfileCacheValue;
+    }
     const cacheKey = `profile|${key}`;
     const cached = mechanicalProfileCache.get(cacheKey);
     if (cached) {
         mechanicalProfileCache.delete(cacheKey);
         mechanicalProfileCache.set(cacheKey, cached);
+        if (card) {
+            card._manaMechanicProfileCacheKey = key;
+            card._manaMechanicProfileCacheValue = cached;
+        }
         return cached;
     }
     const profile = buildUniversalMechanicProfile(card, oracle, parsedEffects || getCachedParsedEffects(card, oracle));
     mechanicalProfileCache.set(cacheKey, profile);
     while (mechanicalProfileCache.size > MECHANICAL_PROFILE_CACHE_MAX) {
         mechanicalProfileCache.delete(mechanicalProfileCache.keys().next().value);
+    }
+    if (card) {
+        card._manaMechanicProfileCacheKey = key;
+        card._manaMechanicProfileCacheValue = profile;
     }
     return profile;
 }
@@ -10584,8 +10697,8 @@ function calculateCategoryScore(targetCard, tags, sourceCard = null, sourceEffec
     const targetProfile = precomputed?.targetProfile || buildUniversalMechanicProfile(targetCard, targetText, targetParsed);
     const universalScore = sourceCard ? calculateUniversalMechanicSimilarity(sourceProfile, targetProfile).score : 0;
 
-    const sourceRole = sourceCard ? (precomputed?.sourceRole || inferStrategicRoleProfile(sourceCard, sourceParsed, sourceText)) : [];
-    const targetRole = precomputed?.targetRole || inferStrategicRoleProfile(targetCard, targetParsed, targetText);
+    const sourceRole = sourceCard ? (precomputed?.sourceRole || inferStrategicRoleProfile(sourceCard, sourceParsed, '')) : [];
+    const targetRole = precomputed?.targetRole || inferStrategicRoleProfile(targetCard, targetParsed, '');
     let roleScore = 0;
     for (const a of sourceRole) for (const b of targetRole) {
         if (a.role === b.role) roleScore = Math.max(roleScore, Math.sqrt(a.score * b.score));
@@ -14050,8 +14163,8 @@ function calculateSynergyScore(sourceCard, targetCard, activeFilters = {}, preco
     // highlighted/partial scoring profile with the full source text used by the synergy channel.
     const sourceEffects = precomputed?.sourceEffects || (Array.isArray(sourceCard._parsedEffects) ? sourceCard._parsedEffects : parseMTGEffect(strategicRoleCardText(sourceCard)));
     const targetEffects = precomputed?.targetEffects || (Array.isArray(targetCard._parsedEffects) ? targetCard._parsedEffects : parseMTGEffect(strategicRoleCardText(targetCard)));
-    const sourceRoles = precomputed?.sourceRoles || inferStrategicRoleProfile(sourceCard, sourceEffects, strategicRoleCardText(sourceCard));
-    const targetRoles = precomputed?.targetRoles || inferStrategicRoleProfile(targetCard, targetEffects, strategicRoleCardText(targetCard));
+    const sourceRoles = precomputed?.sourceRoles || inferStrategicRoleProfile(sourceCard, sourceEffects, '');
+    const targetRoles = precomputed?.targetRoles || inferStrategicRoleProfile(targetCard, targetEffects, '');
     let roleSim = 0;
     for (const a of sourceRoles) for (const b of targetRoles) {
         if (a.role === b.role) roleSim = Math.max(roleSim, Math.sqrt(a.score * b.score));
@@ -16163,14 +16276,14 @@ async function scoreCardBatch({
     // times. The separate parsedSourceCard above remains unchanged for highlight-aware mechanics.
     const sourceSynergyText = strategicRoleCardText(sourceCard);
     const sourceSynergyEffects = getCachedParsedEffects(sourceCard, sourceSynergyText);
-    const sourceSynergyRoleProfile = inferStrategicRoleProfile(sourceCard, sourceSynergyEffects, sourceSynergyText);
+    const sourceSynergyRoleProfile = inferStrategicRoleProfile(sourceCard, sourceSynergyEffects, '');
 
     // Category previously rebuilt these source-side profiles for every candidate using full source
     // Oracle text paired with parsedSourceCard (which can be highlight-aware). Compute them once
     // with those same inputs; don't substitute the narrower highlight-aware profile above.
     const categorySourceText = strategicRoleCardText(sourceCard);
     const categorySourceProfile = buildUniversalMechanicProfile(sourceCard, categorySourceText, parsedSourceCard);
-    const categorySourceRoleProfile = inferStrategicRoleProfile(sourceCard, parsedSourceCard, categorySourceText);
+    const categorySourceRoleProfile = inferStrategicRoleProfile(sourceCard, parsedSourceCard, '');
 
     // Tallies how the embedding cache performed for this batch: how many lookups were already
     // cached, how many required an actual model call, and how many of those calls failed and
@@ -16238,7 +16351,7 @@ async function scoreCardBatch({
         const categoryTargetProfile = categoryTargetText === cardText
             ? candidateMechanicProfile
             : getCachedMechanicalProfile(card, categoryTargetText, parsedCandidateCard);
-        const categoryTargetRoleProfile = inferStrategicRoleProfile(card, parsedCandidateCard, categoryTargetText);
+        const categoryTargetRoleProfile = inferStrategicRoleProfile(card, parsedCandidateCard, '');
         card.synergyScore = calculateSynergyScore(sourceCard, card, activeFilters, {
             sourceEffects: sourceSynergyEffects,
             targetEffects: parsedCandidateCard,
@@ -16375,7 +16488,7 @@ async function scoreCardBatch({
         card.categoryScore = calculateCategoryScore(card, tags, sourceCard, parsedSourceCard, {
             sourceProfile: categorySourceProfile,
             targetProfile: categoryTargetProfile,
-            sourceRole: categoryTargetRoleProfile,
+            sourceRole: categorySourceRoleProfile,
             targetRole: categoryTargetRoleProfile
         });
         __structuralDetailTimings.categoryMs += __scoreNow() - __detailStageStartedAt;
@@ -18201,24 +18314,52 @@ async function findSimilarCards() {
         const MIN_PREVIEW_RESULTS = 1;
         const PREVIEW_RENDER_CAP = 20;
         const PREVIEW_RENDER_MIN_INTERVAL_MS = 300;
+        // Provisional display must never parse/profile the entire retrieval pool and then force the
+        // authoritative pass to do that same work again. All candidates still receive the full
+        // scoring pipeline once; only the immediate preview uses this cheap lexical/retrieval hint.
+        const MAX_PROGRESSIVE_FULL_SCORE_CANDIDATES = 96;
+        const progressiveRankingPending = new Map();
+        let progressiveRankingRunning = false;
+        let progressiveFullScoreCount = 0;
+        let requestProgressiveRanking = null;
+        let lightweightPreviewCount = 0;
+        const previewTokenCache = new WeakMap();
+        const previewQueryText = targetTextForScoring || getCurrentSourceOracleText(currentSourceCard);
+        const previewQueryTokenList = getLocalCorpusIndexTokens(previewQueryText).slice(0, 48);
+        const previewQueryTokens = new Set(previewQueryTokenList);
         let previewRenderTimer = null;
         let previewRenderDirty = false;
         let previewRenderFlushing = false;
         let previewRenderLabel = '';
         let previewLastRenderedAt = 0;
 
-        const previewSourceMechanicProfile = buildUniversalMechanicProfile(currentSourceCard, targetTextForScoring, sourceParsedEffects);
-
         function computePreviewScore(card) {
-            const cText = card.oracle_text || (card.card_faces ? card.card_faces.map(f => f.oracle_text).join(' ') : '');
-            const cParsed = parseMTGEffect(cText);
-            const cProfile = buildUniversalMechanicProfile(card, cText, cParsed);
-            const mech = calculateMechanicalSimilarity(sourceParsedEffects, cParsed, previewSourceMechanicProfile, cProfile);
-            const cat = calculateCategoryScore(card, activeTags);
-            const syn = calculateSynergyScore(currentSourceCard, card, filters);
-            // Weighted toward mechanical since it's the most direct "does this do the same
-            // thing" signal available without the embedding model.
-            return (mech * 0.55) + (cat * 0.25) + (syn * 0.20);
+            lightweightPreviewCount++;
+            let candidateTokens = previewTokenCache.get(card);
+            if (!candidateTokens) {
+                const rawText = card?._localSearchText || normalizeLocalCorpusText([
+                    card?.name || '', getCurrentSourceOracleText(card),
+                    Array.isArray(card?.keywords) ? card.keywords.join(' ') : '', card?.type_line || ''
+                ].join(' '));
+                candidateTokens = new Set(rawText.split(/\s+/).filter(token =>
+                    token.length >= 3 && !LOCAL_CORPUS_STOP_WORDS.has(token)
+                ));
+                previewTokenCache.set(card, candidateTokens);
+            }
+            let shared = 0;
+            for (const token of previewQueryTokens) if (candidateTokens.has(token)) shared++;
+            const queryCoverage = previewQueryTokens.size ? shared / previewQueryTokens.size : 0;
+            const candidateCoverage = candidateTokens.size ? shared / candidateTokens.size : 0;
+            const semanticHint = Math.max(0, Math.min(1, Number(card?._semanticRetrievalSimilarity) || 0));
+            const localHint = Math.max(0, Math.min(1, Number(card?._localCorpusSimilarity) || 0));
+            const retrievalHint = Math.min(1, (card?.retrievalEvidence?.length || 0) / 5);
+            // This score is explicitly provisional. It provides a fast first look while the 96
+            // strongest candidates receive real progressive NLP scores; final ranking still runs
+            // the complete unchanged scorer for every candidate.
+            return Math.max(0, Math.min(1,
+                queryCoverage * 0.56 + candidateCoverage * 0.08 +
+                semanticHint * 0.22 + localHint * 0.10 + retrievalHint * 0.04
+            ));
         }
 
         async function flushPreviewRender() {
@@ -18272,6 +18413,9 @@ async function findSimilarCards() {
                     c.similarityScore = c._previewScore;
                     c._isProvisionalScore = true;
                     previewPool.set(key, c);
+                    if (progressiveFullScoreCount < MAX_PROGRESSIVE_FULL_SCORE_CANDIDATES) {
+                        progressiveRankingPending.set(key, c);
+                    }
                     addedAny = true;
                 }
                 const mergeNow = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
@@ -18586,9 +18730,6 @@ async function findSimilarCards() {
         // re-renders the provisional result order. The final full-pool pass remains authoritative
         // and reuses the embedding cache, so this improves time-to-ranked-results without changing
         // the final ranking model.
-        let requestProgressiveRanking = null;
-        let progressiveRankingRunning = false;
-        const progressiveRankingPending = new Map();
         const progressiveRankingBatchSize = 18;
         let progressiveTargetVectorPromise = null;
         const getProgressiveTargetVector = async () => {
@@ -18608,13 +18749,18 @@ async function findSimilarCards() {
                 const ex = await extractorPromise;
                 if (!ex || requestId !== searchRequestId) return;
                 const targetVector = await getProgressiveTargetVector();
-                while (progressiveRankingPending.size && requestId === searchRequestId) {
+                while (progressiveRankingPending.size && requestId === searchRequestId &&
+                    progressiveFullScoreCount < MAX_PROGRESSIVE_FULL_SCORE_CANDIDATES) {
                     const sortedPending = await sortManaArrayResponsively(
                         Array.from(progressiveRankingPending.values()),
                         (a, b) => (b._previewScore || 0) - (a._previewScore || 0)
                     );
                     if (requestId !== searchRequestId) break;
-                    const batch = sortedPending.slice(0, isManaUiInteractionPriorityActive() ? 3 : progressiveRankingBatchSize);
+                    const remainingProgressiveBudget = MAX_PROGRESSIVE_FULL_SCORE_CANDIDATES - progressiveFullScoreCount;
+                    const batch = sortedPending.slice(0, Math.min(
+                        remainingProgressiveBudget,
+                        isManaUiInteractionPriorityActive() ? 3 : progressiveRankingBatchSize
+                    ));
                     if (!batch.length) break;
                     batch.forEach(card => progressiveRankingPending.delete((card.name||'').toLowerCase()));
                     await scoreCardBatch({
@@ -18626,7 +18772,11 @@ async function findSimilarCards() {
                         tags:activeTags, topNNames:new Set(), sniperIds:new Set(), activeFilters:filters
                     });
                     if (requestId !== searchRequestId) break;
-                    batch.forEach(card=>{card._progressivelyRanked=true;});
+                    batch.forEach(card=>{
+                        card._progressivelyRanked = true;
+                        card._isProvisionalScore = false;
+                    });
+                    progressiveFullScoreCount += batch.length;
                     // Related Search may intentionally own the Results grid while this main
                     // search continues in the background. Do not repaint the user's active view.
                     if (activeResultView.mode !== 'main' || activeResultView.requestId !== requestId) break;
@@ -18637,16 +18787,29 @@ async function findSimilarCards() {
                     });
                     if (requestId !== searchRequestId) break;
                     scheduleProgressiveResultRender(ranked, requestId);
+                    if (progressiveFullScoreCount >= MAX_PROGRESSIVE_FULL_SCORE_CANDIDATES) {
+                        // Remaining candidates keep their cheap preview score only until the
+                        // authoritative full-pool pass replaces the preview. Never structurally
+                        // score the same large pool twice just to animate intermediate ordering.
+                        progressiveRankingPending.clear();
+                        break;
+                    }
                     await yieldForManaSearchResponsiveness();
                 }
-            } catch(error) { console.info('Progressive ranking paused; final ranking continues:', error?.message||error); }
-            finally { progressiveRankingRunning=false; }
+            } catch(error) {
+                // A provisional scoring failure must not keep retrying the same expensive batch.
+                // The authoritative final pass still scores every candidate with the full pipeline.
+                progressiveRankingPending.clear();
+                console.info('Progressive ranking paused; final ranking continues:', error?.message||error);
+            } finally { progressiveRankingRunning=false; }
         };
         requestProgressiveRanking = () => {
-            if (requestId !== searchRequestId) return;
-            previewPool.forEach((card,key)=>{ if(card && key && !card._progressivelyRanked) progressiveRankingPending.set(key,card); });
+            if (requestId !== searchRequestId || progressiveFullScoreCount >= MAX_PROGRESSIVE_FULL_SCORE_CANDIDATES) return;
             runProgressiveRanking();
         };
+        // Start immediately if a retrieval stream filled the queue before the ranking worker was
+        // initialized. Each later arrival is enqueued once by mergeIntoPreview; no repeated Map scan.
+        if (progressiveRankingPending.size) runProgressiveRanking();
 
         const [resultsA, resultsB, resultsC, resultsLocalCorpus, resultsE, resultsBroad, resultsShared, resultsFSets, resultsExactSets, extractor, semanticRetrieval, resolvedMethodStreams] = await Promise.all([
             streamAPromise, streamBPromise, streamCPromise, streamLocalCorpusPromise, streamEPromise, streamBroadPromise, streamSharedPromise,
@@ -19195,6 +19358,12 @@ if (candidates.length > 0) {
         // - previously silent (review: embedding diagnostics).
         embeddingDiagnostics,
         semanticCalibration,
+        previewOptimization: {
+            lightweightCandidates: lightweightPreviewCount,
+            progressiveFullScored: progressiveFullScoreCount,
+            progressiveFullScoreCap: MAX_PROGRESSIVE_FULL_SCORE_CANDIDATES,
+            remainingQueuedForFinalPass: progressiveRankingPending.size
+        },
         rankingEvidenceTop,
         highlightIntentDiagnostics: hasHighlight ? highlightProfilesForSearch.map(p => ({
             groupId: p.groupId, contextText: p.contextText, mode: p.mode, selections: p.selections,
