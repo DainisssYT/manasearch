@@ -5,7 +5,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>ManaSearch</title>
-    <link rel="stylesheet" href="style.css">
+    <link rel="stylesheet" href="style.css?v=20261010-34">
 </head>
 <body>
     <header class="site-header">
@@ -174,8 +174,19 @@
                 </div>
                 <div id="provisional-results-banner" class="provisional-results-banner hidden">First look — still searching further sources, results will update…</div>
                 <div id="results-grid" class="results-grid"></div>
-                <div class="search-deeper-row">
-                    <button type="button" id="search-deeper-btn" class="hidden">🔍 Search Deeper (+8 pages/stream)</button>
+                <div id="results-bottom-toolbar" class="results-bottom-toolbar">
+                    <nav id="results-pagination" class="results-pagination hidden" aria-label="Results pages">
+                        <button type="button" id="results-prev-page" class="results-page-nav-btn" data-page-action="previous" disabled>‹ <span>Prev page</span></button>
+                        <div id="results-page-numbers" class="results-page-numbers" aria-label="Page numbers"></div>
+                        <button type="button" id="results-next-page" class="results-page-nav-btn" data-page-action="next" disabled><span>Next page</span> ›</button>
+                    </nav>
+                    <div class="search-deeper-row">
+                        <button type="button" id="search-deeper-btn" class="hidden">🔍 Search Deeper</button>
+                    </div>
+                    <div id="results-exact-page-wrap" class="results-exact-page-wrap hidden">
+                        <label for="results-exact-page">Exact Page</label>
+                        <input type="number" id="results-exact-page" min="1" step="1" value="1" inputmode="numeric" aria-label="Go to exact results page">
+                    </div>
                 </div>
             </section>
         </div>
@@ -261,16 +272,16 @@
                             <span class="search-depth-summary">How much of the available card pool is explored before results are finalized.</span>
                         </div>
                         <div class="search-depth-input-wrap">
-                            <input type="number" id="filter-depth-percent" placeholder="25" min="1" max="100" step="1" value="25" inputmode="numeric" aria-describedby="search-depth-help">
+                            <input type="number" id="filter-depth-percent" placeholder="100" min="1" max="100" step="1" value="100" inputmode="numeric" aria-describedby="search-depth-help">
                             <span class="percent-suffix" aria-hidden="true">%</span>
                         </div>
                     </div>
                     <div id="search-depth-help" class="search-depth-scale" aria-label="Search depth guidance">
                         <div><strong>1%</strong><span>Fastest results</span></div>
-                        <div><strong>25%</strong><span>Fast, pretty accurate results</span></div>
+                        <div><strong>25%</strong><span>Fast, partial coverage</span></div>
                         <div><strong>50%</strong><span>Balanced speed and coverage</span></div>
                         <div><strong>75%</strong><span>Thorough results</span></div>
-                        <div><strong>100%</strong><span>Slowest, most complete results</span></div>
+                        <div><strong>100%</strong><span>Complete available retrieval</span></div>
                     </div>
                 </div>
             </div>
@@ -475,11 +486,29 @@
                         <label for="filter-format">Format Legality</label>
                         <select id="filter-format">
                             <option value="">Any Format</option>
-                            <option value="commander">Commander</option>
                             <option value="standard">Standard</option>
-                            <option value="modern">Modern</option>
+                            <option value="future">Future Standard</option>
+                            <option value="historic">Historic</option>
+                            <option value="timeless">Timeless</option>
+                            <option value="gladiator">Gladiator</option>
                             <option value="pioneer">Pioneer</option>
+                            <option value="explorer">Explorer</option>
+                            <option value="modern">Modern</option>
                             <option value="legacy">Legacy</option>
+                            <option value="pauper">Pauper</option>
+                            <option value="vintage">Vintage</option>
+                            <option value="penny">Penny Dreadful</option>
+                            <option value="commander">Commander</option>
+                            <option value="oathbreaker">Oathbreaker</option>
+                            <option value="brawl">Brawl</option>
+                            <option value="historicbrawl">Historic Brawl</option>
+                            <option value="standardbrawl">Standard Brawl</option>
+                            <option value="alchemy">Alchemy</option>
+                            <option value="paupercommander">Pauper Commander</option>
+                            <option value="duel">Duel Commander</option>
+                            <option value="oldschool">Old School</option>
+                            <option value="premodern">Premodern</option>
+                            <option value="predh">PreDH</option>
                         </select>
                     </div>
                     <div class="filter-group">
@@ -596,14 +625,14 @@
                 <div class="preference-setting">
                     <div class="preference-setting-copy">
                         <label for="preference-result-limit"><strong>Maximum results displayed</strong></label>
-                        <span>Controls how many ranked cards are shown at once. Search and Search Deeper still keep their full internal candidate pools.</span>
+                        <span>Controls how many ranked cards appear per page. Use the page controls below the results to browse the entire ranked candidate list.</span>
                     </div>
                     <div class="preference-control preference-number-control">
                         <input type="number" id="preference-result-limit" min="1" max="200" step="1" inputmode="numeric" aria-describedby="preference-result-limit-help">
-                        <span>results</span>
+                        <span>per page</span>
                     </div>
                 </div>
-                <p id="preference-result-limit-help" class="preference-help">Recommended: 30–50 for a good balance between comparison depth and page performance.</p>
+                <p id="preference-result-limit-help" class="preference-help">Recommended: 30–50 cards per page. Every eligible ranked candidate remains available through pagination.</p>
 
                 <div class="preference-setting preference-toggle-setting">
                     <div class="preference-setting-copy">
@@ -713,6 +742,6 @@
         import * as transformers from "https://cdn.jsdelivr.net/npm/@xenova/transformers@2.16.0";
         window.transformers = transformers;
     </script>
-    <script type="module" src="app.js?v=20261009-33"></script>
+    <script type="module" src="app.js?v=20261010-34"></script>
 </body>
 </html>

@@ -1,17 +1,22 @@
-/* ManaSearch build 20261009-33 */
+/* ManaSearch build 20261010-34 */
 // ManaSearch deployment build marker. Bump this whenever app.js changes so cached-module issues are easy to diagnose.
-const MANASEARCH_APP_BUILD = '20261009-33';
+const MANASEARCH_APP_BUILD = '20261010-34';
 console.info(`[ManaSearch] app.js build ${MANASEARCH_APP_BUILD}`);
 
 // State Management
 let currentSourceCard = null;
 let lastSearchResults = [];
+// Results are paginated in the presentation layer; the full ranked candidate list remains intact.
+let currentResultsPage = 1;
 let reorderResultsRequestId = 0;
 // Set after a search whose retrieval streams were capped mid-pagination (see fetchScryfallSearch's
 // `.continuation`) while Scryfall still had more pages. Holds everything searchDeeper() needs to
 // fetch more pages and score/merge/render them without re-deriving the whole search context from
 // the DOM again. null whenever there's nothing more to fetch, or before any search has run.
 let pendingDeeperSearch = null;
+// Snapshot the search-depth control at the start of each main search so 100% searches do not
+// advertise a continuation button after their requested complete retrieval has finished.
+let activeSearchDepthPercent = 100;
 // Search instrumentation is kept in its OWN variable, never as a property hung off the results
 // array. Attaching it to the array made it silently vanish the moment any step built a new array
 // (renderResults' safety-net dedup did exactly that), which left the benchmark reporting 0% for
@@ -10679,8 +10684,14 @@ function explainFilterFailures(card, filters, broadFallbackFilters) {
     for (const keyword of (filters.keywords || [])) {
         if (!cardHasKeyword(card, keyword)) failures.push({ field: 'keyword', expected: keyword, actual: (card.keywords || []).join(', ') || '(none)' });
     }
-    if (filters.format && card.legalities && card.legalities[filters.format.toLowerCase()] !== 'legal') {
-        failures.push({ field: 'format', expected: `legal in ${filters.format}`, actual: card.legalities[filters.format.toLowerCase()] || '(unknown)' });
+    if (filters.format && card.legalities) {
+        const formatKey = filters.format.toLowerCase();
+        const status = String(card.legalities[formatKey] || '').toLowerCase();
+        // Restricted cards remain playable in their format (with a deck-building limit), so they
+        // should pass a Format Legality filter just like cards whose status is explicitly legal.
+        if (status !== 'legal' && status !== 'restricted') {
+            failures.push({ field: 'format', expected: `legal in ${filters.format}`, actual: card.legalities[formatKey] || '(unknown)' });
+        }
     }
     if (filters.rarity && (card.rarity || '').toLowerCase() !== filters.rarity.toLowerCase()) {
         failures.push({ field: 'rarity', expected: filters.rarity, actual: card.rarity || '(none)' });
@@ -10754,9 +10765,10 @@ function matchesActiveFilters(card, filters, broadFallbackFilters) {
     if ((filters.subtypes || []).some(subtype => !hasTypeLineToken(typeLineParts.subtypes, subtype))) return false;
     if ((filters.keywords || []).some(keyword => !cardHasKeyword(card, keyword))) return false;
 
-    if (filters.format) {
+    if (filters.format && card.legalities) {
         const formatLower = filters.format.toLowerCase();
-        if (card.legalities && card.legalities[formatLower] !== 'legal') return false;
+        const legality = String(card.legalities[formatLower] || '').toLowerCase();
+        if (legality !== 'legal' && legality !== 'restricted') return false;
     }
 
     if (filters.rarity) {
@@ -10829,10 +10841,11 @@ const SEARCH_CACHE_TTL_MS = 10 * 60 * 1000; // 10 minutes
 // Search-depth policy: every live retrieval stream gets at least an 8-page budget when the
 // query has that many pages, while Search Depth (%) controls how much of the complete Scryfall
 // result set is actually traversed. 100% means exhaust every available page.
-const DEFAULT_SEARCH_DEPTH_PERCENT = 25;
+const DEFAULT_SEARCH_DEPTH_PERCENT = 100;
 const MIN_SEARCH_PAGES = 8;
 const MAX_SEARCH_DEPTH_PERCENT = 100;
-const SEARCH_DEPTH_STORAGE_KEY = 'manamatch_search_depth_percent_v2';
+const SEARCH_DEPTH_STORAGE_KEY = 'manamatch_search_depth_percent_v3';
+const LEGACY_SEARCH_DEPTH_STORAGE_KEY = 'manamatch_search_depth_percent_v2';
 
 // --- Persistent search cache (localStorage-backed) ------------------------------------------
 // The in-memory searchCache above is wiped on every page refresh, so a user testing a few
@@ -12283,9 +12296,9 @@ function getCurrentSearchDepthPercent() {
 
 function getDepthScaledLocalLimit(requestedLimit, depthPercent = getCurrentSearchDepthPercent()) {
     const base = Math.max(1, Math.min(1200, Number(requestedLimit) || 180));
-    // 25% remains the established default budget. Higher depths widen the local candidate pool,
-    // while very shallow depths retain a useful floor instead of collapsing to a handful of cards.
-    const scale = Math.max(0.20, depthPercent / DEFAULT_SEARCH_DEPTH_PERCENT);
+    // Higher depth values widen the local candidate pool, while shallow depths retain a useful
+    // floor instead of collapsing to a handful of cards. The default is now exhaustive 100%.
+    const scale = Math.max(0.20, depthPercent / 25);
     return Math.max(12, Math.min(1200, Math.round(base * scale)));
 }
 
@@ -14269,7 +14282,9 @@ function initApp() {
     }
 
     function commitPreferences() {
+        const previousPageSize = getDisplayedResultLimit();
         displayPreferences.maxResults = clampDisplayResultLimit(preferenceResultLimit?.value);
+        if (displayPreferences.maxResults !== previousPageSize) currentResultsPage = 1;
         displayPreferences.showScoreBreakdown = preferenceScoreBreakdown?.checked !== false;
         displayPreferences.theme = ['dark', 'light'].includes(preferenceTheme?.value) ? preferenceTheme.value : DEFAULT_DISPLAY_PREFERENCES.theme;
         displayPreferences.resultDensity = ['comfortable', 'compact'].includes(preferenceDensity?.value) ? preferenceDensity.value : DEFAULT_DISPLAY_PREFERENCES.resultDensity;
@@ -14324,17 +14339,27 @@ function initApp() {
     setupSourceCardPicker();
     runMechanicalRegressionSuite();
 
-    // Search Depth defaults to 25% for a new browser profile. Once the user deliberately changes
-    // it, remember that choice so the control remains genuinely user-configurable across reloads.
+    // Search Depth defaults to 100% for new profiles. Once the user changes it, remember that
+    // explicit choice while migrating the old untouched 25% default to the new 100% default.
     const depthControl = document.getElementById('filter-depth-percent');
     if (depthControl) {
         let storedDepth = null;
         try {
-            storedDepth = parseFloat(localStorage.getItem(SEARCH_DEPTH_STORAGE_KEY));
+            const currentStored = localStorage.getItem(SEARCH_DEPTH_STORAGE_KEY);
+            if (currentStored !== null) {
+                storedDepth = parseFloat(currentStored);
+            } else {
+                const legacyStored = parseFloat(localStorage.getItem(LEGACY_SEARCH_DEPTH_STORAGE_KEY));
+                // Version 2's default was 25%. Treat that old default as an untouched default,
+                // but preserve other values as explicit user choices.
+                if (Number.isFinite(legacyStored) && legacyStored > 0 && legacyStored !== 25) {
+                    storedDepth = legacyStored;
+                }
+            }
         } catch (err) {
             storedDepth = null;
         }
-        if (!isNaN(storedDepth) && storedDepth > 0) {
+        if (Number.isFinite(storedDepth) && storedDepth > 0) {
             depthControl.value = String(Math.max(1, Math.min(MAX_SEARCH_DEPTH_PERCENT, storedDepth)));
         } else {
             depthControl.value = String(DEFAULT_SEARCH_DEPTH_PERCENT);
@@ -14498,6 +14523,35 @@ function initApp() {
     if (findSimilarBtn) findSimilarBtn.addEventListener('click', findSimilarCards);
     const searchDeeperBtnInit = document.getElementById('search-deeper-btn');
     if (searchDeeperBtnInit) searchDeeperBtnInit.addEventListener('click', searchDeeper);
+    const resultsPagination = document.getElementById('results-pagination');
+    resultsPagination?.addEventListener('click', event => {
+        const pageButton = event.target.closest('[data-page]');
+        if (pageButton) {
+            goToResultsPage(Number(pageButton.dataset.page));
+            return;
+        }
+        const actionButton = event.target.closest('[data-page-action]');
+        if (!actionButton) return;
+        if (actionButton.dataset.pageAction === 'previous') goToResultsPage(currentResultsPage - 1);
+        if (actionButton.dataset.pageAction === 'next') goToResultsPage(currentResultsPage + 1);
+    });
+    const exactPageInput = document.getElementById('results-exact-page');
+    const commitExactPage = () => {
+        const value = Number(exactPageInput?.value);
+        if (!Number.isFinite(value)) {
+            if (exactPageInput) exactPageInput.value = String(currentResultsPage);
+            return;
+        }
+        goToResultsPage(value);
+    };
+    exactPageInput?.addEventListener('change', commitExactPage);
+    exactPageInput?.addEventListener('keydown', event => {
+        if (event.key === 'Enter') {
+            event.preventDefault();
+            commitExactPage();
+            exactPageInput.blur();
+        }
+    });
     if (favoriteBtn) favoriteBtn.addEventListener('click', toggleFavorite);
     const discardSourceCardBtn = document.getElementById('discard-source-card-btn');
     if (discardSourceCardBtn) {
@@ -15445,6 +15499,7 @@ function clearSourceCard() {
     renderAdditionalSourceCards();
     updateSourceCardMultiSearchState();
     lastSearchResults = [];
+    currentResultsPage = 1;
     lastSearchCandidateCount = null;
     manualHighlights = [];
     highlightComposerOpen = false;
@@ -15499,6 +15554,7 @@ async function loadSourceCard(query, providedCard = null) {
     // Reset state to avoid leaking previous search results, highlights, or selected related cards.
     // These belong to the previous source-card context and must never participate in the new one.
     lastSearchResults = [];
+    currentResultsPage = 1;
     selectedRelatedCards.clear();
     manualHighlights = [];
     // Diagnostics belong to a specific search - clear them alongside the results so a later
@@ -16701,6 +16757,7 @@ async function executeRelatedCardSearch() {
         }
         
         lastSearchResults = [...Array.from(selectedCardsAtStart.values()), ...nonSelected];
+        currentResultsPage = 1;
         // Related-card search runs its own pipeline and produces no stage diagnostics; clear
         // them rather than leaving the previous search's instrumentation in place.
         lastSearchDiagnostics = null;
@@ -17303,6 +17360,8 @@ async function findSimilarCards() {
 
     const requestId = ++searchRequestId;
     activeResultView = { mode: 'main', requestId };
+    activeSearchDepthPercent = getCurrentSearchDepthPercent();
+    currentResultsPage = 1;
 
     // Phase timing, surfaced through diagnostics so the benchmark can report where a search
     // actually spends its time (retrieval vs. scoring vs. ranking vs. render) instead of only a
@@ -18635,7 +18694,7 @@ if (candidates.length > 0) {
         .map(r => r?.continuation)
         .filter(Boolean);
     const useLocalDeeper = Boolean(staticCardCorpusMemory?.cards?.length && localDeeperPlans.length);
-    pendingDeeperSearch = (deeperStreamCursors.length > 0 || useLocalDeeper) ? {
+    pendingDeeperSearch = activeSearchDepthPercent < 100 && (deeperStreamCursors.length > 0 || useLocalDeeper) ? {
         requestId,
         streams: deeperStreamCursors,
         localPlans: useLocalDeeper ? localDeeperPlans : [],
@@ -18660,9 +18719,7 @@ if (candidates.length > 0) {
     if (searchDeeperBtn) {
         searchDeeperBtn.classList.toggle('hidden', !pendingDeeperSearch);
         searchDeeperBtn.disabled = false;
-        searchDeeperBtn.textContent = useLocalDeeper && deeperStreamCursors.length === 0
-            ? '🔍 Search Deeper (+local candidates)'
-            : '🔍 Search Deeper (+8 pages/stream)';
+        searchDeeperBtn.textContent = '🔍 Search Deeper';
     }
 
     const rankingEvidenceTop = candidates.slice(0, 20).map((card, index) => ({
@@ -18925,16 +18982,16 @@ async function searchDeeper() {
         } else if (searchDeeperBtn) {
             searchDeeperBtn.disabled = false;
             searchDeeperBtn.textContent = localStillAvailable && !apiStillAvailable
-                ? '🔍 Search Deeper (+local candidates)'
-                : '🔍 Search Deeper (+8 pages/stream)';
+                ? '🔍 Search Deeper'
+                : '🔍 Search Deeper';
         }
     } catch (error) {
         console.error("Error in searchDeeper:", error);
         if (requestId === searchRequestId && searchDeeperBtn) {
             searchDeeperBtn.disabled = false;
             searchDeeperBtn.textContent = hasLocalPlans && !hasApiStreams
-                ? '🔍 Search Deeper (+local candidates)'
-                : '🔍 Search Deeper (+8 pages/stream)';
+                ? '🔍 Search Deeper'
+                : '🔍 Search Deeper';
         }
     }
 }
@@ -19152,7 +19209,9 @@ async function reorderResults() {
     // A new search or a newer order request may have replaced the result set while this sort yielded.
     if (requestId !== reorderResultsRequestId || searchGenerationAtStart !== searchRequestId || sourceResults !== lastSearchResults) return;
     lastSearchResults = ordered;
+    currentResultsPage = 1;
     renderResults(lastSearchResults);
+    updateResultsSummary();
 }
 
 async function copyCardNameToClipboard(cardName, button = null) {
@@ -19197,15 +19256,110 @@ function getResultCardStateKey(card) {
     return String(card?.id || card?.oracle_id || card?.name || '').toLowerCase();
 }
 
+function getRenderableResultCards(cards) {
+    if (!Array.isArray(cards)) return [];
+    const seenNames = new Set();
+    const renderable = [];
+    for (const card of cards) {
+        const key = normalizeCardNameForIdentity(card?.name || '');
+        if (!key || seenNames.has(key)) continue;
+        if (currentSourceCard && card?.name && isSameCardName(card.name, currentSourceCard.name)) continue;
+        if (!isAllowedByCandidatePreferences(card)) continue;
+        seenNames.add(key);
+        renderable.push(card);
+    }
+    return renderable;
+}
+
+function makeResultsPageButton(pageNumber) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'results-page-number-btn';
+    button.dataset.page = String(pageNumber);
+    button.textContent = String(pageNumber);
+    button.setAttribute('aria-label', `Page ${pageNumber}`);
+    if (pageNumber === currentResultsPage) {
+        button.classList.add('active');
+        button.setAttribute('aria-current', 'page');
+        button.disabled = true;
+    }
+    return button;
+}
+
+function updateResultsPagination(totalResults) {
+    const pagination = document.getElementById('results-pagination');
+    const pageNumbers = document.getElementById('results-page-numbers');
+    const previousButton = document.getElementById('results-prev-page');
+    const nextButton = document.getElementById('results-next-page');
+    const exactPageWrap = document.getElementById('results-exact-page-wrap');
+    const exactPageInput = document.getElementById('results-exact-page');
+    if (!pagination || !pageNumbers || !previousButton || !nextButton || !exactPageWrap || !exactPageInput) return;
+
+    const pageSize = getDisplayedResultLimit();
+    const safeTotal = Math.max(0, Number(totalResults) || 0);
+    const totalPages = Math.max(1, Math.ceil(safeTotal / pageSize));
+    currentResultsPage = Math.max(1, Math.min(totalPages, Math.round(Number(currentResultsPage) || 1)));
+    const shouldShow = safeTotal > pageSize;
+    pagination.classList.toggle('hidden', !shouldShow);
+    exactPageWrap.classList.toggle('hidden', !shouldShow);
+    previousButton.disabled = currentResultsPage <= 1 || !shouldShow;
+    nextButton.disabled = currentResultsPage >= totalPages || !shouldShow;
+    exactPageInput.min = '1';
+    exactPageInput.max = String(totalPages);
+    exactPageInput.value = String(currentResultsPage);
+    exactPageInput.setAttribute('aria-label', `Go to exact results page, 1 through ${totalPages}`);
+    pageNumbers.replaceChildren();
+    if (!shouldShow) return;
+
+    const appendEllipsis = () => {
+        const ellipsis = document.createElement('span');
+        ellipsis.className = 'results-page-ellipsis';
+        ellipsis.textContent = '…';
+        ellipsis.setAttribute('aria-hidden', 'true');
+        pageNumbers.appendChild(ellipsis);
+    };
+    const appendPage = page => pageNumbers.appendChild(makeResultsPageButton(page));
+
+    if (totalPages <= 7) {
+        for (let page = 1; page <= totalPages; page++) appendPage(page);
+    } else if (currentResultsPage <= 3) {
+        appendPage(1); appendPage(2); appendPage(3); appendEllipsis(); appendPage(totalPages);
+    } else if (currentResultsPage >= totalPages - 2) {
+        appendPage(1); appendEllipsis();
+        appendPage(totalPages - 2); appendPage(totalPages - 1); appendPage(totalPages);
+    } else {
+        appendPage(1); appendEllipsis();
+        appendPage(currentResultsPage - 1); appendPage(currentResultsPage); appendPage(currentResultsPage + 1);
+        appendEllipsis(); appendPage(totalPages);
+    }
+}
+
+function goToResultsPage(requestedPage) {
+    const all = getRenderableResultCards(lastSearchResults);
+    const totalPages = Math.max(1, Math.ceil(all.length / getDisplayedResultLimit()));
+    const parsed = Number(requestedPage);
+    if (!Number.isFinite(parsed)) return;
+    currentResultsPage = Math.max(1, Math.min(totalPages, Math.round(parsed)));
+    // A pagination action is itself the user's explicit request to change the visible page; do
+    // not defer it behind the generic post-interaction quiet window.
+    renderResults(lastSearchResults, { forceImmediate: true });
+    updateResultsSummary();
+}
+
 function updateResultsSummary() {
     const summary = document.getElementById('results-summary');
     if (!summary) return;
 
-    const allFinalCards = Array.isArray(lastSearchResults) ? lastSearchResults : [];
-    const finalCount = getPreferenceFilteredCandidates(allFinalCards).length;
-    const preferenceHiddenCount = Math.max(0, allFinalCards.length - finalCount);
+    const rawCards = Array.isArray(lastSearchResults) ? lastSearchResults : [];
+    const allFinalCards = getRenderableResultCards(rawCards);
+    const finalCount = allFinalCards.length;
+    const preferenceHiddenCount = Math.max(0, rawCards.length - finalCount);
     const candidateCount = Number.isFinite(lastSearchCandidateCount) ? lastSearchCandidateCount : null;
-    const visibleCount = Math.min(finalCount, getDisplayedResultLimit());
+    const pageSize = getDisplayedResultLimit();
+    const totalPages = Math.max(1, Math.ceil(finalCount / pageSize));
+    currentResultsPage = Math.max(1, Math.min(totalPages, currentResultsPage));
+    const firstVisible = finalCount ? ((currentResultsPage - 1) * pageSize) + 1 : 0;
+    const lastVisible = Math.min(finalCount, currentResultsPage * pageSize);
 
     if (candidateCount === null) {
         summary.textContent = '';
@@ -19215,18 +19369,18 @@ function updateResultsSummary() {
 
     const resultWord = finalCount === 1 ? 'result' : 'results';
     const candidateWord = candidateCount === 1 ? 'candidate' : 'candidates';
-
     const hiddenNote = preferenceHiddenCount > 0
         ? ` ${preferenceHiddenCount} hidden by candidate preferences.`
         : '';
+
     if (finalCount === 0) {
         summary.textContent = preferenceHiddenCount > 0
             ? `No results are visible with the current candidate preferences; ${preferenceHiddenCount} ranked cards are hidden. ${candidateCount} ${candidateWord} were evaluated.`
             : `No final results matched. ${candidateCount} ${candidateWord} were evaluated.`;
-    } else if (finalCount > visibleCount) {
-        summary.textContent = `Found ${finalCount} visible ${resultWord} from ${candidateCount} ${candidateWord} evaluated. Showing the top ${visibleCount}.${hiddenNote}`;
+    } else if (totalPages > 1) {
+        summary.textContent = `Found ${finalCount} visible ${resultWord} from ${candidateCount} ${candidateWord} evaluated. Showing ${firstVisible}–${lastVisible} (page ${currentResultsPage} of ${totalPages}).${hiddenNote}`;
     } else {
-        summary.textContent = `Found ${finalCount} visible ${resultWord} from ${candidateCount} ${candidateWord} evaluated.${hiddenNote}`;
+        summary.textContent = `Found ${finalCount} visible ${resultWord} from ${candidateCount} ${candidateWord} evaluated. Showing ${firstVisible}–${lastVisible}.${hiddenNote}`;
     }
     summary.classList.remove('hidden');
 }
@@ -19427,7 +19581,7 @@ function renderResults(cards, internalOptions = {}) {
     if (internalOptions?.progressive !== true) cancelScheduledProgressiveResultRender();
     // Panel controls must remain interactive while progressive scoring continues. Do not repeatedly
     // touch every visible card behind an open modal; the most recent snapshot is painted on close.
-    if (document.body?.classList.contains('mana-panel-open') || shouldDeferManaResultRender()) {
+    if (internalOptions?.forceImmediate !== true && (document.body?.classList.contains('mana-panel-open') || shouldDeferManaResultRender())) {
         deferredResultRenderCards = cards;
         deferredResultRenderPending = true;
         if (isManaUserActivelyEditing() || isManaUiInteractionRecentlyActive(MANASEARCH_UI_RENDER_QUIET_WINDOW_MS)) {
@@ -19449,22 +19603,10 @@ function renderResults(cards, internalOptions = {}) {
 
     // Final safety-net filtering, right before anything touches the DOM. Keep this local to the
     // presentation layer; callers retain ownership of lastSearchResults/diagnostics.
-    let displayCards = cards;
-    if (Array.isArray(cards)) {
-        const seenNames = new Set();
-        const deduped = [];
-        for (const card of cards) {
-            const key = normalizeCardNameForIdentity(card?.name || '');
-            if (!key || seenNames.has(key)) continue;
-            if (currentSourceCard && card?.name && isSameCardName(card.name, currentSourceCard.name)) continue;
-            if (!isAllowedByCandidatePreferences(card)) continue;
-            seenNames.add(key);
-            deduped.push(card);
-        }
-        displayCards = deduped;
-    }
+    const displayCards = getRenderableResultCards(cards);
+    updateResultsPagination(displayCards.length);
 
-    if (!displayCards || displayCards.length === 0) {
+    if (displayCards.length === 0) {
         visibleResultCardData.clear();
         resultsGrid.replaceChildren();
         const note = document.createElement('p');
@@ -19479,7 +19621,9 @@ function renderResults(cards, internalOptions = {}) {
     }
 
     exportBtn.style.display = 'block';
-    const topCards = displayCards.slice(0, getDisplayedResultLimit());
+    const pageSize = getDisplayedResultLimit();
+    const pageStart = (currentResultsPage - 1) * pageSize;
+    const topCards = displayCards.slice(pageStart, pageStart + pageSize);
     visibleResultCardData.clear();
     // Event delegation identifies cards by the same stable name key stored on each result node.
     // Keep this map keyed by getCardKey(), not getResultCardStateKey(): the latter uses the
