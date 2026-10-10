@@ -1,11 +1,16 @@
-/* ManaSearch build 20261010-35 */
+/* ManaSearch build 20261010-36 */
 // ManaSearch deployment build marker. Bump this whenever app.js changes so cached-module issues are easy to diagnose.
-const MANASEARCH_APP_BUILD = '20261010-35';
+const MANASEARCH_APP_BUILD = '20261010-36';
 console.info(`[ManaSearch] app.js build ${MANASEARCH_APP_BUILD}`);
 
 // State Management
 let currentSourceCard = null;
 let lastSearchResults = [];
+// The exact result snapshot currently represented by the Results grid. During progressive search,
+// this intentionally differs from lastSearchResults until the final ranking is ready. Pagination
+// must always use this same snapshot as the grid, never stale results from the previous search.
+let currentRenderedResultsCards = [];
+let activeMainSearchRequestId = null;
 // Results are paginated in the presentation layer; the full ranked candidate list remains intact.
 let currentResultsPage = 1;
 let reorderResultsRequestId = 0;
@@ -173,7 +178,8 @@ function scheduleProgressiveResultRender(cards, requestId) {
         const scheduledRequestId = progressiveResultRenderRequestId;
         progressiveResultRenderCards = null;
         progressiveResultRenderRequestId = 0;
-        if (!snapshot || scheduledRequestId !== searchRequestId) return;
+        if (!snapshot || scheduledRequestId !== searchRequestId ||
+            activeResultView.mode !== 'main' || activeResultView.requestId !== scheduledRequestId) return;
         lastProgressiveResultRenderAt = Date.now();
         renderResults(snapshot, { progressive: true });
     }, wait);
@@ -15492,6 +15498,8 @@ function setupSourceCardPicker() {
 
 function clearSourceCard() {
     ++searchRequestId;
+    activeMainSearchRequestId = null;
+    cancelScheduledProgressiveResultRender();
     ++sourceCardPickerRequestId;
     currentSourceCard = null;
     sourceCards.clear();
@@ -15499,8 +15507,10 @@ function clearSourceCard() {
     renderAdditionalSourceCards();
     updateSourceCardMultiSearchState();
     lastSearchResults = [];
+    currentRenderedResultsCards = [];
     currentResultsPage = 1;
     lastSearchCandidateCount = null;
+    updateResultsPagination(0);
     manualHighlights = [];
     highlightComposerOpen = false;
     selectedRelatedCards.clear();
@@ -15547,6 +15557,8 @@ async function loadSourceCard(query, providedCard = null) {
 
     ++relatedSearchRequestId;
     const requestId = ++searchRequestId;
+    activeMainSearchRequestId = null;
+    cancelScheduledProgressiveResultRender();
 
     showLoading(true);
     resultsSection.classList.add('hidden');
@@ -15554,7 +15566,10 @@ async function loadSourceCard(query, providedCard = null) {
     // Reset state to avoid leaking previous search results, highlights, or selected related cards.
     // These belong to the previous source-card context and must never participate in the new one.
     lastSearchResults = [];
+    currentRenderedResultsCards = [];
     currentResultsPage = 1;
+    lastSearchCandidateCount = null;
+    updateResultsPagination(0);
     selectedRelatedCards.clear();
     manualHighlights = [];
     // Diagnostics belong to a specific search - clear them alongside the results so a later
@@ -16380,6 +16395,9 @@ async function executeRelatedCardSearch() {
 
     const requestId = ++relatedSearchRequestId;
     activeResultView = { mode: 'related', requestId };
+    currentRenderedResultsCards = [];
+    currentResultsPage = 1;
+    updateResultsPagination(0);
     const sourceSearchRequestId = searchRequestId;
     const sourceCardAtStart = currentSourceCard;
     const selectedCardsAtStart = new Map(selectedRelatedCards);
@@ -17359,9 +17377,15 @@ async function findSimilarCards() {
     }
 
     const requestId = ++searchRequestId;
+    cancelScheduledProgressiveResultRender();
     activeResultView = { mode: 'main', requestId };
+    activeMainSearchRequestId = requestId;
     activeSearchDepthPercent = getCurrentSearchDepthPercent();
     currentResultsPage = 1;
+    lastSearchResults = [];
+    currentRenderedResultsCards = [];
+    lastSearchCandidateCount = null;
+    updateResultsPagination(0);
 
     // Phase timing, surfaced through diagnostics so the benchmark can report where a search
     // actually spends its time (retrieval vs. scoring vs. ranking vs. render) instead of only a
@@ -17380,6 +17404,7 @@ async function findSimilarCards() {
     }
     if (resultsGrid) {
         resultsGrid.innerHTML = '';
+        currentRenderedResultsCards = [];
         const initialState = document.createElement('div');
         initialState.className = 'search-initial-state';
         initialState.setAttribute('aria-live', 'polite');
@@ -18834,6 +18859,7 @@ if (candidates.length > 0) {
         }
     } finally {
         activeLocalCorpusBatchContext = previousLocalCorpusBatchContext;
+        if (activeMainSearchRequestId === requestId) activeMainSearchRequestId = null;
         if (requestId === searchRequestId) activeSearchStreamProgressReporter = null;
         clearTimeout(searchTimeoutId);
         if (requestId === searchRequestId && activeResultView.mode === 'main' && activeResultView.requestId === requestId) {
@@ -19411,22 +19437,33 @@ function updateResultsPagination(totalResults) {
 }
 
 function goToResultsPage(requestedPage) {
-    const all = getRenderableResultCards(lastSearchResults);
+    // The visible grid may be showing a progressive search snapshot. Never calculate page bounds
+    // from lastSearchResults here: until final ranking completes, that variable can refer to a
+    // previous search (and create phantom pages such as 69 when the current search has only 27).
+    const pageSource = Array.isArray(currentRenderedResultsCards) ? currentRenderedResultsCards : [];
+    const all = getRenderableResultCards(pageSource);
     const totalPages = Math.max(1, Math.ceil(all.length / getDisplayedResultLimit()));
     const parsed = Number(requestedPage);
-    if (!Number.isFinite(parsed)) return;
+    if (!Number.isFinite(parsed) || all.length === 0) return;
     currentResultsPage = Math.max(1, Math.min(totalPages, Math.round(parsed)));
-    // A pagination action is itself the user's explicit request to change the visible page; do
-    // not defer it behind the generic post-interaction quiet window.
-    renderResults(lastSearchResults, { forceImmediate: true });
+    // A pagination action is the user's explicit request; paint immediately and keep any newer
+    // progressive snapshot queued so it can refresh the same page when it arrives.
+    renderResults(pageSource, { forceImmediate: true, preservePendingProgressive: true });
     updateResultsSummary();
+}
+
+function isCurrentMainSearchInProgress() {
+    return activeMainSearchRequestId !== null &&
+        activeMainSearchRequestId === searchRequestId &&
+        activeResultView?.mode === 'main' &&
+        activeResultView?.requestId === activeMainSearchRequestId;
 }
 
 function updateResultsSummary() {
     const summary = document.getElementById('results-summary');
     if (!summary) return;
 
-    const rawCards = Array.isArray(lastSearchResults) ? lastSearchResults : [];
+    const rawCards = Array.isArray(currentRenderedResultsCards) ? currentRenderedResultsCards : [];
     const allFinalCards = getRenderableResultCards(rawCards);
     const finalCount = allFinalCards.length;
     const preferenceHiddenCount = Math.max(0, rawCards.length - finalCount);
@@ -19438,8 +19475,17 @@ function updateResultsSummary() {
     const lastVisible = Math.min(finalCount, currentResultsPage * pageSize);
 
     if (candidateCount === null) {
-        summary.textContent = '';
-        summary.classList.add('hidden');
+        if (isCurrentMainSearchInProgress()) {
+            if (finalCount > 0) {
+                summary.textContent = `Searching… ${finalCount} provisional matches so far. Showing ${firstVisible}–${lastVisible} (page ${currentResultsPage} of ${totalPages}); more matches may appear as the search continues.`;
+            } else {
+                summary.textContent = 'Searching… initial matches will appear as soon as they are found.';
+            }
+            summary.classList.remove('hidden');
+        } else {
+            summary.textContent = '';
+            summary.classList.add('hidden');
+        }
         return;
     }
 
@@ -19654,7 +19700,9 @@ function renderCardLegalityPanel(card, panel) {
 function renderResults(cards, internalOptions = {}) {
     // A final/search-deeper/user-triggered render is authoritative. Drop any queued progressive
     // snapshot before painting, otherwise a timer could repaint an older partial order afterward.
-    if (internalOptions?.progressive !== true) cancelScheduledProgressiveResultRender();
+    if (internalOptions?.progressive !== true && internalOptions?.preservePendingProgressive !== true) {
+        cancelScheduledProgressiveResultRender();
+    }
     // Panel controls must remain interactive while progressive scoring continues. Do not repeatedly
     // touch every visible card behind an open modal; the most recent snapshot is painted on close.
     if (internalOptions?.forceImmediate !== true && (document.body?.classList.contains('mana-panel-open') || shouldDeferManaResultRender())) {
@@ -19676,6 +19724,8 @@ function renderResults(cards, internalOptions = {}) {
     deferredResultRenderCards = null;
     deferredResultRenderPending = false;
     resultsSection.classList.remove('hidden');
+    // Keep pagination, summary text, and card rendering bound to one atomic source snapshot.
+    currentRenderedResultsCards = Array.isArray(cards) ? cards.slice() : [];
 
     // Final safety-net filtering, right before anything touches the DOM. Keep this local to the
     // presentation layer; callers retain ownership of lastSearchResults/diagnostics.
@@ -19693,6 +19743,7 @@ function renderResults(cards, internalOptions = {}) {
             : 'No matching cards found. Try loosening your filters.';
         resultsGrid.appendChild(note);
         exportBtn.style.display = 'none';
+        if (isCurrentMainSearchInProgress()) updateResultsSummary();
         return;
     }
 
@@ -20050,6 +20101,7 @@ function renderResults(cards, internalOptions = {}) {
             copyCardNameToClipboard(card.name, copyBtn);
         });
     }
+    if (isCurrentMainSearchInProgress()) updateResultsSummary();
 }
 
 // --- COMPARISON PRESENTATION & EXPLANATION HELPERS ---
