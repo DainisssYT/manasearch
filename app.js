@@ -1,6 +1,6 @@
-/* ManaSearch build 20261010-39 */
+/* ManaSearch build 20261010-40 */
 // ManaSearch deployment build marker. Bump this whenever app.js changes so cached-module issues are easy to diagnose.
-const MANASEARCH_APP_BUILD = '20261010-39';
+const MANASEARCH_APP_BUILD = '20261010-40';
 console.info(`[ManaSearch] app.js build ${MANASEARCH_APP_BUILD}`);
 
 // State Management
@@ -13433,12 +13433,20 @@ async function embedTextBatch(texts, extractor) {
     return vectors;
 }
 
-async function warmEmbeddingCache(texts, extractor, diagnostics, batchSize = 16) {
+async function warmEmbeddingCache(texts, extractor, diagnostics, batchSize = 32) {
     const unique = [...new Set(texts.filter(Boolean))].filter(t => !embeddingCache.has(t));
-    // Keep the normal inference batch at 16. Doubling this to 32 regressed real browser benchmarks
-    // on long Oracle text, likely from transformer padding and memory pressure on client-side runtimes.
-    // The original per-text model, normalization, and vector semantics stay unchanged. During active
-    // UI interaction this falls to one item, preserving the responsiveness-first guarantee.
+    // Length-bucket the inputs before batching. The feature-extraction pipeline pads each batch to
+    // its longest input, so mixing a very long rules text with many short function summaries wastes
+    // inference time and memory. Sorting is stable and affects only batching order, never scores.
+    unique.sort((a, b) => a.length - b.length);
+    // The normal batch is 32 for throughput, with a smaller cap as text length rises. Length-sorting
+    // above keeps padding efficient, while the adaptive caps below avoid large activation buffers
+    // for long Oracle text. If the runtime still rejects a chunk, it is bisected recursively until
+    // it succeeds, so larger batches do not compromise support for slower devices.
+    // Crucially, mere focus on an input is NOT active typing: reducing to singleton batches whenever
+    // a field remained focused serialized hundreds of model calls during benchmarks. During real
+    // keyboard edits use 4 texts, and for immediately recent other UI activity use 8; idle scoring
+    // uses the size appropriate for the texts. Every batch still yields to the event loop.
     const embedChunkWithFallback = async (chunk) => {
         try {
             const vectors = await embedTextBatch(chunk, extractor);
@@ -13461,7 +13469,13 @@ async function warmEmbeddingCache(texts, extractor, diagnostics, batchSize = 16)
     };
     let i = 0;
     while (i < unique.length) {
-        const effectiveBatchSize = isManaUiInteractionPriorityActive() ? 1 : batchSize;
+        const nextTextLength = String(unique[i] || '').length;
+        const textBatchCap = nextTextLength > 1600 ? 4
+            : (nextTextLength > 1000 ? 8 : (nextTextLength > 600 ? 16 : batchSize));
+        const interactionBatchCap = isManaUserActivelyEditing()
+            ? 4
+            : (isManaUiInteractionRecentlyActive(250) ? 8 : batchSize);
+        const effectiveBatchSize = Math.max(1, Math.min(batchSize, textBatchCap, interactionBatchCap));
         const chunk = unique.slice(i, i + effectiveBatchSize);
         i += chunk.length;
         await embedChunkWithFallback(chunk);
@@ -13801,13 +13815,13 @@ function calculateCanonicalContradictionPenalty(sourceCard, candidateCard) {
 
     const sourceFns = getEffectFunctionSet(sourceCard);
     const candidateFns = getEffectFunctionSet(candidateCard);
-    const sourceFunctions = [...sourceFns].filter(x => !x.startsWith('outcome:'));
-    const candidateFunctions = [...candidateFns].filter(x => !x.startsWith('outcome:'));
+    const sourceFunctions = new Set([...sourceFns].filter(x => !x.startsWith('outcome:')));
+    const candidateFunctions = new Set([...candidateFns].filter(x => !x.startsWith('outcome:')));
 
     // Only penalize strong, strategic contradictions. Extra effects are deliberately
-    // tolerated; this is not another bidirectional "all text must match" score.
+    // tolerated; this is not another bidirectional "all text must match" score. Build each set
+    // once per comparison instead of allocating 16 Sets in the eight-pair loop.
     let penalty = 1;
-    const has = (set, value) => set.has(value);
     const pairs = [
         ['reanimate', 'removal'], ['recursion', 'removal'],
         ['counter', 'direct_damage'], ['counter', 'token_creation'],
@@ -13815,8 +13829,8 @@ function calculateCanonicalContradictionPenalty(sourceCard, candidateCard) {
         ['card_draw', 'removal'], ['tutor', 'direct_damage']
     ];
     for (const [a, b] of pairs) {
-        if (has(new Set(sourceFunctions), a) && has(new Set(candidateFunctions), b) && !candidateFunctions.includes(a)) penalty *= 0.93;
-        if (has(new Set(sourceFunctions), b) && has(new Set(candidateFunctions), a) && !candidateFunctions.includes(b)) penalty *= 0.93;
+        if (sourceFunctions.has(a) && candidateFunctions.has(b) && !candidateFunctions.has(a)) penalty *= 0.93;
+        if (sourceFunctions.has(b) && candidateFunctions.has(a) && !candidateFunctions.has(b)) penalty *= 0.93;
     }
 
     const sourceRecurring = cardHasRecurringEffects(sourceCard);
@@ -13898,7 +13912,7 @@ function calculateRankingStability(card, coreEvidence, supportingEvidence) {
 }
 
 // --- ENGINE 3: SYNERGY (Filter-Aware) ---
-function calculateSynergyScore(sourceCard, targetCard, activeFilters = {}) {
+function calculateSynergyScore(sourceCard, targetCard, activeFilters = {}, precomputed = null) {
     if (!sourceCard || !targetCard) return 0;
     let score = 0, max = 0;
     const identityConstrained = Boolean(activeFilters.identity || activeFilters.colors);
@@ -13947,10 +13961,13 @@ function calculateSynergyScore(sourceCard, targetCard, activeFilters = {}) {
     // supports cards with different implementations without turning role similarity into a second
     // mechanical score.
     max += 0.75;
-    const sourceEffects = Array.isArray(sourceCard._parsedEffects) ? sourceCard._parsedEffects : parseMTGEffect(strategicRoleCardText(sourceCard));
-    const targetEffects = Array.isArray(targetCard._parsedEffects) ? targetCard._parsedEffects : parseMTGEffect(strategicRoleCardText(targetCard));
-    const sourceRoles = inferStrategicRoleProfile(sourceCard, sourceEffects, strategicRoleCardText(sourceCard));
-    const targetRoles = inferStrategicRoleProfile(targetCard, targetEffects, strategicRoleCardText(targetCard));
+    // scoreCardBatch supplies its already-parsed effects and the source's stable synergy-role
+    // profile. This avoids reparsing the same Oracle text once per candidate, without confusing a
+    // highlighted/partial scoring profile with the full source text used by the synergy channel.
+    const sourceEffects = precomputed?.sourceEffects || (Array.isArray(sourceCard._parsedEffects) ? sourceCard._parsedEffects : parseMTGEffect(strategicRoleCardText(sourceCard)));
+    const targetEffects = precomputed?.targetEffects || (Array.isArray(targetCard._parsedEffects) ? targetCard._parsedEffects : parseMTGEffect(strategicRoleCardText(targetCard)));
+    const sourceRoles = precomputed?.sourceRoles || inferStrategicRoleProfile(sourceCard, sourceEffects, strategicRoleCardText(sourceCard));
+    const targetRoles = precomputed?.targetRoles || inferStrategicRoleProfile(targetCard, targetEffects, strategicRoleCardText(targetCard));
     let roleSim = 0;
     for (const a of sourceRoles) for (const b of targetRoles) {
         if (a.role === b.role) roleSim = Math.max(roleSim, Math.sqrt(a.score * b.score));
@@ -16048,6 +16065,13 @@ async function scoreCardBatch({
     // trustworthy than "what fraction of clauses had some action" (review Priority 9).
     const sourceFieldConfidence = calculateCardFieldConfidence(parsedSourceCard);
     const sourceDifficulty = calculateSourceDifficulty(sourceCard, parsedSourceCard, sourceParseConfidence);
+    // Synergy uses the full source Oracle text (not the optional partial text assembled from
+    // highlights). Its effects and own-text role are invariant across all candidates in this batch.
+    // Compute them once so a 3,000-card candidate pool does not reparse/reclassify the source 3,000
+    // times. The separate parsedSourceCard above remains unchanged for highlight-aware mechanics.
+    const sourceSynergyText = strategicRoleCardText(sourceCard);
+    const sourceSynergyEffects = getCachedParsedEffects(sourceCard, sourceSynergyText);
+    const sourceSynergyRoleProfile = inferStrategicRoleProfile(sourceCard, sourceSynergyEffects, sourceSynergyText);
 
     // Tallies how the embedding cache performed for this batch: how many lookups were already
     // cached, how many required an actual model call, and how many of those calls failed and
@@ -16084,12 +16108,23 @@ async function scoreCardBatch({
         const card = cards[i];
         const cardText = card.oracle_text || (card.card_faces ? card.card_faces.map(f => f.oracle_text).join(' ') : '');
 
-        // Pass activeFilters to prevent duplicate scoring of hard-filtered fields
-        card.synergyScore = calculateSynergyScore(sourceCard, card, activeFilters);
+        // Parse once before any scorer needs the candidate's effects. Previously synergy scoring
+        // called parseMTGEffect directly here and then mechanical scoring parsed the same Oracle text
+        // again through the cache. This was especially costly when thousands of candidates survived
+        // the hard filters.
+        const parsedCandidateCard = getCachedParsedEffects(card, cardText);
+        card._parsedEffects = parsedCandidateCard;
+
+        // Pass activeFilters to prevent duplicate scoring of hard-filtered fields. The source-side
+        // effects/role are invariant and the candidate effects are reused from the parse above.
+        card.synergyScore = calculateSynergyScore(sourceCard, card, activeFilters, {
+            sourceEffects: sourceSynergyEffects,
+            targetEffects: parsedCandidateCard,
+            sourceRoles: sourceSynergyRoleProfile
+        });
 
         // Exactness Score & Mechanical Similarity calculations remain independent
         card.exactnessScore = calculateCombinedFuzzyScore(sourceCard, card, exactnessText);
-        const parsedCandidateCard = getCachedParsedEffects(card, cardText);
         const candidateMechanicProfile = getCachedMechanicalProfile(card, cardText, parsedCandidateCard);
         parsedCandidateCard._mechanicProfile = candidateMechanicProfile;
         const candidateMechanicalGraph = getCachedMechanicalEffectGraph(card, cardText, parsedCandidateCard);
