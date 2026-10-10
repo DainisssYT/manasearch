@@ -1,6 +1,6 @@
-/* ManaSearch build 20261010-41 */
+/* ManaSearch build 20261010-42 */
 // ManaSearch deployment build marker. Bump this whenever app.js changes so cached-module issues are easy to diagnose.
-const MANASEARCH_APP_BUILD = '20261010-41';
+const MANASEARCH_APP_BUILD = '20261010-42';
 console.info(`[ManaSearch] app.js build ${MANASEARCH_APP_BUILD}`);
 
 // State Management
@@ -2606,6 +2606,14 @@ async function runBenchmarkSuite(searchFn) {
                 const st = d.embeddingDiagnostics.stageTimings;
                 if (st) {
                     console.log(`  Scoring breakdown: source/setup ${fmtMs(st.sourceSetupMs)} | structural ${fmtMs(st.structuralMs)} | cache calibration ${fmtMs(st.cacheCalibrationMs)} | candidate triage ${fmtMs(st.triageAndSelectionMs)} | embedding text prep ${fmtMs(st.embeddingTextPreparationMs)} | embedding inference/cache ${fmtMs(st.embeddingWarmCacheMs)} | semantic pass ${fmtMs(st.semanticPassMs)} | calibration ${fmtMs(st.calibrationMs)} | final blend ${fmtMs(st.finalBlendMs)} | other ${fmtMs(st.unattributedMs)} | scorer total ${fmtMs(st.totalMs)}`);
+                    if (st.structuralDetails) {
+                        const sd = st.structuralDetails;
+                        console.log(`  Structural detail: parse ${fmtMs(sd.parseMs)} | exactness ${fmtMs(sd.exactnessMs)} | candidate profiles/graph/synergy ${fmtMs(sd.profileGraphSynergyMs)} | mechanical/effect matching ${fmtMs(sd.mechanicalPairingMs)} | role/highlight/confidence ${fmtMs(sd.roleHighlightConfidenceMs)} | category ${fmtMs(sd.categoryMs)}`);
+                    }
+                    if (st.pairCache) {
+                        const pc = st.pairCache;
+                        console.log(`  Pair-cache reuse: effect pairs ${pc.directionalHits.toLocaleString()} reused / ${pc.directionalComputed.toLocaleString()} computed | graph-node pairs ${pc.graphNodeHits.toLocaleString()} reused / ${pc.graphNodeComputed.toLocaleString()} computed`);
+                    }
                 }
             }
 
@@ -6922,98 +6930,131 @@ function manaDiscountSimilarity(a, b) {
     return String(a ?? '').toLowerCase() === String(b ?? '').toLowerCase() ? 1 : 0.45;
 }
 
+// Pair-level directional similarity is pure for a parsed effect pair. The same pair was being
+// evaluated repeatedly by the base directional score, candidate-only-excess penalty, and effect
+// coverage matrix. Cache it by object identity so those scoring channels reuse exactly the same
+// calculation without changing a single score formula. WeakMap keeps this cache self-pruning.
+const directionalMechanicalPairScoreCache = new WeakMap();
+const mechanicalPairCacheStats = {
+    directionalComputed: 0, directionalHits: 0,
+    graphNodeComputed: 0, graphNodeHits: 0
+};
+
+function computeDirectionalMechanicalEffectPairSimilarity(effA, effB) {
+    if (!effA?.canonical || !effB?.canonical) return 0;
+const cfA = effA.canonical || {}, cfB = effB.canonical || {};
+const fnA = cfA.function || null, fnB = cfB.function || null;
+const outcomeA = cfA.outcome || null, outcomeB = cfB.outcome || null;
+const taxA = effA.action ? ACTION_TAXONOMY[effA.action] : null;
+const taxB = effB.action ? ACTION_TAXONOMY[effB.action] : null;
+
+const affinity = getFunctionAffinity(fnA, fnB);
+const sameAction = effA.action && effB.action && effA.action === effB.action;
+const sameOutcome = outcomeA && outcomeB && outcomeA === outcomeB;
+const sameFamily = taxA?.family && taxB?.family && taxA.family === taxB.family;
+const coreAlignment = Math.max(
+    affinity,
+    sameAction ? 0.96 : 0,
+    sameOutcome ? 0.74 : 0,
+    sameFamily ? 0.50 : 0
+);
+if (coreAlignment <= 0) return 0;
+
+const parts = [];
+parts.push(fieldSimilarity(14, cfA.object ?? effA.object, cfB.object ?? effB.object));
+parts.push(fieldSimilarity(10, cfA.target ?? effA.target, cfB.target ?? effB.target));
+if (fnA === 'cost_reduction' || fnB === 'cost_reduction') {
+    parts.push({ weight: 9, value: restrictionSimilarityForMechanical(effA.restriction, effB.restriction) });
+    parts.push(fieldSimilarity(6, effA.controller, effB.controller));
+    parts.push({ weight: 7, value: manaDiscountSimilarity(effA.amount ?? effA.quantity, effB.amount ?? effB.quantity) });
+    parts.push(fieldSimilarity(4, effA.effectMode, effB.effectMode));
+}
+parts.push(fieldSimilarity(9, effA.from, effB.from));
+parts.push(fieldSimilarity(9, effA.to, effB.to));
+parts.push(fieldSimilarity(7, effA.subtype, effB.subtype));
+parts.push(fieldSimilarity(6, effA.controller, effB.controller));
+if (typeof effA.quantity === 'number' || typeof effB.quantity === 'number') {
+    parts.push(fieldSimilarity(7, effA.quantity, effB.quantity,
+        (a,b) => Math.max(0, 1 - Math.abs(a-b) / Math.max(Math.abs(a), Math.abs(b), 1))));
+} else if (effA.quantity != null || effB.quantity != null) {
+    parts.push(fieldSimilarity(5, effA.quantity, effB.quantity));
+}
+
+if (fnA === 'mana_ability' && fnB === 'mana_ability') {
+    const ma = cfA.params || {}, mb = cfB.params || {};
+    const netSim = manaNumericSimilarity(ma.manaNetAmount, mb.manaNetAmount);
+    const outputSim = manaNumericSimilarity(ma.manaOutputAmount, mb.manaOutputAmount);
+    const colorSim = manaColorProfileSimilarity({
+        mode: ma.manaOutputMode,
+        colors: ma.manaOutputColors || []
+    }, {
+        mode: mb.manaOutputMode,
+        colors: mb.manaOutputColors || []
+    });
+    const activationSim = manaActivationSimilarity(ma.activationCost, mb.activationCost);
+    if (netSim != null) parts.push({ weight: 12, value: netSim });
+    if (outputSim != null) parts.push({ weight: 5, value: outputSim });
+    if (colorSim != null) parts.push({ weight: 8, value: colorSim });
+    if (activationSim != null) parts.push({ weight: 5, value: activationSim });
+}
+const tpA = effA.targetProfile || {}, tpB = effB.targetProfile || {};
+parts.push(fieldSimilarity(4, tpA.kind, tpB.kind));
+parts.push(fieldSimilarity(4, tpA.scope, tpB.scope));
+const qpA = effA.quantityProfile || {}, qpB = effB.quantityProfile || {};
+parts.push(fieldSimilarity(4, qpA.relation, qpB.relation));
+parts.push(fieldSimilarity(2, qpA.bound, qpB.bound));
+const trA = effA.triggerProfile || {}, trB = effB.triggerProfile || {};
+parts.push(fieldSimilarity(4, trA.event, trB.event));
+parts.push(fieldSimilarity(3, trA.window, trB.window));
+parts.push(fieldSimilarity(3, effA.durationProfile, effB.durationProfile));
+parts.push(fieldSimilarity(4, effA.effectMode, effB.effectMode));
+parts.push(fieldSimilarity(4, effA.condition, effB.condition));
+parts.push(fieldSimilarity(3, effA.isStatic, effB.isStatic));
+if (effA.action === 'stat_buff' || effB.action === 'stat_buff') {
+    parts.push(fieldSimilarity(4, effA.powerToughness, effB.powerToughness));
+}
+if (effA.action === 'create' || effB.action === 'create') {
+    parts.push(fieldSimilarity(5, effA.stats, effB.stats));
+}
+
+const structuralEvidence = normalizedFieldScore(parts);
+// Core function alignment is multiplicative: structural agreement can refine a real
+// function match, but an action-family coincidence can never create a near-perfect score
+// on its own. When no structural field is available, retain only a conservative floor.
+const fieldFactor = parts.some(Boolean) ? (0.52 + 0.48 * structuralEvidence) : 0.52;
+let score = coreAlignment * fieldFactor;
+score *= (1 - Math.min(0.45, scoreContradictions(effA, effB) / 100));
+    return score;
+}
+
+function getDirectionalMechanicalEffectPairSimilarity(effA, effB) {
+    if (!effA || typeof effA !== 'object' || !effB || typeof effB !== 'object') {
+        return computeDirectionalMechanicalEffectPairSimilarity(effA, effB);
+    }
+    let row = directionalMechanicalPairScoreCache.get(effA);
+    if (row?.has(effB)) {
+        mechanicalPairCacheStats.directionalHits++;
+        return row.get(effB);
+    }
+    if (!row) {
+        row = new WeakMap();
+        directionalMechanicalPairScoreCache.set(effA, row);
+    }
+    mechanicalPairCacheStats.directionalComputed++;
+    const score = computeDirectionalMechanicalEffectPairSimilarity(effA, effB);
+    row.set(effB, score);
+    return score;
+}
+
 function directionalMechanicalSimilarity(parsedA, parsedB) {
     if (!parsedA || !parsedB || parsedA.length === 0 || parsedB.length === 0) return 0;
     let weightedSource = 0, sourceWeight = 0;
-
     for (const effA of parsedA) {
         if (!effA?.canonical) continue;
         let best = 0;
         for (const effB of parsedB) {
             if (!effB?.canonical) continue;
-            const cfA = effA.canonical || {}, cfB = effB.canonical || {};
-            const fnA = cfA.function || null, fnB = cfB.function || null;
-            const outcomeA = cfA.outcome || null, outcomeB = cfB.outcome || null;
-            const taxA = effA.action ? ACTION_TAXONOMY[effA.action] : null;
-            const taxB = effB.action ? ACTION_TAXONOMY[effB.action] : null;
-
-            const affinity = getFunctionAffinity(fnA, fnB);
-            const sameAction = effA.action && effB.action && effA.action === effB.action;
-            const sameOutcome = outcomeA && outcomeB && outcomeA === outcomeB;
-            const sameFamily = taxA?.family && taxB?.family && taxA.family === taxB.family;
-            const coreAlignment = Math.max(
-                affinity,
-                sameAction ? 0.96 : 0,
-                sameOutcome ? 0.74 : 0,
-                sameFamily ? 0.50 : 0
-            );
-            if (coreAlignment <= 0) continue;
-
-            const parts = [];
-            parts.push(fieldSimilarity(14, cfA.object ?? effA.object, cfB.object ?? effB.object));
-            parts.push(fieldSimilarity(10, cfA.target ?? effA.target, cfB.target ?? effB.target));
-            if (fnA === 'cost_reduction' || fnB === 'cost_reduction') {
-                parts.push({ weight: 9, value: restrictionSimilarityForMechanical(effA.restriction, effB.restriction) });
-                parts.push(fieldSimilarity(6, effA.controller, effB.controller));
-                parts.push({ weight: 7, value: manaDiscountSimilarity(effA.amount ?? effA.quantity, effB.amount ?? effB.quantity) });
-                parts.push(fieldSimilarity(4, effA.effectMode, effB.effectMode));
-            }
-            parts.push(fieldSimilarity(9, effA.from, effB.from));
-            parts.push(fieldSimilarity(9, effA.to, effB.to));
-            parts.push(fieldSimilarity(7, effA.subtype, effB.subtype));
-            parts.push(fieldSimilarity(6, effA.controller, effB.controller));
-            if (typeof effA.quantity === 'number' || typeof effB.quantity === 'number') {
-                parts.push(fieldSimilarity(7, effA.quantity, effB.quantity,
-                    (a,b) => Math.max(0, 1 - Math.abs(a-b) / Math.max(Math.abs(a), Math.abs(b), 1))));
-            } else if (effA.quantity != null || effB.quantity != null) {
-                parts.push(fieldSimilarity(5, effA.quantity, effB.quantity));
-            }
-
-            if (fnA === 'mana_ability' && fnB === 'mana_ability') {
-                const ma = cfA.params || {}, mb = cfB.params || {};
-                const netSim = manaNumericSimilarity(ma.manaNetAmount, mb.manaNetAmount);
-                const outputSim = manaNumericSimilarity(ma.manaOutputAmount, mb.manaOutputAmount);
-                const colorSim = manaColorProfileSimilarity({
-                    mode: ma.manaOutputMode,
-                    colors: ma.manaOutputColors || []
-                }, {
-                    mode: mb.manaOutputMode,
-                    colors: mb.manaOutputColors || []
-                });
-                const activationSim = manaActivationSimilarity(ma.activationCost, mb.activationCost);
-                if (netSim != null) parts.push({ weight: 12, value: netSim });
-                if (outputSim != null) parts.push({ weight: 5, value: outputSim });
-                if (colorSim != null) parts.push({ weight: 8, value: colorSim });
-                if (activationSim != null) parts.push({ weight: 5, value: activationSim });
-            }
-            const tpA = effA.targetProfile || {}, tpB = effB.targetProfile || {};
-            parts.push(fieldSimilarity(4, tpA.kind, tpB.kind));
-            parts.push(fieldSimilarity(4, tpA.scope, tpB.scope));
-            const qpA = effA.quantityProfile || {}, qpB = effB.quantityProfile || {};
-            parts.push(fieldSimilarity(4, qpA.relation, qpB.relation));
-            parts.push(fieldSimilarity(2, qpA.bound, qpB.bound));
-            const trA = effA.triggerProfile || {}, trB = effB.triggerProfile || {};
-            parts.push(fieldSimilarity(4, trA.event, trB.event));
-            parts.push(fieldSimilarity(3, trA.window, trB.window));
-            parts.push(fieldSimilarity(3, effA.durationProfile, effB.durationProfile));
-            parts.push(fieldSimilarity(4, effA.effectMode, effB.effectMode));
-            parts.push(fieldSimilarity(4, effA.condition, effB.condition));
-            parts.push(fieldSimilarity(3, effA.isStatic, effB.isStatic));
-            if (effA.action === 'stat_buff' || effB.action === 'stat_buff') {
-                parts.push(fieldSimilarity(4, effA.powerToughness, effB.powerToughness));
-            }
-            if (effA.action === 'create' || effB.action === 'create') {
-                parts.push(fieldSimilarity(5, effA.stats, effB.stats));
-            }
-
-            const structuralEvidence = normalizedFieldScore(parts);
-            // Core function alignment is multiplicative: structural agreement can refine a real
-            // function match, but an action-family coincidence can never create a near-perfect score
-            // on its own. When no structural field is available, retain only a conservative floor.
-            const fieldFactor = parts.some(Boolean) ? (0.52 + 0.48 * structuralEvidence) : 0.52;
-            let score = coreAlignment * fieldFactor;
-            score *= (1 - Math.min(0.45, scoreContradictions(effA, effB) / 100));
-            best = Math.max(best, score);
+            best = Math.max(best, getDirectionalMechanicalEffectPairSimilarity(effA, effB));
         }
         const importance = effA.importance ?? 0.05;
         weightedSource += best * Math.max(0.05, importance);
@@ -9753,7 +9794,31 @@ function mechanicalNodeContradiction(a, b) {
     return Math.min(0.55, penalty);
 }
 
+// Graph similarity intentionally examines the same effect-node pairs in unordered coverage,
+// sequence alignment, and contradiction analysis. Cache the pure pair result so each pair is fully
+// compared once; the returned detail is read-only in all callers. The cache also benefits later
+// searches that reuse the same precomputed card graphs.
+const mechanicalNodePairComparisonCache = new WeakMap();
 function compareMechanicalEffectNodes(a, b) {
+    if (!a || typeof a !== 'object' || !b || typeof b !== 'object') {
+        return computeMechanicalEffectNodeComparison(a, b);
+    }
+    let row = mechanicalNodePairComparisonCache.get(a);
+    if (row?.has(b)) {
+        mechanicalPairCacheStats.graphNodeHits++;
+        return row.get(b);
+    }
+    if (!row) {
+        row = new WeakMap();
+        mechanicalNodePairComparisonCache.set(a, row);
+    }
+    mechanicalPairCacheStats.graphNodeComputed++;
+    const detail = computeMechanicalEffectNodeComparison(a, b);
+    row.set(b, detail);
+    return detail;
+}
+
+function computeMechanicalEffectNodeComparison(a, b) {
     if (!a || !b) return { score: 0, contradiction: 0, breakdown: {} };
 
     const functionExact = a.function && b.function && a.function === b.function;
@@ -16032,6 +16097,7 @@ async function scoreCardBatch({
         semanticPassMs: 0, calibrationMs: 0, finalBlendMs: 0, totalMs: 0, unattributedMs: 0
     };
     const __scoreNow = () => (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+    const __pairCacheStatsAtStart = { ...mechanicalPairCacheStats };
     const rawWM = weights.mechanical ?? 45;
     const rawWS = weights.synergy ?? 10;
     const rawWC = weights.context ?? 20;
@@ -16137,11 +16203,16 @@ async function scoreCardBatch({
 
     __scoreStageTimings.sourceSetupMs = __scoreNow() - __scoreBatchStartedAt;
     const __structuralPassStartedAt = __scoreNow();
+    const __structuralDetailTimings = {
+        parseMs: 0, exactnessMs: 0, profileGraphSynergyMs: 0,
+        mechanicalPairingMs: 0, roleHighlightConfidenceMs: 0, categoryMs: 0
+    };
     let structuralYieldStartedAt = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
     for (let i = 0; i < cards.length; i++) {
         throwIfSearchCancelled(isCancelled);
         const card = cards[i];
-        const cardText = card.oracle_text || (card.card_faces ? card.card_faces.map(f => f.oracle_text).join(' ') : '');
+        const cardText = card.oracle_text || (card.card_faces ? card.card_faces.map(f => f.oracle_text || '').join(' ') : '');
+        let __detailStageStartedAt = __scoreNow();
 
         // Parse once before any scorer needs the candidate's effects. Previously synergy scoring
         // called parseMTGEffect directly here and then mechanical scoring parsed the same Oracle text
@@ -16149,9 +16220,13 @@ async function scoreCardBatch({
         // the hard filters.
         const parsedCandidateCard = getCachedParsedEffects(card, cardText);
         card._parsedEffects = parsedCandidateCard;
+        __structuralDetailTimings.parseMs += __scoreNow() - __detailStageStartedAt;
+        __detailStageStartedAt = __scoreNow();
 
         // Exactness Score & Mechanical Similarity calculations remain independent
         card.exactnessScore = calculateCombinedFuzzyScore(sourceCard, card, exactnessText);
+        __structuralDetailTimings.exactnessMs += __scoreNow() - __detailStageStartedAt;
+        __detailStageStartedAt = __scoreNow();
         const candidateMechanicProfile = getCachedMechanicalProfile(card, cardText, parsedCandidateCard);
         parsedCandidateCard._mechanicProfile = candidateMechanicProfile;
         const candidateMechanicalGraph = getCachedMechanicalEffectGraph(card, cardText, parsedCandidateCard);
@@ -16170,6 +16245,8 @@ async function scoreCardBatch({
             sourceRoles: sourceSynergyRoleProfile,
             targetRoles: categoryTargetRoleProfile
         });
+        __structuralDetailTimings.profileGraphSynergyMs += __scoreNow() - __detailStageStartedAt;
+        __detailStageStartedAt = __scoreNow();
 
         // Related-card search can have several legitimate mechanical reference cards. Score the
         // candidate against each reference and keep the strongest coherent mechanical match. This
@@ -16249,6 +16326,8 @@ async function scoreCardBatch({
             mechanicalDetail: calculateMechanicalSimilarityDetailed(parsedSourceCard, parsedCandidateCard, sourceMechanicProfile, candidateMechanicProfile),
             graphDetail: calculateMechanicalGraphSimilarity(sourceMechanicalGraph, candidateMechanicalGraph)
         };
+        __structuralDetailTimings.mechanicalPairingMs += __scoreNow() - __detailStageStartedAt;
+        __detailStageStartedAt = __scoreNow();
 
         card.mechanicalScore = bestMechanical.mechanical;
         card.mechanicalEvidence = {
@@ -16291,12 +16370,15 @@ async function scoreCardBatch({
             card.exactnessScore = Math.min(1.0, Math.max(card.exactnessScore, ((nameScore * 0.05) + (textScore * 0.95)) + 0.40));
         }
 
+        __structuralDetailTimings.roleHighlightConfidenceMs += __scoreNow() - __detailStageStartedAt;
+        __detailStageStartedAt = __scoreNow();
         card.categoryScore = calculateCategoryScore(card, tags, sourceCard, parsedSourceCard, {
             sourceProfile: categorySourceProfile,
             targetProfile: categoryTargetProfile,
-            sourceRole: categorySourceRoleProfile,
+            sourceRole: categoryTargetRoleProfile,
             targetRole: categoryTargetRoleProfile
         });
+        __structuralDetailTimings.categoryMs += __scoreNow() - __detailStageStartedAt;
 
         // Yield after roughly an 8 ms slice. The time budget adapts to card-text complexity and
         // lets input, paints, and modal interaction run during long searches without changing score math.
@@ -16308,6 +16390,13 @@ async function scoreCardBatch({
     }
 
     __scoreStageTimings.structuralMs = __scoreNow() - __structuralPassStartedAt;
+    __scoreStageTimings.structuralDetails = { ...__structuralDetailTimings };
+    __scoreStageTimings.pairCache = {
+        directionalComputed: mechanicalPairCacheStats.directionalComputed - __pairCacheStatsAtStart.directionalComputed,
+        directionalHits: mechanicalPairCacheStats.directionalHits - __pairCacheStatsAtStart.directionalHits,
+        graphNodeComputed: mechanicalPairCacheStats.graphNodeComputed - __pairCacheStatsAtStart.graphNodeComputed,
+        graphNodeHits: mechanicalPairCacheStats.graphNodeHits - __pairCacheStatsAtStart.graphNodeHits
+    };
     const __cacheCalibrationStartedAt = __scoreNow();
     if (embeddingCache.size >= 8) calibrateSemanticCosineFromCache();
     __scoreStageTimings.cacheCalibrationMs = __scoreNow() - __cacheCalibrationStartedAt;
