@@ -1,6 +1,6 @@
-/* ManaSearch build 20261010-40 */
+/* ManaSearch build 20261010-41 */
 // ManaSearch deployment build marker. Bump this whenever app.js changes so cached-module issues are easy to diagnose.
-const MANASEARCH_APP_BUILD = '20261010-40';
+const MANASEARCH_APP_BUILD = '20261010-41';
 console.info(`[ManaSearch] app.js build ${MANASEARCH_APP_BUILD}`);
 
 // State Management
@@ -218,9 +218,12 @@ function isManaUiInteractionRecentlyActive(windowMs = MANASEARCH_UI_PRIORITY_WIN
 }
 
 function isManaUiInteractionPriorityActive() {
-    if (typeof document === 'undefined') return false;
-    if (isManaEditableControl(document.activeElement)) return true;
-    return isManaUiInteractionRecentlyActive();
+    // A focused field is not the same as an actively used field. Keeping UI-priority slices
+    // forever merely because a caret remains in a search/preference input can make thousands of
+    // scoring iterations spend more time yielding than calculating. Recent focus/typing/pointer
+    // activity still gets priority; once the interaction settles, idle scoring returns to the
+    // normal 8 ms cooperative slices while continuing to yield to the browser between slices.
+    return isManaUserActivelyEditing() || isManaUiInteractionRecentlyActive();
 }
 
 function getManaSearchSliceBudgetMs() {
@@ -2597,6 +2600,13 @@ async function runBenchmarkSuite(searchFn) {
             if (d.embeddingDiagnostics) {
                 const { cacheHits, computed, failed, skippedForBudget } = d.embeddingDiagnostics;
                 console.log(`  Embedding cache: ${cacheHits} cache hit(s), ${computed} computed, ${failed} failed (fell back to lexical-only)${skippedForBudget ? `, ${skippedForBudget} skipped (semantic-scoring budget, fell back to lexical-only)` : ''}`);
+                if (Number.isFinite(d.embeddingDiagnostics.totalCandidates) && Number.isFinite(d.embeddingDiagnostics.semanticEligibleCount)) {
+                    console.log(`  Semantic-scoring budget: ${d.embeddingDiagnostics.semanticEligibleCount} of ${d.embeddingDiagnostics.totalCandidates} candidates`);
+                }
+                const st = d.embeddingDiagnostics.stageTimings;
+                if (st) {
+                    console.log(`  Scoring breakdown: source/setup ${fmtMs(st.sourceSetupMs)} | structural ${fmtMs(st.structuralMs)} | cache calibration ${fmtMs(st.cacheCalibrationMs)} | candidate triage ${fmtMs(st.triageAndSelectionMs)} | embedding text prep ${fmtMs(st.embeddingTextPreparationMs)} | embedding inference/cache ${fmtMs(st.embeddingWarmCacheMs)} | semantic pass ${fmtMs(st.semanticPassMs)} | calibration ${fmtMs(st.calibrationMs)} | final blend ${fmtMs(st.finalBlendMs)} | other ${fmtMs(st.unattributedMs)} | scorer total ${fmtMs(st.totalMs)}`);
+                }
             }
 
             // Coverage warnings: flag any stream that hit its page cap while a large fraction of
@@ -10490,7 +10500,7 @@ function runManaSearchBenchmarkHighlightSuite({ log = true } = {}) {
 try { window.runManaSearchBenchmarkHighlightSuite = runManaSearchBenchmarkHighlightSuite; } catch (_) {}
 
 // Cache tag extraction to prevent running ~70 regex operations repeatedly per card
-function calculateCategoryScore(targetCard, tags, sourceCard = null, sourceEffects = null) {
+function calculateCategoryScore(targetCard, tags, sourceCard = null, sourceEffects = null, precomputed = null) {
     if (!targetCard) return 0;
     const sourceTags = new Set((tags || []).map(t => normalizeMechanicToken(t)).filter(Boolean));
     if (!sourceTags.size && !sourceCard) return 0;
@@ -10502,12 +10512,15 @@ function calculateCategoryScore(targetCard, tags, sourceCard = null, sourceEffec
     const targetText = strategicRoleCardText(targetCard);
     const sourceParsed = Array.isArray(sourceEffects) ? sourceEffects : (sourceCard?._parsedEffects || (sourceText ? parseMTGEffect(sourceText) : []));
     const targetParsed = targetCard._parsedEffects || parseMTGEffect(targetText);
-    const sourceProfile = buildUniversalMechanicProfile(sourceCard, sourceText, sourceParsed);
-    const targetProfile = buildUniversalMechanicProfile(targetCard, targetText, targetParsed);
+    // scoreCardBatch can supply these exact profiles so Category doesn't rebuild the same source
+    // profile for every candidate, nor rebuild a candidate profile/role already needed by Synergy.
+    // Other callers omit this argument and retain the original calculation path.
+    const sourceProfile = precomputed?.sourceProfile || buildUniversalMechanicProfile(sourceCard, sourceText, sourceParsed);
+    const targetProfile = precomputed?.targetProfile || buildUniversalMechanicProfile(targetCard, targetText, targetParsed);
     const universalScore = sourceCard ? calculateUniversalMechanicSimilarity(sourceProfile, targetProfile).score : 0;
 
-    const sourceRole = sourceCard ? inferStrategicRoleProfile(sourceCard, sourceParsed, sourceText) : [];
-    const targetRole = inferStrategicRoleProfile(targetCard, targetParsed, targetText);
+    const sourceRole = sourceCard ? (precomputed?.sourceRole || inferStrategicRoleProfile(sourceCard, sourceParsed, sourceText)) : [];
+    const targetRole = precomputed?.targetRole || inferStrategicRoleProfile(targetCard, targetParsed, targetText);
     let roleScore = 0;
     for (const a of sourceRole) for (const b of targetRole) {
         if (a.role === b.role) roleScore = Math.max(roleScore, Math.sqrt(a.score * b.score));
@@ -13742,6 +13755,12 @@ function lexicalTokenCoverage(sourceText, candidateText) {
     return pool.filter(t => candidateSet.has(t)).length / Math.max(1, pool.length);
 }
 function calculateCombinedFuzzyScore(sourceCard, targetCard, targetTextForScoring) {
+    // Variable-only benchmark highlights deliberately pass no literal text constraint. Avoid
+    // tokenizing the candidate's entire Oracle text just to rediscover that an empty query has no
+    // lexical coverage. This returns the exact same 2%-weighted name score as the general path.
+    if (!String(targetTextForScoring || '').trim()) {
+        return Math.max(0, Math.min(1, calculateFuzzySimilarity(sourceCard?.name, targetCard?.name) * 0.02));
+    }
     const targetOracle = targetCard.oracle_text || (targetCard.card_faces ? targetCard.card_faces.map(f => f.oracle_text).join(' ') : '');
     const textScore = calculateFuzzyTextMatch(targetTextForScoring, targetOracle);
     const lexicalCoverage = lexicalTokenCoverage(targetTextForScoring, targetOracle);
@@ -16006,6 +16025,13 @@ async function scoreCardBatch({
     sniperIds = new Set(),
     activeFilters = {}
 }) {
+    const __scoreBatchStartedAt = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+    const __scoreStageTimings = {
+        sourceSetupMs: 0, structuralMs: 0, cacheCalibrationMs: 0, triageAndSelectionMs: 0,
+        embeddingTextPreparationMs: 0, embeddingWarmCacheMs: 0,
+        semanticPassMs: 0, calibrationMs: 0, finalBlendMs: 0, totalMs: 0, unattributedMs: 0
+    };
+    const __scoreNow = () => (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
     const rawWM = weights.mechanical ?? 45;
     const rawWS = weights.synergy ?? 10;
     const rawWC = weights.context ?? 20;
@@ -16073,6 +16099,13 @@ async function scoreCardBatch({
     const sourceSynergyEffects = getCachedParsedEffects(sourceCard, sourceSynergyText);
     const sourceSynergyRoleProfile = inferStrategicRoleProfile(sourceCard, sourceSynergyEffects, sourceSynergyText);
 
+    // Category previously rebuilt these source-side profiles for every candidate using full source
+    // Oracle text paired with parsedSourceCard (which can be highlight-aware). Compute them once
+    // with those same inputs; don't substitute the narrower highlight-aware profile above.
+    const categorySourceText = strategicRoleCardText(sourceCard);
+    const categorySourceProfile = buildUniversalMechanicProfile(sourceCard, categorySourceText, parsedSourceCard);
+    const categorySourceRoleProfile = inferStrategicRoleProfile(sourceCard, parsedSourceCard, categorySourceText);
+
     // Tallies how the embedding cache performed for this batch: how many lookups were already
     // cached, how many required an actual model call, and how many of those calls failed and
     // silently fell back to lexical-only scoring for that card. Everywhere else in this file is
@@ -16102,6 +16135,8 @@ async function scoreCardBatch({
         ? buildMechanicalConsensusGraph(referenceMechanicalGraphs)
         : null;
 
+    __scoreStageTimings.sourceSetupMs = __scoreNow() - __scoreBatchStartedAt;
+    const __structuralPassStartedAt = __scoreNow();
     let structuralYieldStartedAt = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
     for (let i = 0; i < cards.length; i++) {
         throwIfSearchCancelled(isCancelled);
@@ -16115,20 +16150,26 @@ async function scoreCardBatch({
         const parsedCandidateCard = getCachedParsedEffects(card, cardText);
         card._parsedEffects = parsedCandidateCard;
 
-        // Pass activeFilters to prevent duplicate scoring of hard-filtered fields. The source-side
-        // effects/role are invariant and the candidate effects are reused from the parse above.
-        card.synergyScore = calculateSynergyScore(sourceCard, card, activeFilters, {
-            sourceEffects: sourceSynergyEffects,
-            targetEffects: parsedCandidateCard,
-            sourceRoles: sourceSynergyRoleProfile
-        });
-
         // Exactness Score & Mechanical Similarity calculations remain independent
         card.exactnessScore = calculateCombinedFuzzyScore(sourceCard, card, exactnessText);
         const candidateMechanicProfile = getCachedMechanicalProfile(card, cardText, parsedCandidateCard);
         parsedCandidateCard._mechanicProfile = candidateMechanicProfile;
         const candidateMechanicalGraph = getCachedMechanicalEffectGraph(card, cardText, parsedCandidateCard);
         parsedCandidateCard._mechanicalGraph = candidateMechanicalGraph;
+
+        // Synergy and Category both classify the candidate's own strategic role. Their historical
+        // inputs are the same full card text + this parsed card, so compute it once and reuse it.
+        const categoryTargetText = strategicRoleCardText(card);
+        const categoryTargetProfile = categoryTargetText === cardText
+            ? candidateMechanicProfile
+            : getCachedMechanicalProfile(card, categoryTargetText, parsedCandidateCard);
+        const categoryTargetRoleProfile = inferStrategicRoleProfile(card, parsedCandidateCard, categoryTargetText);
+        card.synergyScore = calculateSynergyScore(sourceCard, card, activeFilters, {
+            sourceEffects: sourceSynergyEffects,
+            targetEffects: parsedCandidateCard,
+            sourceRoles: sourceSynergyRoleProfile,
+            targetRoles: categoryTargetRoleProfile
+        });
 
         // Related-card search can have several legitimate mechanical reference cards. Score the
         // candidate against each reference and keep the strongest coherent mechanical match. This
@@ -16250,7 +16291,12 @@ async function scoreCardBatch({
             card.exactnessScore = Math.min(1.0, Math.max(card.exactnessScore, ((nameScore * 0.05) + (textScore * 0.95)) + 0.40));
         }
 
-        card.categoryScore = calculateCategoryScore(card, tags, sourceCard, parsedSourceCard);
+        card.categoryScore = calculateCategoryScore(card, tags, sourceCard, parsedSourceCard, {
+            sourceProfile: categorySourceProfile,
+            targetProfile: categoryTargetProfile,
+            sourceRole: categorySourceRoleProfile,
+            targetRole: categoryTargetRoleProfile
+        });
 
         // Yield after roughly an 8 ms slice. The time budget adapts to card-text complexity and
         // lets input, paints, and modal interaction run during long searches without changing score math.
@@ -16261,8 +16307,12 @@ async function scoreCardBatch({
         }
     }
 
+    __scoreStageTimings.structuralMs = __scoreNow() - __structuralPassStartedAt;
+    const __cacheCalibrationStartedAt = __scoreNow();
     if (embeddingCache.size >= 8) calibrateSemanticCosineFromCache();
-    const oracleTargetVector = targetVectors?.oracle || targetVector || null;
+    __scoreStageTimings.cacheCalibrationMs = __scoreNow() - __cacheCalibrationStartedAt;
+    const __triageSelectionStartedAt = __scoreNow();
+    const oracleTargetVector = targetVector || targetVectors?.oracle || null;
     const semanticRetrievalTargetVector = targetVectors?.semanticRetrieval || oracleTargetVector;
     const hasSemanticEngine = Boolean(extractor && extractor.type !== 'fallback' && oracleTargetVector);
 
@@ -16404,6 +16454,9 @@ async function scoreCardBatch({
         embeddingDiagnostics.skippedForBudget = cards.length - semanticEligible.length;
     }
     const semanticEligibleSet = new Set(semanticEligible);
+    embeddingDiagnostics.totalCandidates = cards.length;
+    embeddingDiagnostics.semanticEligibleCount = semanticEligible.length;
+    __scoreStageTimings.triageAndSelectionMs = __scoreNow() - __triageSelectionStartedAt;
 
     // Pre-resolve every embedding this batch will need, in small concurrent chunks, before
     // scoring a single card. Previously each candidate's oracle-text embedding and function-text
@@ -16414,6 +16467,7 @@ async function scoreCardBatch({
     // and means the scoring pass below never re-embeds text it has already seen this session
     // (review: parallel embedding batch / embedding cache).
     if (hasSemanticEngine || sourceFunctionVector) {
+        const __embeddingTextPrepStartedAt = __scoreNow();
         const textsToEmbed = [];
         for (const card of semanticEligible) {
             if (card.contextScore !== undefined) continue;
@@ -16424,9 +16478,13 @@ async function scoreCardBatch({
                 if (candidateFunctionText) textsToEmbed.push(candidateFunctionText);
             }
         }
+        __scoreStageTimings.embeddingTextPreparationMs = __scoreNow() - __embeddingTextPrepStartedAt;
+        const __embeddingWarmStartedAt = __scoreNow();
         await warmEmbeddingCache(textsToEmbed, extractor, embeddingDiagnostics);
+        __scoreStageTimings.embeddingWarmCacheMs = __scoreNow() - __embeddingWarmStartedAt;
     }
 
+    const __semanticPassStartedAt = __scoreNow();
     let semanticYieldStartedAt = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
     for (let i = 0; i < cards.length; i++) {
         const card = cards[i];
@@ -16489,7 +16547,10 @@ async function scoreCardBatch({
         }
     }
 
+    __scoreStageTimings.semanticPassMs = __scoreNow() - __semanticPassStartedAt;
+    const __calibrationStartedAt = __scoreNow();
     const semanticCalibration = await calibrateBatchSemanticScores(cards);
+    __scoreStageTimings.calibrationMs = __scoreNow() - __calibrationStartedAt;
 
     // V20 ranking: collapse the model to three intentionally different channels.
     //   1) structural parse: explicit rules mechanics + earned fields only
@@ -16523,6 +16584,7 @@ async function scoreCardBatch({
     const semanticW = rawChannels[1] / channelDenom;
     const functionRoleW = rawChannels[2] / channelDenom;
 
+    const __finalBlendStartedAt = __scoreNow();
     let finalRankYieldStartedAt = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
     for (let i = 0; i < cards.length; i++) {
         const card = cards[i];
@@ -16652,6 +16714,14 @@ async function scoreCardBatch({
         }
     }
 
+    __scoreStageTimings.finalBlendMs = __scoreNow() - __finalBlendStartedAt;
+    __scoreStageTimings.totalMs = __scoreNow() - __scoreBatchStartedAt;
+    const __timedStagesMs = __scoreStageTimings.sourceSetupMs + __scoreStageTimings.structuralMs +
+        __scoreStageTimings.cacheCalibrationMs + __scoreStageTimings.triageAndSelectionMs +
+        __scoreStageTimings.embeddingTextPreparationMs + __scoreStageTimings.embeddingWarmCacheMs +
+        __scoreStageTimings.semanticPassMs + __scoreStageTimings.calibrationMs + __scoreStageTimings.finalBlendMs;
+    __scoreStageTimings.unattributedMs = Math.max(0, __scoreStageTimings.totalMs - __timedStagesMs);
+    embeddingDiagnostics.stageTimings = { ...__scoreStageTimings };
     return { embeddingDiagnostics, semanticCalibration };
 }
 async function executeRelatedCardSearch() {
