@@ -1,6 +1,6 @@
-/* ManaSearch build 20261010-34 */
+/* ManaSearch build 20261010-35 */
 // ManaSearch deployment build marker. Bump this whenever app.js changes so cached-module issues are easy to diagnose.
-const MANASEARCH_APP_BUILD = '20261010-34';
+const MANASEARCH_APP_BUILD = '20261010-35';
 console.info(`[ManaSearch] app.js build ${MANASEARCH_APP_BUILD}`);
 
 // State Management
@@ -19251,9 +19251,85 @@ async function copyCardNameToClipboard(cardName, button = null) {
 // Result-card face state is kept separately from the Scryfall objects so re-ranking or
 // progressive re-renders do not reset a user's front/back selection on double-faced cards.
 const resultCardFaceState = new Map();
+const resultCardFlipInProgress = new WeakSet();
 
 function getResultCardStateKey(card) {
     return String(card?.id || card?.oracle_id || card?.name || '').toLowerCase();
+}
+
+function getResultCardFaceImages(card) {
+    return Array.isArray(card?.card_faces)
+        ? card.card_faces.filter(face => face?.image_uris?.normal)
+        : [];
+}
+
+// Flip the artwork directly on the visible card. This is intentionally attached to each button
+// as well as supported by the grid's delegated controls, so a recycled result grid can never leave
+// the flip control inert because an old delegation flag survived a repaint.
+async function flipResultCardFace(cardElement, flipButton) {
+    if (!cardElement || !flipButton || resultCardFlipInProgress.has(cardElement)) return;
+    const card = visibleResultCardData.get(cardElement.dataset.cardKey) || cardElement._resultCardData;
+    const faces = getResultCardFaceImages(card);
+    if (!card || faces.length < 2) return;
+
+    const img = cardElement.querySelector('.card-art-wrap img');
+    if (!img) return;
+    const stateKey = getResultCardStateKey(card);
+    const currentIndex = Math.max(0, Math.min(faces.length - 1, Number(resultCardFaceState.get(stateKey)) || 0));
+    const nextIndex = (currentIndex + 1) % faces.length;
+    const nextFace = faces[nextIndex];
+    const nextSrc = nextFace.image_uris.normal;
+    const reducedMotion = typeof window.matchMedia === 'function'
+        && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    const canAnimate = typeof img.animate === 'function' && !reducedMotion;
+    let closeAnimation = null;
+    let openAnimation = null;
+
+    resultCardFlipInProgress.add(cardElement);
+    cardElement.dataset.isFlipping = 'true';
+    cardElement.classList.add('is-card-flipping');
+    flipButton.disabled = true;
+    flipButton.setAttribute('aria-busy', 'true');
+    try {
+        // Rotate the current face nearly edge-on, swap the artwork, then rotate the new face in.
+        // Updating the visible image directly avoids it being delayed by the lazy-image queue.
+        if (canAnimate) {
+            closeAnimation = img.animate([
+                { transform: 'perspective(900px) rotateY(0deg) scale(1)', filter: 'brightness(1)' },
+                { transform: 'perspective(900px) rotateY(88deg) scale(.97)', filter: 'brightness(.75)' }
+            ], { duration: 170, easing: 'ease-in', fill: 'forwards' });
+            try { await closeAnimation.finished; } catch (_) {}
+        }
+
+        resultCardFaceState.set(stateKey, nextIndex);
+        resultImageLoadQueue.delete(img);
+        img.dataset.cardImageSrc = nextSrc;
+        img.dataset.cardImageLoaded = nextSrc;
+        img.alt = nextFace.name || card.name;
+        img.src = nextSrc;
+        flipButton.title = `Flip to ${faces[(nextIndex + 1) % faces.length].name || 'other face'}`;
+        flipButton.setAttribute('aria-label', `Flip ${card.name} to ${faces[(nextIndex + 1) % faces.length].name || 'the other face'}`);
+
+        if (canAnimate) {
+            openAnimation = img.animate([
+                { transform: 'perspective(900px) rotateY(-88deg) scale(.97)', filter: 'brightness(.75)' },
+                { transform: 'perspective(900px) rotateY(0deg) scale(1)', filter: 'brightness(1)' }
+            ], { duration: 190, easing: 'ease-out', fill: 'forwards' });
+            try { await openAnimation.finished; } catch (_) {}
+        }
+    } catch (error) {
+        console.warn('Could not flip result card face:', error?.message || error);
+    } finally {
+        // WAAPI's filled animation holds its last frame. Cancel both effects after the new face
+        // has come to rest so they do not interfere with later image or layout updates.
+        try { openAnimation?.cancel(); } catch (_) {}
+        try { closeAnimation?.cancel(); } catch (_) {}
+        resultCardFlipInProgress.delete(cardElement);
+        delete cardElement.dataset.isFlipping;
+        cardElement.classList.remove('is-card-flipping');
+        flipButton.disabled = false;
+        flipButton.removeAttribute('aria-busy');
+    }
 }
 
 function getRenderableResultCards(cards) {
@@ -19692,13 +19768,14 @@ function renderResults(cards, internalOptions = {}) {
             'Related Consensus': scoreValue(card.relatedConsensusScore)
         };
 
+        cardElement._resultCardData = card;
         cardElement.classList.toggle('selected-card', isSelected);
         // Do not animate/recolor cards during progressive ranking; score updates should be visually stable.
         cardElement.classList.remove('newly-added');
         cardElement.dataset.cardKey = getCardKey(card);
 
         const img = cardElement.querySelector('.card-art-wrap img');
-        const faceImages = Array.isArray(card.card_faces) ? card.card_faces.filter(face => face?.image_uris?.normal) : [];
+        const faceImages = getResultCardFaceImages(card);
         const hasMultipleFaces = faceImages.length > 1;
         const stateKey = getResultCardStateKey(card);
         const faceIndex = hasMultipleFaces
@@ -19720,7 +19797,15 @@ function renderResults(cards, internalOptions = {}) {
         if (img) img.alt = hasMultipleFaces ? (faceImages[faceIndex].name || card.name) : card.name;
 
         const flipBtn = cardElement.querySelector('.card-flip-btn');
-        if (flipBtn) flipBtn.hidden = !hasMultipleFaces;
+        if (flipBtn) {
+            flipBtn.hidden = !hasMultipleFaces;
+            flipBtn.disabled = cardElement.dataset.isFlipping === 'true';
+            if (hasMultipleFaces) {
+                const nextFace = faceImages[(faceIndex + 1) % faceImages.length];
+                flipBtn.title = `Flip to ${nextFace.name || 'other face'}`;
+                flipBtn.setAttribute('aria-label', `Flip ${card.name} to ${nextFace.name || 'the other face'}`);
+            }
+        }
 
         const title = cardElement.querySelector('.card-item-title');
         if (title) title.textContent = card.name;
@@ -19805,6 +19890,13 @@ function renderResults(cards, internalOptions = {}) {
         flipBtn.title = 'Flip card face';
         flipBtn.setAttribute('aria-label', `Flip ${card.name}`);
         flipBtn.hidden = true;
+        flipBtn.addEventListener('click', event => {
+            event.preventDefault();
+            // Stop bubbling so the delegated fallback does not double-toggle this face.
+            event.stopPropagation();
+            const cardEl = flipBtn.closest('.card-item[data-card-key]');
+            if (cardEl) void flipResultCardFace(cardEl, flipBtn);
+        });
         artWrap.appendChild(flipBtn);
 
         const info = document.createElement('div');
@@ -19935,19 +20027,8 @@ function renderResults(cards, internalOptions = {}) {
             if (flip) {
                 event.preventDefault();
                 event.stopPropagation();
-                const faces = Array.isArray(card.card_faces) ? card.card_faces.filter(face => face?.image_uris?.normal) : [];
-                if (faces.length > 1) {
-                    const key = getResultCardStateKey(card);
-                    const next = (Number(resultCardFaceState.get(key)) + 1) % faces.length;
-                    resultCardFaceState.set(key, next);
-                    const img = cardEl.querySelector('.card-art-wrap img');
-                    if (img) {
-                        const nextSrc = faces[next].image_uris.normal;
-                        prepareResultImage(img, nextSrc);
-                        hydrateResultImage(img, nextSrc);
-                        img.alt = faces[next].name || card.name;
-                    }
-                }
+                void flipResultCardFace(cardEl, flip);
+                return;
             }
         });
         resultsGrid.addEventListener('change', event => {

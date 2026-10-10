@@ -5547,3 +5547,19 @@ body.mana-panel-open .card-item {
     transition: none !important;
     animation: none !important;
 }
+
+
+/* Result-card double-faced card flip polish (v35). Only promote artwork while it is flipping,
+   rather than reserving a compositing layer for every result image. */
+.card-item.is-card-flipping .card-art-wrap {
+    perspective: 900px;
+}
+.card-item.is-card-flipping .card-art-wrap > img {
+    backface-visibility: hidden;
+    transform-style: preserve-3d;
+    will-change: transform;
+}
+.card-flip-btn:disabled {
+    cursor: progress;
+    opacity: .62;
+}
