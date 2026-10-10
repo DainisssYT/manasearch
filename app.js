@@ -1,6 +1,6 @@
-/* ManaSearch build 20261010-38 */
+/* ManaSearch build 20261010-39 */
 // ManaSearch deployment build marker. Bump this whenever app.js changes so cached-module issues are easy to diagnose.
-const MANASEARCH_APP_BUILD = '20261010-38';
+const MANASEARCH_APP_BUILD = '20261010-39';
 console.info(`[ManaSearch] app.js build ${MANASEARCH_APP_BUILD}`);
 
 // State Management
@@ -13433,10 +13433,11 @@ async function embedTextBatch(texts, extractor) {
     return vectors;
 }
 
-async function warmEmbeddingCache(texts, extractor, diagnostics, batchSize = 32) {
+async function warmEmbeddingCache(texts, extractor, diagnostics, batchSize = 16) {
     const unique = [...new Set(texts.filter(Boolean))].filter(t => !embeddingCache.has(t));
-    // Vectorizing more independent short rules texts in one model call reduces tokenizer/runtime
-    // dispatch overhead without changing the model, normalization, or per-text vector. During active
+    // Keep the normal inference batch at 16. Doubling this to 32 regressed real browser benchmarks
+    // on long Oracle text, likely from transformer padding and memory pressure on client-side runtimes.
+    // The original per-text model, normalization, and vector semantics stay unchanged. During active
     // UI interaction this falls to one item, preserving the responsiveness-first guarantee.
     const embedChunkWithFallback = async (chunk) => {
         try {
