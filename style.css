@@ -5563,3 +5563,48 @@ body.mana-panel-open .card-item {
     cursor: progress;
     opacity: .62;
 }
+
+
+/* Pagination overlap fix: page-number groups may change size while benchmark/search updates
+   regenerate them. Let the number group wrap internally and never let flex items paint over one
+   another when the toolbar is narrower than its max-content width. */
+.results-pagination {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+    max-width: 100%;
+}
+
+.results-pagination > .results-page-nav-btn {
+    flex: 0 0 auto;
+    max-width: 100%;
+    white-space: nowrap;
+}
+
+.results-pagination > .results-page-numbers {
+    display: flex;
+    flex: 1 1 0;
+    flex-wrap: wrap;
+    align-items: center;
+    align-content: center;
+    justify-content: center;
+    gap: 4px;
+    min-width: 34px;
+    max-width: 100%;
+}
+
+.results-pagination > .results-page-numbers > .results-page-number-btn,
+.results-pagination > .results-page-numbers > .results-page-ellipsis {
+    flex: 0 0 auto;
+}
+
+.results-pagination > .results-page-numbers > .results-page-number-btn {
+    min-width: 34px;
+}
+
+@media (max-width: 560px) {
+    .results-pagination { row-gap: 8px; }
+    .results-pagination > .results-page-numbers > .results-page-number-btn { min-width: 30px; }
+}

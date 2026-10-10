@@ -1,6 +1,6 @@
-/* ManaSearch build 20261010-36 */
+/* ManaSearch build 20261010-38 */
 // ManaSearch deployment build marker. Bump this whenever app.js changes so cached-module issues are easy to diagnose.
-const MANASEARCH_APP_BUILD = '20261010-36';
+const MANASEARCH_APP_BUILD = '20261010-38';
 console.info(`[ManaSearch] app.js build ${MANASEARCH_APP_BUILD}`);
 
 // State Management
@@ -52,6 +52,12 @@ const embeddingCache = new Map();
 // LRU-style cache so repeated retrieval streams, Search Deeper, and Related Cards do not repeatedly
 // parse the same card.
 const mechanicalProfileCache = new Map();
+// Mechanical graphs are immutable derivatives of card rules text + mechanic metadata. Search
+// streams routinely return distinct card objects for the same Scryfall card, so cache these by a
+// stable signature rather than only on the individual card object. This does not cache scores or
+// source-dependent comparisons; it only reuses the deterministic graph representation.
+const mechanicalGraphCache = new Map();
+const MECHANICAL_GRAPH_CACHE_MAX = 2400;
 const SEARCH_INTENT_CACHE_MAX = 96;
 const MECHANICAL_PROFILE_CACHE_MAX = 2500;
 // Session semantic corpus: every card this session has actually scored (plus each search's
@@ -324,6 +330,65 @@ async function sortManaArrayResponsively(items, comparator) {
         target = swap;
     }
     return source;
+}
+
+// Return only the best K items without sorting the entire search pool. The triage stage uses six
+// distinct relevance lanes but ultimately embeds only a few hundred candidates; full-sorting tens
+// of thousands of cards for each lane wastes most work on items that can never be selected. This
+// stable bounded heap preserves the same ordering/tie behavior as the prior full stable merge-sort.
+async function selectTopManaArrayResponsively(items, comparator, limit) {
+    const count = items.length;
+    const cap = Math.max(0, Math.min(count, Math.floor(Number(limit) || 0)));
+    if (cap === 0) return [];
+    // For small pools, native/stable full sorting is cheaper than heap maintenance; the heap
+    // becomes worthwhile for the large card corpora that dominate search triage.
+    if (cap >= count || count < 260) return (await sortManaArrayResponsively(items, comparator)).slice(0, cap);
+    const stableCompare = (a, b) => {
+        const raw = comparator(a, b);
+        const order = Number.isNaN(raw) ? 0 : raw;
+        if (order !== 0) return order;
+        return (Number(a?.triageIndex) || 0) - (Number(b?.triageIndex) || 0);
+    };
+    const heap = [];
+    const isWorse = (a, b) => stableCompare(a, b) > 0;
+    const siftDown = (start) => {
+        let parent = start;
+        while (true) {
+            const left = parent * 2 + 1;
+            if (left >= heap.length) break;
+            const right = left + 1;
+            let worseChild = left;
+            if (right < heap.length && isWorse(heap[right], heap[left])) worseChild = right;
+            if (!isWorse(heap[worseChild], heap[parent])) break;
+            [heap[parent], heap[worseChild]] = [heap[worseChild], heap[parent]];
+            parent = worseChild;
+        }
+    };
+    let sliceStartedAt = getManaResponsivenessNow();
+    for (let i = 0; i < count; i++) {
+        const item = items[i];
+        if (heap.length < cap) {
+            heap.push(item);
+            let child = heap.length - 1;
+            while (child > 0) {
+                const parent = Math.floor((child - 1) / 2);
+                if (!isWorse(heap[child], heap[parent])) break;
+                [heap[parent], heap[child]] = [heap[child], heap[parent]];
+                child = parent;
+            }
+        } else if (stableCompare(item, heap[0]) < 0) {
+            heap[0] = item;
+            siftDown(0);
+        }
+        if ((i & 511) === 511) {
+            const now = getManaResponsivenessNow();
+            if (now - sliceStartedAt >= getManaSearchSliceBudgetMs()) {
+                await yieldForManaSearchResponsiveness();
+                sliceStartedAt = getManaResponsivenessNow();
+            }
+        }
+    }
+    return heap.sort(stableCompare);
 }
 
 function shouldDeferManaResultRender() {
@@ -7408,41 +7473,141 @@ function calculateEffectCoverageProfile(parsedSource, parsedCandidate) {
 
     const sourceWeights = source.map(e => Math.max(0.05, e.importance ?? (e.isPrimary ? 1 : 0.35)));
     const candidateWeights = candidate.map(e => Math.max(0.05, e.importance ?? (e.isPrimary ? 1 : 0.35)));
-    const memo = new Map();
+    // Pair quality depends only on an effect pair, not on the current assignment mask. The former
+    // recursive DP recomputed these expensive structural comparisons in many different branches.
+    // Compute the exact same pair scores once and share them between the small-card DP and the
+    // large-card polynomial assignment path.
+    const pairScores = source.map(a => candidate.map(b => directionalMechanicalSimilarity([a], [b])));
+    const pairScore = (i, j) => pairScores[i][j];
 
-    function pairScore(a, b) {
-        return directionalMechanicalSimilarity([a], [b]);
+    const n = source.length;
+    const m = candidate.length;
+    const maxPairs = Math.min(n, m);
+    let combination = 1;
+    let estimatedStates = 1;
+    for (let k = 1; k <= maxPairs; k++) {
+        combination = combination * (m - k + 1) / k;
+        estimatedStates += combination;
+        if (estimatedStates * Math.max(1, m) > 50000) break;
     }
-    function solve(i, usedMask) {
-        if (i >= source.length) return { score: 0, matches: [] };
-        const key = `${i}|${usedMask}`;
-        if (memo.has(key)) return memo.get(key);
-        let best = solve(i + 1, usedMask); // leave source effect unmatched
-        for (let j = 0; j < candidate.length; j++) {
-            const bit = 1n << BigInt(j);
-            if (usedMask & bit) continue;
-            const pair = pairScore(source[i], candidate[j]);
-            if (pair <= 0.02) continue;
-            const rest = solve(i + 1, usedMask | bit);
-            const weighted = pair * sourceWeights[i];
-            const option = { score: weighted + rest.score, matches: [[i, j, pair], ...rest.matches] };
-            if (option.score > best.score) best = option;
+
+    let assignment;
+    if (estimatedStates * Math.max(1, m) <= 50000) {
+        // Exact memoized assignment for ordinary cards. Store choices instead of a fresh matches
+        // array at every state, reducing allocation without changing tie order or score math.
+        const memo = new Map();
+        function solve(i, usedMask) {
+            if (i >= n) return 0;
+            const key = `${i}|${usedMask}`;
+            const cached = memo.get(key);
+            if (cached !== undefined) return cached.score;
+            let bestScore = solve(i + 1, usedMask); // leave source effect unmatched, as before
+            let bestChoice = -1;
+            for (let j = 0; j < m; j++) {
+                const bit = 1n << BigInt(j);
+                if (usedMask & bit) continue;
+                const pair = pairScore(i, j);
+                if (pair <= 0.02) continue;
+                const restScore = solve(i + 1, usedMask | bit);
+                const score = pair * sourceWeights[i] + restScore;
+                if (score > bestScore) {
+                    bestScore = score;
+                    bestChoice = j;
+                }
+            }
+            memo.set(key, { score: bestScore, choice: bestChoice });
+            return bestScore;
         }
-        memo.set(key, best);
-        return best;
+        const score = solve(0, 0n);
+        const matches = [];
+        let usedMask = 0n;
+        for (let i = 0; i < n; i++) {
+            const entry = memo.get(`${i}|${usedMask}`);
+            const j = entry?.choice ?? -1;
+            if (j >= 0) {
+                matches.push([i, j, pairScore(i, j)]);
+                usedMask |= 1n << BigInt(j);
+            }
+        }
+        assignment = { score, matches };
+    } else {
+        // Exact maximum-weight bipartite matching (Hungarian algorithm). This solves the same
+        // objective as the DP in O(n^2 * m), avoiding combinatorial explosions on long multi-effect
+        // cards. Each source row also receives a dummy unmatched column with zero weight.
+        // Positive pair scores <= 0.02 are treated as no match, identically to the DP path.
+        const rows = n;
+        const realCols = m;
+        const cols = m + n;
+        const u = new Array(rows + 1).fill(0);
+        const v = new Array(cols + 1).fill(0);
+        const p = new Array(cols + 1).fill(0);
+        const way = new Array(cols + 1).fill(0);
+        const cost = (i, j) => {
+            if (j > realCols) return 0; // dummy unmatched source effect
+            const pair = pairScore(i - 1, j - 1);
+            return pair > 0.02 ? -(pair * sourceWeights[i - 1]) : 0;
+        };
+        for (let i = 1; i <= rows; i++) {
+            p[0] = i;
+            let j0 = 0;
+            const minv = new Array(cols + 1).fill(Infinity);
+            const used = new Array(cols + 1).fill(false);
+            do {
+                used[j0] = true;
+                const i0 = p[j0];
+                let delta = Infinity;
+                let j1 = 0;
+                for (let j = 1; j <= cols; j++) {
+                    if (used[j]) continue;
+                    const cur = cost(i0, j) - u[i0] - v[j];
+                    if (cur < minv[j]) {
+                        minv[j] = cur;
+                        way[j] = j0;
+                    }
+                    if (minv[j] < delta) {
+                        delta = minv[j];
+                        j1 = j;
+                    }
+                }
+                for (let j = 0; j <= cols; j++) {
+                    if (used[j]) {
+                        u[p[j]] += delta;
+                        v[j] -= delta;
+                    } else {
+                        minv[j] -= delta;
+                    }
+                }
+                j0 = j1;
+            } while (p[j0] !== 0);
+            do {
+                const j1 = way[j0];
+                p[j0] = p[j1];
+                j0 = j1;
+            } while (j0 !== 0);
+        }
+        const assignedColumn = new Array(rows + 1).fill(0);
+        for (let j = 1; j <= cols; j++) if (p[j] > 0) assignedColumn[p[j]] = j;
+        const matches = [];
+        let score = 0;
+        for (let i = 1; i <= rows; i++) {
+            const j = assignedColumn[i];
+            if (j >= 1 && j <= realCols) {
+                const pair = pairScore(i - 1, j - 1);
+                if (pair > 0.02) {
+                    matches.push([i - 1, j - 1, pair]);
+                    score += pair * sourceWeights[i - 1];
+                }
+            }
+        }
+        assignment = { score, matches };
     }
 
-    const assignment = solve(0, 0n);
     const sourceWeight = sourceWeights.reduce((a,b) => a+b, 0) || 1;
     const candidateWeight = candidateWeights.reduce((a,b) => a+b, 0) || 1;
     const sourceCoverage = Math.max(0, Math.min(1, assignment.score / sourceWeight));
 
     let candidateMatchedWeight = 0;
-    const matchedCandidateIndexes = new Set();
-    for (const [, j, pair] of assignment.matches) {
-        candidateMatchedWeight += candidateWeights[j] * pair;
-        matchedCandidateIndexes.add(j);
-    }
+    for (const [, j, pair] of assignment.matches) candidateMatchedWeight += candidateWeights[j] * pair;
     const candidateCoverage = Math.max(0, Math.min(1, candidateMatchedWeight / candidateWeight));
     const balancedCoverage = Math.sqrt(sourceCoverage * candidateCoverage);
 
@@ -7472,12 +7637,12 @@ function calculateEffectCoverageProfile(parsedSource, parsedCandidate) {
  * bounce, and destroy can all be useful creature-interaction substitutes, while draw and discard
  * are related resource/card-advantage functions without being treated as identical.
  */
-function calculateFunctionalSimilarity(parsedSource, parsedCandidate) {
+function calculateFunctionalSimilarity(parsedSource, parsedCandidate, precomputed = null) {
     const source = (parsedSource || []).filter(e => e?.canonical);
     const candidate = (parsedCandidate || []).filter(e => e?.canonical);
     const sourceProfile = parsedSource?._mechanicProfile || buildUniversalMechanicProfile(null, '', parsedSource || []);
     const candidateProfile = parsedCandidate?._mechanicProfile || buildUniversalMechanicProfile(null, '', parsedCandidate || []);
-    const universal = calculateUniversalMechanicSimilarity(sourceProfile, candidateProfile);
+    const universal = precomputed?.universal || calculateUniversalMechanicSimilarity(sourceProfile, candidateProfile);
     if (!source.length || !candidate.length) return universal.score * 0.88;
     const sourceFns = source.map(e => e.canonical.function).filter(Boolean);
     const candidateFns = candidate.map(e => e.canonical.function).filter(Boolean);
@@ -7491,7 +7656,9 @@ function calculateFunctionalSimilarity(parsedSource, parsedCandidate) {
     const canonicalScore = weight ? total / weight : 0;
     const graphA = parsedSource?._mechanicalGraph || buildMechanicalEffectGraph(null, '', parsedSource || []);
     const graphB = parsedCandidate?._mechanicalGraph || buildMechanicalEffectGraph(null, '', parsedCandidate || []);
-    const graphScore = calculateMechanicalGraphSimilarity(graphA, graphB).score;
+    const graphScore = Number.isFinite(precomputed?.graphDetail?.score)
+        ? precomputed.graphDetail.score
+        : calculateMechanicalGraphSimilarity(graphA, graphB).score;
     return Math.max(0, Math.min(1, canonicalScore * 0.62 + graphScore * 0.23 + universal.score * 0.15));
 }
 
@@ -9375,11 +9542,38 @@ function getCachedMechanicalProfile(card = null, text = '', parsedEffects = null
 
 function getCachedMechanicalEffectGraph(card = null, text = '', parsedEffects = null) {
     const oracle = String(text || card?.oracle_text || (card?.card_faces ? card.card_faces.map(f => f.oracle_text || '').join('\n\n') : '') || '');
-    if (card && card._mechanicalGraphCacheText === oracle && card._mechanicalGraph) return card._mechanicalGraph;
-    const graph = buildMechanicalEffectGraph(card, oracle, parsedEffects);
+    // Keyword lists and type lines participate in mechanic-anchor extraction, so include them in
+    // the cache signature along with name + Oracle text. The graph itself is source-independent.
+    const keywords = Array.isArray(card?.keywords) ? card.keywords.map(String).sort().join('|') : '';
+    const key = `${normalizeCardNameForIdentity(card?.name || '')}|${String(card?.type_line || '')}|${keywords}|${oracle}`;
+    if (card && card._mechanicalGraphCacheKey === key && card._mechanicalGraph) return card._mechanicalGraph;
+    if (parsedEffects?._mechanicalGraphCacheKey === key && parsedEffects?._mechanicalGraph) {
+        if (card) {
+            card._mechanicalGraphCacheKey = key;
+            card._mechanicalGraphCacheText = oracle;
+            card._mechanicalGraph = parsedEffects._mechanicalGraph;
+        }
+        return parsedEffects._mechanicalGraph;
+    }
+    let graph = mechanicalGraphCache.get(key);
+    if (graph) {
+        mechanicalGraphCache.delete(key);
+        mechanicalGraphCache.set(key, graph);
+    } else {
+        graph = buildMechanicalEffectGraph(card, oracle, parsedEffects);
+        mechanicalGraphCache.set(key, graph);
+        while (mechanicalGraphCache.size > MECHANICAL_GRAPH_CACHE_MAX) {
+            mechanicalGraphCache.delete(mechanicalGraphCache.keys().next().value);
+        }
+    }
     if (card) {
+        card._mechanicalGraphCacheKey = key;
         card._mechanicalGraphCacheText = oracle;
         card._mechanicalGraph = graph;
+    }
+    if (parsedEffects) {
+        parsedEffects._mechanicalGraphCacheKey = key;
+        parsedEffects._mechanicalGraph = graph;
     }
     return graph;
 }
@@ -10023,7 +10217,10 @@ function calculateMechanicalSimilarityDetailed(parsedA, parsedB, profileA = null
         graphMatches: graph.matches,
         graphEvidence: graph.evidence,
         universalScore: universal.score,
-        universal
+        universal,
+        // Reuse this exact comparison in functional similarity / scoring. It is immutable for this
+        // source-candidate pair and already contains all the graph evidence fields above.
+        graphDetail: graph
     };
 }
 
@@ -13236,16 +13433,12 @@ async function embedTextBatch(texts, extractor) {
     return vectors;
 }
 
-async function warmEmbeddingCache(texts, extractor, diagnostics, batchSize = 16) {
+async function warmEmbeddingCache(texts, extractor, diagnostics, batchSize = 32) {
     const unique = [...new Set(texts.filter(Boolean))].filter(t => !embeddingCache.has(t));
-    let i = 0;
-    while (i < unique.length) {
-        // Some browser ML backends perform a meaningful amount of synchronous WASM work per
-        // inference call. Use smaller calls while someone is actively entering a value so the
-        // event loop gets control back more often; the vector results and cache keys are identical.
-        const effectiveBatchSize = isManaUiInteractionPriorityActive() ? Math.min(batchSize, 1) : batchSize;
-        const chunk = unique.slice(i, i + effectiveBatchSize);
-        i += chunk.length;
+    // Vectorizing more independent short rules texts in one model call reduces tokenizer/runtime
+    // dispatch overhead without changing the model, normalization, or per-text vector. During active
+    // UI interaction this falls to one item, preserving the responsiveness-first guarantee.
+    const embedChunkWithFallback = async (chunk) => {
         try {
             const vectors = await embedTextBatch(chunk, extractor);
             chunk.forEach((t, idx) => {
@@ -13253,8 +13446,24 @@ async function warmEmbeddingCache(texts, extractor, diagnostics, batchSize = 16)
                 if (diagnostics) diagnostics.computed++;
             });
         } catch (batchErr) {
-            await Promise.all(chunk.map(t => getCachedEmbedding(t, extractor, diagnostics)));
+            // One unusually long or backend-sensitive text should not force every sibling in a large
+            // batch through serialized single-text inference. Bisect until the backend-compatible
+            // batch size is found; a single failing text retains the original scalar fallback.
+            if (chunk.length > 1) {
+                const middle = Math.floor(chunk.length / 2);
+                await embedChunkWithFallback(chunk.slice(0, middle));
+                await embedChunkWithFallback(chunk.slice(middle));
+            } else if (chunk.length === 1) {
+                await getCachedEmbedding(chunk[0], extractor, diagnostics);
+            }
         }
+    };
+    let i = 0;
+    while (i < unique.length) {
+        const effectiveBatchSize = isManaUiInteractionPriorityActive() ? 1 : batchSize;
+        const chunk = unique.slice(i, i + effectiveBatchSize);
+        i += chunk.length;
+        await embedChunkWithFallback(chunk);
         await yieldForManaSearchResponsiveness();
     }
 }
@@ -15902,11 +16111,15 @@ async function scoreCardBatch({
                 candidateMechanicProfile
             );
             const mechanical = mechanicalDetail.score;
-            const referenceGraph = referenceMechanicalGraphs[referenceIndex] || buildMechanicalEffectGraph(null, '', referenceEffects);
-            const graphDetail = calculateMechanicalGraphSimilarity(referenceGraph, candidateMechanicalGraph);
+            // calculateMechanicalSimilarityDetailed already compared these exact graph objects.
+            // Reuse its detail instead of running the O(nodes^2) graph matcher a second time.
+            const graphDetail = mechanicalDetail.graphDetail || calculateMechanicalGraphSimilarity(
+                referenceMechanicalGraphs[referenceIndex] || buildMechanicalEffectGraph(null, '', referenceEffects),
+                candidateMechanicalGraph
+            );
             const graphAwareMechanical = Math.max(mechanical, graphDetail.score);
             const coverage = calculateEffectCoverageProfile(referenceEffects, parsedCandidateCard);
-            const functional = calculateFunctionalSimilarity(referenceEffects, parsedCandidateCard);
+            const functional = calculateFunctionalSimilarity(referenceEffects, parsedCandidateCard, mechanicalDetail);
             const quantity = calculateAggregateQuantitySimilarity(referenceEffects, parsedCandidateCard, coverage);
             if (!bestMechanical || graphAwareMechanical > bestMechanical.mechanical ||
                 (graphAwareMechanical === bestMechanical.mechanical && functional > bestMechanical.functional)) {
@@ -15921,21 +16134,29 @@ async function scoreCardBatch({
                     referenceEffectSets[0] || parsedSourceCard,
                     parsedCandidateCard
                 );
+                const consensusUniversal = candidateMechanicProfile
+                    ? calculateUniversalMechanicSimilarity((consensusMechanicalGraph.universalProfile || sourceMechanicProfile), candidateMechanicProfile)
+                    : null;
+                const consensusMechanicalDetail = {
+                    score: consensusDetail.score,
+                    structuralScore: bestMechanical?.mechanicalDetail?.structuralScore || 0,
+                    graphScore: consensusDetail.score,
+                    graphFeatureVector: consensusDetail.featureVector,
+                    graphEvidence: [...(consensusDetail.evidence || []), 'consensus across related cards'],
+                    universalScore: consensusUniversal?.score || 0,
+                    universal: consensusUniversal,
+                    graphDetail: consensusDetail
+                };
                 bestMechanical = {
                     mechanical: consensusDetail.score,
                     coverage: consensusCoverage,
+                    // Preserve the original reference-card functional signal in the consensus override. The
+                    // consensus graph is the main mechanical gate, but the functional channel still
+                    // compares against the first selected reference, exactly as before.
                     functional: calculateFunctionalSimilarity(referenceEffectSets[0] || parsedSourceCard, parsedCandidateCard),
                     quantity: calculateAggregateQuantitySimilarity(referenceEffectSets[0] || parsedSourceCard, parsedCandidateCard, consensusCoverage),
                     referenceEffects: referenceEffectSets[0] || parsedSourceCard,
-                    mechanicalDetail: {
-                        score: consensusDetail.score,
-                        structuralScore: bestMechanical?.mechanicalDetail?.structuralScore || 0,
-                        graphScore: consensusDetail.score,
-                        graphFeatureVector: consensusDetail.featureVector,
-                        graphEvidence: [...(consensusDetail.evidence || []), 'consensus across related cards'],
-                        universalScore: candidateMechanicProfile ? calculateUniversalMechanicSimilarity((consensusMechanicalGraph.universalProfile || sourceMechanicProfile), candidateMechanicProfile).score : 0,
-                        universal: candidateMechanicProfile ? calculateUniversalMechanicSimilarity((consensusMechanicalGraph.universalProfile || sourceMechanicProfile), candidateMechanicProfile) : null
-                    },
+                    mechanicalDetail: consensusMechanicalDetail,
                     graphDetail: consensusDetail,
                     consensus: true
                 };
@@ -16067,7 +16288,7 @@ async function scoreCardBatch({
         const lexical = calculateSimpleSimilarity(targetText, strategicRoleCardText(card));
         const semanticRetrieval = card._semanticRetrievalSimilarity || (card.retrievalEvidence?.includes('Search G') ? 0.58 : 0);
         const triage = mechanical * 0.35 + role * 0.15 + exactness * 0.12 + lexical * 0.10 + retrievalAgreement * 0.04 + searchFAgreement * 0.04 + semanticRetrieval * 0.20;
-        triageDetails.push({ card, triage, mechanical, role, exactness, lexical, retrievalCount, searchFAgreement, semanticRetrieval });
+        triageDetails.push({ card, triage, mechanical, role, exactness, lexical, retrievalCount, searchFAgreement, semanticRetrieval, triageIndex: triageDetails.length });
         const triageNow = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
         if (triageNow - triageSliceStartedAt >= getManaSearchSliceBudgetMs()) {
             throwIfSearchCancelled(isCancelled);
@@ -16088,17 +16309,17 @@ async function scoreCardBatch({
             semantic: Math.max(72, Math.floor(budget * 0.34)),
             exploratory: Math.max(22, Math.floor(budget * 0.10))
         };
-        const by = async (fn) => sortManaArrayResponsively(triageDetails, (a, b) => fn(b) - fn(a));
-        const mechanicalLane = (await by(x => x.mechanical)).slice(0, laneSizes.mechanical);
-        const roleLane = (await by(x => x.role)).filter(x => x.role >= 0.55).slice(0, laneSizes.role);
-        const lexicalLane = (await by(x => x.lexical)).slice(0, laneSizes.lexical);
-        const retrievalLane = (await by(x => (x.retrievalCount * 0.12) + (x.searchFAgreement * 0.16) + (x.mechanical * 0.22) + (x.role * 0.20) + (x.lexical * 0.30))).slice(0, laneSizes.retrieval);
+        const by = async (fn, limit = 0, pool = triageDetails) => selectTopManaArrayResponsively(pool, (a, b) => fn(b) - fn(a), limit);
+        const mechanicalLane = await by(x => x.mechanical, laneSizes.mechanical);
+        const roleLane = await by(x => x.role, laneSizes.role, triageDetails.filter(x => x.role >= 0.55));
+        const lexicalLane = await by(x => x.lexical, laneSizes.lexical);
+        const retrievalLane = await by(x => (x.retrievalCount * 0.12) + (x.searchFAgreement * 0.16) + (x.mechanical * 0.22) + (x.role * 0.20) + (x.lexical * 0.30), laneSizes.retrieval);
         // Semantic lane: cards already surfaced by meaning-only Search G are protected even
         // when mechanical/lexical evidence is weak. This prevents the triage lanes starving
         // differently-worded candidates.
-        const semanticLane = (await by(x => (x.card._semanticRetrievalSimilarity || 0) + (x.role * 0.03) + (x.mechanical * 0.02))).slice(0, laneSizes.semantic);
+        const semanticLane = await by(x => (x.card._semanticRetrievalSimilarity || 0) + (x.role * 0.03) + (x.mechanical * 0.02), laneSizes.semantic);
         // Exploration lane is the safety valve for plausible candidates missed by the strongest lanes.
-        const exploratoryLane = (await by(x => Math.max(x.role * 0.8, x.lexical * 0.6, x.retrievalCount / 4) + (x.mechanical < 0.35 ? 0.12 : 0))).slice(0, laneSizes.exploratory);
+        const exploratoryLane = await by(x => Math.max(x.role * 0.8, x.lexical * 0.6, x.retrievalCount / 4) + (x.mechanical < 0.35 ? 0.12 : 0), laneSizes.exploratory);
         const lanes = [mechanicalLane, roleLane, lexicalLane, retrievalLane, semanticLane, exploratoryLane];
 
         const merged = [];
@@ -16115,9 +16336,11 @@ async function scoreCardBatch({
 
         // Full-pool semantic retrieval is a first-class retrieval lane, not a weak rerank hint.
         // Protect every semantic-index hit with a real similarity value before the fallback fill.
-        const protectedSemanticHits = await sortManaArrayResponsively(
-            triageDetails.filter(x => Number.isFinite(x.card._semanticRetrievalSimilarity)),
-            (a,b) => (b.card._semanticRetrievalSimilarity || 0) - (a.card._semanticRetrievalSimilarity || 0)
+        const protectedSemanticPool = triageDetails.filter(x => Number.isFinite(x.card._semanticRetrievalSimilarity));
+        const protectedSemanticHits = await selectTopManaArrayResponsively(
+            protectedSemanticPool,
+            (a,b) => (b.card._semanticRetrievalSimilarity || 0) - (a.card._semanticRetrievalSimilarity || 0),
+            Math.min(protectedSemanticPool.length, budget + seen.size)
         );
         for (const item of protectedSemanticHits) {
             if (merged.length >= budget) break;
@@ -16127,7 +16350,12 @@ async function scoreCardBatch({
         }
 
         // Strong evidence still gets protected if the lane union under-fills the budget.
-        const fallback = await sortManaArrayResponsively(triageDetails, (a, b) => b.triage - a.triage);
+        const fallbackPool = triageDetails.filter(item => !(item.triage < 0.22 && item.role < 0.55 && item.mechanical < 0.30 && item.exactness < 0.40 && item.retrievalCount < 2));
+        const fallback = await selectTopManaArrayResponsively(
+            fallbackPool,
+            (a, b) => b.triage - a.triage,
+            Math.min(fallbackPool.length, budget + seen.size)
+        );
         for (const item of fallback) {
             if (merged.length >= budget) break;
             if (seen.has(item.card)) continue;
