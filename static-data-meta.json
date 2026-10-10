@@ -1,10 +1,10 @@
 {
   "builder_version": 4,
-  "generated_at": "2026-10-09T11:56:00.901Z",
-  "build_id": "2026-10-09T09:01:54.966+00:00|Xenova/all-MiniLM-L6-v2|4",
-  "oracle_cards_updated_at": "2026-10-09T09:01:54.966+00:00",
-  "oracle_cards_uri": "https://data.scryfall.io/oracle-cards/oracle-cards-20261009090154.jsonl.gz",
-  "card_count": 38708,
+  "generated_at": "2026-10-10T11:12:37.072Z",
+  "build_id": "2026-10-10T09:01:58.475+00:00|Xenova/all-MiniLM-L6-v2|4",
+  "oracle_cards_updated_at": "2026-10-10T09:01:58.475+00:00",
+  "oracle_cards_uri": "https://data.scryfall.io/oracle-cards/oracle-cards-20261010090158.jsonl.gz",
+  "card_count": 38716,
   "embedding_dimension": 384,
   "model": "Xenova/all-MiniLM-L6-v2"
 }
