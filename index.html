@@ -5,7 +5,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>ManaSearch</title>
-    <link rel="stylesheet" href="style.css?v=20261011-48">
+    <link rel="stylesheet" href="style.css?v=20261011-51">
 </head>
 <body>
     <header class="site-header">
@@ -23,6 +23,14 @@
             <button type="button" id="search-btn">Load Card</button>
         </div>
         <p class="search-hint">Choose a source card below to begin, then highlight the part that matters most.</p>
+    <aside id="first-use-help-hint" class="first-use-help-hint hidden" role="note" aria-label="Quick tip for new users">
+        <div class="first-use-help-hint-copy">
+            <strong>New to ManaSearch?</strong>
+            <span>Hover over dotted-underlined names on desktop, or tap the small ? icons on your phone, to open visual help panels.</span>
+            <span><b>Try Highlight:</b> select <mark>draw a card</mark> in a source card's rules text. It becomes a colored highlight; select it again to remove it.</span>
+        </div>
+        <button type="button" id="dismiss-first-use-help-hint" class="first-use-help-dismiss" aria-label="Dismiss quick tip">Got it ×</button>
+    </aside>
     </header>
 
     <main class="app-layout">
@@ -208,6 +216,7 @@
                 <button type="button" id="close-methods-modal" class="close-btn" aria-label="Close search methods">&times;</button>
             </div>
             <div class="modal-body">
+                <p class="modal-intro contextual-help-intro">Hover or tap an underlined option name for a short visual example.</p>
                 <div class="methods-list">
                     <label class="method-card">
                         <input type="checkbox" id="broad-search">
@@ -306,7 +315,7 @@
                 <button type="button" id="close-order-modal" class="close-btn" aria-label="Close result ordering">&times;</button>
             </div>
             <div class="modal-body">
-                <p class="modal-intro">Choose the main ranking used to order the scored candidates. Then enable optional ordering features to change how that ranking is presented.</p>
+                <p class="modal-intro">Pick how results should be arranged. Hover over underlined names—or tap them on your phone—for a visual example.</p>
 
                 <section class="order-panel-section" aria-labelledby="order-ranking-heading">
                     <div class="order-panel-section-heading">
@@ -452,8 +461,8 @@
                 <button type="button" id="close-card-constraints-modal" class="close-btn" aria-label="Close card constraints">&times;</button>
             </div>
             <div class="modal-body">
-                <p class="modal-intro">These filters are hard constraints: matching cards must satisfy them.</p>
-                <p class="constraint-autofill-help">Fill Empty From Source copies known types, subtypes, keywords, colors, mana value, numeric power/toughness, rarity, and set code into <strong>empty</strong> fields only. These become hard filters, so use them only when you want those restrictions. Format stays under your control.</p>
+                <p class="modal-intro">Every active constraint must match. Hover over an underlined field name—or tap its ?—for a short example.</p>
+                <p class="constraint-autofill-help">Fill Empty From Source fills blank fields from the source card. Review the filters before searching; use Clear All Constraints to remove them.</p>
                 <div class="filters-grid">
                     <div class="filter-group filter-group-wide">
                         <label>Card Types <span class="filter-help">All selected types must be present</span></label>
@@ -790,7 +799,7 @@
         import * as transformers from "https://cdn.jsdelivr.net/npm/@xenova/transformers@2.16.0";
         window.transformers = transformers;
     </script>
-    <script src="pako.min.js?v=20261011-49"></script>
-    <script type="module" src="app.js?v=20261011-49"></script>
+    <script src="pako.min.js?v=20261011-51"></script>
+    <script type="module" src="app.js?v=20261011-51"></script>
 </body>
 </html>
