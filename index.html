@@ -5,7 +5,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>ManaSearch</title>
-    <link rel="stylesheet" href="style.css?v=20261010-43">
+    <link rel="stylesheet" href="style.css?v=20261011-46">
 </head>
 <body>
     <header class="site-header">
@@ -15,7 +15,7 @@
                 <p class="brand-subtitle">MTG similarity search by mechanics, function, and context</p>
             </div>
             <div class="header-actions">
-                <button type="button" id="preferences-btn" class="header-action-btn" aria-haspopup="dialog">Preferences</button>
+                <button type="button" id="preferences-btn" class="header-action-btn" aria-haspopup="dialog" data-feature-tip="Customize ManaSearch display and card-pool preferences." data-feature-preview="Theme · density · card types">Preferences</button>
             </div>
         </div>
         <div id="legacy-source-search" hidden aria-hidden="true">
@@ -47,32 +47,36 @@
                         <span class="section-kicker">SOURCE</span>
                         <h2>Source Card</h2>
                     </div>
-                    <span class="section-note">Choose a card, then highlight Oracle text to focus the search</span>
+                    <span class="section-note">Choose a card, then highlight its type line or rules text to focus the search</span>
                 </div>
 
                 <div id="source-card-empty" class="source-card-empty-state">
-                    <button type="button" id="source-card-add-btn" class="source-card-add-btn" aria-label="Choose source card">+</button>
+                    <button type="button" id="source-card-add-btn" class="source-card-add-btn" aria-label="Choose source card" data-feature-tip="Choose the card whose mechanics you want to search from." data-feature-preview="Select a card → highlight relevant text">+</button>
                     <h3>Choose a source card</h3>
                     <p>Search for a card to use as the starting point for ManaSearch.</p>
                 </div>
 
                 <div id="source-card-loaded" class="hidden">
                     <div class="card-inspector">
-                        <img id="source-card-image" src="" alt="Card Artwork">
+                        <div class="source-card-art-wrap" id="source-card-art-wrap">
+                            <img id="source-card-image" src="" alt="Card Artwork">
+                            <button type="button" id="source-card-flip-btn" class="source-card-flip-btn hidden" aria-label="Flip source card to its other face" data-feature-tip="View the other face of a double-faced card." data-feature-preview="Front face ⇄ back face">Flip</button>
+                        </div>
                         <div class="card-details">
                             <div class="card-header">
                                 <h3 id="source-card-name"></h3>
                                 <div class="source-card-actions">
-                                    <button type="button" id="favorite-btn">☆ Favorite</button>
+                                    <button type="button" id="favorite-btn" data-feature-tip="Save this source card to your local favorites." data-feature-preview="★ Favorite cards are quick to reopen">☆ Favorite</button>
                                     <button type="button" id="add-source-card-btn" class="add-source-card-btn">Add Source Card</button>
                                     <button type="button" id="discard-source-card-btn" class="discard-source-card-btn" aria-label="Remove source card">Remove</button>
                                 </div>
                             </div>
                             <p><strong>Mana Cost:</strong> <span id="source-card-mana"></span></p>
-                            <p><strong>Type:</strong> <span id="source-card-type"></span></p>
+                            <p class="source-card-meta-line"><strong>Price:</strong> <span id="source-card-price">Unavailable</span></p>
+                            <p class="source-card-meta-line"><strong>Type:</strong> <span id="source-card-type" class="selectable-text type-line-selectable" title="Select a type-line phrase to highlight it"></span></p>
                             <div class="oracle-container">
                                 <strong>Oracle Text</strong>
-                                <span class="oracle-help">Highlight one or more spans to define what matters most. Use Edit to refine a highlight or connect an additional search detail to it.</span>
+                                <span class="oracle-help">Select text in either the type line or rules text to highlight it. Select an existing highlight again to remove it.</span>
                                 <div id="source-card-oracle" class="selectable-text"></div>
                                 <div id="highlight-chips-list" class="highlight-chip-panel"></div>
                             </div>
@@ -119,10 +123,10 @@
                         <p class="section-description">Use retrieval methods to change how cards are found, then choose how the scored results are ordered.</p>
                     </div>
                     <div class="trigger-buttons-group">
-                        <button type="button" id="toggle-search-methods-btn" class="methods-trigger-btn">
+                        <button type="button" id="toggle-search-methods-btn" class="methods-trigger-btn" data-feature-tip="Choose how ManaSearch discovers candidates." data-feature-preview="Search streams widen the candidate pool">
                             Methods <span id="selected-methods-badge" class="badge">Standard</span> ▾
                         </button>
-                        <button type="button" id="toggle-order-btn" class="methods-trigger-btn">
+                        <button type="button" id="toggle-order-btn" class="methods-trigger-btn" data-feature-tip="Choose how matches are ranked or sort by cost." data-feature-preview="Overall Match · Price · Mana Value">
                             Order <span id="selected-order-badge" class="badge">Overall Match</span> ▾
                         </button>
                         <select id="sort-results" class="order-select-source" aria-hidden="true" tabindex="-1">
@@ -135,16 +139,19 @@
                             <option value="synergy">Synergy</option>
                             <option value="exactness">Exactness</option>
                             <option value="category">Category</option>
+                            <option value="price">Price (USD: low to high)</option>
+                            <option value="manaValue">Mana Value (low to high)</option>
+                            <option value="manaValueDesc">Mana Value (high to low)</option>
                             <option value="matrix">Matrix Sweep</option>
                             <option value="diverse">Diverse Spread</option>
                         </select>
-                        <button type="button" id="toggle-card-constraints-btn" class="methods-trigger-btn">
+                        <button type="button" id="toggle-card-constraints-btn" class="methods-trigger-btn" data-feature-tip="Limit results with hard card attributes and format legality." data-feature-preview="Type · Colors · Format · Mana Value">
                             Constraints <span id="card-constraints-badge" class="badge">Any</span> ▾
                         </button>
                     </div>
                 </div>
 
-                <button type="button" id="find-similar-btn" class="primary-search-btn" disabled>Find Similar Cards</button>
+                <button type="button" id="find-similar-btn" class="primary-search-btn" disabled data-feature-tip="Search for cards with similar mechanics, function, and context." data-feature-preview="Source card + highlights + constraints → ranked matches">Find Similar Cards</button>
                 <div id="static-search-status" class="static-search-status" role="status" aria-live="polite">
                     <span id="static-search-status-spinner" class="static-search-status-spinner" aria-hidden="true"></span>
                     <span id="static-search-status-text" class="static-search-status-text">Loading search data — cards.bin and semantic-index.bin are loading… Find Similar Cards will be available when both files are ready.</span>
@@ -170,7 +177,7 @@
                         <p class="section-description">Cards are ranked by the engine's mechanical and functional similarity signals.</p>
                         <p id="results-summary" class="results-summary" aria-live="polite"></p>
                     </div>
-                    <button type="button" id="export-btn">Export to CSV</button>
+                    <button type="button" id="export-btn" data-feature-tip="Export the current ranked results to a spreadsheet-friendly CSV file." data-feature-preview="Card names · scores · card details">Export to CSV</button>
                 </div>
                 <div id="provisional-results-banner" class="provisional-results-banner hidden">First look — still searching further sources, results will update…</div>
                 <div id="results-grid" class="results-grid"></div>
@@ -181,7 +188,7 @@
                         <button type="button" id="results-next-page" class="results-page-nav-btn" data-page-action="next" disabled><span>Next page</span> ›</button>
                     </nav>
                     <div class="search-deeper-row">
-                        <button type="button" id="search-deeper-btn" class="hidden">🔍 Search Deeper</button>
+                        <button type="button" id="search-deeper-btn" class="hidden" data-feature-tip="Look for more candidates while keeping your current result pool." data-feature-preview="Find additional matches without replacing existing results">🔍 Search Deeper</button>
                     </div>
                     <div id="results-exact-page-wrap" class="results-exact-page-wrap hidden">
                         <label for="results-exact-page">Exact Page</label>
@@ -379,6 +386,30 @@
                                 <small>Best for: keeping results in the same general card class.</small>
                             </div>
                         </label>
+                        <label class="method-card order-card">
+                            <input type="radio" name="order-choice" value="price">
+                            <div class="method-text">
+                                <strong>Price (lowest first)</strong>
+                                <span>Sorts by the card's non-foil USD price, with unavailable prices last.</span>
+                                <small>Best for: finding budget-friendly options.</small>
+                            </div>
+                        </label>
+                        <label class="method-card order-card">
+                            <input type="radio" name="order-choice" value="manaValue">
+                            <div class="method-text">
+                                <strong>Mana Value (lowest first)</strong>
+                                <span>Sorts by mana value from low to high.</span>
+                                <small>Best for: finding cheaper-to-cast options.</small>
+                            </div>
+                        </label>
+                        <label class="method-card order-card">
+                            <input type="radio" name="order-choice" value="manaValueDesc">
+                            <div class="method-text">
+                                <strong>Mana Value (highest first)</strong>
+                                <span>Sorts by mana value from high to low.</span>
+                                <small>Best for: exploring high-cost alternatives.</small>
+                            </div>
+                        </label>
                     </div>
                 </section>
 
@@ -562,7 +593,8 @@
                     </div>
                 </div>
             </div>
-            <div class="modal-footer">
+            <div class="modal-footer constraints-modal-footer">
+                <button type="button" id="clear-all-constraints-btn" class="secondary-preference-btn">Clear All Constraints</button>
                 <button type="button" id="save-card-constraints-btn">Done</button>
             </div>
         </div>
@@ -577,8 +609,12 @@
                 <button type="button" id="selected-cards-more-btn" class="selected-cards-more-btn hidden" aria-label="Show all selected related cards">...</button>
             </div>
             <div class="floating-bar-actions">
-                <button type="button" id="clear-selected-btn" class="clear-btn">Clear All</button>
-                <button type="button" id="related-search-btn" class="related-search-btn">🔍 Search Related Cards</button>
+                <label class="related-use-highlights-label" title="Add your selected source-card highlights as an extra focus for Related Search">
+                    <input type="checkbox" id="related-use-highlights" checked disabled>
+                    <span>Use source highlights</span>
+                </label>
+                <button type="button" id="clear-selected-btn" class="clear-btn" data-feature-tip="Clear the cards selected for Search Related Cards." data-feature-preview="Clear the selection, not the current search results">Clear All</button>
+                <button type="button" id="related-search-btn" class="related-search-btn" data-feature-tip="Find cards related to the cards you selected from the results." data-feature-preview="Selected cards + optional source highlights → related matches">🔍 Search Related Cards</button>
             </div>
         </div>
     </div>
@@ -742,6 +778,6 @@
         import * as transformers from "https://cdn.jsdelivr.net/npm/@xenova/transformers@2.16.0";
         window.transformers = transformers;
     </script>
-    <script type="module" src="app.js?v=20261010-43"></script>
+    <script type="module" src="app.js?v=20261011-46"></script>
 </body>
 </html>

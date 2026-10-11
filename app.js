@@ -1,6 +1,6 @@
-/* ManaSearch build 20261010-43 */
+/* ManaSearch build 20261011-46 */
 // ManaSearch deployment build marker. Bump this whenever app.js changes so cached-module issues are easy to diagnose.
-const MANASEARCH_APP_BUILD = '20261010-43';
+const MANASEARCH_APP_BUILD = '20261011-46';
 console.info(`[ManaSearch] app.js build ${MANASEARCH_APP_BUILD}`);
 
 // State Management
@@ -83,6 +83,7 @@ const SESSION_SEMANTIC_CORPUS_LIMIT = 4000;
 // the specific value doesn't, so it's excluded from the literal-match requirement and only
 // informs mechanical/semantic parsing.
 let manualHighlights = [];
+let nextHighlightColorIndex = 0;
 let highlightComposerOpen = false;
 let highlightEditIndex = null;
 let sortSelect;
@@ -137,6 +138,7 @@ const MANASEARCH_UI_PANEL_OPEN_SELECTOR = MANASEARCH_UI_PANEL_SELECTOR
 let manaPanelMutationObserver = null;
 let deferredResultRenderPending = false;
 let deferredResultRenderCards = null;
+let deferredResultRenderSearchGeneration = 0;
 let deferredResultRenderFrame = 0;
 
 // Progressive scoring can produce a new ordering several times per second. Painting every batch
@@ -170,6 +172,17 @@ function cancelScheduledProgressiveResultRender() {
     progressiveResultRenderTimer = 0;
     progressiveResultRenderCards = null;
     progressiveResultRenderRequestId = 0;
+}
+
+
+function cancelDeferredResultRender() {
+    if (deferredRenderFlushTimer) clearTimeout(deferredRenderFlushTimer);
+    deferredRenderFlushTimer = 0;
+    if (deferredResultRenderFrame) cancelAnimationFrame(deferredResultRenderFrame);
+    deferredResultRenderFrame = 0;
+    deferredResultRenderPending = false;
+    deferredResultRenderCards = null;
+    deferredResultRenderSearchGeneration = 0;
 }
 
 function scheduleProgressiveResultRender(cards, requestId) {
@@ -416,9 +429,11 @@ function flushDeferredResultRender() {
             return;
         }
         if (!deferredResultRenderPending) return;
+        if (deferredResultRenderSearchGeneration !== searchRequestId) { cancelDeferredResultRender(); return; }
         const cards = deferredResultRenderCards;
         deferredResultRenderCards = null;
         deferredResultRenderPending = false;
+        deferredResultRenderSearchGeneration = 0;
         renderResults(cards);
     });
 }
@@ -679,7 +694,12 @@ function applyPresentationPreferences() {
 
 
 // UI Elements 
-let cardSearchInput, searchBtn, sourceCardSection, sourceCardOracle, findSimilarBtn;
+let cardSearchInput, searchBtn, sourceCardSection, sourceCardOracle, sourceCardType, findSimilarBtn;
+let sourceCardImage, sourceCardFlipBtn, sourceCardPrice;
+let currentSourceCardFaceIndex = 0;
+let sourceCardFlipTimer = 0;
+let sourceCardFlipFinalTimer = 0;
+let includeSourceHighlightsInRelatedSearch = true;
 let staticSearchStatus, staticSearchStatusText, staticSearchStatusSpinner, staticSearchRetryBtn;
 let loadingIndicator, resultsSection, resultsGrid, themeToggle, historyList;
 let systemThemeMediaQuery = null;
@@ -1830,6 +1850,7 @@ function resetBenchmarkColdState({ keepSourceCard = false } = {}) {
     lastSearchResults = [];
     lastSearchDiagnostics = null;
     manualHighlights = [];
+    nextHighlightColorIndex = 0;
     highlightComposerOpen = false;
     selectedRelatedCards.clear();
     sourceCards.clear();
@@ -3975,7 +3996,7 @@ function reapplyOracleHighlights() {
     const ranges = [];
 
     for (const h of manualHighlights) {
-        if (!h || !h.text) continue;
+        if (!h || !h.text || h.field === 'type') continue;
 
         // User-authored additions are search-intent tags, not selections from the source
         // Oracle text. They must participate in search/scoring, but should never be rendered as
@@ -3995,7 +4016,7 @@ function reapplyOracleHighlights() {
 
         start = Math.max(0, Math.min(start, originalText.length));
         end = Math.max(start, Math.min(end, originalText.length));
-        if (end > start) ranges.push({ start, end, mode: h.mode });
+        if (end > start) ranges.push({ start, end, mode: h.mode, colorIndex: Number.isInteger(h.colorIndex) ? h.colorIndex % 4 : 0 });
     }
 
     // Resolve overlaps deterministically.  A user selection's stored position wins; when two
@@ -4013,7 +4034,7 @@ function reapplyOracleHighlights() {
     for (const range of claimed) {
         html += escapeHtmlText(originalText.slice(cursor, range.start));
         const modeClass = range.mode === 'variable' ? 'highlight-variable' : 'highlight-exact';
-        html += `<strong class="highlight-active ${modeClass}">${escapeHtmlText(originalText.slice(range.start, range.end))}</strong>`;
+        html += `<strong class="highlight-active ${modeClass} highlight-color-${range.colorIndex}">${escapeHtmlText(originalText.slice(range.start, range.end))}</strong>`;
         cursor = range.end;
     }
     html += escapeHtmlText(originalText.slice(cursor));
@@ -4024,53 +4045,80 @@ function reapplyOracleHighlights() {
  * Captures a completed Oracle-text selection and records its exact text offsets so the same
  * occurrence can be re-rendered without accidentally highlighting every matching phrase.
  */
-function handleOracleTextSelection() {
-    if (!sourceCardOracle) return;
+function handleSourceTextSelection(root = sourceCardOracle, field = 'oracle') {
+    if (!root) return;
     const selection = window.getSelection?.();
     if (!selection || selection.rangeCount === 0) return;
-
     const range = selection.getRangeAt(0);
-    const commonAncestor = range.commonAncestorContainer;
-    if (!sourceCardOracle.contains(commonAncestor)) return;
-
+    if (!root.contains(range.commonAncestorContainer)) return;
     const selectedText = selection.toString().trim();
     if (!selectedText) return;
 
-    if (!sourceCardOracle.dataset.originalText) {
-        sourceCardOracle.dataset.originalText = sourceCardOracle.textContent || '';
-        sourceCardOracle.dataset.originalHtml = sourceCardOracle.innerHTML;
+    const originalText = field === 'type'
+        ? (root.dataset.originalText ?? root.textContent ?? '')
+        : (root.dataset.originalText ?? root.textContent ?? '');
+    if (!root.dataset.originalText) {
+        root.dataset.originalText = originalText;
+        root.dataset.originalHtml = root.innerHTML;
     }
-
-    const offsets = normalizeHighlightSelectionOffsets(sourceCardOracle, range);
-    const trimmedSelection = offsets
+    const offsets = normalizeHighlightSelectionOffsets(root, range);
+    const trimmed = offsets
         ? trimHighlightRangeText(selectedText, offsets.start, offsets.end)
         : { text: selectedText, start: null, end: null };
+    if (!trimmed.text) return;
 
-    if (!trimmedSelection.text) return;
-
-    // The same phrase may legitimately be highlighted more than once. Treat an identical
-    // phrase at a different source-text position as a distinct selection.
-    const alreadyHighlighted = manualHighlights.some(h =>
-        h.text.toLowerCase() === trimmedSelection.text.toLowerCase() &&
-        Number.isFinite(h.start) && Number.isFinite(trimmedSelection.start) &&
-        h.start === trimmedSelection.start && h.end === trimmedSelection.end
-    );
-
-    if (!alreadyHighlighted) {
-        manualHighlights.push({
-            text: trimmedSelection.text,
-            mode: 'exact',
-            origin: 'source',
-            start: trimmedSelection.start,
-            end: trimmedSelection.end,
-            attachedTo: null
-        });
+    const existingIndex = manualHighlights.findIndex(h => h.field === field &&
+        String(h.text || '').toLowerCase() === trimmed.text.toLowerCase() &&
+        (field === 'type'
+            ? Number.isFinite(h.typeStart) && h.typeStart === trimmed.start && h.typeEnd === trimmed.end
+            : Number.isFinite(h.start) && h.start === trimmed.start && h.end === trimmed.end));
+    if (existingIndex >= 0) {
+        removeHighlight(existingIndex);
+    } else {
+        const highlight = {
+            text: trimmed.text, mode: 'exact', origin: 'source', field,
+            colorIndex: nextHighlightColorIndex++ % 4, attachedTo: null
+        };
+        if (field === 'type') {
+            highlight.typeStart = trimmed.start;
+            highlight.typeEnd = trimmed.end;
+        } else {
+            highlight.start = trimmed.start;
+            highlight.end = trimmed.end;
+        }
+        manualHighlights.push(highlight);
         reapplyOracleHighlights();
+        reapplyTypeLineHighlights();
         renderHighlightChips();
     }
-
     selection.removeAllRanges();
 }
+
+function handleOracleTextSelection() {
+    return handleSourceTextSelection(sourceCardOracle, 'oracle');
+}
+
+function reapplyTypeLineHighlights() {
+    if (!sourceCardType) return;
+    const text = sourceCardType.dataset.originalText ?? sourceCardType.textContent ?? '';
+    const ranges = manualHighlights
+        .filter(h => h?.field === 'type' && Number.isFinite(h.typeStart) && Number.isFinite(h.typeEnd) && h.typeEnd > h.typeStart)
+        .map(h => ({ start: h.typeStart, end: h.typeEnd, colorIndex: Number.isInteger(h.colorIndex) ? h.colorIndex % 4 : 0 }))
+        .filter(r => text.slice(r.start, r.end));
+    ranges.sort((a, b) => (b.end - b.start) - (a.end - a.start) || a.start - b.start);
+    const claimed = [];
+    for (const range of ranges) if (!claimed.some(r => range.start < r.end && range.end > r.start)) claimed.push(range);
+    claimed.sort((a, b) => a.start - b.start);
+    let cursor = 0, html = '';
+    for (const r of claimed) {
+        html += escapeHtmlText(text.slice(cursor, r.start));
+        html += `<strong class="highlight-active highlight-type highlight-color-${r.colorIndex}">${escapeHtmlText(text.slice(r.start, r.end))}</strong>`;
+        cursor = r.end;
+    }
+    html += escapeHtmlText(text.slice(cursor));
+    sourceCardType.innerHTML = html;
+}
+
 
 /**
  * Renders the highlight chip list beneath the oracle text - one chip per active highlight, each
@@ -4280,7 +4328,7 @@ function renderHighlightChips() {
 
     manualHighlights.forEach((h, idx) => {
         const chip = document.createElement('div');
-        chip.className = `card-chip highlight-chip ${h.origin === 'user' ? 'highlight-user-chip' : 'highlight-source-chip'} ${Number.isInteger(h.attachedTo) ? 'highlight-linked-chip' : ''}`;
+        chip.className = `card-chip highlight-chip highlight-color-${Number.isInteger(h.colorIndex) ? h.colorIndex % 4 : 0} ${h.field === 'type' ? 'highlight-type-chip' : ''} ${h.origin === 'user' ? 'highlight-user-chip' : 'highlight-source-chip'} ${Number.isInteger(h.attachedTo) ? 'highlight-linked-chip' : ''}`;
 
         if (Number.isInteger(h.attachedTo) && manualHighlights[h.attachedTo]) {
             const linked = document.createElement('span');
@@ -4292,10 +4340,10 @@ function renderHighlightChips() {
 
         const origin = document.createElement('span');
         origin.className = 'highlight-origin-label';
-        origin.textContent = h.origin === 'user' ? '+' : 'Highlight';
+        origin.textContent = h.origin === 'user' ? '+' : (h.field === 'type' ? 'Type' : 'Highlight');
         origin.title = h.origin === 'user'
             ? (Number.isInteger(h.attachedTo) ? `User-added search detail connected to: ${getHighlightParentLabel(h.attachedTo)}` : 'Independent user-added search detail')
-            : 'Selected from this card\'s Oracle text';
+            : (h.field === 'type' ? 'Selected from this card\'s type line' : 'Selected from this card\'s Oracle text');
 
         const modeBtn = document.createElement('button');
         modeBtn.type = 'button';
@@ -4346,6 +4394,30 @@ function renderHighlightChips() {
     });
 
     container.appendChild(chipsRow);
+
+    const relatedHighlightsToggle = document.getElementById('related-use-highlights');
+    if (relatedHighlightsToggle) {
+        relatedHighlightsToggle.disabled = manualHighlights.filter(h => h && h.origin !== 'user').length === 0;
+        relatedHighlightsToggle.checked = includeSourceHighlightsInRelatedSearch;
+        if (!relatedHighlightsToggle.disabled && relatedHighlightsToggle.checked) includeSourceHighlightsInRelatedSearch = true;
+    }
+
+    if (manualHighlights.length > 0) {
+        const clearAllButton = document.createElement('button');
+        clearAllButton.type = 'button';
+        clearAllButton.className = 'highlight-clear-all-btn';
+        clearAllButton.textContent = 'Clear All Highlights';
+        clearAllButton.addEventListener('click', () => {
+            manualHighlights = [];
+            nextHighlightColorIndex = 0;
+            highlightEditIndex = null;
+            highlightComposerOpen = false;
+            reapplyOracleHighlights();
+            reapplyTypeLineHighlights();
+            renderHighlightChips();
+        });
+        container.appendChild(clearAllButton);
+    }
 
     const addButton = document.createElement('button');
     addButton.type = 'button';
@@ -4461,6 +4533,7 @@ function renderHighlightChips() {
                     text,
                     mode: selectedMode,
                     origin: 'user',
+                    colorIndex: nextHighlightColorIndex++ % 4,
                     start: null,
                     end: null,
                     attachedTo: /^\d+$/.test(connectSelect.value) ? Number(connectSelect.value) : null
@@ -4499,6 +4572,7 @@ function toggleHighlightMode(idx) {
     manualHighlights[idx].mode = manualHighlights[idx].mode === 'variable' ? 'exact' : 'variable';
     renderHighlightChips();
     reapplyOracleHighlights();
+    reapplyTypeLineHighlights();
 }
 
 function removeHighlight(idx) {
@@ -4514,6 +4588,7 @@ function removeHighlight(idx) {
     else if (Number.isInteger(highlightEditIndex) && highlightEditIndex > idx) highlightEditIndex -= 1;
     renderHighlightChips();
     reapplyOracleHighlights();
+    reapplyTypeLineHighlights();
 }
 
 // Configurable tag weights (Primary: 1.0, Secondary: 0.5, Broad Category: 0.2, Default fallback: 0.5)
@@ -5196,6 +5271,19 @@ function parseCounterEffect(clause) {
 }
 
 /**
+ * True only when the clause explicitly describes drawing cards. A reference to a player's
+ * "draw step" is turn structure, not an instruction to draw cards. This guard is shared by the
+ * zone-movement parser and its regression tests to prevent draw-step text from becoming a false
+ * card-draw function.
+ */
+function hasExplicitCardDrawAction(value) {
+    const text = String(value || '');
+    const quantity = '(?:a|an|one|two|three|four|five|six|seven|eight|nine|ten|x|that many|another|an additional|the top(?:\\s+(?:one|two|three|four|five|\\d+))?|half(?: of)?|up to\\s+(?:one|two|three|four|five|\\d+)|\\d+|one or more)';
+    const re = new RegExp('\\bdraw(?:s|ing)?\\s+(?:' + quantity + '\\s+)?cards?\\b', 'i');
+    return re.test(text);
+}
+
+/**
  * Parses movement between battlefield, hand, graveyard, library, and exile.
  * @param {string} clause 
  * @returns {Object|null}
@@ -5270,7 +5358,7 @@ function parseZoneMovementEffect(clause) {
         effect.object = "card";
         if (!effect.from) effect.from = "library";
         if (!effect.to) effect.to = "graveyard";
-    } else if (/\bdraws?\b/i.test(text)) {
+    } else if (hasExplicitCardDrawAction(text)) {
         effect.action = "draw";
         effect.object = "card";
         if (!effect.from) effect.from = "library";
@@ -6517,6 +6605,221 @@ function strategicRoleHasTrigger(parsedEffects) {
     return (parsedEffects || []).some(e => e.triggerProfile || e.isTriggered || /\b(?:whenever|at the beginning of|at the end of)\b/i.test(e.raw || ''));
 }
 
+// Repeatability is a distinct mechanical property. Matching "draw a card" or "create a
+// Treasure" is not enough: an upkeep engine and a one-shot sorcery do fundamentally different
+// jobs over the course of a game. These profiles are annotations only; the parsed action,
+// quantity, targets, costs, and all existing mechanic bridges remain intact.
+const REPEATABILITY_PROFILE_META = Object.freeze({
+    periodic_trigger:       { group: 'repeatable_engine', strength: 1.00, label: 'Recurring turn trigger' },
+    repeatable_trigger:     { group: 'repeatable_engine', strength: 0.90, label: 'Repeatable triggered ability' },
+    repeatable_activation:  { group: 'repeatable_engine', strength: 0.86, label: 'Repeatable activated ability' },
+    ongoing_static:         { group: 'repeatable_engine', strength: 0.94, label: 'Ongoing static effect' },
+    repeatable_spell:       { group: 'limited_reuse',     strength: 0.66, label: 'Repeatable spell' },
+    recastable_spell:       { group: 'limited_reuse',     strength: 0.44, label: 'Spell with another cast available' },
+    entry_trigger:          { group: 'single_use',        strength: 0.30, label: 'Entry-triggered effect' },
+    self_event:             { group: 'single_use',        strength: 0.28, label: 'One-time event for this permanent' },
+    single_use_activation:  { group: 'single_use',        strength: 0.18, label: 'Single-use activation' },
+    one_shot:               { group: 'single_use',        strength: 0.05, label: 'One-shot effect' },
+    unknown:                { group: 'unknown',           strength: null, label: 'Repeatability unclear' }
+});
+
+function normalizeRepeatabilityText(value) {
+    return String(value || '').toLowerCase()
+        .replace(/[’']/g, "'")
+        .replace(/[^a-z0-9{}+/'-]+/g, ' ')
+        .replace(/\s+/g, ' ').trim();
+}
+
+function findRepeatabilityContextClause(effectRaw, fullText) {
+    const raw = String(effectRaw || '').trim();
+    const text = String(fullText || '').trim();
+    if (!text) return raw;
+    if (!raw) return text;
+    const rawNorm = normalizeRepeatabilityText(raw);
+    if (!rawNorm) return text;
+    const clauses = text.split(/\n+|(?<=[.!?;])\s+/).map(x => x.trim()).filter(Boolean);
+    let best = null, bestScore = -Infinity;
+    const rawWords = new Set(rawNorm.split(' ').filter(w => w.length > 2));
+    for (let i = 0; i < clauses.length; i++) {
+        const clause = clauses[i];
+        const norm = normalizeRepeatabilityText(clause);
+        if (!norm) continue;
+        let score = 0;
+        if (norm.includes(rawNorm) || rawNorm.includes(norm)) score += 100;
+        const words = norm.split(' ').filter(w => w.length > 2);
+        const overlap = words.reduce((n, w) => n + (rawWords.has(w) ? 1 : 0), 0);
+        score += overlap / Math.max(1, Math.min(rawWords.size, words.length)) * 20;
+        // When a selected/highlighted fragment such as "draw a card" appears in multiple
+        // clauses, prefer the clause that carries explicit ability timing/cost context.
+        if (/\b(?:at the beginning of|at the end of|each upkeep|each turn|every turn|whenever|when|\{t\}|activate only)\b/i.test(clause)) score += 3;
+        if (norm.includes(rawNorm)) score += Math.min(8, norm.length / 30);
+        if (score > bestScore) { best = clause; bestScore = score; }
+    }
+    return best || raw;
+}
+
+function inferEffectRepeatabilityProfile(card, effect, fullText = '') {
+    if (!effect || effect.isCostEffect) return { kind: 'unknown', group: 'unknown', strength: null, confidence: 0 };
+    const raw = String(effect.raw || effect.canonical?.params?.raw || '').trim();
+    const context = findRepeatabilityContextClause(raw, fullText || strategicRoleCardText(card));
+    const combined = `${context} ${raw}`.trim();
+    const lower = combined.toLowerCase();
+    const typeLine = String(card?.type_line || '').toLowerCase();
+    const isPermanent = /\b(?:creature|artifact|enchantment|planeswalker|land|battle)\b/.test(typeLine);
+    const isInstantSorceryOnly = !isPermanent && /\b(?:instant|sorcery)\b/.test(typeLine);
+    const cardName = String(card?.name || '').split(' // ')[0].trim();
+    const escapedName = cardName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const selfReference = /\bthis(?: creature| artifact| enchantment| permanent| planeswalker| land| card| spell)?\b/i.test(combined) ||
+        Boolean(escapedName && new RegExp(`\\b${escapedName}\\b`, 'i').test(combined));
+    const periodicTiming = /\bat the beginning of (?:your|each|every|each player's|each players') (?:upkeep|draw step|main phase|combat|end step|turn)\b|\bat the end of (?:your|each|every|each player's|each players') (?:turn|end step|upkeep)\b|\beach upkeep\b|\beach turn\b|\bevery turn\b/i.exec(combined);
+    const timingText = periodicTiming ? periodicTiming[0].replace(/\s+/g, ' ').trim() : '';
+    const activation = Boolean(effect.activationCost) || /(?:^|[.;]\s*)[^.;]*:\s*(?:add|draw|create|put|return|exile|search|destroy|tap|untap|gain|deal|discard|mill|counter)\b/i.test(raw);
+    // Replacement effects (for example, doubling tokens or preventing damage) are continuous
+    // rules modifications on permanents, not one-shot actions merely because their text lacks a
+    // conventional "as long as" clause.
+    const replacementEffect = /\bwould\b[^.;]{0,180}\binstead\b/i.test(combined);
+    const staticAbilityText = /\b(?:creatures?|artifacts?|enchantments?|tokens?|spells?|cards?|lands?|permanents?) you control (?:get|have|can't|cannot|enter tapped|cost|produce)\b/i.test(combined) ||
+        /\b(?:creatures?|artifacts?|enchantments?|tokens?|spells?|cards?|lands?|permanents?) you control are (?:indestructible|unblockable|hexproof|shrouded|indestructible|unaffected|exiled|exempt)\b/i.test(combined) ||
+        /\b(?:each|all) (?:creatures?|artifacts?|enchantments?|tokens?|spells?|lands?|permanents?) (?:get|have|enter tapped|cost|produce)\b/i.test(combined);
+    const consumesSource = /\b(?:sacrifice|discard|exile)\s+(?:this(?: creature| artifact| enchantment| permanent| planeswalker| land| card)?|the source|~)\b/i.test(context) ||
+        Boolean(escapedName && new RegExp(`\\b(?:sacrifice|discard|exile)\\s+${escapedName}\\b`, 'i').test(context));
+    const spellReuse = /\b(?:flashback|buyback|retrace|escape|jump-start|rebound|aftermath|disturb|adventure)\b/i.test(strategicRoleCardText(card) || fullText || '');
+    const indefiniteCastReuse = /\b(?:buyback|retrace|escape)\b/i.test(strategicRoleCardText(card) || fullText || '');
+
+    let kind = 'one_shot', confidence = 0.82, eventText = '';
+    if (isInstantSorceryOnly) {
+        kind = indefiniteCastReuse ? 'repeatable_spell' : (spellReuse ? 'recastable_spell' : 'one_shot');
+        confidence = spellReuse ? 0.76 : 0.88;
+    } else if (periodicTiming && (isPermanent || !typeLine)) {
+        // Some benchmark/highlight-only card records omit type_line. Explicit recurring
+        // turn timing is still strong evidence of cadence in that case; do not downgrade it
+        // to one-shot merely because the partial record lacks its card type.
+        kind = 'periodic_trigger';
+        confidence = typeLine ? 0.96 : 0.90;
+    } else if (activation && isPermanent) {
+        kind = consumesSource ? 'single_use_activation' : 'repeatable_activation';
+        confidence = 0.88;
+    } else if (isPermanent && (replacementEffect || staticAbilityText || /\b(?:as long as|while)\b/i.test(combined) || effect.isStatic === true)) {
+        kind = 'ongoing_static';
+        confidence = replacementEffect ? 0.93 : 0.84;
+    } else if (/\b(?:when|whenever)\b/i.test(combined) && isPermanent) {
+        const ownEntry = selfReference && /\b(?:enters? the battlefield|comes into play)\b/i.test(combined);
+        const ownOneTimeEvent = selfReference && /\b(?:dies|leaves the battlefield|is sacrificed|is put into a graveyard)\b/i.test(combined);
+        const repeatingCombatEvent = /\b(?:attacks|blocks)\b/i.test(combined) && !ownOneTimeEvent;
+        if (ownEntry) {
+            kind = 'entry_trigger';
+            confidence = 0.88;
+        } else if (ownOneTimeEvent && !repeatingCombatEvent) {
+            kind = 'self_event';
+            confidence = 0.76;
+        } else {
+            kind = 'repeatable_trigger';
+            confidence = 0.84;
+            const eventMatch = combined.match(/\b(?:whenever|when)\s+([^,.;]+)/i);
+            eventText = eventMatch ? eventMatch[0].trim() : '';
+        }
+    } else if (isPermanent && /\b(?:creatures?|artifacts?|enchantments?|permanents?|lands?|spells?) you control (?:get|have|can't|cannot)|\bas long as\b/i.test(combined)) {
+        kind = 'ongoing_static';
+        confidence = 0.74;
+    }
+
+    const meta = REPEATABILITY_PROFILE_META[kind] || REPEATABILITY_PROFILE_META.unknown;
+    return {
+        kind,
+        group: meta.group,
+        strength: meta.strength,
+        confidence,
+        timingText,
+        eventText,
+        context: context.slice(0, 240)
+    };
+}
+
+function annotateEffectRepeatability(card, parsedEffects, textOverride = '') {
+    if (!Array.isArray(parsedEffects) || !card) return parsedEffects || [];
+    const fullText = strategicRoleCardText(card) || String(textOverride || '');
+    const signature = `${String(card.type_line || '')}|${fullText}`;
+    if (parsedEffects._repeatabilityContextKey === signature) return parsedEffects;
+    for (const effect of parsedEffects) {
+        if (!effect || typeof effect !== 'object') continue;
+        const profile = inferEffectRepeatabilityProfile(card, effect, fullText);
+        effect.repeatabilityProfile = profile;
+        if (effect.canonical?.params) effect.canonical.params.repeatabilityProfile = profile;
+    }
+    try { Object.defineProperty(parsedEffects, '_repeatabilityContextKey', { value: signature, writable: true, configurable: true }); }
+    catch (_) { parsedEffects._repeatabilityContextKey = signature; }
+    return parsedEffects;
+}
+
+function getEffectRepeatabilityProfile(value) {
+    return value?.repeatabilityProfile || value?.canonical?.params?.repeatabilityProfile || value?.params?.repeatabilityProfile || null;
+}
+
+function repeatabilityProfileSimilarity(profileA, profileB) {
+    if (!profileA || !profileB || !profileA.kind || !profileB.kind || profileA.group === 'unknown' || profileB.group === 'unknown') return 1;
+    let score;
+    if (profileA.kind === profileB.kind) score = 1;
+    else if (profileA.group === 'repeatable_engine' && profileB.group === 'repeatable_engine') {
+        score = (profileA.kind === 'periodic_trigger' || profileB.kind === 'periodic_trigger') ? 0.78 : 0.74;
+    } else if (profileA.group === 'single_use' && profileB.group === 'single_use') {
+        score = (profileA.kind === 'one_shot' || profileB.kind === 'one_shot') ? 0.78 : 0.70;
+    } else if (profileA.group === 'limited_reuse' && profileB.group === 'single_use' || profileB.group === 'limited_reuse' && profileA.group === 'single_use') {
+        score = 0.66;
+    } else if (profileA.group === 'repeatable_engine' && profileB.group === 'limited_reuse' || profileB.group === 'repeatable_engine' && profileA.group === 'limited_reuse') {
+        score = 0.46;
+    } else if (profileA.group === 'repeatable_engine' && profileB.group === 'single_use' || profileB.group === 'repeatable_engine' && profileA.group === 'single_use') {
+        const oneShot = (profileA.kind === 'one_shot' || profileB.kind === 'one_shot');
+        const entryOnly = (profileA.kind === 'entry_trigger' || profileB.kind === 'entry_trigger' || profileA.kind === 'self_event' || profileB.kind === 'self_event');
+        score = oneShot ? 0.10 : (entryOnly ? 0.20 : 0.16);
+    } else score = 0.55;
+    const confidence = Math.min(Number(profileA.confidence ?? 1), Number(profileB.confidence ?? 1));
+    return Math.max(0, Math.min(1, 1 - (1 - score) * Math.max(0, Math.min(1, confidence))));
+}
+
+function calculateRepeatabilityMismatchSeverity(parsedA = [], parsedB = []) {
+    const byFunction = effects => {
+        const map = new Map();
+        for (const effect of (effects || [])) {
+            if (effect?.isCostEffect || effect?.canonical?.params?.isCostEffect) continue;
+            const fn = effect?.canonical?.function;
+            const profile = getEffectRepeatabilityProfile(effect);
+            if (!fn || !profile || profile.group === 'unknown') continue;
+            const list = map.get(fn) || [];
+            list.push({ effect, profile, importance: Math.max(0.05, Number(effect.importance) || 0.5) });
+            map.set(fn, list);
+        }
+        return map;
+    };
+    const aMap = byFunction(parsedA), bMap = byFunction(parsedB);
+    let maxSeverity = 0;
+    for (const [fn, aList] of aMap) {
+        const bList = bMap.get(fn);
+        if (!bList?.length) continue;
+        let bestSimilarity = 0, bestWeight = 0;
+        for (const a of aList) for (const b of bList) {
+            const sim = repeatabilityProfileSimilarity(a.profile, b.profile);
+            const weight = Math.sqrt(a.importance * b.importance);
+            if (sim > bestSimilarity || (sim === bestSimilarity && weight > bestWeight)) {
+                bestSimilarity = sim;
+                bestWeight = weight;
+            }
+        }
+        // Only treat large repeatability gaps as an important mismatch. Small differences such as
+        // periodic upkeep triggers versus other reusable triggers remain reasonably close.
+        if (bestSimilarity < 0.42) {
+            const severity = (1 - bestSimilarity) * Math.min(1, bestWeight / 0.55 + 0.25);
+            maxSeverity = Math.max(maxSeverity, severity);
+        }
+    }
+    return Math.max(0, Math.min(1, maxSeverity));
+}
+
+function hasRepeatableEffectForFunctions(parsedEffects, functionNames) {
+    const wanted = functionNames instanceof Set ? functionNames : new Set(Array.isArray(functionNames) ? functionNames : [functionNames]);
+    return (parsedEffects || []).some(effect => wanted.has(effect?.canonical?.function) &&
+        getEffectRepeatabilityProfile(effect)?.group === 'repeatable_engine');
+}
+
 function strategicRoleMaxNumber(parsedEffects, fn) {
     let max = 0;
     for (const e of (parsedEffects || [])) {
@@ -6556,11 +6859,13 @@ function inferStrategicRoleProfile(card, parsedEffects = [], intentText = '') {
     const text = strategicRoleCardText(card);
     const lower = `${text} ${String(intentText || '')}`.toLowerCase();
     const typeLine = String(card?.type_line || '').toLowerCase();
+    annotateEffectRepeatability(card, parsedEffects, text);
     const roles = [];
     const functions = new Set(strategicRoleFunctions(parsedEffects));
-    const recurring = strategicRoleHasTrigger(parsedEffects) || /\b(?:whenever|at the beginning of|at the end of)\b/.test(lower);
-    const activated = /\bpay\b|\{t\}|\b:\s*(?:add|draw|return|exile|search|create)/i.test(text);
-    const permanent = /\b(?:creature|artifact|enchantment|planeswalker)\b/.test(typeLine);
+    const recurring = (parsedEffects || []).some(e => getEffectRepeatabilityProfile(e)?.group === 'repeatable_engine');
+    const activated = (parsedEffects || []).some(e => getEffectRepeatabilityProfile(e)?.kind === 'repeatable_activation') ||
+        /\bpay\b|\{t\}|\b:\s*(?:add|draw|return|exile|search|create)/i.test(text);
+    const permanent = /\b(?:creature|artifact|enchantment|planeswalker|land|battle)\b/.test(typeLine);
 
     // Fast mana: require an explicit mana-producing ability plus either >1 mana per activation,
     // or a clearly early/efficient nonland permanent. A generic "add one mana" land is not enough.
@@ -6594,20 +6899,29 @@ function inferStrategicRoleProfile(card, parsedEffects = [], intentText = '') {
     const handAcquisition = /\b(?:put|puts|return|returns)\b[^.]{0,90}\b(?:card|cards|that card|those cards)\b[^.]{0,50}\b(?:into|to) your hand\b/.test(lower);
     const topCardAcquisition = /\b(?:reveal|exile)\s+the top card\b[^.]{0,100}\b(?:hand|put it into your hand|cards? exiled)\b/.test(lower);
     const recurringAcquisition = directDraw || handAcquisition || topCardAcquisition;
-    const resourceExchange = /\b(?:pay|lose)\s+\d+\s+life\b|\bpay\s+life\b|\breveal the top card\b|\bskip your draw step\b/.test(lower);
-    if (recurringAcquisition && (recurring || activated || resourceExchange)) {
+    const acquisitionText = /\bdraw(?:s)?\s+(?:a|one|two|three|four|five|\d+|x)\s+cards?\b|\b(?:put|puts|return|returns)\b[^.;]{0,100}\b(?:card|cards|it|them)\b[^.;]{0,60}\b(?:into|to) your hand\b|\b(?:reveal|exile)\s+the top card\b/i;
+    const acquisitionIsRepeatable = (parsedEffects || []).some(e =>
+        getEffectRepeatabilityProfile(e)?.group === 'repeatable_engine' &&
+        (e?.canonical?.function === 'card_draw' || acquisitionText.test(String(e?.raw || e?.canonical?.params?.raw || '')))
+    );
+    // A trigger elsewhere on a card must not turn its unrelated one-shot draw into an engine.
+    // The draw/acquisition effect itself has to live in a repeatable trigger, activation or static
+    // ability. Resource costs alone are not evidence of repeatability.
+    if (recurringAcquisition && acquisitionIsRepeatable) {
+        const timingAnchor = (parsedEffects || []).some(e => getEffectRepeatabilityProfile(e)?.kind === 'periodic_trigger' && acquisitionText.test(String(e?.raw || e?.canonical?.params?.raw || '')));
         strategicRoleAdd(roles, 'card_advantage_engine', 0.84,
-            [directDraw ? 'card draw' : 'card acquisition', recurring ? 'repeat timing' : null, resourceExchange ? 'resource exchange' : null]);
+            [directDraw ? 'card draw' : 'card acquisition', timingAnchor ? 'repeat timing' : 'repeatable acquisition', activated ? 'reusable ability' : null]);
     }
 
-    // Token roles. A multiplier is distinct from a token creator; recurring creation requires a
-    // trigger or permanent-based source rather than a one-shot spell.
+    // Token production is an engine only when the creation effect itself can recur. A permanent
+    // with a one-time enters-the-battlefield token trigger is not equivalent to a repeatable token
+    // maker, and an instant/sorcery that creates tokens is not an engine at all.
     if (functions.has('token_multiplier') || /\b(?:twice|double|two times)\b[^.]{0,70}\b(?:token|tokens)\b/.test(lower)) {
         strategicRoleAdd(roles, 'token_multiplier', 0.90, ['token multiplication']);
     }
-    if (functions.has('token_creation')) {
-        strategicRoleAdd(roles, 'token_engine', recurring || permanent ? 0.75 : 0.63,
-            ['token creation', recurring ? 'repeated creation' : null]);
+    const repeatableTokenCreation = hasRepeatableEffectForFunctions(parsedEffects, ['token_creation']);
+    if (repeatableTokenCreation) {
+        strategicRoleAdd(roles, 'token_engine', 0.78, ['token creation', 'repeated creation']);
     }
 
     // Tribal anthem: subtype-specific team buff is much more discriminating than a generic anthem.
@@ -6651,14 +6965,18 @@ function inferStrategicRoleProfile(card, parsedEffects = [], intentText = '') {
     if (functions.has('tutor') || functions.has('ramp_tutor')) {
         strategicRoleAdd(roles, 'tutor', 0.72, ['search library']);
     }
+    const repeatableDiscard = hasRepeatableEffectForFunctions(parsedEffects, ['discard']);
+    const repeatableMill = hasRepeatableEffectForFunctions(parsedEffects, ['mill']);
+    const repeatableLifeGain = hasRepeatableEffectForFunctions(parsedEffects, ['gain_life']);
+    const repeatableLifeLoss = hasRepeatableEffectForFunctions(parsedEffects, ['lose_life']);
     if (functions.has('discard')) {
-        strategicRoleAdd(roles, 'discard_engine', recurring ? 0.72 : 0.63, ['discard', recurring ? 'repeated disruption' : null]);
+        strategicRoleAdd(roles, 'discard_engine', repeatableDiscard ? 0.72 : 0.63, ['discard', repeatableDiscard ? 'repeated disruption' : null]);
     }
     if (functions.has('mill')) {
-        strategicRoleAdd(roles, 'mill_engine', recurring ? 0.72 : 0.63, ['mill', recurring ? 'repeated mill' : null]);
+        strategicRoleAdd(roles, 'mill_engine', repeatableMill ? 0.72 : 0.63, ['mill', repeatableMill ? 'repeated mill' : null]);
     }
-    if (functions.has('gain_life') && /\b(?:gain|gains)\s+(?:\d+|life)\s+life\b/.test(lower)) strategicRoleAdd(roles, 'life_gain_engine', recurring ? 0.72 : 0.63, ['life gain']);
-    if (functions.has('lose_life') && /\b(?:you|target|each opponent|opponent)\s+(?:lose|loses)\s+(?:\d+|life)\s+life\b/.test(lower)) strategicRoleAdd(roles, 'life_loss_engine', recurring ? 0.72 : 0.63, ['life loss']);
+    if (functions.has('gain_life') && /\b(?:gain|gains)\s+(?:\d+|life)\s+life\b/.test(lower)) strategicRoleAdd(roles, 'life_gain_engine', repeatableLifeGain ? 0.72 : 0.63, ['life gain']);
+    if (functions.has('lose_life') && /\b(?:you|target|each opponent|opponent)\s+(?:lose|loses)\s+(?:\d+|life)\s+life\b/.test(lower)) strategicRoleAdd(roles, 'life_loss_engine', repeatableLifeLoss ? 0.72 : 0.63, ['life loss']);
 
     roles.sort((a, b) => b.score - a.score);
     return roles.slice(0, 4);
@@ -6705,7 +7023,8 @@ function buildStrategicRoleFingerprint(card, parsedEffects = [], profile = []) {
     const text = strategicRoleCardText(card);
     const lower = text.toLowerCase();
     const topRole = profile?.[0]?.role || null;
-    const recurring = strategicRoleHasTrigger(parsedEffects) || /\b(?:whenever|at the beginning of|at the end of|each upkeep|each turn|every turn)\b/.test(lower);
+    annotateEffectRepeatability(card, parsedEffects, text);
+    const recurring = (parsedEffects || []).some(e => getEffectRepeatabilityProfile(e)?.group === 'repeatable_engine');
     const permanent = /\b(?:creature|artifact|enchantment|planeswalker)\b/.test(String(card?.type_line || '').toLowerCase());
     const damageAmounts = [...lower.matchAll(/\b(?:deal|deals)\s+(\d+)\s+damage\b/g)].map(m => Number(m[1])).filter(Number.isFinite);
     const manaEffects = (parsedEffects || []).filter(e => e?.canonical?.function === 'mana_ability');
@@ -6743,7 +7062,7 @@ function buildStrategicRoleFingerprint(card, parsedEffects = [], profile = []) {
         lifePaid,
         lifeLoss: Math.max(...lifeLoss, 0),
         tribe: tribeMatch ? tribeMatch[1] : null,
-        activated: /\bpay\b|\{t\}|\bsacrifice\b.*:\s*/i.test(text),
+        activated: (parsedEffects || []).some(e => getEffectRepeatabilityProfile(e)?.kind === 'repeatable_activation') || /\bpay\b|\{t\}|\bsacrifice\b.*:\s*/i.test(text),
         strength: sourceRole?.score || 0
     };
 }
@@ -7010,6 +7329,7 @@ parts.push(fieldSimilarity(2, qpA.bound, qpB.bound));
 const trA = effA.triggerProfile || {}, trB = effB.triggerProfile || {};
 parts.push(fieldSimilarity(4, trA.event, trB.event));
 parts.push(fieldSimilarity(3, trA.window, trB.window));
+parts.push({ weight: 18, value: repeatabilityProfileSimilarity(getEffectRepeatabilityProfile(effA), getEffectRepeatabilityProfile(effB)) });
 parts.push(fieldSimilarity(3, effA.durationProfile, effB.durationProfile));
 parts.push(fieldSimilarity(4, effA.effectMode, effB.effectMode));
 parts.push(fieldSimilarity(4, effA.condition, effB.condition));
@@ -7417,8 +7737,8 @@ function annotateHighlightGroups(highlights, sourceText = getCurrentSourceOracle
             ? String(sourceText || '').slice(start, end).trim()
             : '';
         const connectedIntentTexts = group
-            .filter(h => h.origin === 'user' || !Number.isFinite(h.start) || !Number.isFinite(h.end))
-            .map(h => String(h.text || '').trim())
+            .filter(h => h.origin === 'user' || h.field === 'type' || !Number.isFinite(h.start) || !Number.isFinite(h.end))
+            .map(h => h.field === 'type' ? `Card type line: ${String(h.text || '').trim()}` : String(h.text || '').trim())
             .filter(Boolean);
         const hasExact = group.some(h => h.mode !== 'variable');
         const hasVariable = group.some(h => h.mode === 'variable');
@@ -7458,7 +7778,15 @@ function annotateHighlightGroups(highlights, sourceText = getCurrentSourceOracle
 }
 
 function buildHighlightIntentProfiles(highlights) {
-    const groups = annotateHighlightGroups(highlights, getCurrentSourceOracleText());
+    const allHighlights = Array.isArray(highlights) ? highlights : [];
+    const effectEntries = allHighlights.map((highlight, originalIndex) => ({ highlight, originalIndex }))
+        .filter(entry => entry.highlight?.field !== 'type');
+    const remappedIndex = new Map(effectEntries.map((entry, index) => [entry.originalIndex, index]));
+    const effectHighlights = effectEntries.map(({ highlight }) => ({
+        ...highlight,
+        attachedTo: Number.isInteger(highlight.attachedTo) ? (remappedIndex.get(highlight.attachedTo) ?? null) : null
+    }));
+    const groups = annotateHighlightGroups(effectHighlights, getCurrentSourceOracleText());
     return groups.map((group, index) => {
         // Parse only text that actually exists on the source card. Attached search details are
         // intentionally NOT injected into the rules parser because phrases like "produces 3
@@ -7977,7 +8305,8 @@ function buildUniversalMechanicProfile(card = null, text = '', parsedEffects = n
     let actionMatch;
     while ((actionMatch = UNIVERSAL_RULE_ACTION_REGEX.exec(oracle))) {
         const action = normalizeMechanicToken(actionMatch[0]);
-        if (action) actions.add(action);
+        const isDrawStepLabel = action === 'draw' && /^\s+step\b/i.test(oracle.slice(actionMatch.index + actionMatch[0].length));
+        if (action && !isDrawStepLabel) actions.add(action);
         if (UNIVERSAL_RULE_ACTION_REGEX.lastIndex === actionMatch.index) UNIVERSAL_RULE_ACTION_REGEX.lastIndex++;
     }
 
@@ -8916,7 +9245,7 @@ function collectSemanticBridgeTextEvidence(text) {
         [/\bshield counter\b/i, 'counter:shield'],
         [/\bpoison counter\b/i, 'resource:poison_counters'],
         [/\benergy counter\b/i, 'resource:energy'],
-        [/\bdraw\b/i, 'draw:cards_to_hand'],
+        [/\bdraw\b(?!\s+step\b)/i, 'draw:cards_to_hand'],
         [/\bdiscard\b/i, 'hand:discard'],
         [/\bsearch\b.*\blibrary\b/i, 'library:tutor_or_search'],
         [/\bshuffle\b/i, 'library:shuffle'],
@@ -9625,6 +9954,7 @@ function buildMechanicalEffectNode(effect, index = 0, graphAnchors = new Set()) 
         costType: normalizeMechanicToken(effect?.activationCost?.type || ''),
         costs: new Set([...(effect?.activationCost?.parts || []), effect?.payCost, p.payCost].filter(Boolean).map(normalizeMechanicToken)),
         effectMode: mode,
+        repeatabilityProfile: getEffectRepeatabilityProfile(effect),
         static: effect?.isStatic === true || mode === 'prohibition' || mode === 'replacement' || mode === 'prevention' || event === 'static' || event === 'static_condition',
         replacement: mode === 'replacement',
         prevention: mode === 'prevention',
@@ -9646,11 +9976,11 @@ function buildMechanicalEffectNode(effect, index = 0, graphAnchors = new Set()) 
 
 function getCachedParsedEffects(card = null, text = '') {
     const oracle = String(text || card?.oracle_text || (card?.card_faces ? card.card_faces.map(f => f.oracle_text || '').join('\n\n') : '') || '');
-    const key = `${normalizeCardNameForIdentity(card?.name || '')}|${oracle}`;
+    const key = `${normalizeCardNameForIdentity(card?.name || '')}|${String(card?.type_line || '')}|${oracle}`;
     // Fast per-object reuse protects the current card from LRU eviction while a large pool is
     // being scored. The global cache remains the cross-stream/cross-search source of truth.
     if (card && card._manaParsedEffectsCacheKey === key && Array.isArray(card._manaParsedEffectsCacheValue)) {
-        return card._manaParsedEffectsCacheValue;
+        return annotateEffectRepeatability(card, card._manaParsedEffectsCacheValue, oracle);
     }
     const cacheKey = `parsed|${key}`;
     const cached = mechanicalProfileCache.get(cacheKey);
@@ -9661,9 +9991,9 @@ function getCachedParsedEffects(card = null, text = '') {
             card._manaParsedEffectsCacheKey = key;
             card._manaParsedEffectsCacheValue = cached;
         }
-        return cached;
+        return annotateEffectRepeatability(card, cached, oracle);
     }
-    const parsed = parseMTGEffect(oracle);
+    const parsed = annotateEffectRepeatability(card, parseMTGEffect(oracle), oracle);
     mechanicalProfileCache.set(cacheKey, parsed);
     while (mechanicalProfileCache.size > MECHANICAL_PROFILE_CACHE_MAX) {
         mechanicalProfileCache.delete(mechanicalProfileCache.keys().next().value);
@@ -9964,6 +10294,7 @@ function computeMechanicalEffectNodeComparison(a, b) {
         event: mechanicalEventSimilarity(a, b),
         duration: mechanicalDurationSimilarity(a, b),
         mode: mechanicalModeSimilarity(a, b),
+        repeatability: repeatabilityProfileSimilarity(a.repeatabilityProfile, b.repeatabilityProfile),
         cost: mechanicalCostSimilarity(a, b),
         role: mechanicalRoleSimilarity(a, b),
         condition: a.condition || b.condition ? (a.condition === b.condition ? 1 : 0.45) : 1,
@@ -9973,7 +10304,7 @@ function computeMechanicalEffectNodeComparison(a, b) {
     const fieldParts = [
         [15, breakdown.object], [14, breakdown.target], [13, breakdown.zone], [10, breakdown.restriction],
         [9, breakdown.quantity], [10, breakdown.trigger], [8, breakdown.event], [7, breakdown.duration],
-        [7, breakdown.mode], [5, breakdown.cost], [5, breakdown.role], [5, breakdown.condition], [4, breakdown.stats]
+        [7, breakdown.mode], [16, breakdown.repeatability], [5, breakdown.cost], [5, breakdown.role], [5, breakdown.condition], [4, breakdown.stats]
     ];
     const fieldScore = fieldParts.reduce((sum, [w, v]) => sum + w * v, 0) / fieldParts.reduce((sum, [w]) => sum + w, 0);
     const contradiction = mechanicalNodeContradiction(a, b);
@@ -10384,8 +10715,13 @@ function calculateMechanicalSimilarityDetailed(parsedA, parsedB, profileA = null
         Math.max(structuredBlend, keywordRescue * 0.92, universal.score * 0.62)
         * (1 - Math.min(0.42, contradictionPenalty * 0.72))
     ));
+    const repeatabilityMismatch = calculateRepeatabilityMismatchSeverity(safeA, safeB);
+    // A shared verb cannot fully compensate for one card being an ongoing engine and the other
+    // being a one-shot resolution. Keep the rest of the scoring channels intact and apply a
+    // bounded mechanical-only penalty when the same canonical function has a strong cadence gap.
+    const repeatabilityFactor = 1 - (0.52 * repeatabilityMismatch);
     const explicitContrast = inferExplicitMechanicalContrast(safeA, safeB);
-    let score = rawScore;
+    let score = rawScore * repeatabilityFactor;
     if (explicitContrast.kind === 'opposite') score = Math.min(score, 0.55);
     else if (explicitContrast.kind === 'different-primary-effects') score = Math.min(score, 0.38);
     else if (explicitContrast.kind === 'mana-choice-vs-simultaneous') score = Math.min(0.89, score * 0.94);
@@ -10395,7 +10731,9 @@ function calculateMechanicalSimilarityDetailed(parsedA, parsedB, profileA = null
         rawScore,
         explicitContrast,
         structuralScore: structural,
-        graphScore: graph.score,
+        graphScore: graph.score * repeatabilityFactor,
+        repeatabilityMismatch,
+        repeatabilityFactor,
         graphSourceCoverage: graph.sourceCoverage,
         graphCandidateCoverage: graph.candidateCoverage,
         graphBalancedCoverage: graph.balancedCoverage,
@@ -10408,7 +10746,7 @@ function calculateMechanicalSimilarityDetailed(parsedA, parsedB, profileA = null
         universal,
         // Reuse this exact comparison in functional similarity / scoring. It is immutable for this
         // source-candidate pair and already contains all the graph evidence fields above.
-        graphDetail: graph
+        graphDetail: { ...graph, unadjustedScore: graph.score, score: graph.score * repeatabilityFactor, repeatabilityMismatch, repeatabilityFactor }
     };
 }
 
@@ -10484,6 +10822,139 @@ const MANASEARCH_MECHANICAL_REGRESSION_CASES = Object.freeze([
     }
 ]);
 
+function runManaSearchRepeatabilityRegressionSuite({ log = true } = {}) {
+    const cases = [
+        {
+            id: 'periodic-draw-is-engine',
+            card: { name: 'Upkeep Draw Engine', type_line: 'Enchantment', oracle_text: 'At the beginning of your upkeep, draw a card.' },
+            fn: 'card_draw', expected: 'periodic_trigger', engine: true
+        },
+        {
+            id: 'one-shot-sorcery-is-not-engine',
+            card: { name: 'One-shot Draw', type_line: 'Sorcery', oracle_text: 'Draw two cards.' },
+            fn: 'card_draw', expected: 'one_shot', engine: false
+        },
+        {
+            id: 'repeatable-token-trigger-is-engine',
+            card: { name: 'Token Trigger', type_line: 'Creature — Shaman', oracle_text: 'Whenever you cast an instant or sorcery spell, create a 1/1 red Elemental creature token.' },
+            fn: 'token_creation', expected: 'repeatable_trigger', engine: true
+        },
+        {
+            id: 'one-shot-token-spell-is-not-engine',
+            card: { name: 'One-shot Tokens', type_line: 'Instant', oracle_text: 'Create two 1/1 white Soldier creature tokens.' },
+            fn: 'token_creation', expected: 'one_shot', engine: false
+        },
+        {
+            id: 'etb-draw-is-not-automatic-engine',
+            card: { name: 'ETB Draw Creature', type_line: 'Creature — Human', oracle_text: 'When ETB Draw Creature enters the battlefield, draw a card.' },
+            fn: 'card_draw', expected: 'entry_trigger', engine: false
+        },
+        {
+            id: 'replacement-effect-is-ongoing-static',
+            card: { name: 'Token Doubler', type_line: 'Legendary Creature — God', oracle_text: 'If one or more tokens would be created under your control, three times that many of those tokens are created instead.' },
+            fn: 'token_multiplier', expected: 'ongoing_static', engine: false, repeatable: true
+        },
+        {
+            id: 'repeatable-sacrifice-cost-does-not-consume-source',
+            card: { name: 'Goblin Bombardment', type_line: 'Enchantment', oracle_text: 'Sacrifice a creature: Goblin Bombardment deals 1 damage to any target.' },
+            fn: 'direct_damage', expected: 'repeatable_activation', engine: true, role: 'burn', repeatable: true
+        },
+        {
+            id: 'repeated-treasure-trigger-is-engine',
+            card: { name: 'Treasure Trigger', type_line: 'Creature — Rogue', oracle_text: 'Whenever one or more artifacts you control are put into a graveyard from the battlefield, create a Treasure token.' },
+            fn: 'token_creation', expected: 'repeatable_trigger', engine: true, repeatable: true
+        }
+    ];
+    const results = [];
+    const parsedCases = [];
+    for (const item of cases) {
+        try {
+            const effects = annotateEffectRepeatability(item.card, parseMTGEffect(item.card.oracle_text), item.card.oracle_text);
+            const matching = effects.filter(e => e?.canonical?.function === item.fn);
+            const profileKind = matching.map(e => getEffectRepeatabilityProfile(e)?.kind).find(Boolean) || 'unknown';
+            const roleProfile = inferStrategicRoleProfile(item.card, effects, '');
+            const role = item.role || (item.fn === 'card_draw' ? 'card_advantage_engine' : 'token_engine');
+            const hasRole = roleProfile.some(r => r.role === role);
+            const hasRepeatableEffect = matching.some(e => getEffectRepeatabilityProfile(e)?.group === 'repeatable_engine');
+            const repeatabilityPass = item.repeatable == null || hasRepeatableEffect === item.repeatable;
+            results.push({ id: item.id, pass: profileKind === item.expected && hasRole === item.engine && repeatabilityPass, profileKind, expected: item.expected, hasRole, expectedRole: item.engine, hasRepeatableEffect, expectedRepeatable: item.repeatable });
+            parsedCases.push({ item, effects });
+        } catch (error) {
+            results.push({ id: item.id, pass: false, error: error?.message || String(error) });
+        }
+    }
+    try {
+        const engineA = parsedCases.find(x => x.item.id === 'periodic-draw-is-engine');
+        const spell = parsedCases.find(x => x.item.id === 'one-shot-sorcery-is-not-engine');
+        const engineBCard = { name: 'Second Upkeep Engine', type_line: 'Enchantment', oracle_text: 'At the beginning of your upkeep, draw a card.' };
+        const engineB = annotateEffectRepeatability(engineBCard, parseMTGEffect(engineBCard.oracle_text), engineBCard.oracle_text);
+        if (engineA && spell) {
+            const mismatch = calculateRepeatabilityMismatchSeverity(engineA.effects, spell.effects);
+            const engineSimilarity = calculateMechanicalSimilarityDetailed(engineA.effects, engineB).score;
+            const oneShotSimilarity = calculateMechanicalSimilarityDetailed(engineA.effects, spell.effects).score;
+            results.push({ id: 'mechanical-score-distinguishes-cadence', pass: mismatch > 0.55 && engineSimilarity > oneShotSimilarity, mismatch, engineSimilarity, oneShotSimilarity });
+            const compareText = buildCompareExplanation(engineA.item.card, spell.item.card).summary;
+            const duplicatedFollowup = /also has a follow-up effect: draw card/i.test(compareText);
+            const nameCasingOk = compareText.includes('One-shot Draw');
+            results.push({ id: 'compare-explains-repeatability', pass: /how often the effect happens/i.test(compareText) && /once|upkeep|repeat/i.test(compareText) && nameCasingOk && !duplicatedFollowup, summary: compareText, duplicatedFollowup, nameCasingOk });
+            const tokenEngineItem = parsedCases.find(x => x.item.id === 'repeatable-token-trigger-is-engine');
+            const oneShotTokenItem = parsedCases.find(x => x.item.id === 'one-shot-token-spell-is-not-engine');
+            if (tokenEngineItem && oneShotTokenItem) {
+                const oneShotTokenScore = calculateMechanicalSimilarityDetailed(tokenEngineItem.effects, oneShotTokenItem.effects).score;
+                const secondTokenEngineCard = { name: 'Treasure Trigger Two', type_line: 'Creature — Rogue', oracle_text: 'Whenever you cast an artifact spell, create a Treasure token.' };
+                const secondTokenEngine = annotateEffectRepeatability(secondTokenEngineCard, parseMTGEffect(secondTokenEngineCard.oracle_text), secondTokenEngineCard.oracle_text);
+                const repeatTokenScore = calculateMechanicalSimilarityDetailed(tokenEngineItem.effects, secondTokenEngine).score;
+                results.push({ id: 'repeatable-token-vs-one-shot-token-score', pass: repeatTokenScore > oneShotTokenScore, repeatableScore: repeatTokenScore, oneShotScore: oneShotTokenScore });
+            }
+            const arenaCard = { name: 'Phyrexian Arena', type_line: 'Enchantment', oracle_text: 'At the beginning of your upkeep, you draw a card and you lose 1 life.' };
+            const arenaEffects = annotateEffectRepeatability(arenaCard, parseMTGEffect(arenaCard.oracle_text), arenaCard.oracle_text);
+            const arenaRoles = inferStrategicRoleProfile(arenaCard, arenaEffects, '').map(r => r.role);
+            results.push({ id: 'arena-combined-draw-and-life-loss-is-still-card-advantage-engine', pass: arenaRoles.includes('card_advantage_engine'), roles: arenaRoles });
+
+            const arenaCompareText = buildCompareExplanation(
+                arenaCard,
+                { name: 'Divination', type_line: 'Sorcery', oracle_text: 'Draw two cards.' }
+            ).summary;
+            results.push({
+                id: 'compare-describes-repeatable-draw-versus-one-shot-and-life-cost',
+                pass: /how often the effect happens/i.test(arenaCompareText) && /Divination draws two cards once/i.test(arenaCompareText) && /lose 1 life/i.test(arenaCompareText),
+                summary: arenaCompareText
+            });
+
+            const counterCompareText = buildCompareExplanation(
+                { name: 'Counterspell', type_line: 'Instant', oracle_text: 'Counter target spell.' },
+                { name: 'Countersquall', type_line: 'Instant', oracle_text: 'Counter target noncreature spell. Its controller loses 2 life.' }
+            ).summary;
+            results.push({
+                id: 'compare-explains-target-restriction-and-additional-cost-once',
+                pass: /noncreature/i.test(counterCompareText) && /lose 2 life/i.test(counterCompareText) && !/additional restriction/i.test(counterCompareText),
+                summary: counterCompareText
+            });
+
+            const tokenMultiplierCompareText = buildCompareExplanation(
+                { name: 'Ojer Taq, Deepest Foundation', type_line: 'Legendary Creature — God', oracle_text: 'If one or more tokens would be created under your control, three times that many of those tokens are created instead.' },
+                { name: 'Doubling Season', type_line: 'Enchantment', oracle_text: 'If an effect would create one or more tokens under your control, it creates twice that many of those tokens instead.' }
+            ).summary;
+            results.push({
+                id: 'compare-explains-different-token-multipliers',
+                pass: /triples/i.test(tokenMultiplierCompareText) && /doubles/i.test(tokenMultiplierCompareText),
+                summary: tokenMultiplierCompareText
+            });
+        }
+    } catch (error) {
+        results.push({ id: 'comparison-and-scoring-check', pass: false, error: error?.message || String(error) });
+    }
+    const passed = results.filter(r => r.pass).length;
+    const summary = { passed, total: results.length, passRate: results.length ? passed / results.length : 1, results };
+    if (log) {
+        console.groupCollapsed(`ManaSearch repeatability regression: ${passed}/${results.length} passed`);
+        results.forEach(result => console.log(`${result.pass ? 'PASS' : 'FAIL'} ${result.id}`, result));
+        console.groupEnd();
+    }
+    return summary;
+}
+try { window.runManaSearchRepeatabilityRegressionSuite = runManaSearchRepeatabilityRegressionSuite; } catch (_) {}
+
 function runManaSearchMechanicalRegressionSuite({ log = true } = {}) {
     const results = [];
     for (const test of MANASEARCH_MECHANICAL_REGRESSION_CASES) {
@@ -10514,6 +10985,23 @@ function runManaSearchMechanicalRegressionSuite({ log = true } = {}) {
         } catch (error) {
             results.push({ id: test.id, score: 0, expected: [test.min, test.max], pass: false, error: error?.message || String(error) });
         }
+    }
+    // A draw-step reference is phase/timing text, not card draw. At the same time, a real draw
+    // action elsewhere on the card must remain scoreable even if its text also names the draw step.
+    try {
+        const drawStepText = 'Skip your draw step.';
+        const drawStepEffects = parseMTGEffect(drawStepText);
+        const drawStepProfile = buildUniversalMechanicProfile(null, drawStepText, drawStepEffects);
+        const falselyParsedAsDraw = drawStepEffects.some(effect => effect?.action === 'draw' || effect?.canonical?.function === 'card_draw') ||
+            drawStepProfile.actions.has('draw') || drawStepProfile.parsedActions.has('draw') || drawStepProfile.canonicalFunctions.has('card_draw');
+        results.push({ id: 'draw-step-is-not-card-draw', pass: !falselyParsedAsDraw, falselyParsedAsDraw });
+
+        const mixedText = 'Skip your draw step. At the beginning of your upkeep, draw a card.';
+        const mixedEffects = parseMTGEffect(mixedText);
+        const preservesRealDraw = mixedEffects.some(effect => effect?.action === 'draw' || effect?.canonical?.function === 'card_draw');
+        results.push({ id: 'real-draw-is-preserved-alongside-draw-step-reference', pass: preservesRealDraw, preservesRealDraw });
+    } catch (error) {
+        results.push({ id: 'draw-step-vs-card-draw-regression', pass: false, error: error?.message || String(error) });
     }
     const passed = results.filter(r => r.pass).length;
     const summary = { passed, total: results.length, passRate: results.length ? passed / results.length : 1, results };
@@ -14667,6 +15155,10 @@ function initApp() {
     searchBtn = document.getElementById('search-btn');
     sourceCardSection = document.getElementById('source-card-section');
     sourceCardOracle = document.getElementById('source-card-oracle');
+    sourceCardType = document.getElementById('source-card-type');
+    sourceCardImage = document.getElementById('source-card-image');
+    sourceCardFlipBtn = document.getElementById('source-card-flip-btn');
+    sourceCardPrice = document.getElementById('source-card-price');
     findSimilarBtn = document.getElementById('find-similar-btn');
     staticSearchStatus = document.getElementById('static-search-status');
     staticSearchStatusText = document.getElementById('static-search-status-text');
@@ -14881,7 +15373,10 @@ function initApp() {
         balanced: 'Mechanical + Functional',
         synergy: 'Synergy',
         exactness: 'Exactness',
-        category: 'Category'
+        category: 'Category',
+        price: 'Price (lowest first)',
+        manaValue: 'Mana Value (lowest first)',
+        manaValueDesc: 'Mana Value (highest first)'
     };
     const validOrderRankings = new Set(Object.keys(orderLabels));
 
@@ -14923,6 +15418,12 @@ function initApp() {
         const selected = orderRadios.find(radio => radio.checked)?.value || 'overall';
         activeOrderFeatureFlags.matrix = Boolean(orderMatrixFeature?.checked);
         activeOrderFeatureFlags.diverse = Boolean(orderDiverseFeature?.checked);
+        if (['price', 'manaValue', 'manaValueDesc'].includes(selected)) {
+            activeOrderFeatureFlags.matrix = false;
+            activeOrderFeatureFlags.diverse = false;
+            if (orderMatrixFeature) orderMatrixFeature.checked = false;
+            if (orderDiverseFeature) orderDiverseFeature.checked = false;
+        }
 
         if (sortSelect && sortSelect.value !== selected) {
             sortSelect.value = selected;
@@ -15070,22 +15571,21 @@ function initApp() {
         });
     }
 
-    if (sourceCardOracle) {
-        // Mouse, touch, and keyboard selection all end up in the same handler.  The mouse handler
-        // MUST only react to the primary (left) mouse button.  A generic `mouseup` listener also
-        // receives the middle-button release used by browser auto-scroll; re-rendering the Oracle
-        // from that event can interfere with the browser's native middle-click scroll state,
-        // especially while a search is replacing/rerendering the page.  Leaving button===1 alone
-        // lets the browser start/stop auto-scroll normally.
-        sourceCardOracle.addEventListener('mouseup', (event) => {
-            if (event.button !== 0) return;
-            handleOracleTextSelection();
-        });
-        sourceCardOracle.addEventListener('touchend', () => setTimeout(handleOracleTextSelection, 0));
-        sourceCardOracle.addEventListener('keyup', (event) => {
-            if (event.shiftKey || event.key.startsWith('Arrow')) handleOracleTextSelection();
-        });
-    }
+    const bindHighlightSelection = (root, field) => {
+        if (!root) return;
+        const handler = () => handleSourceTextSelection(root, field);
+        root.addEventListener('mouseup', event => { if (event.button === 0) handler(); });
+        root.addEventListener('touchend', () => setTimeout(handler, 0));
+        root.addEventListener('keyup', event => { if (event.shiftKey || event.key.startsWith('Arrow')) handler(); });
+    };
+    bindHighlightSelection(sourceCardOracle, 'oracle');
+    bindHighlightSelection(sourceCardType, 'type');
+    sourceCardFlipBtn?.addEventListener('click', flipCurrentSourceCardFace);
+    document.getElementById('related-use-highlights')?.addEventListener('change', event => {
+        includeSourceHighlightsInRelatedSearch = Boolean(event.target.checked);
+    });
+    installCardImageMagnifier();
+    installFeatureHelpPopovers();
 
     sourceCardSection?.classList.remove('hidden');
     sourceCardLoaded?.classList.toggle('hidden', !currentSourceCard);
@@ -15167,6 +15667,24 @@ function initApp() {
             cardConstraintsBadge.style.backgroundColor = 'var(--accent-color)';
         }
     }
+    const clearAllConstraintsBtn = document.getElementById('clear-all-constraints-btn');
+    if (clearAllConstraintsBtn) clearAllConstraintsBtn.addEventListener('click', () => {
+        const ids = ['filter-type', 'filter-supertype', 'filter-subtype', 'filter-keyword', 'filter-format', 'filter-rarity', 'filter-identity', 'filter-colors', 'filter-cmc', 'filter-power', 'filter-toughness', 'filter-set', 'filter-extra-oracle'];
+        for (const id of ids) {
+            const el = document.getElementById(id);
+            if (!el) continue;
+            el.value = '';
+            el.dispatchEvent(new Event('input', { bubbles: true }));
+            if (el.tagName === 'SELECT') el.dispatchEvent(new Event('change', { bubbles: true }));
+            if (['filter-type', 'filter-supertype', 'filter-subtype', 'filter-keyword'].includes(id)) {
+                syncConstraintChipField(id, `${id}-chips`);
+            }
+        }
+        document.querySelectorAll('#card-constraints-modal .color-pip.active').forEach(pip => pip.classList.remove('active'));
+        document.querySelectorAll('#card-constraints-modal .constraint-chips').forEach(chips => chips.replaceChildren());
+        updateCardConstraintsBadge();
+    });
+
     if (toggleCardConstraintsBtn) toggleCardConstraintsBtn.addEventListener('click', () => cardConstraintsModal.classList.remove('hidden'));
     if (closeCardConstraintsBtn) closeCardConstraintsBtn.addEventListener('click', () => cardConstraintsModal.classList.add('hidden'));
     if (saveCardConstraintsBtn) {
@@ -15270,6 +15788,71 @@ function getStoredArray(key) {
         console.error(`Error reading ${key} from localStorage:`, err);
         return [];
     }
+}
+
+let manaImageMagnifierInstalled = false;
+function installCardImageMagnifier() {
+    if (manaImageMagnifierInstalled || typeof document === 'undefined') return;
+    manaImageMagnifierInstalled = true;
+    const magnifier = document.createElement('div');
+    magnifier.className = 'mana-image-magnifier';
+    magnifier.setAttribute('aria-hidden', 'true');
+    const image = document.createElement('img');
+    image.alt = '';
+    magnifier.appendChild(image);
+    document.body.appendChild(magnifier);
+    const hide = () => magnifier.classList.remove('visible');
+    document.addEventListener('pointerover', event => {
+        const target = event.target?.closest?.('#source-card-image, .card-art-wrap img, .selected-related-card-art-wrap img, .compare-card-art');
+        if (!target || !target.currentSrc && !target.src) return;
+        if (event.relatedTarget && target.contains(event.relatedTarget)) return;
+        const source = target.currentSrc || target.src;
+        if (!source || source.startsWith('data:')) return;
+        image.src = source;
+        const rect = target.getBoundingClientRect();
+        const desiredWidth = Math.min(330, Math.max(220, window.innerWidth * 0.27));
+        const left = rect.right + desiredWidth + 16 < window.innerWidth ? rect.right + 12 : Math.max(8, rect.left - desiredWidth - 12);
+        const top = Math.max(8, Math.min(rect.top, window.innerHeight - Math.min(window.innerHeight * 0.82, desiredWidth * 1.45) - 8));
+        magnifier.style.width = `${desiredWidth}px`;
+        magnifier.style.left = `${left}px`;
+        magnifier.style.top = `${top}px`;
+        magnifier.classList.add('visible');
+    });
+    document.addEventListener('pointerout', event => {
+        const target = event.target?.closest?.('#source-card-image, .card-art-wrap img, .selected-related-card-art-wrap img, .compare-card-art');
+        if (target && (!event.relatedTarget || !target.contains(event.relatedTarget))) hide();
+    });
+    document.addEventListener('scroll', hide, true);
+    window.addEventListener('resize', hide);
+}
+
+let manaFeatureHelpInstalled = false;
+function installFeatureHelpPopovers() {
+    if (manaFeatureHelpInstalled || typeof document === 'undefined') return;
+    manaFeatureHelpInstalled = true;
+    let popover = null, activeTrigger = null;
+    const close = () => { if (popover) popover.remove(); popover = null; activeTrigger = null; };
+    const show = trigger => {
+        const title = trigger.dataset.featureTip;
+        const preview = trigger.dataset.featurePreview;
+        if (!title) return;
+        close();
+        popover = document.createElement('div');
+        popover.className = 'mana-feature-help-popover';
+        popover.setAttribute('role', 'tooltip');
+        const description = document.createElement('strong'); description.textContent = title;
+        popover.appendChild(description);
+        if (preview) { const sample = document.createElement('span'); sample.className = 'mana-feature-help-preview'; sample.textContent = preview; popover.appendChild(sample); }
+        document.body.appendChild(popover); activeTrigger = trigger;
+        const rect = trigger.getBoundingClientRect();
+        const left = Math.max(8, Math.min(rect.left, window.innerWidth - 300));
+        popover.style.left = `${left}px`;
+        popover.style.top = `${Math.min(window.innerHeight - 110, rect.bottom + 8)}px`;
+    };
+    document.addEventListener('pointerover', event => { const t = event.target?.closest?.('[data-feature-tip]'); if (t && !t.contains(event.relatedTarget)) show(t); });
+    document.addEventListener('pointerout', event => { const t = event.target?.closest?.('[data-feature-tip]'); if (t && !t.contains(event.relatedTarget)) close(); });
+    document.addEventListener('focusin', event => { const t = event.target?.closest?.('[data-feature-tip]'); if (t) show(t); });
+    document.addEventListener('focusout', event => { if (activeTrigger && event.target === activeTrigger) close(); });
 }
 
 function getCardImageUrl(card) {
@@ -15393,6 +15976,8 @@ function updateFavoriteButtons(cardName) {
 
     if (favoriteBtn && currentSourceCard && String(currentSourceCard.name || '').toLowerCase() === normalizedName) {
         favoriteBtn.textContent = isFavorite ? '★ Favorited' : '☆ Favorite';
+        favoriteBtn.classList.toggle('is-favorited', isFavorite);
+        favoriteBtn.setAttribute('aria-pressed', isFavorite ? 'true' : 'false');
     }
 
     document.querySelectorAll('[data-favorite-card-name]').forEach(button => {
@@ -15451,7 +16036,10 @@ function renderSidebarLists() {
 
 function checkFavoriteStatus(cardName) {
     const favorites = getStoredArray(FAVORITES_KEY);
-    favoriteBtn.textContent = favorites.includes(cardName) ? '★ Favorited' : '☆ Favorite';
+    const isFavorite = favorites.some(name => String(name).toLowerCase() === String(cardName || '').toLowerCase());
+    favoriteBtn.textContent = isFavorite ? '★ Favorited' : '☆ Favorite';
+    favoriteBtn.classList.toggle('is-favorited', isFavorite);
+    favoriteBtn.setAttribute('aria-pressed', isFavorite ? 'true' : 'false');
 }
 
 // --- MULTI-SOURCE CARD CONTEXT ------------------------------------------------------------
@@ -15924,6 +16512,7 @@ function clearSourceCard() {
     ++searchRequestId;
     activeMainSearchRequestId = null;
     cancelScheduledProgressiveResultRender();
+    cancelDeferredResultRender();
     ++sourceCardPickerRequestId;
     currentSourceCard = null;
     sourceCards.clear();
@@ -15983,6 +16572,7 @@ async function loadSourceCard(query, providedCard = null) {
     const requestId = ++searchRequestId;
     activeMainSearchRequestId = null;
     cancelScheduledProgressiveResultRender();
+    cancelDeferredResultRender();
 
     showLoading(true);
     resultsSection.classList.add('hidden');
@@ -15996,6 +16586,7 @@ async function loadSourceCard(query, providedCard = null) {
     updateResultsPagination(0);
     selectedRelatedCards.clear();
     manualHighlights = [];
+    nextHighlightColorIndex = 0;
     // Diagnostics belong to a specific search - clear them alongside the results so a later
     // benchmark or debug read can't pick up instrumentation from a previous, unrelated search.
     lastSearchDiagnostics = null;
@@ -16140,10 +16731,67 @@ async function loadSourceCard(query, providedCard = null) {
     }
 }
 
+function getSourceCardFaceImages(card = currentSourceCard) {
+    return Array.isArray(card?.card_faces) ? card.card_faces.filter(face => face?.image_uris?.normal || face?.image_uris?.large || face?.image_uris?.png) : [];
+}
+
+function getSourceCardFaceImageUrl(card = currentSourceCard, faceIndex = currentSourceCardFaceIndex) {
+    const faces = getSourceCardFaceImages(card);
+    if (faces.length) {
+        const face = faces[Math.max(0, Math.min(faceIndex, faces.length - 1))];
+        return face?.image_uris?.normal || face?.image_uris?.large || face?.image_uris?.png || getCardImageUrl(card);
+    }
+    return getCardImageUrl(card);
+}
+
+function updateSourceCardFaceDisplay(card = currentSourceCard, animate = false) {
+    if (!sourceCardImage) sourceCardImage = document.getElementById('source-card-image');
+    if (!sourceCardFlipBtn) sourceCardFlipBtn = document.getElementById('source-card-flip-btn');
+    if (!sourceCardImage) return;
+    const faces = getSourceCardFaceImages(card);
+    const canFlip = faces.length > 1;
+    if (sourceCardFlipBtn) {
+        sourceCardFlipBtn.classList.toggle('hidden', !canFlip);
+        sourceCardFlipBtn.disabled = !canFlip || sourceCardFlipBtn.dataset.animating === 'true';
+        sourceCardFlipBtn.textContent = 'Flip';
+        sourceCardFlipBtn.setAttribute('aria-label', canFlip ? `Flip source card to ${faces[(currentSourceCardFaceIndex + 1) % faces.length]?.name || 'its other face'}` : 'This card has no other face');
+    }
+    const url = getSourceCardFaceImageUrl(card, currentSourceCardFaceIndex);
+    sourceCardImage.alt = faces[currentSourceCardFaceIndex]?.name || card?.name || 'Card Artwork';
+    sourceCardImage.style.display = url ? 'block' : 'none';
+    if (!animate) { sourceCardImage.src = url; return; }
+    const reducedMotion = document.body?.classList.contains('reduce-motion') || window.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches;
+    if (reducedMotion) { sourceCardImage.src = url; return; }
+    const wrap = document.getElementById('source-card-art-wrap');
+    if (!wrap) { sourceCardImage.src = url; return; }
+    if (sourceCardFlipTimer) clearTimeout(sourceCardFlipTimer);
+    if (sourceCardFlipFinalTimer) clearTimeout(sourceCardFlipFinalTimer);
+    wrap.classList.add('is-source-flipping');
+    if (sourceCardFlipBtn) { sourceCardFlipBtn.disabled = true; sourceCardFlipBtn.dataset.animating = 'true'; }
+    sourceCardFlipTimer = setTimeout(() => { sourceCardImage.src = url; }, 190);
+    sourceCardFlipFinalTimer = setTimeout(() => {
+        wrap.classList.remove('is-source-flipping');
+        sourceCardFlipTimer = 0;
+        sourceCardFlipFinalTimer = 0;
+        if (sourceCardFlipBtn) { sourceCardFlipBtn.disabled = !canFlip; sourceCardFlipBtn.dataset.animating = 'false'; }
+    }, 390);
+}
+
+function flipCurrentSourceCardFace() {
+    const faces = getSourceCardFaceImages(currentSourceCard);
+    if (faces.length < 2 || sourceCardFlipBtn?.dataset.animating === 'true') return;
+    currentSourceCardFaceIndex = (currentSourceCardFaceIndex + 1) % faces.length;
+    updateSourceCardFaceDisplay(currentSourceCard, true);
+}
+
 function displaySourceCard(card) {
     document.getElementById('source-card-name').textContent = card.name;
     document.getElementById('source-card-mana').textContent = card.mana_cost || 'None';
-    document.getElementById('source-card-type').textContent = card.type_line;
+    if (sourceCardType) {
+        const typeText = card.type_line || card.card_faces?.[0]?.type_line || '';
+        sourceCardType.textContent = typeText;
+        sourceCardType.dataset.originalText = typeText;
+    }
     
     // Keep the displayed Oracle text in exactly the same coordinate space used by the scoring
     // layer. Face names are metadata, not Oracle text; including them here shifted highlight
@@ -16155,11 +16803,21 @@ function displaySourceCard(card) {
     // highlight offsets because HTML entity lengths differ from text-node lengths.
     sourceCardOracle.dataset.originalHtml = sourceCardOracle.innerHTML;
     manualHighlights = [];
+    nextHighlightColorIndex = 0;
+    if (sourceCardFlipTimer) clearTimeout(sourceCardFlipTimer);
+    if (sourceCardFlipFinalTimer) clearTimeout(sourceCardFlipFinalTimer);
+    sourceCardFlipTimer = sourceCardFlipFinalTimer = 0;
+    document.getElementById('source-card-art-wrap')?.classList.remove('is-source-flipping');
+    if (sourceCardFlipBtn) sourceCardFlipBtn.dataset.animating = 'false';
+    currentSourceCardFaceIndex = 0;
+    if (sourceCardPrice) {
+        const usd = card?.prices?.usd;
+        const eur = card?.prices?.eur;
+        sourceCardPrice.textContent = [usd ? `$${usd}` : null, eur ? `€${eur}` : null].filter(Boolean).join(' / ') || 'Unavailable';
+    }
+    if (sourceCardType) reapplyTypeLineHighlights();
     renderHighlightChips();
-    
-    const imageUrl = getCardImageUrl(card);
-    const sourceImage = document.getElementById('source-card-image');
-    if (sourceImage) { sourceImage.src = imageUrl; sourceImage.style.display = imageUrl ? 'block' : 'none'; }
+    updateSourceCardFaceDisplay(card, false);
 
     sourceCardEmpty?.classList.add('hidden');
     sourceCardLoaded?.classList.remove('hidden');
@@ -16216,7 +16874,11 @@ async function scoreCardBatch({
     const rawWC = weights.context ?? 20;
     const rawWE = weights.exactness ?? 15;
     const rawWCa = weights.category ?? 10;
-    const hasHighlight = Boolean(manualHighlights && manualHighlights.length > 0);
+    const activeHighlights = Array.isArray(manualHighlights) ? manualHighlights : [];
+    const effectHighlights = activeHighlights.filter(h => h?.field !== 'type');
+    const typeLineHighlights = activeHighlights.filter(h => h?.field === 'type');
+    const hasHighlight = activeHighlights.length > 0;
+    const hasEffectHighlight = effectHighlights.length > 0;
 
     // Strategic role is a NEW ranking dimension, but it is deliberately carved out of the existing
     // 100-point budget instead of being added on top. That keeps a role match from making every
@@ -16237,15 +16899,16 @@ async function scoreCardBatch({
     // mechanical budget rather than silently inflating the total score.
     const effectiveHighlightWeight = Math.min(wH, wM);
     const effectiveMechanicalBase = wM - effectiveHighlightWeight;
-    const highlightProfiles = hasHighlight ? buildHighlightIntentProfiles(manualHighlights) : [];
+    const highlightProfiles = hasEffectHighlight ? buildHighlightIntentProfiles(effectHighlights) : [];
 
     const sourceText = sourceCard.oracle_text || (sourceCard.card_faces ? sourceCard.card_faces.map(f => f.oracle_text).join(' ') : '');
-    const sourceTextToParse = (hasHighlight && targetText) ? targetText : sourceText;
+    const sourceTextToParse = (hasEffectHighlight && targetText) ? (buildHighlightScoringText(effectHighlights, sourceText) || sourceText) : sourceText;
     const parsedSourceCard = Array.isArray(sourceParsedEffectsOverride) && sourceParsedEffectsOverride.length > 0
         ? sourceParsedEffectsOverride
         : (sourceTextToParse === (sourceCard.oracle_text || (sourceCard.card_faces ? sourceCard.card_faces.map(f => f.oracle_text).join(' ') : ''))
             ? getCachedParsedEffects(sourceCard, sourceTextToParse)
             : parseMTGEffect(sourceTextToParse));
+    annotateEffectRepeatability(sourceCard, parsedSourceCard, sourceTextToParse);
     const sourceMechanicProfile = getCachedMechanicalProfile(sourceCard, sourceTextToParse, parsedSourceCard);
     const sourceMechanicalGraph = getCachedMechanicalEffectGraph(sourceCard, sourceTextToParse, parsedSourceCard);
     parsedSourceCard._mechanicProfile = sourceMechanicProfile;
@@ -16461,9 +17124,23 @@ async function scoreCardBatch({
         card.roleProfile = inferStrategicRoleProfile(card, parsedCandidateCard, targetText);
         card._strategicRoleFingerprint = buildStrategicRoleFingerprint(card, parsedCandidateCard, card.roleProfile);
         card.roleScore = calculateStrategicRoleScore(sourceRoleProfile, card.roleProfile, sourceRoleFingerprint, card._strategicRoleFingerprint);
-        card.highlightIntentScore = hasHighlight
+        const effectHighlightScore = hasEffectHighlight
             ? calculateHighlightIntentMatch(highlightProfiles, parsedCandidateCard, card)
             : 0;
+        const candidateTypeLine = String(card.type_line || '').toLowerCase();
+        const typeHighlightScore = typeLineHighlights.length
+            ? typeLineHighlights.reduce((sum, h) => {
+                const phrase = String(h.text || '').toLowerCase().trim();
+                if (!phrase) return sum;
+                const oneScore = h.mode === 'variable'
+                    ? calculateSimpleSimilarity(phrase, candidateTypeLine)
+                    : (candidateTypeLine.includes(phrase) ? 1 : 0);
+                return sum + oneScore;
+            }, 0) / typeLineHighlights.length
+            : 0;
+        card.highlightIntentScore = hasEffectHighlight && typeLineHighlights.length
+            ? (effectHighlightScore * 0.85 + typeHighlightScore * 0.15)
+            : (hasEffectHighlight ? effectHighlightScore : typeHighlightScore);
         card._parsedEffects = parsedCandidateCard;
         card.fieldConfidence = calculateCardFieldConfidence(parsedCandidateCard);
         card.parseConfidence = calculateParseConfidence(parsedCandidateCard);
@@ -16937,6 +17614,13 @@ async function executeRelatedCardSearch() {
     const sourceSearchRequestId = searchRequestId;
     const sourceCardAtStart = currentSourceCard;
     const selectedCardsAtStart = new Map(selectedRelatedCards);
+    const relatedSourceHighlights = includeSourceHighlightsInRelatedSearch
+        ? manualHighlights.filter(h => h && h.origin !== 'user')
+            .map(h => ({ ...h }))
+        : [];
+    const relatedHighlightText = relatedSourceHighlights.length
+        ? buildHighlightScoringText(relatedSourceHighlights, getCurrentSourceOracleText(sourceCardAtStart))
+        : '';
     const isCurrentRelatedSearch = () =>
         requestId === relatedSearchRequestId &&
         sourceSearchRequestId === searchRequestId &&
@@ -16993,6 +17677,7 @@ async function executeRelatedCardSearch() {
         let lastRelatedQueryError = null;
         const localRelatedQueries = [
             buildRelatedConsensusIntentText(relatedIntentProfile),
+            ...(relatedHighlightText ? [`Source-highlight focus: ${relatedHighlightText}`] : []),
             ...repeatingPatterns.slice(0, 8),
             ...relatedSearchQueries.flatMap(attempt => extractLocalRetrievalAlternativesFromScryfallQuery(
                 typeof attempt === 'string' ? attempt : attempt?.query
@@ -17222,9 +17907,11 @@ async function executeRelatedCardSearch() {
         const supportingPatternText = relatedIntentProfile?.confidence >= 0.55
             ? repeatingPatterns.slice(0, 2).join('. ')
             : repeatingPatterns.slice(0, 3).join('. ');
-        const combinedTargetText = canonicalTargetText
-            ? [canonicalTargetText, supportingPatternText].filter(Boolean).join('. ')
-            : (repeatingPatterns.length > 0 ? repeatingPatterns.join('. ') : getCurrentSourceOracleText(sourceCardAtStart));
+        const combinedTargetText = [
+            canonicalTargetText || (repeatingPatterns.length > 0 ? repeatingPatterns.join('. ') : getCurrentSourceOracleText(sourceCardAtStart)),
+            supportingPatternText,
+            relatedHighlightText ? `Focus on the selected source-card detail: ${relatedHighlightText}` : ''
+        ].filter(Boolean).join('. ');
 
         // Related search is an ensemble query: a candidate is mechanically related when it
         // matches a meaningful effect from ANY selected card, not only the original source card.
@@ -17770,6 +18457,8 @@ function getSearchIntent(sourceCard, highlights = []) {
     const sourceText = getCurrentSourceOracleText(sourceCard) || '';
     const signature = JSON.stringify((highlights || []).map(h => ({
         text: String(h?.text || ''),
+        field: h?.field || 'oracle',
+        colorIndex: Number.isInteger(h?.colorIndex) ? h.colorIndex : 0,
         mode: h?.mode === 'variable' ? 'variable' : 'exact',
         origin: h?.origin || 'user',
         attachedTo: Number.isInteger(h?.attachedTo) ? h.attachedTo : null,
@@ -17785,7 +18474,9 @@ function getSearchIntent(sourceCard, highlights = []) {
         return cached;
     }
 
-    const hasHighlight = Array.isArray(highlights) && highlights.length > 0;
+    const effectHighlights = (Array.isArray(highlights) ? highlights : []).filter(h => h?.field !== 'type');
+    const typeHighlights = (Array.isArray(highlights) ? highlights : []).filter(h => h?.field === 'type');
+    const hasHighlight = effectHighlights.length > 0 || typeHighlights.length > 0;
     const targetText = hasHighlight
         ? buildHighlightScoringText(highlights, sourceText)
         : sourceText;
@@ -17797,7 +18488,7 @@ function getSearchIntent(sourceCard, highlights = []) {
         const profiles = buildHighlightIntentProfiles(highlights);
         parsedEffects = profiles.flatMap(p => p.recognizedEffects?.length ? p.recognizedEffects : (p.parsedEffects || []));
         if (!parsedEffects.length) {
-            const sourceOnlyText = (profiles.map(p => p.contextText).filter(Boolean).join('. ') || targetText);
+            const sourceOnlyText = (profiles.map(p => p.contextText).filter(Boolean).join('. ') || sourceText);
             parsedEffects = parseMTGEffect(sourceOnlyText);
         }
     } else {
@@ -18016,7 +18707,7 @@ async function findSimilarCards() {
     const exactnessTextForScoring = hasHighlight
         ? (hasBenchmarkMixedHighlightIntent
             ? ''
-            : manualHighlights.filter(h => h.mode === 'exact' && !h.benchmarkIntentOnly).map(h => h.text).join('. '))
+            : manualHighlights.filter(h => h.field !== 'type' && h.mode === 'exact' && !h.benchmarkIntentOnly).map(h => h.text).join('. '))
         : targetTextForScoring;
 
     const filters = readConstraintFilters();
@@ -18117,13 +18808,14 @@ async function findSimilarCards() {
         const seenExactQueries = new Set();
         for (const highlight of manualHighlights.filter(h => h?.mode !== 'variable' && !h.benchmarkIntentOnly && typeof h.text === 'string' && h.text.trim())) {
             const literal = highlight.text.trim().replaceAll('\\', '\\\\').replaceAll('"', '\\"');
-            const key = literal.toLowerCase();
+            const prefix = highlight.field === 'type' ? 'type' : 'oracle';
+            const key = `${prefix}:${literal.toLowerCase()}`;
             if (!literal || seenExactQueries.has(key)) continue;
             seenExactQueries.add(key);
             exactHighlightQueries.push({
-                query: `oracle:"${literal}" ${excludeSelf}`.trim(),
+                query: `${prefix}:"${literal}" ${excludeSelf}`.trim(),
                 narrow: true,
-                source: 'highlight-exact'
+                source: highlight.field === 'type' ? 'highlight-type' : 'highlight-exact'
             });
         }
     }
@@ -19629,6 +20321,9 @@ function getRankingScoreForCriteria(card, criteria) {
         case 'synergy': return Number(card.synergyScore) || 0;
         case 'exactness': return Number(card.exactnessScore) || 0;
         case 'category': return Number(card.categoryScore) || 0;
+        case 'price': { const raw = card?.prices?.usd; if (raw === null || raw === undefined || raw === '') return -1e9; const price = Number(raw); return Number.isFinite(price) && price >= 0 ? -price : -1e9; }
+        case 'manaValue': { const raw = card?.cmc; if (raw === null || raw === undefined || raw === '') return -1e9; const manaValue = Number(raw); return Number.isFinite(manaValue) && manaValue >= 0 ? -manaValue : -1e9; }
+        case 'manaValueDesc': { const raw = card?.cmc; if (raw === null || raw === undefined || raw === '') return -1e9; const manaValue = Number(raw); return Number.isFinite(manaValue) && manaValue >= 0 ? manaValue : -1e9; }
         case 'overall':
         default: return Number(card.similarityScore) || 0;
     }
@@ -19793,10 +20488,11 @@ function applyResultOrdering(cards, criteria, featureFlags = null) {
     const features = featureFlags || activeOrderFeatureFlags;
     let output = input.sort((a, b) => getRankingScoreForCriteria(b, ranking) - getRankingScoreForCriteria(a, ranking));
 
-    // Features are presentation modifiers layered on top of the selected ranking. They can be
-    // combined with one another and never replace the primary ranking category.
-    if (features.diverse) output = buildDiverseOrder(output, ranking);
-    if (features.matrix) output = buildMatrixSweepOrder(output, ranking);
+    // Attribute sorts (price/mana value) should remain strictly ordered; diversity/matrix are
+    // presentation modifiers for similarity rankings only.
+    const attributeSort = ['price', 'manaValue', 'manaValueDesc'].includes(ranking);
+    if (!attributeSort && features.diverse) output = buildDiverseOrder(output, ranking);
+    if (!attributeSort && features.matrix) output = buildMatrixSweepOrder(output, ranking);
     return output;
 }
 
@@ -19807,13 +20503,14 @@ async function applyResultOrderingResponsively(cards, criteria, featureFlags = n
     const features = featureFlags || activeOrderFeatureFlags;
     let output = await sortManaArrayResponsively(input,
         (a, b) => getRankingScoreForCriteria(b, ranking) - getRankingScoreForCriteria(a, ranking));
-    if (features.diverse) output = await buildDiverseOrderResponsively(output, ranking);
-    if (features.matrix) output = await buildMatrixSweepOrderResponsively(output, ranking);
+    const attributeSort = ['price', 'manaValue', 'manaValueDesc'].includes(ranking);
+    if (!attributeSort && features.diverse) output = await buildDiverseOrderResponsively(output, ranking);
+    if (!attributeSort && features.matrix) output = await buildMatrixSweepOrderResponsively(output, ranking);
     return output;
 }
 
 function validOrderCriteriaForOrdering(criteria) {
-    const allowed = new Set(['overall','mechanical','functional','semantic','role','balanced','synergy','exactness','category']);
+    const allowed = new Set(['overall','mechanical','functional','semantic','role','balanced','synergy','exactness','category','price','manaValue','manaValueDesc']);
     return allowed.has(criteria) ? criteria : 'overall';
 }
 
@@ -20300,6 +20997,7 @@ function renderResults(cards, internalOptions = {}) {
     if (internalOptions?.forceImmediate !== true && (document.body?.classList.contains('mana-panel-open') || shouldDeferManaResultRender())) {
         deferredResultRenderCards = cards;
         deferredResultRenderPending = true;
+        deferredResultRenderSearchGeneration = searchRequestId;
         if (isManaUserActivelyEditing() || isManaUiInteractionRecentlyActive(MANASEARCH_UI_RENDER_QUIET_WINDOW_MS)) {
             scheduleDeferredResultFlushAfterEditing();
         }
@@ -20315,6 +21013,7 @@ function renderResults(cards, internalOptions = {}) {
     }
     deferredResultRenderCards = null;
     deferredResultRenderPending = false;
+    deferredResultRenderSearchGeneration = 0;
     resultsSection.classList.remove('hidden');
     // Keep pagination, summary text, and card rendering bound to one atomic source snapshot.
     currentRenderedResultsCards = Array.isArray(cards) ? cards.slice() : [];
@@ -20455,7 +21154,13 @@ function renderResults(cards, internalOptions = {}) {
         const typeLine = cardElement.querySelector('.result-type-line');
         if (typeLine) typeLine.textContent = card.type_line || '';
         const matchLine = cardElement.querySelector('.card-match-line');
-        if (matchLine) matchLine.textContent = `Overall Match: ${matchPercentage}%`;
+        if (matchLine) {
+            matchLine.textContent = `Overall Match: ${matchPercentage}%`;
+            matchLine.classList.remove('score-band-low', 'score-band-medium', 'score-band-high', 'score-band-excellent');
+            const scoreBand = matchPercentage < 40 ? 'score-band-low' : matchPercentage < 60 ? 'score-band-medium' : matchPercentage < 80 ? 'score-band-high' : 'score-band-excellent';
+            matchLine.classList.add(scoreBand);
+            matchLine.style.color = ({ 'score-band-low': '#f87171', 'score-band-medium': '#fbbf24', 'score-band-high': '#4ade80', 'score-band-excellent': '#67e8f9' })[scoreBand];
+        }
 
         const badge = cardElement.querySelector('.weak-match-badge');
         if (card._weakBackfillMatch) {
@@ -20531,6 +21236,8 @@ function renderResults(cards, internalOptions = {}) {
         flipBtn.className = 'card-flip-btn';
         flipBtn.textContent = 'Flip';
         flipBtn.title = 'Flip card face';
+        flipBtn.dataset.featureTip = 'View the other face of a double-faced card.';
+        flipBtn.dataset.featurePreview = 'Front face ⇄ back face';
         flipBtn.setAttribute('aria-label', `Flip ${card.name}`);
         flipBtn.hidden = true;
         flipBtn.addEventListener('click', event => {
@@ -20583,17 +21290,22 @@ function renderResults(cards, internalOptions = {}) {
         favoriteBtn.className = 'result-favorite-btn';
         favoriteBtn.style.alignSelf = 'center';
         favoriteBtn.dataset.role = 'favorite';
+        favoriteBtn.dataset.featureTip = 'Add this candidate to favorites for quick access later.';
+        favoriteBtn.dataset.featurePreview = '☆ → ★ Saved in your local favorites';
         const compareBtn = document.createElement('button');
         compareBtn.type = 'button';
         compareBtn.className = 'compare-btn';
         compareBtn.dataset.role = 'compare';
         compareBtn.textContent = 'Compare';
+        compareBtn.dataset.featureTip = 'Compare the card with your source or another candidate.';
+        compareBtn.dataset.featurePreview = 'Shared effects · costs · restrictions · differences';
         const selectLabel = document.createElement('label');
         selectLabel.className = 'result-select-label';
         selectLabel.style.cssText = 'font-size: 11px; display: flex; align-items: center; justify-content: center; gap: 4px; cursor: pointer; white-space: nowrap;';
         const checkbox = document.createElement('input');
         checkbox.type = 'checkbox';
         checkbox.className = 'related-checkbox';
+        checkbox.setAttribute('aria-label', `Select ${card.name} for Search Related Cards`);
         const selectText = document.createElement('span');
         selectText.className = 'result-select-text';
         selectText.textContent = 'Select';
@@ -20745,7 +21457,7 @@ function ensureComparePresentationStyles() {
         }
         #compare-modal .compare-card .compare-card-art {
             display: block;
-            width: min(100%, 260px);
+            width: min(100%, 360px);
             height: auto;
             margin: 0 auto 14px;
             border-radius: 10px;
@@ -20818,17 +21530,57 @@ function ensureComparePresentationStyles() {
         @media (max-width: 760px) {
             #compare-modal .modal-content { padding: 16px; }
             #compare-modal .compare-container { grid-template-columns: 1fr; gap: 14px; }
-            #compare-modal .compare-card-art { width: min(100%, 300px) !important; }
+            #compare-modal .compare-card-art { width: min(100%, 340px) !important; }
         }
     `;
     document.head.appendChild(style);
 }
 
+function buildCompareSupplementalCanonicalEffects(card, text, canonical = []) {
+    const present = new Set((canonical || []).map(effect => effect?.function).filter(Boolean));
+    const quantity = '(?:a|an|one|two|three|four|five|six|seven|eight|nine|ten|\\d+|x)';
+    const patterns = [
+        { fn: 'card_draw', regex: new RegExp(`\\b(?:draw|draws)\\s+${quantity}\\s+cards?\\b`, 'i') },
+        { fn: 'token_creation', regex: new RegExp(`\\bcreates?\\s+${quantity}\\s+((?:\\d+\\/\\d+\\s+)?(?:[a-z'-]+\\s+){0,4}tokens?)\\b`, 'i') },
+        { fn: 'gain_life', regex: new RegExp(`\\b(?:gain|gains)\\s+(?:${quantity}\\s+)?life\\b`, 'i') },
+        { fn: 'lose_life', regex: new RegExp(`\\b(?:lose|loses)\\s+(?:${quantity}\\s+)?life\\b`, 'i') },
+        { fn: 'direct_damage', regex: /\b(?:deal|deals)\s+(?:\d+|x)\s+damage(?:\s+to\s+[^.;,]+)?/i },
+        { fn: 'mill', regex: new RegExp(`\\bmill\\s+${quantity}\\s+cards?\\b`, 'i') },
+        { fn: 'discard', regex: new RegExp(`\\bdiscard\\s+${quantity}\\s+cards?\\b`, 'i') }
+    ];
+    const supplemental = [];
+    for (const spec of patterns) {
+        if (present.has(spec.fn)) continue;
+        const sourceText = String(text || '');
+        const found = sourceText.match(spec.regex);
+        if (!found?.[0]) continue;
+        if (spec.fn === 'token_creation') {
+            const before = sourceText.slice(Math.max(0, found.index - 32), found.index);
+            const after = sourceText.slice(found.index, found.index + 140);
+            if (/\bwould\s*$/i.test(before) || /\b(?:twice|three times|four times|double|triple)\s+that many\b/i.test(after)) continue;
+        }
+        try {
+            const miniParsed = annotateEffectRepeatability(card, parseMTGEffect(found[0]), text);
+            const effect = getCanonicalFunctions(miniParsed).find(item => item?.function === spec.fn);
+            if (!effect) continue;
+            const cloned = {
+                ...effect,
+                params: { ...(effect.params || {}), raw: found[0], compareSupplemental: true },
+                _compareSupplemental: true
+            };
+            supplemental.push(cloned);
+            present.add(spec.fn);
+        } catch (_) {}
+    }
+    return supplemental;
+}
+
 function getCompareParsedCard(card) {
     const text = card?.oracle_text || (card?.card_faces ? card.card_faces.map(f => f.oracle_text || '').join(' ') : '');
     try {
-        const parsed = card?._parsedEffects || parseMTGEffect(text);
+        const parsed = annotateEffectRepeatability(card, card?._parsedEffects || getCachedParsedEffects(card, text), text);
         const canonical = getCanonicalFunctions(parsed);
+        canonical.push(...buildCompareSupplementalCanonicalEffects(card, text, canonical));
         const roles = inferStrategicRoleProfile(card, parsed, '') || [];
         return { text, parsed, canonical, roles };
     } catch (_) {
@@ -21036,6 +21788,126 @@ function compareEffectDescription(cf) {
     }
 }
 
+function compareRepeatabilityLabel(profile) {
+    if (!profile?.kind) return '';
+    return REPEATABILITY_PROFILE_META[profile.kind]?.label || 'Repeatability unclear';
+}
+
+function compareNaturalQuantity(value, singular, plural = `${singular}s`) {
+    const n = typeof value === 'number' && Number.isFinite(value) ? value : null;
+    if (n === 1) return `a ${singular}`;
+    if (n !== null) {
+        const words = { 0: 'zero', 2: 'two', 3: 'three', 4: 'four', 5: 'five', 6: 'six', 7: 'seven', 8: 'eight', 9: 'nine', 10: 'ten' };
+        return `${words[n] || n} ${plural}`;
+    }
+    return plural;
+}
+
+function compareNaturalEffectAction(cf) {
+    const core = compareEffectCore(cf);
+    const p = cf?.params || {};
+    const q = core.quantity;
+    switch (core.fn) {
+        case 'card_draw': return `draw ${compareNaturalQuantity(q, 'card')}`;
+        case 'token_creation': {
+            const raw = String(cf?.raw || p.raw || '');
+            const tokenMatch = raw.match(/\bcreates?\s+(?:a|an|one|two|three|four|five|six|seven|eight|nine|ten|\d+)\s+(.+?\btoken(?:s)?\b)/i);
+            const token = compareClean(tokenMatch?.[1] || core.subtype || p.tokenType || 'token').replace(/\btokens?$/i, 'token');
+            const pluralToken = token.replace(/\btoken$/i, 'tokens');
+            return `create ${compareNaturalQuantity(q, token, pluralToken)}`;
+        }
+        case 'token_multiplier': {
+            const raw = String(cf?.raw || p.raw || '').toLowerCase();
+            if (/\bthree times\b|\btriple\b/.test(raw)) return 'triple the tokens you would create';
+            if (/\btwice\b|\bdouble\b/.test(raw)) return 'double the tokens you would create';
+            return 'multiply the tokens you would create';
+        }
+        case 'gain_life': return q !== null ? `gain ${q} life` : 'gain life';
+        case 'lose_life': return q !== null ? `lose ${q} life` : 'lose life';
+        case 'direct_damage': return q !== null ? `deal ${q} damage${core.target ? ` to ${core.target}` : ''}` : `deal damage${core.target ? ` to ${core.target}` : ''}`;
+        case 'mill': return `mill ${compareNaturalQuantity(q, 'card')}`;
+        case 'discard': return `discard ${compareNaturalQuantity(q, 'card')}`;
+        case 'mana_ability': return q !== null ? `add ${q} mana` : 'add mana';
+        case 'removal': return `destroy ${core.target || core.object || 'the relevant permanent'}`;
+        case 'exile_removal': return `exile ${core.target || core.object || 'the relevant permanent'}`;
+        case 'counter': return `counter ${core.target || core.object || 'the relevant spell or ability'}`;
+        default: return compareEffectDescription(cf) || `use its ${compareFunctionLabel(core.fn || 'effect').toLowerCase()} effect`;
+    }
+}
+
+function compareNaturalThirdPerson(action) {
+    return String(action || '').replace(/^(draw|create|gain|lose|deal|mill|discard|add|destroy|exile|counter|triple|double|multiply|return|put|search|tap|untap)\b/i, verb => ({
+        draw: 'draws', create: 'creates', gain: 'gains', lose: 'loses', deal: 'deals', mill: 'mills', discard: 'discards', add: 'adds',
+        destroy: 'destroys', exile: 'exiles', counter: 'counters', triple: 'triples', double: 'doubles', multiply: 'multiplies',
+        return: 'returns', put: 'puts', search: 'searches', tap: 'taps', untap: 'untaps'
+    }[verb.toLowerCase()] || verb));
+}
+
+function describeRepeatabilityBehavior(card, cf) {
+    const core = compareEffectCore(cf);
+    const profile = core.repeatabilityProfile;
+    const name = card?.name || 'This card';
+    const action = compareNaturalEffectAction(cf);
+    const thirdPerson = compareNaturalThirdPerson(action);
+    if (!profile || profile.group === 'unknown') return '';
+    switch (profile.kind) {
+        case 'periodic_trigger': {
+            let timing = String(profile.timingText || '').toLowerCase();
+            timing = timing.replace(/^at the beginning of your upkeep$/, 'the beginning of each of your upkeeps')
+                .replace(/^at the beginning of each upkeep$/, 'the beginning of each upkeep')
+                .replace(/^at the beginning of every upkeep$/, 'the beginning of every upkeep')
+                .replace(/^at the end of your turn$/, 'the end of each of your turns');
+            return timing ? `At ${timing}, ${name} lets you ${action}` : `${name} repeatedly lets you ${action} on a recurring turn schedule`;
+        }
+        case 'repeatable_trigger': {
+            const event = String(profile.eventText || '').replace(/[,.]+$/g, '').trim();
+            if (event && /^(when|whenever)\b/i.test(event)) return `${event.charAt(0).toUpperCase()}${event.slice(1)}, ${name} ${thirdPerson}`;
+            return `Whenever its trigger condition occurs, ${name} ${thirdPerson}`;
+        }
+        case 'repeatable_activation':
+            return `${name} can ${action} repeatedly by paying its activation cost`;
+        case 'ongoing_static':
+            return `${name} continuously ${action}`;
+        case 'repeatable_spell':
+            return `${name} can repeat the effect by using its reusable casting mechanic`;
+        case 'recastable_spell':
+            return `${name} performs the effect once per cast, but its rules text gives you a way to cast it again`;
+        case 'entry_trigger':
+            return `${name} ${thirdPerson} when it enters the battlefield; that trigger does not repeat just because the permanent stays in play`;
+        case 'self_event':
+            return `${name} ${thirdPerson} when its one-time event occurs, rather than providing a recurring effect while it stays in play`;
+        case 'single_use_activation':
+            return `${name} can ${action} with its ability, but doing so consumes the source`;
+        case 'one_shot':
+            return /\b(?:instant|sorcery)\b/i.test(String(card?.type_line || ''))
+                ? `${name} ${thirdPerson} once when the spell resolves`
+                : `${name} lets you ${action} once when its ability resolves`;
+        default:
+            return `${name} ${thirdPerson}`;
+    }
+}
+
+function findRepeatabilityMismatchMatch(matches = []) {
+    for (const match of (matches || []).slice(0, 8)) {
+        const aCore = compareEffectCore(match.af), bCore = compareEffectCore(match.bf);
+        if (!aCore.fn || !bCore.fn) continue;
+        if (aCore.fn !== bCore.fn && aCore.family !== bCore.family) continue;
+        const pa = aCore.repeatabilityProfile, pb = bCore.repeatabilityProfile;
+        if (!pa || !pb || pa.group === 'unknown' || pb.group === 'unknown') continue;
+        if (repeatabilityProfileSimilarity(pa, pb) < 0.58) return match;
+    }
+    return null;
+}
+
+function compareRepeatabilitySentence(cardA, cardB, matches = []) {
+    const match = findRepeatabilityMismatchMatch(matches);
+    if (!match) return '';
+    const behaviorA = describeRepeatabilityBehavior(cardA, match.af);
+    const behaviorB = describeRepeatabilityBehavior(cardB, match.bf);
+    if (!behaviorA || !behaviorB) return '';
+    return `The key difference is how often the effect happens: ${behaviorA}, whereas ${behaviorB}.`;
+}
+
 function compareEffectCore(cf) {
     const p = cf?.params || {};
     return {
@@ -21062,6 +21934,7 @@ function compareEffectCore(cf) {
         targetProfile: p.targetProfile || null,
         quantityProfile: p.quantityProfile || null,
         triggerProfile: p.triggerProfile || null,
+        repeatabilityProfile: p.repeatabilityProfile || null,
         dependencyProfile: p.dependencyProfile || null,
         durationProfile: p.durationProfile || null,
         raw: p.raw || ''
@@ -21107,34 +21980,67 @@ function compareConditionPhrase(core) {
     return '';
 }
 
-function compareCostPhrase(core) {
+function compareNaturalActivationCost(rawCost) {
+    const parts = String(rawCost || '').split(/\s*,\s*/).map(part => part.trim()).filter(Boolean);
+    if (!parts.length) return '';
+    const naturalParts = parts.map(part => {
+        if (/^\{t\}$/i.test(part)) return 'tap the permanent';
+        if (/^\{[^}]+\}$/.test(part)) return `pay ${part}`;
+        if (/^sacrifice\b/i.test(part)) return `sacrifice ${part.replace(/^sacrifice\s+/i, '')}`;
+        if (/^tap\b/i.test(part)) return `tap ${part.replace(/^tap\s+/i, '')}`;
+        if (/^pay\b/i.test(part)) return `pay ${part.replace(/^pay\s+/i, '')}`;
+        if (/^discard\b/i.test(part)) return `discard ${part.replace(/^discard\s+/i, '')}`;
+        return part;
+    });
+    return `requires you to ${compareFormatList(naturalParts)} each time you activate it`;
+}
+
+function compareCostPhrase(core, cardText = '') {
     const pieces = [];
-    if (core.activationCost?.parts?.length) pieces.push(`activation costs ${compareFormatList(core.activationCost.parts)}`);
-    else if (core.payCost && !/^mana$/.test(core.payCost)) pieces.push(`requires ${core.payCost}`);
+    if (core.activationCost?.parts?.length) {
+        const rawCardText = String(cardText || core.raw || '');
+        const prefix = rawCardText.match(/^\s*([^:\n]+)\s*:/);
+        const naturalCost = prefix ? compareNaturalActivationCost(prefix[1]) : '';
+        pieces.push(naturalCost || `has activation cost ${compareFormatList(core.activationCost.parts)}`);
+    } else if (core.payCost && !/^mana$/.test(core.payCost)) {
+        pieces.push(`requires ${core.payCost}`);
+    }
     const condition = compareConditionPhrase(core);
     if (condition && core.condition === 'unless_pay') pieces.push(condition);
     return pieces.join('; ');
 }
 
-function compareDifferenceSentences(cardA, cardB, af, bf) {
+function compareDifferenceSentences(cardA, cardB, af, bf, skipQuantityDifference = false) {
     const a = compareEffectCore(af), b = compareEffectCore(bf), out = [];
     const aName = cardA.name, bName = cardB.name;
 
-    if (a.quantity !== null && b.quantity !== null && a.quantity !== b.quantity) {
-        const descA = compareEffectDescription(af), descB = compareEffectDescription(bf);
-        const unit = /damage|life|draw|mill|discard|token|counter|mana/.test(descA + ' ' + descB) ? '' : ' units';
-        out.push(`The amount differs: ${aName} uses ${a.quantity}${unit}, while ${bName} uses ${b.quantity}${unit}.`);
+    if (!skipQuantityDifference && a.quantity !== null && b.quantity !== null && a.quantity !== b.quantity) {
+        const actionA = compareNaturalEffectAction(af), actionB = compareNaturalEffectAction(bf);
+        if (actionA && actionB && a.fn === b.fn) out.push(`${aName} ${actionA.replace(/^(draw|create|gain|lose|deal|mill|discard|add|destroy|exile|counter)\b/, (verb) => ({ draw: 'draws', create: 'creates', gain: 'gains', lose: 'loses', deal: 'deals', mill: 'mills', discard: 'discards', add: 'adds', destroy: 'destroys', exile: 'exiles', counter: 'counters' }[verb] || verb))}, while ${bName} ${actionB.replace(/^(draw|create|gain|lose|deal|mill|discard|add|destroy|exile|counter)\b/, (verb) => ({ draw: 'draws', create: 'creates', gain: 'gains', lose: 'loses', deal: 'deals', mill: 'mills', discard: 'discards', add: 'adds', destroy: 'destroys', exile: 'exiles', counter: 'counters' }[verb] || verb))}.`);
+        else out.push(`The amount differs: ${aName} uses ${a.quantity}, while ${bName} uses ${b.quantity}.`);
     }
 
+    const counterTargetRestrictionExplained = a.fn === 'counter' && b.fn === 'counter' && a.target && b.target && a.target !== b.target && (a.restriction || b.restriction);
     if (a.target && b.target && a.target !== b.target) {
-        out.push(`The targeting differs: ${aName} can affect ${a.target}, while ${bName} can affect ${b.target}.`);
+        if (counterTargetRestrictionExplained) {
+            const restricted = (core, name) => {
+                const target = String(core.target || 'spells').replace(/^(?:a|an)\s+/i, '').replace(/\bspell\b/i, 'spells');
+                const hasRestriction = Boolean(core.restriction) || /\b(?:noncreature|creature|artifact|enchantment|instant|sorcery|permanent)\b/i.test(target);
+                return hasRestriction ? `${name} is limited to ${target}` : `${name} can counter any spell`;
+            };
+            if (!a.restriction && b.restriction) out.push(`The targeting differs: ${aName} can counter any spell, while ${restricted(b, bName)}.`);
+            else if (a.restriction && !b.restriction) out.push(`The targeting differs: ${bName} can counter any spell, while ${restricted(a, aName)}.`);
+            else out.push(`The targeting differs: ${aName} can counter ${a.target}, while ${bName} can counter ${b.target}.`);
+        } else {
+            out.push(`The targeting differs: ${aName} can affect ${a.target}, while ${bName} can affect ${b.target}.`);
+        }
     } else if (a.target && !b.target) {
         out.push(`${aName} specifies ${a.target}, while ${bName} uses a different targeting structure.`);
     } else if (!a.target && b.target) {
         out.push(`${bName} specifies ${b.target}, while ${aName} uses a different targeting structure.`);
     }
 
-    if (a.restriction !== b.restriction) {
+    if (a.restriction !== b.restriction && !counterTargetRestrictionExplained) {
         if (a.restriction && !b.restriction) out.push(`${aName} has an additional restriction: it is limited to ${a.restriction}.`);
         else if (b.restriction && !a.restriction) out.push(`${bName} has an additional restriction: it is limited to ${b.restriction}.`);
         else if (a.restriction && b.restriction) out.push(`The restrictions differ: ${aName} is limited to ${a.restriction}, while ${bName} is limited to ${b.restriction}.`);
@@ -21156,11 +22062,11 @@ function compareDifferenceSentences(cardA, cardB, af, bf) {
         else if (cb && !ca) out.push(`${bName} has an additional condition: ${cb}.`);
     }
 
-    const costA = compareCostPhrase(a), costB = compareCostPhrase(b);
+    const costA = compareCostPhrase(a, cardA?.oracle_text || cardA?.card_faces?.map(f => f.oracle_text || '').join(' ') || ''), costB = compareCostPhrase(b, cardB?.oracle_text || cardB?.card_faces?.map(f => f.oracle_text || '').join(' ') || '');
     if (costA !== costB) {
-        if (costA && costB) out.push(`The costs or requirements differ: ${aName} ${costA}, while ${bName} ${costB}.`);
-        else if (costA) out.push(`${aName} has an additional cost or requirement: ${costA}.`);
-        else if (costB) out.push(`${bName} has an additional cost or requirement: ${costB}.`);
+        if (costA && costB) out.push(`Their activation requirements differ: ${aName} ${costA}, while ${bName} ${costB}.`);
+        else if (costA) out.push(`${aName} ${costA}.`);
+        else if (costB) out.push(`${bName} ${costB}.`);
     }
 
     if (a.effectMode !== b.effectMode && (a.effectMode || b.effectMode)) out.push(`The rules structure differs: ${aName} uses a ${a.effectMode || 'normal'} effect, while ${bName} uses a ${b.effectMode || 'normal'} effect.`);
@@ -21168,8 +22074,25 @@ function compareDifferenceSentences(cardA, cardB, af, bf) {
     if (a.subtype !== b.subtype && (a.subtype || b.subtype)) out.push(`The subtype restriction differs: ${aName} specifies ${a.subtype || 'no subtype restriction'}, while ${bName} specifies ${b.subtype || 'no subtype restriction'}.`);
     if (a.scope !== b.scope && (a.scope || b.scope)) out.push(`The scope differs: ${aName} affects ${a.scope || 'the default scope'}, while ${bName} affects ${b.scope || 'the default scope'}.`);
     if (a.magnitude && b.magnitude && a.magnitude !== b.magnitude && a.quantity === null && b.quantity === null) out.push(`The magnitude differs: ${aName} uses ${a.magnitude}, while ${bName} uses ${b.magnitude}.`);
+    if (a.fn === 'token_multiplier' && b.fn === 'token_multiplier') {
+        const multiplierA = compareNaturalThirdPerson(compareNaturalEffectAction(af));
+        const multiplierB = compareNaturalThirdPerson(compareNaturalEffectAction(bf));
+        if (multiplierA && multiplierB && multiplierA !== multiplierB) {
+            out.push(`${aName} ${multiplierA}, while ${bName} ${multiplierB.replace(/the tokens you would create/i, 'them')}.`);
+        }
+    }
 
-    const extraA = compareFormatList(a.additionalEffects), extraB = compareFormatList(b.additionalEffects);
+    let extraA = compareFormatList(a.additionalEffects), extraB = compareFormatList(b.additionalEffects);
+    const normalizeEffectForDuplicateCheck = value => compareClean(value).toLowerCase()
+        .replace(/_/g, ' ')
+        .replace(/\b(?:a|an|the|that|those|this|these|one|two|three|four|five|six|seven|eight|nine|ten)\b/g, ' ')
+        .replace(/\b\d+\b/g, ' ')
+        .replace(/\bcards?\b/g, 'card')
+        .replace(/\s+/g, ' ').trim();
+    const baseEffectA = normalizeEffectForDuplicateCheck(compareEffectDescription(af));
+    const baseEffectB = normalizeEffectForDuplicateCheck(compareEffectDescription(bf));
+    if (extraA && baseEffectA && normalizeEffectForDuplicateCheck(extraA) === baseEffectA) extraA = '';
+    if (extraB && baseEffectB && normalizeEffectForDuplicateCheck(extraB) === baseEffectB) extraB = '';
     if (extraA !== extraB && (extraA || extraB)) {
         if (extraA && extraB) out.push(`The follow-up effects differ: ${aName} also has ${extraA}, while ${bName} also has ${extraB}.`);
         else if (extraA) out.push(`${aName} also has a follow-up effect: ${extraA}.`);
@@ -21194,6 +22117,8 @@ function compareMatchScore(af, bf) {
     if (a.condition === b.condition && a.condition) score += 4;
     if (a.effectMode === b.effectMode) score += 3;
     if (a.duration === b.duration) score += 3;
+    const repeatability = repeatabilityProfileSimilarity(a.repeatabilityProfile, b.repeatabilityProfile);
+    if (repeatability < 0.50) score -= 18 * (1 - repeatability);
     return score;
 }
 
@@ -21437,17 +22362,27 @@ function compareModalAlternativeSentences(cardA, cardB, a, b, matches) {
 function compareMechanicalSentences(cardA, cardB, a, b) {
     const compound = compareCompoundEffects(cardA, cardB, a, b);
     const sentences = [];
+    const repeatabilityMismatchMatch = findRepeatabilityMismatchMatch(compound.matches);
+    const repeatabilitySentence = compareRepeatabilitySentence(cardA, cardB, compound.matches);
+    if (repeatabilitySentence) sentences.push(repeatabilitySentence);
     sentences.push(...compareModalAlternativeSentences(cardA, cardB, a, b, compound.matches));
     sentences.push(...compareSequenceSentences(cardA, cardB, a, b));
     compound.matches.slice(0, 8).forEach(({ af, bf }) => {
         const aDesc = compareEffectDescription(af), bDesc = compareEffectDescription(bf);
         if (aDesc && bDesc && aDesc === bDesc) {
-            sentences.push(`Both ${cardA.name} and ${cardB.name} ${aDesc}.`);
+            if (af?.function === 'token_multiplier' && bf?.function === 'token_multiplier') {
+                const multiplierA = compareNaturalThirdPerson(compareNaturalEffectAction(af));
+                const multiplierB = compareNaturalThirdPerson(compareNaturalEffectAction(bf));
+                if (multiplierA && multiplierB && multiplierA !== multiplierB) {
+                    sentences.push(`${cardA.name} ${multiplierA}, while ${cardB.name} ${multiplierB.replace(/the tokens you would create/i, 'them')}.`);
+                } else sentences.push(`Both ${cardA.name} and ${cardB.name} ${aDesc}.`);
+            } else sentences.push(`Both ${cardA.name} and ${cardB.name} ${aDesc}.`);
         } else {
-            const differences = compareDifferenceSentences(cardA, cardB, af, bf);
+            const sameRepeatabilityMismatch = Boolean(repeatabilityMismatchMatch && repeatabilityMismatchMatch.af === af && repeatabilityMismatchMatch.bf === bf);
+            const differences = compareDifferenceSentences(cardA, cardB, af, bf, sameRepeatabilityMismatch);
             sentences.push(...compareConditionCostSentences(cardA, cardB, af, bf));
             if (differences.length) sentences.push(...differences);
-            else if (aDesc && bDesc) sentences.push(`Both cards have a related effect: ${cardA.name} ${aDesc}, while ${cardB.name} ${bDesc}.`);
+            else if (aDesc && bDesc && !sameRepeatabilityMismatch) sentences.push(`Both cards have a related effect: ${cardA.name} ${aDesc}, while ${cardB.name} ${bDesc}.`);
         }
     });
 
@@ -21476,23 +22411,24 @@ function compareAdditionalEffectSentence(cardName, cf) {
     const fn = String(cf?.function || '');
     switch (fn) {
         case 'direct_damage': return `${cardName} additionally deals ${description.replace(/^\\s*damage/i, 'damage')}.`;
-        case 'card_draw': return `${cardName} additionally ${description}.`;
-        case 'mill': return `${cardName} additionally ${description}.`;
-        case 'discard': return `${cardName} additionally ${description}.`;
-        case 'gain_life': return `${cardName} additionally ${description}.`;
-        case 'lose_life': return `${cardName} additionally causes its controller to ${description}.`;
-        case 'mana_ability': return `${cardName} additionally ${description}.`;
-        case 'token_creation': return `${cardName} additionally ${description}.`;
-        case 'place_counter': return `${cardName} additionally ${description}.`;
-        case 'self_sacrifice': return `${cardName} additionally must ${description}.`;
-        case 'tap': return `${cardName} additionally ${description}.`;
-        case 'untap': return `${cardName} additionally ${description}.`;
-        default: return `${cardName} additionally ${description}.`;
+        case 'card_draw': return `${cardName} also ${compareNaturalThirdPerson(description)}.`;
+        case 'mill': return `${cardName} also ${compareNaturalThirdPerson(description)}.`;
+        case 'discard': return `${cardName} also ${compareNaturalThirdPerson(description)}.`;
+        case 'gain_life': return `${cardName} also ${compareNaturalThirdPerson(description)}.`;
+        case 'lose_life': return `${cardName} also makes its controller ${description}.`;
+        case 'mana_ability': return `${cardName} also ${compareNaturalThirdPerson(description)}.`;
+        case 'token_creation': return `${cardName} also ${compareNaturalThirdPerson(description)}.`;
+        case 'place_counter': return `${cardName} also ${compareNaturalThirdPerson(description)}.`;
+        case 'self_sacrifice': return `${cardName} also ${compareNaturalThirdPerson(description)}.`;
+        case 'tap': return `${cardName} also ${compareNaturalThirdPerson(description)}.`;
+        case 'untap': return `${cardName} also ${compareNaturalThirdPerson(description)}.`;
+        default: return `${cardName} also ${compareNaturalThirdPerson(description)}.`;
     }
 }
 
 function compareAdditionalEffects(cardName, effects) {
     return (effects || [])
+        .filter(cf => !(cf?.isCostEffect || cf?.params?.isCostEffect))
         .slice(0, 6)
         .map(cf => compareAdditionalEffectSentence(cardName, cf))
         .filter(Boolean);
@@ -21504,8 +22440,12 @@ function buildCompareExplanation(cardA, cardB) {
     const mechanical = compareMechanicalSentences(cardA, cardB, a, b);
     const { matches, onlyA, onlyB } = mechanical;
     const archetypes = compareArchetypeSentences(cardA, cardB, a, b);
+    const distinctEffectDetails = [
+        ...compareAdditionalEffects(cardA.name, onlyA),
+        ...compareAdditionalEffects(cardB.name, onlyB)
+    ];
 
-    const detail = [...mechanical.sentences, ...archetypes.shared];
+    const detail = [...mechanical.sentences, ...archetypes.shared, ...distinctEffectDetails];
 
     const evidence = [];
     matches.slice(0, 8).forEach(({ af, bf }) => {
@@ -21518,9 +22458,6 @@ function buildCompareExplanation(cardA, cardB) {
     differences.push(...compareAdditionalEffects(cardA.name, onlyA));
     differences.push(...compareAdditionalEffects(cardB.name, onlyB));
     differences.push(...archetypes.differences);
-    if (onlyA.length || onlyB.length) {
-        differences.push(`${cardA.name} has ${onlyA.length} unmatched parsed effect${onlyA.length === 1 ? '' : 's'}, while ${cardB.name} has ${onlyB.length} unmatched parsed effect${onlyB.length === 1 ? '' : 's'}.`);
-    }
 
     let summary;
     if (matches.length) {
@@ -21625,9 +22562,14 @@ function buildCompareInsightModel(cardA, cardB, explanation) {
         if (a.condition !== b.condition || a.conditionDetail !== b.conditionDetail) {
             pushDifference('Condition', compareConditionPhrase(a), compareConditionPhrase(b));
         }
-        const costA = compareCostPhrase(a), costB = compareCostPhrase(b);
+        const costA = compareCostPhrase(a, cardA?.oracle_text || cardA?.card_faces?.map(f => f.oracle_text || '').join(' ') || ''), costB = compareCostPhrase(b, cardB?.oracle_text || cardB?.card_faces?.map(f => f.oracle_text || '').join(' ') || '');
         if (costA !== costB) pushDifference('Requirement', costA, costB);
         if (a.duration !== b.duration && (a.duration || b.duration)) pushDifference('Duration', a.duration, b.duration);
+        const repeatA = compareRepeatabilityLabel(a.repeatabilityProfile);
+        const repeatB = compareRepeatabilityLabel(b.repeatabilityProfile);
+        if (repeatA && repeatB && repeatabilityProfileSimilarity(a.repeatabilityProfile, b.repeatabilityProfile) < 0.72) {
+            pushDifference('Repeatability', repeatA, repeatB);
+        }
         if (a.subtype !== b.subtype && (a.subtype || b.subtype)) pushDifference('Subtype', a.subtype, b.subtype);
         if (a.scope !== b.scope && (a.scope || b.scope)) pushDifference('Scope', a.scope, b.scope);
         if (a.magnitude !== b.magnitude && (a.magnitude || b.magnitude) && a.quantity === null && b.quantity === null) {

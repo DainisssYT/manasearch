@@ -4617,7 +4617,9 @@ body.light-theme .search-hint { color: var(--text-muted); }
 }
 
 .result-favorite-btn.is-favorited {
-    color: var(--accent-color);
+    color: #f5c542;
+    border-color: rgba(245,197,66,.65);
+    background: color-mix(in srgb, #f5c542 9%, var(--bg-primary));
 }
 
 .result-favorite-btn:focus-visible {
@@ -5607,4 +5609,121 @@ body.mana-panel-open .card-item {
 @media (max-width: 560px) {
     .results-pagination { row-gap: 8px; }
     .results-pagination > .results-page-numbers > .results-page-number-btn { min-width: 30px; }
+}
+
+/* v46 quality-of-life improvements: cyclic text highlight colors, source-card face flipping,
+   image magnification, more legible scores/scrollbars, and lightweight interaction feedback. */
+.source-card-art-wrap {
+    position: relative;
+    perspective: 900px;
+    transform-style: preserve-3d;
+}
+.source-card-art-wrap > img {
+    transform: perspective(900px) rotateY(0deg);
+    backface-visibility: hidden;
+    transition: transform .38s ease, filter .25s ease;
+}
+.source-card-art-wrap.is-source-flipping > img {
+    transform: perspective(900px) rotateY(90deg) scale(.97);
+    filter: brightness(.84);
+}
+.source-card-flip-btn {
+    position: absolute;
+    z-index: 2;
+    top: 10px;
+    right: 10px;
+    border: 1px solid rgba(255,255,255,.6);
+    border-radius: 6px;
+    padding: 6px 10px;
+    color: #fff;
+    background: rgba(20,20,26,.82);
+    box-shadow: 0 2px 8px rgba(0,0,0,.25);
+}
+.source-card-meta-line { margin-top: 5px; margin-bottom: 5px; }
+.type-line-selectable { cursor: text; user-select: text; -webkit-user-select: text; }
+.highlight-active.highlight-color-0 { background-color: rgba(250, 204, 21, .42); box-shadow: inset 0 -2px 0 rgba(202, 138, 4, .75); }
+.highlight-active.highlight-color-1 { background-color: rgba(34, 197, 94, .34); box-shadow: inset 0 -2px 0 rgba(22, 163, 74, .8); }
+.highlight-active.highlight-color-2 { background-color: rgba(34, 211, 238, .36); box-shadow: inset 0 -2px 0 rgba(8, 145, 178, .85); }
+.highlight-active.highlight-color-3 { background-color: rgba(232, 121, 249, .34); box-shadow: inset 0 -2px 0 rgba(192, 38, 211, .8); }
+.highlight-active.highlight-type { border-radius: 2px; }
+.highlight-chip.highlight-color-0 { border-color: rgba(202,138,4,.7); }
+.highlight-chip.highlight-color-1 { border-color: rgba(22,163,74,.7); }
+.highlight-chip.highlight-color-2 { border-color: rgba(8,145,178,.7); }
+.highlight-chip.highlight-color-3 { border-color: rgba(192,38,211,.7); }
+.highlight-clear-all-btn {
+    display: inline-flex;
+    align-items: center;
+    margin: 8px 5px 0 0;
+    padding: 6px 10px;
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    color: var(--text-main);
+    background: var(--bg-secondary);
+    font-size: 12px;
+}
+#related-use-highlights { accent-color: var(--accent-color); }
+.related-use-highlights-label { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; }
+#favorite-btn.is-favorited { color: #f5c542; border-color: rgba(245,197,66,.65); }
+#favorite-btn.is-favorited::first-letter { color: #f5c542; }
+.card-match-line.score-band-low { color: #f87171; }
+.card-match-line.score-band-medium { color: #fbbf24; }
+.card-match-line.score-band-high { color: #4ade80; }
+.card-match-line.score-band-excellent { color: #67e8f9; }
+
+.mana-image-magnifier {
+    position: fixed;
+    z-index: 10050;
+    display: none;
+    max-width: min(330px, 42vw);
+    padding: 5px;
+    border: 1px solid var(--border-color);
+    border-radius: 12px;
+    background: var(--bg-primary);
+    box-shadow: 0 15px 40px rgba(0,0,0,.48);
+    pointer-events: none;
+}
+.mana-image-magnifier.visible { display: block; animation: mana-magnifier-in .12s ease-out both; }
+.mana-image-magnifier img { display: block; width: 100%; max-height: 78vh; object-fit: contain; border-radius: 8px; }
+@keyframes mana-magnifier-in { from { opacity: 0; transform: scale(.97) translateY(3px); } to { opacity: 1; transform: scale(1) translateY(0); } }
+.mana-feature-help-popover {
+    position: fixed;
+    z-index: 10040;
+    display: flex;
+    flex-direction: column;
+    gap: 7px;
+    width: min(280px, calc(100vw - 16px));
+    padding: 12px;
+    border: 1px solid var(--border-color);
+    border-radius: 10px;
+    color: var(--text-main);
+    background: var(--bg-primary);
+    box-shadow: 0 10px 28px rgba(0,0,0,.4);
+    pointer-events: none;
+    font-size: 12px;
+}
+.mana-feature-help-popover strong { line-height: 1.4; }
+.mana-feature-help-preview { padding: 7px 9px; border: 1px dashed var(--border-color); border-radius: 6px; color: var(--text-secondary); background: var(--bg-secondary); }
+
+/* Attribute sorts are intentionally strict; their labels remain readable in the order modal. */
+#compare-modal .compare-card-art { width: min(100%, 360px) !important; }
+#compare-modal .modal-content { max-width: 1120px; max-height: 92vh; overflow-y: auto; }
+
+/* Slightly wider, easier-to-grab scrollbars on desktop and mobile where supported. */
+* { scrollbar-width: auto; scrollbar-color: #737383 var(--bg-secondary); }
+::-webkit-scrollbar { width: 12px; height: 12px; }
+::-webkit-scrollbar-track { background: var(--bg-secondary); border-radius: 8px; }
+::-webkit-scrollbar-thumb { background: #737383; border: 3px solid var(--bg-secondary); border-radius: 8px; }
+::-webkit-scrollbar-thumb:hover { background: #9595a6; }
+
+button:not(:disabled) { transition: transform .12s ease, box-shadow .16s ease, filter .16s ease, border-color .16s ease; }
+button:not(:disabled):active { transform: translateY(1px) scale(.985); }
+button:focus-visible { outline: 2px solid var(--accent-color); outline-offset: 2px; }
+@media (prefers-reduced-motion: reduce) {
+    .source-card-art-wrap > img, button:not(:disabled), .mana-image-magnifier.visible { transition: none !important; animation: none !important; }
+    .source-card-art-wrap.is-source-flipping > img { transform: none; }
+}
+.source-card-art-wrap { width: 240px; max-width: 100%; flex: 0 0 240px; }
+.source-card-art-wrap > img { display: block; width: 100%; max-width: 100%; aspect-ratio: 63 / 88; height: auto; object-fit: contain; border-radius: 4.5%; }
+@media (max-width: 760px) {
+    .source-card-art-wrap { width: min(100%, 300px); flex: 0 1 auto; margin-inline: auto; }
 }
