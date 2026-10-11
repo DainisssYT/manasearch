@@ -1,6 +1,6 @@
-/* ManaSearch build 20261012-55 */
+/* ManaSearch build 20261012-56 */
 // ManaSearch deployment build marker. Bump this whenever app.js changes so cached-module issues are easy to diagnose.
-const MANASEARCH_APP_BUILD = '20261012-55';
+const MANASEARCH_APP_BUILD = '20261012-56';
 console.info(`[ManaSearch] app.js build ${MANASEARCH_APP_BUILD}`);
 
 // State Management
@@ -793,8 +793,31 @@ const workerCode = `
         setTimeout(() => self.postMessage(e.data.id), e.data.ms);
     };
 `;
-const workerBlob = new Blob([workerCode], { type: 'application/javascript' });
-const bgTimerWorker = new Worker(URL.createObjectURL(workerBlob));
+// A Blob-backed Worker is an optimization only. Some mobile browsers, embedded browsers, or
+// deployments with restrictive worker policies reject it; that must never abort app.js evaluation
+// before buttons are wired and static card assets begin loading.
+let bgTimerWorker = null;
+try {
+    if (typeof Worker === 'function' && typeof Blob === 'function' && typeof URL !== 'undefined' && typeof URL.createObjectURL === 'function') {
+        const workerBlob = new Blob([workerCode], { type: 'application/javascript' });
+        const workerUrl = URL.createObjectURL(workerBlob);
+        try {
+            const worker = new Worker(workerUrl);
+            bgTimerWorker = worker;
+            worker.addEventListener('error', event => {
+                console.warn('[ManaSearch] Background timer worker unavailable; using timer fallback.', event?.message || 'Worker error');
+                if (bgTimerWorker === worker) bgTimerWorker = null;
+                try { worker.terminate(); } catch (_) {}
+            });
+        } finally {
+            // Revoke the temporary URL after the Worker constructor has captured it.
+            URL.revokeObjectURL(workerUrl);
+        }
+    }
+} catch (error) {
+    bgTimerWorker = null;
+    console.info('[ManaSearch] Background timer worker blocked; using timer fallback.', error?.message || error);
+}
 
 // Add to State Management at the top
 let activeTags = [];
@@ -11245,16 +11268,39 @@ async function pauseForUserIdle(initialDelayMs = 0, maxDelayMs = 2500) {
 }
 
 function backgroundAwareDelay(ms) {
+    const delay = Math.max(0, Number(ms) || 0);
     return new Promise(resolve => {
-        const id = Math.random().toString();
-        const handler = (e) => {
-            if (e.data === id) {
-                bgTimerWorker.removeEventListener('message', handler);
-                resolve();
+        let settled = false;
+        let fallbackTimer = null;
+        let handler = null;
+        const finish = () => {
+            if (settled) return;
+            settled = true;
+            if (fallbackTimer !== null) clearTimeout(fallbackTimer);
+            if (handler && bgTimerWorker) {
+                try { bgTimerWorker.removeEventListener('message', handler); } catch (_) {}
             }
+            resolve();
         };
-        bgTimerWorker.addEventListener('message', handler);
-        bgTimerWorker.postMessage({ id, ms });
+
+        // Reliable fallback for browsers that do not permit Blob Workers or if a worker exits
+        // after startup. Keep a watchdog even on the Worker path so no delay promise can hang.
+        fallbackTimer = setTimeout(finish, delay + (bgTimerWorker ? 300 : 0));
+        if (!bgTimerWorker) return;
+
+        const id = `mana-delay-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+        handler = event => { if (event.data === id) finish(); };
+        try {
+            bgTimerWorker.addEventListener('message', handler);
+            bgTimerWorker.postMessage({ id, ms: delay });
+        } catch (error) {
+            try { bgTimerWorker.removeEventListener('message', handler); } catch (_) {}
+            bgTimerWorker = null;
+            console.info('[ManaSearch] Background timer message failed; using timer fallback.', error?.message || error);
+            // Re-schedule at the intended delay if a message failed immediately.
+            if (fallbackTimer !== null) clearTimeout(fallbackTimer);
+            fallbackTimer = setTimeout(finish, delay);
+        }
     });
 }
 
@@ -18107,7 +18153,9 @@ function updateSourceCardFaceDisplay(card = currentSourceCard, animate = false) 
     if (isLegacyFlip) { sourceCardImage.src = url; return; }
     const reducedMotion = document.body?.classList.contains('reduce-motion') || window.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches;
     if (reducedMotion) { sourceCardImage.src = url; return; }
-    const wrap = document.getElementById('source-card-art-wrap');
+    // Reuse the wrapper reference captured above. Redeclaring `const wrap` in the same function
+    // makes this ES module fail to parse entirely, which prevents every UI handler and both data
+    // loaders from ever starting.
     if (!wrap) { sourceCardImage.src = url; return; }
     if (sourceCardFlipTimer) clearTimeout(sourceCardFlipTimer);
     if (sourceCardFlipFinalTimer) clearTimeout(sourceCardFlipFinalTimer);
