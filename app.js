@@ -1,6 +1,6 @@
-/* ManaSearch build 20261011-47 */
+/* ManaSearch build 20261011-51 */
 // ManaSearch deployment build marker. Bump this whenever app.js changes so cached-module issues are easy to diagnose.
-const MANASEARCH_APP_BUILD = '20261011-47';
+const MANASEARCH_APP_BUILD = '20261011-51';
 console.info(`[ManaSearch] app.js build ${MANASEARCH_APP_BUILD}`);
 
 // State Management
@@ -16131,29 +16131,392 @@ let manaFeatureHelpInstalled = false;
 function installFeatureHelpPopovers() {
     if (manaFeatureHelpInstalled || typeof document === 'undefined') return;
     manaFeatureHelpInstalled = true;
-    let popover = null, activeTrigger = null;
-    const close = () => { if (popover) popover.remove(); popover = null; activeTrigger = null; };
-    const show = trigger => {
-        const title = trigger.dataset.featureTip;
-        const preview = trigger.dataset.featurePreview;
-        if (!title) return;
-        close();
-        popover = document.createElement('div');
-        popover.className = 'mana-feature-help-popover';
-        popover.setAttribute('role', 'tooltip');
-        const description = document.createElement('strong'); description.textContent = title;
-        popover.appendChild(description);
-        if (preview) { const sample = document.createElement('span'); sample.className = 'mana-feature-help-preview'; sample.textContent = preview; popover.appendChild(sample); }
-        document.body.appendChild(popover); activeTrigger = trigger;
-        const rect = trigger.getBoundingClientRect();
-        const left = Math.max(8, Math.min(rect.left, window.innerWidth - 300));
-        popover.style.left = `${left}px`;
-        popover.style.top = `${Math.min(window.innerHeight - 110, rect.bottom + 8)}px`;
+
+    const examples = {
+        methods: {
+            title: 'Search Methods',
+            description: 'Methods change how ManaSearch discovers candidate cards. Start with Standard, then widen or redirect retrieval when you need different kinds of matches.',
+            howTo: 'Try Broad Search when wording differs; try Divergent Search when the results feel too similar to one another.'
+        },
+        order: {
+            title: 'Order Results',
+            description: 'Order chooses which score or property decides what appears first. It changes the order of results, not which cards the search retrieves.',
+            howTo: 'Use Overall Match as a starting point. Choose Mechanical to prioritize matching game actions, or Price / Mana Value to sort by a card property.'
+        },
+        constraints: {
+            title: 'Constraints',
+            description: 'Constraints are hard filters. A result must satisfy every active constraint, so use only the limits you really need.',
+            howTo: 'For example, choose Creature and green to show only green creatures. Use Clear All Constraints to remove the limits again.'
+        },
+        highlight: {
+            title: 'Highlight the important text',
+            description: 'Select the exact part of the source card that matters. ManaSearch uses the selected passage to focus retrieval and similarity scoring.',
+            howTo: 'On desktop, drag across the phrase. On a phone, press and select the words. Select the same highlighted passage again to remove it. Use Exact for literal wording or Variable when the effect may differ in wording or amount.'
+        },
+        generic: {
+            title: 'Quick help',
+            description: 'This control changes one part of how ManaSearch searches or displays cards.',
+            howTo: 'Try the control, then run a search to see how it changes the results.'
+        }
     };
-    document.addEventListener('pointerover', event => { const t = event.target?.closest?.('[data-feature-tip]'); if (t && !t.contains(event.relatedTarget)) show(t); });
-    document.addEventListener('pointerout', event => { const t = event.target?.closest?.('[data-feature-tip]'); if (t && !t.contains(event.relatedTarget)) close(); });
-    document.addEventListener('focusin', event => { const t = event.target?.closest?.('[data-feature-tip]'); if (t) show(t); });
-    document.addEventListener('focusout', event => { if (activeTrigger && event.target === activeTrigger) close(); });
+
+    const methodHelp = {
+        'Broad Search': ['Searches more widely when ordinary retrieval misses useful cards.', 'methods', 'Use this when a card describes an effect in unusual or different wording.'],
+        'Divergent Search': ['Encourages a more varied set of matches instead of many near-duplicates.', 'methods', 'Turn it on when the first results all look almost the same.'],
+        'Wording Search': ['Favors cards that use similar rules-text phrases and terminology.', 'methods', 'Useful when the wording itself matters, such as closely templated effects.'],
+        'Functional Search': ['Favors cards that do the same practical job even when their mechanics or wording differ.', 'methods', 'Useful for finding substitutes that fulfill the same role in a deck.'],
+        'Target Search': ['Looks for cards that interact with similar objects, zones, targets, or restrictions.', 'methods', 'Useful when you want another answer to the same kind of problem.'],
+        'Role Search': ['Looks for cards that fill the same strategic role, such as ramp, removal, or card advantage.', 'methods', 'Useful when replacing a card by its job rather than its exact text.'],
+        'Alternative Search': ['Prefers different mechanics that can still reach a similar outcome.', 'methods', 'Useful when you want another route to the same result, not a near-copy.'],
+        'Synergy Search': ['Looks for cards that support or interact with the source card rather than simply copying its effect.', 'methods', 'Useful for tribal cards, build-arounds, and combo pieces.'],
+        'Search Depth': ['Controls how much of the available retrieval pool is explored.', 'methods', '100% requests complete available retrieval; a smaller percentage can finish sooner but may miss candidates.'],
+        'Overall Match': ['Balances the available scoring signals into one all-purpose ranking.', 'order', 'Keep this selected for a general-purpose similarity search.'],
+        'Mechanical': ['Ranks by similarity between the underlying game actions and effects.', 'order', 'Choose this when matching mechanics matters more than wording.'],
+        'Functional': ['Ranks by how closely the cards perform the same practical job.', 'order', 'Choose this to find a functional replacement even when the mechanics differ.'],
+        'Semantic': ['Ranks cards by meaning-level similarity in their rules text.', 'order', 'Choose this when two effects are described differently but mean similar things.'],
+        'Strategic Role': ['Ranks cards by the strategic job they fill in a deck.', 'order', 'Choose this for alternatives such as another ramp piece or card-advantage engine.'],
+        'Mechanical + Functional': ['Balances matching game actions with matching the practical outcome.', 'order', 'Choose this if neither mechanical similarity nor functional role should dominate alone.'],
+        'Synergy': ['Ranks cards by how well they interact with the source card or its context.', 'order', 'Choose this for cards that support the source rather than copy it.'],
+        'Exactness': ['Favors close matches to the selected text and wording.', 'order', 'Choose this when the highlighted wording is especially important.'],
+        'Category': ['Ranks by the cards’ inferred type of effect or strategic category.', 'order', 'Useful for keeping matches within a broad effect family.'],
+        'Price (USD: low to high)': ['Sorts by available price data, cheapest first.', 'order', 'Use this after finding similar cards to look for budget options.'],
+        'Price (lowest first)': ['Sorts by available price data, cheapest first. Cards without a price are placed last.', 'order', 'Use this after finding similar cards to look for budget options.'],
+        'Mana Value (low to high)': ['Sorts cards from lowest mana value to highest.', 'order', 'Useful for finding cheaper-to-cast alternatives.'],
+        'Mana Value (lowest first)': ['Sorts cards from lowest mana value to highest.', 'order', 'Useful for finding cheaper-to-cast alternatives.'],
+        'Mana Value (high to low)': ['Sorts cards from highest mana value to lowest.', 'order', 'Useful when looking for large or expensive versions of an effect.'],
+        'Mana Value (highest first)': ['Sorts cards from highest mana value to lowest.', 'order', 'Useful when looking for large or expensive versions of an effect.'],
+        'Matrix Sweep': ['Spreads results across score dimensions to explore different kinds of strong matches.', 'order', 'Use it when you want to inspect different strengths, not just one narrow ranking.'],
+        'Diverse Spread': ['Reduces the tendency for the visible results to be dominated by near-duplicates.', 'order', 'Use it when you want to discover a broader variety of alternatives.'],
+        'Format Legality': ['Filters by a card’s legality in the selected format.', 'constraints', 'Choose Commander, Modern, or another format to exclude cards that are not legal there.'],
+        'Card Types': ['Keeps only cards that have the selected card type or types.', 'constraints', 'Choose Creature to exclude noncreatures. Every selected type must match.'],
+        'Supertypes': ['Filters for labels such as Legendary, Basic, Snow, or World.', 'constraints', 'Choose Legendary when you specifically want legendary cards.'],
+        'Subtypes': ['Filters by creature, land, artifact, or other subtypes such as Elf, Warrior, or Aura.', 'constraints', 'Enter a subtype such as Elf to narrow the pool to cards with that subtype.'],
+        'Keywords': ['Filters by keyword abilities such as Flying, Flash, or Trample.', 'constraints', 'Enter a keyword to require the matching ability.'],
+        'Rarity': ['Keeps cards with the selected rarity.', 'constraints', 'Choose Common for a common-only search.'],
+        'Color Identity': ['Filters by the colors allowed in a card’s deck-building identity.', 'constraints', 'For Commander deckbuilding, choose the colors allowed by your deck.'],
+        'Exact Colors': ['Filters by the card’s exact color set, including colorless when selected.', 'constraints', 'Use this when you want exactly mono-green, colorless, or another specific color combination.'],
+        'Mana Value (CMC)': ['Filters by mana value; comparison operators such as <=2 and >=4 are supported.', 'constraints', 'Enter <=2 to keep cards with mana value two or less.'],
+        'Power': ['Filters creatures by power; comparison operators can be used.', 'constraints', 'Enter >=4 to require power four or greater.'],
+        'Toughness': ['Filters creatures by toughness; comparison operators can be used.', 'constraints', 'Enter <=2 to require toughness two or less.'],
+        'Set Code': ['Limits results to a particular set code.', 'constraints', 'Enter a set code such as khm to restrict results to that printing set.'],
+        'Oracle Text': ['Select a meaningful phrase in the source card’s rules text to focus the search.', 'highlight', 'Example: select “draw a card” to look for similar card-draw effects.'],
+        'Type:': ['The card type line can also be highlighted, not just rules text.', 'highlight', 'Select “Creature — Elf” or a smaller phrase to focus on that type or subtype.']
+    };
+
+    let popover = null;
+    let activeTrigger = null;
+    let pinned = false;
+
+    const el = (tag, className, text) => {
+        const node = document.createElement(tag);
+        if (className) node.className = className;
+        if (text !== undefined) node.textContent = text;
+        return node;
+    };
+
+    const buildDemo = kind => {
+        const demo = el('div', `mana-help-demo mana-help-demo-${kind || 'generic'}`);
+        if (kind === 'highlight') {
+            demo.appendChild(el('div', 'mana-help-demo-kicker', 'SOURCE CARD · ORACLE TEXT'));
+            const rules = el('p', 'mana-help-demo-rules');
+            rules.appendChild(document.createTextNode('At the beginning of your upkeep, '));
+            rules.appendChild(el('mark', 'mana-help-demo-mark', 'draw a card'));
+            rules.appendChild(document.createTextNode(' and lose 1 life.'));
+            demo.appendChild(rules);
+            const chipRow = el('div', 'mana-help-demo-chip-row');
+            chipRow.appendChild(el('span', 'mana-help-demo-chip', 'Variable highlight'));
+            chipRow.appendChild(el('span', 'mana-help-demo-caption', 'draw a card'));
+            demo.appendChild(chipRow);
+            demo.appendChild(el('div', 'mana-help-demo-step', '1. Select words  →  2. Highlight appears  →  3. Search similar effects'));
+        } else if (kind === 'methods') {
+            demo.appendChild(el('div', 'mana-help-demo-kicker', 'RETRIEVAL EXAMPLE'));
+            const flow = el('div', 'mana-help-demo-flow');
+            flow.appendChild(el('span', 'mana-help-demo-box', 'Source card'));
+            flow.appendChild(el('span', 'mana-help-demo-arrow', '→'));
+            flow.appendChild(el('span', 'mana-help-demo-box mana-help-demo-box-accent', 'Search methods'));
+            flow.appendChild(el('span', 'mana-help-demo-arrow', '→'));
+            flow.appendChild(el('span', 'mana-help-demo-box', 'Candidate cards'));
+            demo.appendChild(flow);
+            demo.appendChild(el('div', 'mana-help-demo-step', 'Methods decide where and how ManaSearch looks for candidates.'));
+        } else if (kind === 'order') {
+            demo.appendChild(el('div', 'mana-help-demo-kicker', 'SAME POOL · DIFFERENT ORDER'));
+            const rows = el('div', 'mana-help-demo-rank-list');
+            [['Mechanical', '92%'], ['Overall Match', '86%'], ['Semantic', '79%']].forEach(([name, score], index) => {
+                const row = el('div', `mana-help-demo-rank-row${index === 0 ? ' is-selected' : ''}`);
+                row.appendChild(el('span', '', name));
+                row.appendChild(el('strong', '', score));
+                rows.appendChild(row);
+            });
+            demo.appendChild(rows);
+            demo.appendChild(el('div', 'mana-help-demo-step', 'Changing Order reorders the candidates; it does not retrieve a new pool.'));
+        } else if (kind === 'flip') {
+            demo.appendChild(el('div', 'mana-help-demo-kicker', 'DOUBLE-FACED CARD'));
+            const flow = el('div', 'mana-help-demo-flow');
+            flow.appendChild(el('span', 'mana-help-demo-box', 'Front face'));
+            flow.appendChild(el('span', 'mana-help-demo-arrow', '⇄'));
+            flow.appendChild(el('span', 'mana-help-demo-box mana-help-demo-box-accent', 'Back face'));
+            demo.appendChild(flow);
+            demo.appendChild(el('div', 'mana-help-demo-step', 'Flip changes which side of the same card is displayed.'));
+        } else if (kind === 'favorite') {
+            demo.appendChild(el('div', 'mana-help-demo-kicker', 'SAVED LOCALLY'));
+            demo.appendChild(el('div', 'mana-help-demo-filter-result', '☆  Favorite card → reopen it quickly from Favorites'));
+        } else if (kind === 'constraints') {
+            demo.appendChild(el('div', 'mana-help-demo-kicker', 'EXAMPLE HARD FILTERS'));
+            const chips = el('div', 'mana-help-demo-chip-row');
+            chips.appendChild(el('span', 'mana-help-demo-chip', 'Creature'));
+            chips.appendChild(el('span', 'mana-help-demo-chip', 'Green identity'));
+            chips.appendChild(el('span', 'mana-help-demo-chip', 'Commander legal'));
+            demo.appendChild(chips);
+            demo.appendChild(el('div', 'mana-help-demo-filter-result', '✓ Only candidates satisfying the active filters remain'));
+            demo.appendChild(el('div', 'mana-help-demo-step', 'Add a constraint to narrow results. Use Clear All Constraints to start over.'));
+        } else {
+            demo.appendChild(el('div', 'mana-help-demo-kicker', 'QUICK EXAMPLE'));
+            demo.appendChild(el('div', 'mana-help-demo-step', 'Choose a setting, see the preview, and adjust it to fit your search.'));
+        }
+        return demo;
+    };
+
+    const close = () => {
+        if (popover) popover.remove();
+        popover = null;
+        activeTrigger = null;
+        pinned = false;
+    };
+
+    const show = (trigger, pin = false) => {
+        const base = trigger?.dataset?.featureTip ? trigger : null;
+        if (!base) return;
+        if (popover && activeTrigger === trigger) {
+            if (pin) {
+                pinned = true;
+                popover.dataset.pinned = 'true';
+                popover.setAttribute('role', 'dialog');
+            }
+            return;
+        }
+        close();
+        const exampleKey = trigger.dataset.featureExample || 'generic';
+        const defaults = examples[exampleKey] || examples.generic;
+        const fallbackLabel = String(trigger.getAttribute('aria-label') || trigger.textContent || '').replace(/\s+/g, ' ').trim();
+        const title = trigger.dataset.featureTitle || fallbackLabel || defaults.title || 'Quick help';
+        const description = trigger.dataset.featureTip || defaults.description;
+        const howTo = trigger.dataset.featureHowto || defaults.howTo;
+
+        popover = el('section', 'mana-feature-help-popover');
+        popover.setAttribute('role', pin ? 'dialog' : 'tooltip');
+        popover.setAttribute('aria-label', title);
+        popover.dataset.pinned = pin ? 'true' : 'false';
+        const head = el('div', 'mana-feature-help-header');
+        head.appendChild(el('strong', 'mana-feature-help-title', title));
+        const closeBtn = el('button', 'mana-feature-help-close', '×');
+        closeBtn.type = 'button';
+        closeBtn.setAttribute('aria-label', 'Close help');
+        closeBtn.addEventListener('click', event => { event.preventDefault(); event.stopPropagation(); close(); });
+        head.appendChild(closeBtn);
+        popover.appendChild(head);
+        popover.appendChild(el('p', 'mana-feature-help-description', description));
+        if (trigger.dataset.featurePreview) popover.appendChild(el('div', 'mana-feature-help-preview', trigger.dataset.featurePreview));
+        popover.appendChild(buildDemo(exampleKey));
+        if (howTo) {
+            const how = el('p', 'mana-feature-help-howto');
+            how.appendChild(el('strong', '', 'How to use it: '));
+            how.appendChild(document.createTextNode(howTo));
+            popover.appendChild(how);
+        }
+        document.body.appendChild(popover);
+        activeTrigger = trigger;
+        pinned = pin;
+        positionPopover(trigger);
+    };
+
+    function positionPopover(trigger) {
+        if (!popover || !trigger) return;
+        const rect = trigger.getBoundingClientRect();
+        const margin = 8;
+        const width = Math.min(340, window.innerWidth - margin * 2);
+        popover.style.width = `${width}px`;
+        popover.style.left = `${Math.max(margin, Math.min(rect.left, window.innerWidth - width - margin))}px`;
+        popover.style.top = '8px';
+        // Measure after insertion to keep the panel inside the visible viewport, including mobile keyboards.
+        const height = popover.offsetHeight;
+        let top = rect.bottom + 8;
+        if (top + height > window.innerHeight - margin) top = rect.top - height - 8;
+        if (top < margin) top = Math.max(margin, Math.min(window.innerHeight - height - margin, rect.bottom + 8));
+        popover.style.top = `${Math.max(margin, top)}px`;
+    }
+
+    const setHelp = (target, title, description, example, howTo, interactive = false) => {
+        if (!target) return;
+        target.dataset.featureTitle = title;
+        target.dataset.featureTip = description;
+        target.dataset.featureExample = example;
+        if (howTo) target.dataset.featureHowto = howTo;
+        target.classList.add('mana-help-hover-target');
+        if (interactive) {
+            target.classList.add('mana-feature-help-interactive');
+            target.setAttribute('tabindex', '0');
+            target.setAttribute('role', 'button');
+            target.setAttribute('aria-label', `${title}. Open visual help`);
+        }
+    };
+
+    // Main workspace controls: hover on desktop, open their related modal normally when tapped.
+    setHelp(document.getElementById('toggle-search-methods-btn'), 'Search Methods', examples.methods.description, 'methods', examples.methods.howTo);
+    setHelp(document.getElementById('toggle-order-btn'), 'Order Results', examples.order.description, 'order', examples.order.howTo);
+    setHelp(document.getElementById('toggle-card-constraints-btn'), 'Constraints', examples.constraints.description, 'constraints', examples.constraints.howTo);
+    setHelp(document.getElementById('source-card-add-btn'), 'Choose a source card', 'Choose the card whose mechanics or text you want to search from.', 'highlight', 'After choosing a card, select an important phrase in its type line or rules text.');
+    setHelp(document.getElementById('find-similar-btn'), 'Find Similar Cards', 'Starts the search using the selected source card, highlights, retrieval settings, and constraints.', 'highlight', 'Choose a source card, optionally highlight an important phrase, then press Find Similar Cards.');
+    setHelp(document.getElementById('autofill-source-constraints-btn'), 'Fill Empty From Source', 'Copies reliable properties from the selected source card into empty constraint fields only.', 'constraints', 'Review the filled fields; they become hard filters.');
+
+    // Keep the previously available help tips but provide the nearest matching visual example.
+    const tipExamples = {
+        'preferences-btn': 'generic', 'source-card-flip-btn': 'flip', 'favorite-btn': 'favorite',
+        'export-btn': 'order', 'search-deeper-btn': 'methods', 'clear-selected-btn': 'generic',
+        'related-search-btn': 'highlight'
+    };
+    Object.entries(tipExamples).forEach(([id, example]) => {
+        const target = document.getElementById(id);
+        if (target && !target.dataset.featureExample) target.dataset.featureExample = example;
+    });
+
+    // Each major modal title and each setting name gets a compact, visual explanation.
+    setHelp(document.getElementById('search-methods-title'), 'Search Methods', examples.methods.description, 'methods', examples.methods.howTo, true);
+    setHelp(document.getElementById('order-title'), 'Order Results', examples.order.description, 'order', examples.order.howTo, true);
+    setHelp(document.getElementById('card-constraints-title'), 'Constraints', examples.constraints.description, 'constraints', examples.constraints.howTo, true);
+
+    document.querySelectorAll('#search-methods-modal .method-text strong, #order-modal .method-text strong').forEach(nameNode => {
+        const name = nameNode.textContent.trim();
+        const config = methodHelp[name];
+        if (!config) return;
+        // Hover/focus on the name explains it, while tapping the name itself still selects its option.
+        setHelp(nameNode, name, config[0], config[1], config[2], false);
+        nameNode.setAttribute('tabindex', '0');
+        nameNode.setAttribute('aria-label', `${name}. Hover for explanation; use the question mark for visual help on touch screens.`);
+        const marker = el('span', 'mana-inline-help-marker mana-feature-help-interactive', '?');
+        marker.setAttribute('role', 'button');
+        marker.setAttribute('tabindex', '0');
+        marker.setAttribute('aria-label', `Show visual help for ${name}`);
+        marker.dataset.featureTitle = name;
+        marker.dataset.featureTip = config[0];
+        marker.dataset.featureExample = config[1];
+        marker.dataset.featureHowto = config[2];
+        nameNode.parentElement?.parentElement?.appendChild(marker);
+    });
+    document.querySelectorAll('#order-modal .order-panel-section-heading h4').forEach(node => {
+        setHelp(node, node.textContent.trim(), node.textContent.includes('Features')
+            ? 'Optional ordering features change how the ranked list is presented. They do not replace the selected primary ranking.'
+            : 'Choose one primary score or property to decide which candidates appear first.', 'order', 'Pick a primary ranking first, then optionally enable Matrix Sweep or Diverse Spread. ', true);
+    });
+
+    document.querySelectorAll('#card-constraints-modal .filters-grid > .filter-group > label').forEach(label => {
+        const raw = label.childNodes.length ? Array.from(label.childNodes).filter(n => n.nodeType === Node.TEXT_NODE).map(n => n.textContent).join(' ').trim() : label.textContent.trim();
+        const name = raw || label.textContent.trim().split(/\s+/).slice(0, 3).join(' ');
+        const config = methodHelp[name] || [
+            `Filters candidates by ${name.toLowerCase()}. Active constraints are hard requirements, not ranking hints.`,
+            'constraints',
+            'Only set this field when you are willing to exclude cards that do not match it.'
+        ];
+        setHelp(label, name, config[0], config[1], config[2]);
+        // A separate tap target works on phones without making the form label itself awkward to use.
+        const marker = el('button', 'mana-feature-help-marker', '?');
+        marker.type = 'button';
+        marker.setAttribute('aria-label', `How to use ${name}`);
+        marker.dataset.featureTitle = name;
+        marker.dataset.featureTip = config[0];
+        marker.dataset.featureExample = config[1];
+        marker.dataset.featureHowto = config[2];
+        marker.classList.add('mana-feature-help-interactive');
+        label.insertAdjacentElement('afterend', marker);
+    });
+
+    const addInlineHelpMarker = (target, title, description, example, howTo) => {
+        if (!target) return;
+        const marker = el('span', 'mana-inline-help-marker mana-feature-help-interactive', '?');
+        marker.setAttribute('role', 'button');
+        marker.setAttribute('tabindex', '0');
+        marker.setAttribute('aria-label', `Show visual help for ${title}`);
+        marker.dataset.featureTitle = title;
+        marker.dataset.featureTip = description;
+        marker.dataset.featureExample = example;
+        marker.dataset.featureHowto = howTo || '';
+        target.insertAdjacentElement('afterend', marker);
+    };
+
+    const oracleHeading = document.querySelector('#source-card-loaded .oracle-container > strong');
+    setHelp(oracleHeading, 'Highlight rules text', examples.highlight.description, 'highlight', examples.highlight.howTo, true);
+    addInlineHelpMarker(oracleHeading, 'Highlight rules text', examples.highlight.description, 'highlight', examples.highlight.howTo);
+    const typeLabel = document.querySelector('#source-card-type')?.parentElement?.querySelector('strong');
+    const typeDescription = 'You can highlight a type-line phrase as well as rules text to focus on a card type or subtype.';
+    const typeHowTo = 'Select a phrase such as “Creature — Elf” in the source card type line.';
+    setHelp(typeLabel, 'Highlight the type line', typeDescription, 'highlight', typeHowTo, true);
+    addInlineHelpMarker(typeLabel, 'Highlight the type line', typeDescription, 'highlight', typeHowTo);
+    const searchDepthLabel = document.querySelector('#search-methods-modal .search-depth-label strong');
+    setHelp(searchDepthLabel, 'Search Depth', methodHelp['Search Depth'][0], 'methods', methodHelp['Search Depth'][2], true);
+    const oracleHelp = document.querySelector('#source-card-loaded .oracle-help');
+    if (oracleHelp) setHelp(oracleHelp, 'How highlighting works', examples.highlight.description, 'highlight', examples.highlight.howTo, true);
+
+    // A once-per-browser first-use hint teaches people to look for the visual help and demonstrates highlighting.
+    const firstHint = document.getElementById('first-use-help-hint');
+    const dismissHint = document.getElementById('dismiss-first-use-help-hint');
+    let hintDismissed = false;
+    try { hintDismissed = localStorage.getItem('manaSearchFirstUseHelpV51') === 'dismissed'; } catch (_) {}
+    if (firstHint && !hintDismissed) firstHint.classList.remove('hidden');
+    dismissHint?.addEventListener('click', () => {
+        firstHint?.classList.add('hidden');
+        try { localStorage.setItem('manaSearchFirstUseHelpV51', 'dismissed'); } catch (_) {}
+    });
+
+    document.addEventListener('pointerover', event => {
+        if (event.pointerType === 'touch') return;
+        const target = event.target?.closest?.('[data-feature-tip]');
+        if (target && !target.contains(event.relatedTarget) && !pinned) show(target, false);
+    });
+    document.addEventListener('pointerout', event => {
+        if (!popover || pinned) return;
+        const related = event.relatedTarget;
+        // Keep the hover panel open while the pointer enters it, then close when it leaves both panel and trigger.
+        if (popover.contains(event.target)) {
+            if (related && (popover.contains(related) || activeTrigger?.contains(related))) return;
+            close();
+            return;
+        }
+        const target = event.target?.closest?.('[data-feature-tip]');
+        if (!target || activeTrigger !== target) return;
+        if (related && (target.contains(related) || popover.contains(related))) return;
+        close();
+    });
+    document.addEventListener('focusin', event => {
+        const target = event.target?.closest?.('[data-feature-tip]');
+        if (target && !pinned) show(target, false);
+    });
+    document.addEventListener('focusout', event => {
+        if (!activeTrigger || pinned || event.target !== activeTrigger) return;
+        const next = event.relatedTarget;
+        if (next && (activeTrigger.contains(next) || popover?.contains(next))) return;
+        close();
+    });
+    document.addEventListener('click', event => {
+        const target = event.target?.closest?.('.mana-feature-help-interactive');
+        if (target) {
+            event.preventDefault();
+            event.stopPropagation();
+            if (pinned && activeTrigger === target) close();
+            else show(target, true);
+            return;
+        }
+        if (popover && !popover.contains(event.target)) close();
+    }, true);
+    document.addEventListener('keydown', event => {
+        const target = event.target?.closest?.('.mana-feature-help-interactive');
+        if (!target || !['Enter', ' '].includes(event.key)) return;
+        event.preventDefault();
+        event.stopPropagation();
+        if (pinned && activeTrigger === target) close();
+        else show(target, true);
+    });
+    document.addEventListener('keydown', event => { if (event.key === 'Escape' && popover) close(); });
+    document.addEventListener('scroll', () => { if (popover && !pinned) close(); }, true);
+    window.addEventListener('resize', () => { if (popover && activeTrigger) positionPopover(activeTrigger); });
 }
 
 function getCardImageUrl(card) {
@@ -16482,7 +16845,9 @@ async function addAdditionalSourceCard(card) {
             const reason = getPreferenceHiddenReason(fullCard);
             throw new Error(`${fullCard.name} is hidden by your current Preferences (${reason}). Enable the relevant option in Preferences to use it as a source card.`);
         }
-        sourceCardCache.set(fullCard.name.toLowerCase(),fullCard); addSourceCardToSet(fullCard); closeSourceCardPicker();
+        sourceCardCache.set(fullCard.name.toLowerCase(), fullCard);
+        if (addSourceCardToSet(fullCard)) addToHistory(fullCard.name, fullCard);
+        closeSourceCardPicker();
     } catch(error) { alert(error.message||'Unable to add source card.'); }
 }
 function updateSourceCardMultiSearchState() {
@@ -16648,6 +17013,13 @@ function closeSelectedRelatedCardsModal() {
 }
 
 // --- SOURCE CARD PICKER ---
+const SOURCE_CARD_STARTER_SUGGESTIONS = Object.freeze([
+    'Sol Ring', 'Counterspell', 'Lightning Bolt', 'Cultivate', 'Phyrexian Arena',
+    'Swords to Plowshares', 'Young Pyromancer', 'Rhystic Study', 'Wrath of God',
+    'Arcane Signet', 'Elvish Mystic', 'Ponder'
+]);
+const SOURCE_CARD_SUGGESTION_THRESHOLD = 4;
+
 function closeSourceCardPicker() {
     if (!sourceCardPickerModal) return;
     sourceCardPickerModal.classList.add('hidden');
@@ -16657,24 +17029,141 @@ function closeSourceCardPicker() {
     }
 }
 
+/**
+ * Recent cards is backed by explicit source history, not the entire in-memory cache.
+ * Retrieval and typed-name search can cache many cards; those must not appear as recent until
+ * a user has actually selected one and it successfully loads as a source.
+ */
 function getSourceCardPickerMatches() {
-    const previews = getHistoryCardPreviews();
-    const cached = Array.from(sourceCardCache.values()).filter(card => card && card.name);
-    const dismissed = new Set(getStoredArray(HISTORY_DISMISSED_KEY).map(name => String(name || '').toLowerCase()));
-    const merged = [];
-    const seen = new Set();
-    [...previews, ...cached].forEach(card => {
-        const key = String(card.name || '').toLowerCase();
-        if (!key || seen.has(key) || dismissed.has(key)) return;
-        seen.add(key);
-        merged.push(card);
+    const historyNames = getStoredArray(HISTORY_KEY);
+    const previews = new Map(getHistoryCardPreviews().map(card => [String(card?.name || '').trim().toLowerCase(), card]));
+    const cached = new Map();
+    sourceCardCache.forEach(card => {
+        if (card?.name) cached.set(String(card.name).trim().toLowerCase(), card);
     });
-    return filterSourceCardsByCurrentPreferences(merged);
+    const dismissed = new Set(getStoredArray(HISTORY_DISMISSED_KEY).map(name => String(name || '').trim().toLowerCase()));
+    const corpusByName = staticCardCorpusMemory?.byName;
+    const seen = new Set();
+    const merged = [];
+
+    historyNames.forEach(rawName => {
+        const name = String(rawName || '').trim();
+        const key = name.toLowerCase();
+        if (!name || seen.has(key) || dismissed.has(key)) return;
+        seen.add(key);
+        const local = corpusByName?.get(normalizeCardNameForIdentity(name)) || null;
+        const preview = previews.get(key) || null;
+        const cachedCard = cached.get(key) || null;
+        let card = mergeCardRecords(preview, cachedCard);
+        card = mergeCardRecords(card, local);
+        merged.push(card ? mergeCardRecords({ name }, card) : { name });
+    });
+    return filterSourceCardsByCurrentPreferences(merged, staticCardCorpusMemory);
 }
 
-function renderSourceCardPickerCards(cards, emptyMessage = 'No cards found.') {
+function getSourceCardSuggestionMatches(recentCards = []) {
+    const recentNames = new Set((Array.isArray(recentCards) ? recentCards : [])
+        .map(card => String(card?.name || '').trim().toLowerCase()).filter(Boolean));
+    const dismissed = new Set(getStoredArray(HISTORY_DISMISSED_KEY).map(name => String(name || '').trim().toLowerCase()));
+    const cacheByName = new Map();
+    sourceCardCache.forEach(card => { if (card?.name) cacheByName.set(String(card.name).trim().toLowerCase(), card); });
+    const corpusByName = staticCardCorpusMemory?.byName;
+    const suggestions = [];
+    const seen = new Set();
+
+    for (const name of SOURCE_CARD_STARTER_SUGGESTIONS) {
+        const key = name.toLowerCase();
+        if (recentNames.has(key) || dismissed.has(key) || seen.has(key)) continue;
+        seen.add(key);
+        const local = corpusByName?.get(normalizeCardNameForIdentity(name)) || null;
+        const cached = cacheByName.get(key) || null;
+        // Keep curated suggestions usable even while recovering from a missing local catalog.
+        // Selection still goes through the normal loader, which fetches the full card if needed.
+        const card = local || cached || {
+            name,
+            image_uris: { normal: `https://api.scryfall.com/cards/named?exact=${encodeURIComponent(name)}&format=image&version=normal` }
+        };
+        if (isAllowedByCandidatePreferences(enrichCardForPreferenceEvaluation(card, staticCardCorpusMemory))) {
+            suggestions.push(card);
+        }
+    }
+    return suggestions;
+}
+
+function createSourceCardPickerTile(card, { removable = false } = {}) {
+    const tile = document.createElement('div');
+    tile.className = `source-picker-card-tile${removable ? ' is-recent' : ''}`;
+
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'source-picker-card';
+    button.title = `Use ${card.name} as a source card`;
+    const imageUrl = getCardImageUrl(card);
+    if (imageUrl) {
+        const img = document.createElement('img');
+        img.src = imageUrl;
+        img.alt = card.name;
+        img.loading = 'lazy';
+        img.addEventListener('error', () => { img.style.display = 'none'; }, { once: true });
+        button.appendChild(img);
+    } else {
+        const placeholder = document.createElement('div');
+        placeholder.className = 'source-card-picker-placeholder';
+        placeholder.textContent = 'MTG';
+        button.appendChild(placeholder);
+    }
+
+    const body = document.createElement('span');
+    body.className = 'source-picker-card-body';
+    const name = document.createElement('strong');
+    name.textContent = card.name;
+    const type = document.createElement('span');
+    type.textContent = [card.mana_cost, card.type_line].filter(Boolean).join(' • ');
+    body.append(name, type);
+    button.appendChild(body);
+    button.addEventListener('click', () => {
+        // Merely displaying a suggestion or caching a search match never records history.
+        // A recent entry is saved by loadSourceCard/addAdditionalSourceCard only after success.
+        cardSearchInput.value = card.name;
+        if (currentSourceCard) void addAdditionalSourceCard(card);
+        else { closeSourceCardPicker(); void loadSourceCard(card.name, card); }
+    });
+    tile.appendChild(button);
+
+    if (removable) {
+        const remove = document.createElement('button');
+        remove.type = 'button';
+        remove.className = 'source-picker-card-remove';
+        remove.textContent = '\u00D7';
+        remove.title = `Remove ${card.name} from Recent Searches`;
+        remove.setAttribute('aria-label', `Remove ${card.name} from Recent Searches`);
+        remove.addEventListener('click', event => {
+            event.preventDefault();
+            event.stopPropagation();
+            removeRecentSearchCard(card.name);
+        });
+        tile.appendChild(remove);
+    }
+    return tile;
+}
+
+function appendSourceCardPickerHeading(fragment, title, description = '') {
+    const heading = document.createElement('div');
+    heading.className = 'source-picker-section-heading';
+    const strong = document.createElement('strong');
+    strong.textContent = title;
+    heading.appendChild(strong);
+    if (description) {
+        const hint = document.createElement('span');
+        hint.textContent = description;
+        heading.appendChild(hint);
+    }
+    fragment.appendChild(heading);
+}
+
+function renderSourceCardPickerCards(cards, emptyMessage = 'No cards found.', { removable = false } = {}) {
     if (!sourceCardPickerResults) return;
-    sourceCardPickerResults.innerHTML = '';
+    sourceCardPickerResults.replaceChildren();
     if (!cards.length) {
         const empty = document.createElement('div');
         empty.className = 'source-card-picker-empty';
@@ -16682,41 +17171,39 @@ function renderSourceCardPickerCards(cards, emptyMessage = 'No cards found.') {
         sourceCardPickerResults.appendChild(empty);
         return;
     }
-
     const fragment = document.createDocumentFragment();
-    cards.slice(0, 12).forEach(card => {
-        const button = document.createElement('button');
-        button.type = 'button';
-        button.className = 'source-picker-card';
-        const imageUrl = getCardImageUrl(card);
-        if (imageUrl) {
-            const img = document.createElement('img');
-            img.src = imageUrl;
-            img.alt = card.name;
-            img.loading = 'lazy';
-            img.addEventListener('error', () => { img.style.display = 'none'; }, { once: true });
-            button.appendChild(img);
-        } else {
-            const placeholder = document.createElement('div');
-            placeholder.className = 'source-picker-card-placeholder';
-            placeholder.textContent = 'MTG';
-            button.appendChild(placeholder);
-        }
-        const body = document.createElement('span');
-        body.className = 'source-picker-card-body';
-        const name = document.createElement('strong');
-        name.textContent = card.name;
-        const type = document.createElement('span');
-        type.textContent = [card.mana_cost, card.type_line].filter(Boolean).join(' • ');
-        body.append(name, type);
-        button.appendChild(body);
-        button.addEventListener('click', () => {
-            cardSearchInput.value = card.name;
-            if (currentSourceCard) addAdditionalSourceCard(card);
-            else { closeSourceCardPicker(); loadSourceCard(card.name, card); }
-        });
-        fragment.appendChild(button);
-    });
+    cards.slice(0, 12).forEach(card => fragment.appendChild(createSourceCardPickerTile(card, { removable })));
+    sourceCardPickerResults.appendChild(fragment);
+}
+
+function renderSourceCardPickerHome(recentCards, { emptyMessage = 'No recent cards yet.', allowSuggestions = true } = {}) {
+    if (!sourceCardPickerResults) return;
+    sourceCardPickerResults.replaceChildren();
+    const recent = Array.isArray(recentCards) ? recentCards.slice(0, 10) : [];
+    const suggestions = allowSuggestions && recent.length < SOURCE_CARD_SUGGESTION_THRESHOLD
+        ? getSourceCardSuggestionMatches(recent).slice(0, recent.length === 0 ? 6 : 4)
+        : [];
+    const fragment = document.createDocumentFragment();
+
+    if (recent.length) {
+        appendSourceCardPickerHeading(fragment, 'Recent cards', 'Cards you have selected as sources');
+        recent.forEach(card => fragment.appendChild(createSourceCardPickerTile(card, { removable: true })));
+    } else {
+        const empty = document.createElement('div');
+        empty.className = 'source-card-picker-empty source-card-picker-empty-intro';
+        empty.textContent = emptyMessage;
+        fragment.appendChild(empty);
+    }
+
+    if (suggestions.length) {
+        appendSourceCardPickerHeading(fragment, 'Suggestions to try', 'Choose a card to explore similar cards');
+        suggestions.forEach(card => fragment.appendChild(createSourceCardPickerTile(card)));
+    } else if (!recent.length) {
+        const empty = document.createElement('div');
+        empty.className = 'source-card-picker-empty';
+        empty.textContent = 'Start typing above to search for a source card.';
+        fragment.appendChild(empty);
+    }
     sourceCardPickerResults.appendChild(fragment);
 }
 
@@ -16728,32 +17215,30 @@ function openSourceCardPicker() {
         sourceCardPickerInput.focus();
     }
     const hasLocalCorpus = Boolean(staticCardCorpusMemory?.cards?.length);
-    const history = getSourceCardPickerMatches();
     if (hasLocalCorpus) {
-        if (sourceCardPickerStatus) sourceCardPickerStatus.textContent = history.length ? 'Recent cards' : 'Start typing to search the local card database.';
-        renderSourceCardPickerCards(history, 'No recent cards match the current preferences. Start typing to search.');
+        const history = getSourceCardPickerMatches();
+        if (sourceCardPickerStatus) sourceCardPickerStatus.textContent = history.length
+            ? (history.length < SOURCE_CARD_SUGGESTION_THRESHOLD ? 'Recent cards and suggestions' : 'Recent cards')
+            : 'Try a suggested card or search by name.';
+        renderSourceCardPickerHome(history, { emptyMessage: 'No recent cards yet. Try a suggested card or search by name.' });
         return;
     }
 
-    // Do not briefly show incomplete history previews before they have been checked against the
-    // digital/token/funny-card preferences. The corpus is normally already loaded, but when a
-    // user opens this picker early we wait and then refresh only if it is still showing recents.
     if (sourceCardPickerStatus) sourceCardPickerStatus.textContent = 'Checking recent cards against Preferences…';
-    renderSourceCardPickerCards([], 'Loading card data to apply source-card preferences…');
+    renderSourceCardPickerCards([], 'Loading card data to prepare recent cards and suggestions…');
     void loadStaticCardCorpus().then(() => {
         if (!sourceCardPickerModal || sourceCardPickerModal.classList.contains('hidden') || sourceCardPickerInput?.value.trim()) return;
         const canClassifyHistory = Boolean(staticCardCorpusMemory?.cards?.length);
         const currentHistory = canClassifyHistory ? getSourceCardPickerMatches() : [];
         if (sourceCardPickerStatus) sourceCardPickerStatus.textContent = currentHistory.length
-            ? 'Recent cards'
-            : canClassifyHistory ? 'Start typing to search the card database.' : 'Local card catalog unavailable';
-        renderSourceCardPickerCards(currentHistory, canClassifyHistory
-            ? 'No recent cards match the current preferences. Start typing to search.'
-            : 'Recent cards could not be checked because the local card catalog is unavailable. Type to search instead.');
+            ? (currentHistory.length < SOURCE_CARD_SUGGESTION_THRESHOLD ? 'Recent cards and suggestions' : 'Recent cards')
+            : canClassifyHistory ? 'Try a suggested card or search by name.' : 'Local card catalog unavailable';
+        if (canClassifyHistory) renderSourceCardPickerHome(currentHistory, { emptyMessage: 'No recent cards yet. Try a suggested card or search by name.' });
+        else renderSourceCardPickerCards([], 'Recent cards could not be checked because the local card catalog is unavailable. Type to search instead.');
     }).catch(() => {
         if (!sourceCardPickerModal || sourceCardPickerModal.classList.contains('hidden') || sourceCardPickerInput?.value.trim()) return;
         if (sourceCardPickerStatus) sourceCardPickerStatus.textContent = 'Local card catalog unavailable';
-        renderSourceCardPickerCards([], 'Recent cards could not be checked against Preferences. Type to search using the fallback card search.');
+        renderSourceCardPickerCards([], 'Recent cards could not be checked because the local card catalog is unavailable. Type to search using the fallback card search.');
     });
 }
 
@@ -16771,11 +17256,10 @@ async function searchSourceCardPicker(query) {
         const canClassifyHistory = Boolean(corpus?.cards?.length);
         const history = canClassifyHistory ? getSourceCardPickerMatches() : [];
         if (sourceCardPickerStatus) sourceCardPickerStatus.textContent = history.length
-            ? 'Recent cards'
-            : canClassifyHistory ? 'Start typing to search the local card database.' : 'Local card catalog unavailable';
-        renderSourceCardPickerCards(history, canClassifyHistory
-            ? 'No recent cards match the current preferences. Start typing to search.'
-            : 'Recent cards could not be checked against Preferences because the local card catalog is unavailable. Type to search using the fallback card search.');
+            ? (history.length < SOURCE_CARD_SUGGESTION_THRESHOLD ? 'Recent cards and suggestions' : 'Recent cards')
+            : canClassifyHistory ? 'Try a suggested card or search by name.' : 'Local card catalog unavailable';
+        if (canClassifyHistory) renderSourceCardPickerHome(history, { emptyMessage: 'No recent cards yet. Try a suggested card or search by name.' });
+        else renderSourceCardPickerCards([], 'Recent cards could not be checked against Preferences because the local card catalog is unavailable. Type to search using the fallback card search.');
         return;
     }
     if (q.length < 2) {
@@ -17081,7 +17565,9 @@ async function loadSourceCard(query, providedCard = null) {
         updateSourceCardMultiSearchState();
         activeTags = generateTags(cardData);
         renderTags();
-        addToHistory(cardData.name, cardData);
+        // Benchmarks load source cards programmatically; keep those fixtures out of a user's
+        // Recent Searches. Ordinary user-driven successful selections are recorded here.
+        if (!benchmarkColdMode) addToHistory(cardData.name, cardData);
         checkFavoriteStatus(cardData.name);
         const removeBtn = document.getElementById('discard-source-card-btn');
         if (removeBtn) removeBtn.disabled = false;
