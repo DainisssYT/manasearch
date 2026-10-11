@@ -12661,7 +12661,7 @@ let semanticCosineBaselineReady = false;
 const STATIC_CARD_CORPUS_FILENAME = 'cards.bin';
 const STATIC_CARD_CORPUS_VERSION = 1;
 const STATIC_CARD_CORPUS_MAGIC = 'MSCARD1G';
-const STATIC_CARD_CORPUS_CACHE_VERSION = '20261011-48';
+const STATIC_CARD_CORPUS_CACHE_VERSION = '20261011-49';
 const STATIC_DATA_META_FILENAME = 'static-data-meta.json';
 let staticDataMetaPromise = null;
 let staticDataBuildId = null;
@@ -13709,7 +13709,7 @@ const FULL_SEMANTIC_INDEX_SEARCH_LIMIT = 96;
 const STATIC_SEMANTIC_INDEX_FILENAME = 'semantic-index.bin';
 const STATIC_SEMANTIC_INDEX_VERSION = 1;
 const STATIC_SEMANTIC_INDEX_MAGIC = 'MSIDX1';
-const STATIC_SEMANTIC_INDEX_CACHE_VERSION = '20261008-8';
+const STATIC_SEMANTIC_INDEX_CACHE_VERSION = '20261011-49';
 let staticSemanticIndexPromise = null;
 let staticSemanticIndexAttempted = false;
 let staticSemanticIndexLoadError = null;
@@ -15988,7 +15988,6 @@ function initApp() {
     // disabled until both cards.bin and semantic-index.bin are fully loaded and validated. Each
     // asset receives up to three automatic attempts before the status area offers a manual retry.
     getNLPModel().catch(() => {});
-    loadStaticSearchResources().catch(() => {});
 }
 
 /**
@@ -16029,11 +16028,42 @@ function initColorPips() {
     });
 }
 
-// Fallback execution check for ES Module environments
+// Start static-data loading independently of the lengthy UI initialization. On mobile, one
+// unrelated control setup can throw before initApp reaches its final statements; in that case
+// the previous arrangement never called loadStaticSearchResources() and the status stayed at
+// 'Search data is preparing…' forever. Starting the asset promises first guarantees the real
+// loader runs regardless of later UI wiring, and initApp immediately reflects its loading state.
+function startManaSearchApp() {
+    try {
+        initApp();
+    } catch (error) {
+        console.error('[ManaSearch] App initialization failed:', error?.stack || error);
+        // The asset loader was already started above. Surface the UI initialization error too,
+        // rather than letting the page silently remain in its original placeholder state.
+        if (staticSearchStatusText) {
+            staticSearchStatusText.textContent = `The interface did not finish initializing: ${error?.message || error}. Search data loading continues; reload the page if controls do not respond.`;
+            if (staticSearchStatus) {
+                staticSearchStatus.classList.remove('is-loading', 'is-ready');
+                staticSearchStatus.classList.add('is-error');
+            }
+        }
+    }
+}
+
+// Begin fetching the static corpus/index as soon as this module has evaluated. Do not wait
+// for DOMContentLoaded or the end of initApp(): another module (for example the optional NLP
+// CDN module) can delay DOMContentLoaded, and a UI wiring exception used to prevent the asset
+// loader from ever being called. The page controls will reflect the current state as soon as
+// initApp binds their elements.
+loadStaticSearchResources().catch(error => {
+    console.error('[ManaSearch] Static search data bootstrap failed:', error?.message || error);
+});
+
+// Fallback execution check for ES Module environments. Static-data preloading has already started.
 if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', initApp);
+    document.addEventListener('DOMContentLoaded', startManaSearchApp, { once: true });
 } else {
-    initApp();
+    startManaSearchApp();
 }
 
 // --- THEME & STORAGE MANAGEMENT ---
