@@ -1,6 +1,6 @@
-/* ManaSearch build 20261012-54 */
+/* ManaSearch build 20261012-55 */
 // ManaSearch deployment build marker. Bump this whenever app.js changes so cached-module issues are easy to diagnose.
-const MANASEARCH_APP_BUILD = '20261012-54';
+const MANASEARCH_APP_BUILD = '20261012-55';
 console.info(`[ManaSearch] app.js build ${MANASEARCH_APP_BUILD}`);
 
 // State Management
@@ -16083,11 +16083,17 @@ loadStaticSearchResources().catch(error => {
     console.error('[ManaSearch] Static search data bootstrap failed:', error?.message || error);
 });
 
-// Fallback execution check for ES Module environments. Static-data preloading has already started.
+// Start only after this ES module has finished evaluating. Module scripts commonly run while
+// document.readyState is already "interactive"; calling startManaSearchApp synchronously here
+// would enter initApp before top-level `let` state declared later in this file (for example
+// manaImageMagnifierInstalled and manaFeatureHelpInstalled) has initialized. That throws a
+// temporal-dead-zone ReferenceError and prevents all control handlers from being installed.
+// Deferring by one microtask guarantees every top-level declaration is initialized first.
+const scheduleManaSearchAppStart = () => Promise.resolve().then(() => startManaSearchApp());
 if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', startManaSearchApp, { once: true });
+    document.addEventListener('DOMContentLoaded', scheduleManaSearchAppStart, { once: true });
 } else {
-    startManaSearchApp();
+    scheduleManaSearchAppStart();
 }
 
 // --- THEME & STORAGE MANAGEMENT ---
