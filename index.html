@@ -5,7 +5,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>ManaSearch</title>
-    <link rel="stylesheet" href="style.css?v=20261011-51">
+    <link rel="stylesheet" href="style.css?v=20261012-52">
 </head>
 <body>
     <header class="site-header">
@@ -15,6 +15,7 @@
                 <p class="brand-subtitle">MTG similarity search by mechanics, function, and context</p>
             </div>
             <div class="header-actions">
+                <button type="button" id="start-onboarding-tour-btn" class="header-action-btn guided-tour-header-btn" aria-label="Start guided tour">Guided tour</button>
                 <button type="button" id="preferences-btn" class="header-action-btn" aria-haspopup="dialog" data-feature-tip="Customize ManaSearch display and card-pool preferences." data-feature-preview="Theme · density · card types">Preferences</button>
             </div>
         </div>
@@ -27,9 +28,12 @@
         <div class="first-use-help-hint-copy">
             <strong>New to ManaSearch?</strong>
             <span>Hover over dotted-underlined names on desktop, or tap the small ? icons on your phone, to open visual help panels.</span>
-            <span><b>Try Highlight:</b> select <mark>draw a card</mark> in a source card's rules text. It becomes a colored highlight; select it again to remove it.</span>
+            <span><b>Highlight example:</b> select <mark>draw a card</mark> in a source card’s rules text. Select it again to remove the highlight.</span>
         </div>
-        <button type="button" id="dismiss-first-use-help-hint" class="first-use-help-dismiss" aria-label="Dismiss quick tip">Got it ×</button>
+        <div class="first-use-help-actions">
+            <button type="button" id="replay-onboarding-tour-btn" class="first-use-help-dismiss">Take tour</button>
+            <button type="button" id="dismiss-first-use-help-hint" class="first-use-help-dismiss" aria-label="Dismiss quick tip">Got it ×</button>
+        </div>
     </aside>
     </header>
 
@@ -799,7 +803,7 @@
         import * as transformers from "https://cdn.jsdelivr.net/npm/@xenova/transformers@2.16.0";
         window.transformers = transformers;
     </script>
-    <script src="pako.min.js?v=20261011-51"></script>
-    <script type="module" src="app.js?v=20261011-51"></script>
+    <script src="pako.min.js?v=20261012-52"></script>
+    <script type="module" src="app.js?v=20261012-52"></script>
 </body>
 </html>

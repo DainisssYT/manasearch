@@ -1,6 +1,6 @@
-/* ManaSearch build 20261011-51 */
+/* ManaSearch build 20261012-52 */
 // ManaSearch deployment build marker. Bump this whenever app.js changes so cached-module issues are easy to diagnose.
-const MANASEARCH_APP_BUILD = '20261011-51';
+const MANASEARCH_APP_BUILD = '20261012-52';
 console.info(`[ManaSearch] app.js build ${MANASEARCH_APP_BUILD}`);
 
 // State Management
@@ -16517,6 +16517,251 @@ function installFeatureHelpPopovers() {
     document.addEventListener('keydown', event => { if (event.key === 'Escape' && popover) close(); });
     document.addEventListener('scroll', () => { if (popover && !pinned) close(); }, true);
     window.addEventListener('resize', () => { if (popover && activeTrigger) positionPopover(activeTrigger); });
+    installManaSearchOnboarding();
+}
+
+// A short, step-by-step onboarding tour. It is deliberately one idea per screen, works with
+// touch and keyboard (not just hover), and can be replayed from the header at any time.
+function installManaSearchOnboarding() {
+    if (window.__manaSearchOnboardingInstalled) return;
+    window.__manaSearchOnboardingInstalled = true;
+
+    const tourKey = 'manaSearchOnboardingV52';
+    const steps = [
+        {
+            title: 'Welcome to ManaSearch',
+            text: 'Find Magic cards that do a similar job—even when their wording is different. This quick tour shows the basic workflow. It takes about a minute.',
+            example: 'welcome', target: null,
+            hint: 'You can replay this tour later with the Guided tour button.'
+        },
+        {
+            title: '1. Choose a source card',
+            text: 'Start with a card you want to find alternatives for. Search by name and select it. Choosing a different source clears the old candidate results so searches never get mixed together.',
+            example: 'source', target: '#source-card-add-btn', fallback: '#source-card-section',
+            hint: 'You only need one source card to start.'
+        },
+        {
+            title: '2. Highlight what matters',
+            text: 'Select a phrase in the source card’s rules text or type line. ManaSearch gives it a color and uses it to focus the search. On a phone, press and select the words; on desktop, drag across them.',
+            example: 'highlight', target: '#source-card-loaded .oracle-container', fallback: '#source-card-section',
+            hint: 'Example: highlight “draw a card” to focus on card-draw effects. Select the same passage again to remove it.'
+        },
+        {
+            title: '3. Choose Methods',
+            text: 'Methods control how ManaSearch finds candidate cards. The Standard setup is a good place to begin; broaden the search if you are missing useful alternatives.',
+            example: 'methods', target: '#toggle-search-methods-btn', fallback: '#filter-section',
+            hint: 'Tap or click Methods to see the available retrieval options.'
+        },
+        {
+            title: '4. Choose Order',
+            text: 'Order controls which candidates appear first. It changes ranking, not which candidates were retrieved. Overall Match is a useful default; Mechanical emphasizes similar game actions.',
+            example: 'order', target: '#toggle-order-btn', fallback: '#filter-section',
+            hint: 'You can change the order after a search without starting over.'
+        },
+        {
+            title: '5. Add Constraints only when needed',
+            text: 'Constraints are hard filters: a card must satisfy every active one to appear. Keep them broad at first, then narrow by type, color, mana value, or format when you need to.',
+            example: 'constraints', target: '#toggle-card-constraints-btn', fallback: '#filter-section',
+            hint: 'Use Clear All Constraints if your filters remove too many cards.'
+        },
+        {
+            title: '6. Find Similar Cards',
+            text: 'Press Find Similar Cards to start. The button becomes available once the source card and search data are ready. You can keep the default settings for your first search.',
+            example: 'search', target: '#find-similar-btn', fallback: '#filter-section',
+            hint: 'A search can take time when a large pool of candidates needs to be scored.'
+        },
+        {
+            title: '7. Explore and compare results',
+            text: 'Browse every result page, open Compare to read the differences, flip double-faced cards, or save useful cards as Favorites. Search Deeper can find more candidates when it is available.',
+            example: 'results', target: '#results-section', fallback: '#find-similar-btn',
+            hint: 'Use the score breakdown and Compare together—similarity is made from several signals.'
+        }
+    ];
+
+    const make = (tag, className, text) => {
+        const node = document.createElement(tag);
+        if (className) node.className = className;
+        if (text !== undefined) node.textContent = text;
+        return node;
+    };
+    let layer = null;
+    let highlighted = null;
+    let currentStep = 0;
+    let lastFocused = null;
+
+    const getVisibleTarget = step => {
+        if (!step.target) return null;
+        const isVisible = node => {
+            if (!node || !node.isConnected || node.closest('.hidden')) return false;
+            const style = getComputedStyle(node);
+            const rect = node.getBoundingClientRect();
+            return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+        };
+        let target = document.querySelector(step.target);
+        if (!isVisible(target) && step.fallback) target = document.querySelector(step.fallback);
+        return isVisible(target) ? target : null;
+    };
+
+    const demoMarkup = {
+        welcome: '<div class="mana-tour-demo-flow"><span>Source card</span><b>→</b><span>Highlight</span><b>→</b><span>Similar cards</span></div>',
+        source: '<div class="mana-tour-demo-card"><strong>Phyrexian Arena</strong><small>Choose the card you want alternatives for.</small></div>',
+        highlight: '<div class="mana-tour-demo-rules">At the beginning of your upkeep, <mark>draw a card</mark> and lose 1 life.</div><small class="mana-tour-demo-caption">Select a phrase in the real source card to highlight it.</small>',
+        methods: '<div class="mana-tour-demo-flow"><span>Standard</span><b>→</b><span class="is-accent">Broader retrieval</span></div>',
+        order: '<div class="mana-tour-demo-rank"><span>Mechanical</span><strong>92%</strong></div><div class="mana-tour-demo-rank is-accent"><span>Overall Match</span><strong>86%</strong></div><div class="mana-tour-demo-rank"><span>Semantic</span><strong>79%</strong></div>',
+        constraints: '<div class="mana-tour-demo-chips"><span>Creature</span><span>Green</span><span>Commander legal</span></div><small class="mana-tour-demo-caption">Every active constraint must match.</small>',
+        search: '<div class="mana-tour-demo-search">Find Similar Cards <span>→</span></div>',
+        results: '<div class="mana-tour-demo-result"><span>Similar card</span><strong>Mechanical · Functional · Semantic</strong></div><div class="mana-tour-demo-result is-accent"><span>Compare</span><strong>Read what differs</strong></div><div class="mana-tour-demo-pages"><i></i><i></i><i></i><span>Next page →</span></div>'
+    };
+
+    const removeSpotlight = () => {
+        if (highlighted) highlighted.classList.remove('mana-onboarding-spotlight');
+        highlighted = null;
+    };
+    const persist = status => {
+        try { localStorage.setItem(tourKey, status); } catch (_) {}
+    };
+    const closeTour = status => {
+        removeSpotlight();
+        if (layer) layer.remove();
+        layer = null;
+        persist(status || 'skipped');
+        const hint = document.getElementById('first-use-help-hint');
+        let hintDismissed = false;
+        try { hintDismissed = localStorage.getItem('manaSearchFirstUseHelpV51') === 'dismissed'; } catch (_) {}
+        if (hint) {
+            if (hintDismissed) hint.classList.add('hidden');
+            else {
+                hint.classList.remove('hidden');
+                hint.classList.add('mana-tour-hint-after');
+            }
+        }
+        if (lastFocused && lastFocused.isConnected) lastFocused.focus({ preventScroll: true });
+    };
+
+    const openTour = () => {
+        if (layer) return;
+        lastFocused = document.activeElement;
+        const hint = document.getElementById('first-use-help-hint');
+        if (hint) hint.classList.add('hidden');
+        currentStep = 0;
+        layer = make('div', 'mana-onboarding-layer');
+        layer.setAttribute('role', 'presentation');
+        const scrim = make('div', 'mana-onboarding-scrim');
+        const dialog = make('section', 'mana-onboarding-card');
+        dialog.setAttribute('role', 'dialog');
+        dialog.setAttribute('aria-modal', 'true');
+        dialog.setAttribute('aria-labelledby', 'mana-onboarding-title');
+        dialog.setAttribute('aria-describedby', 'mana-onboarding-text');
+
+        const top = make('div', 'mana-onboarding-top');
+        const brand = make('span', 'mana-onboarding-kicker', 'MANASEARCH QUICK TOUR');
+        const closeButton = make('button', 'mana-onboarding-close', '×');
+        closeButton.type = 'button';
+        closeButton.setAttribute('aria-label', 'Skip guided tour');
+        top.append(brand, closeButton);
+
+        const progressWrap = make('div', 'mana-onboarding-progress-wrap');
+        const progressText = make('span', 'mana-onboarding-progress-text');
+        progressText.id = 'mana-onboarding-progress-text';
+        const progressTrack = make('div', 'mana-onboarding-progress-track');
+        const progressFill = make('div', 'mana-onboarding-progress-fill');
+        progressTrack.appendChild(progressFill);
+        progressWrap.append(progressText, progressTrack);
+
+        const title = make('h2', 'mana-onboarding-title');
+        title.id = 'mana-onboarding-title';
+        const description = make('p', 'mana-onboarding-text');
+        description.id = 'mana-onboarding-text';
+        const demo = make('div', 'mana-onboarding-demo');
+        const hintText = make('p', 'mana-onboarding-hint');
+        const footer = make('div', 'mana-onboarding-footer');
+        const skipButton = make('button', 'mana-onboarding-skip', 'Skip tour');
+        skipButton.type = 'button';
+        const nav = make('div', 'mana-onboarding-nav');
+        const backButton = make('button', 'mana-onboarding-back', 'Back');
+        backButton.type = 'button';
+        const nextButton = make('button', 'mana-onboarding-next', 'Next');
+        nextButton.type = 'button';
+        nav.append(backButton, nextButton);
+        footer.append(skipButton, nav);
+        dialog.append(top, progressWrap, title, description, demo, hintText, footer);
+        layer.append(scrim, dialog);
+        document.body.appendChild(layer);
+
+        const renderStep = () => {
+            removeSpotlight();
+            const step = steps[currentStep];
+            const target = getVisibleTarget(step);
+            if (target) {
+                target.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'auto' });
+                target.classList.add('mana-onboarding-spotlight');
+                highlighted = target;
+            }
+            progressText.textContent = currentStep === 0 ? 'Welcome' : `Step ${currentStep} of ${steps.length - 1}`;
+            progressFill.style.width = `${((currentStep + 1) / steps.length) * 100}%`;
+            title.textContent = step.title;
+            description.textContent = step.text;
+            demo.innerHTML = demoMarkup[step.example] || demoMarkup.welcome;
+            hintText.textContent = step.hint;
+            backButton.disabled = currentStep === 0;
+            nextButton.textContent = currentStep === steps.length - 1 ? 'Finish tour' : currentStep === 0 ? 'Start tour' : 'Next';
+            dialog.classList.toggle('is-top', Boolean(target && target.getBoundingClientRect().top > window.innerHeight * 0.52));
+            dialog.scrollTop = 0;
+        };
+        const skip = () => closeTour('skipped');
+        closeButton.addEventListener('click', skip);
+        skipButton.addEventListener('click', skip);
+        backButton.addEventListener('click', () => { if (currentStep > 0) { currentStep--; renderStep(); } });
+        nextButton.addEventListener('click', () => {
+            if (currentStep >= steps.length - 1) { closeTour('completed'); return; }
+            currentStep++;
+            renderStep();
+        });
+        dialog.addEventListener('keydown', event => {
+            if (event.key === 'Escape') { event.preventDefault(); skip(); return; }
+            if (event.key === 'Tab') {
+                const controls = Array.from(dialog.querySelectorAll('button:not(:disabled)'));
+                if (!controls.length) return;
+                const first = controls[0];
+                const last = controls[controls.length - 1];
+                if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+                else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+            }
+        });
+        renderStep();
+        nextButton.focus({ preventScroll: true });
+    };
+
+    document.getElementById('start-onboarding-tour-btn')?.addEventListener('click', () => openTour());
+    document.getElementById('replay-onboarding-tour-btn')?.addEventListener('click', () => openTour());
+    let tourStatus = '';
+    let hasPriorUse = false;
+    try {
+        tourStatus = localStorage.getItem(tourKey) || '';
+        // Do not surprise returning ManaSearch users with a forced tour after an update. New
+        // installations have no history, favorites, saved preferences, or dismissed-help marker.
+        const priorUseKeys = [HISTORY_KEY, FAVORITES_KEY, DISPLAY_PREFERENCES_KEY, THEME_KEY, 'manaSearchFirstUseHelpV51'];
+        hasPriorUse = priorUseKeys.some(key => {
+            const value = localStorage.getItem(key);
+            if (!value) return false;
+            if (key === HISTORY_KEY || key === FAVORITES_KEY) {
+                try { return JSON.parse(value).length > 0; } catch (_) { return false; }
+            }
+            return true;
+        });
+    } catch (_) {}
+    if (!tourStatus && hasPriorUse) {
+        tourStatus = 'existing-user';
+        persist(tourStatus);
+    }
+    if (tourStatus !== 'completed' && tourStatus !== 'skipped' && tourStatus !== 'existing-user') {
+        window.setTimeout(() => openTour(), 650);
+    } else {
+        const hint = document.getElementById('first-use-help-hint');
+        let hintDismissed = false;
+        try { hintDismissed = localStorage.getItem('manaSearchFirstUseHelpV51') === 'dismissed'; } catch (_) {}
+        if (hint && !hintDismissed) hint.classList.remove('hidden');
+    }
 }
 
 function getCardImageUrl(card) {

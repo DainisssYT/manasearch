@@ -5986,3 +5986,73 @@ button:focus-visible { outline: 2px solid var(--accent-color); outline-offset: 2
 .mana-inline-help-marker:hover, .mana-inline-help-marker:focus-visible { color: white; border-color: var(--accent-color); background: var(--accent-color); }
 #search-methods-modal .method-card > .method-text,
 #order-modal .method-card > .method-text { flex: 1 1 auto; min-width: 0; }
+
+
+/* v52: touch-friendly, step-by-step onboarding overlay. Each screen teaches one action. */
+.first-use-help-actions { display:flex; flex:0 0 auto; gap:6px; align-items:center; }
+.guided-tour-header-btn { border:1px solid var(--border-color); color:var(--text-main); background:var(--bg-secondary); }
+.guided-tour-header-btn:hover { border-color:var(--accent-color); }
+.first-use-help-hint.mana-tour-hint-after { animation:mana-tour-hint-in .18s ease-out both; }
+@keyframes mana-tour-hint-in { from { opacity:0; transform:translateY(-4px); } to { opacity:1; transform:translateY(0); } }
+.mana-onboarding-layer { position:fixed; inset:0; z-index:auto; isolation:auto; pointer-events:none; }
+.mana-onboarding-scrim { position:fixed; z-index:10090; inset:0; background:rgba(7,7,11,.76); pointer-events:auto; }
+.mana-onboarding-card { position:fixed; z-index:10092; pointer-events:auto; left:50%; bottom:max(14px, env(safe-area-inset-bottom)); transform:translateX(-50%); width:min(460px, calc(100vw - 24px)); max-height:min(72dvh, 590px); overflow-y:auto; overscroll-behavior:contain; padding:18px; border:1px solid var(--border-color); border-top:3px solid var(--accent-color); border-radius:16px; background:var(--bg-primary); color:var(--text-main); box-shadow:0 24px 90px rgba(0,0,0,.52); display:flex; flex-direction:column; gap:12px; }
+.mana-onboarding-card.is-top { top:max(12px, env(safe-area-inset-top)); bottom:auto; }
+.mana-onboarding-top { display:flex; align-items:center; justify-content:space-between; gap:12px; }
+.mana-onboarding-kicker { color:var(--accent-color); font-size:10px; letter-spacing:.14em; font-weight:850; }
+.mana-onboarding-close { display:inline-flex; align-items:center; justify-content:center; width:32px; height:32px; min-width:32px; padding:0; border:1px solid var(--border-color); border-radius:8px; background:var(--bg-secondary); color:var(--text-main); font-size:23px; line-height:1; }
+.mana-onboarding-progress-wrap { display:flex; align-items:center; gap:12px; }
+.mana-onboarding-progress-text { min-width:90px; color:var(--text-muted); font-size:11px; font-weight:750; }
+.mana-onboarding-progress-track { flex:1; height:5px; border-radius:999px; overflow:hidden; background:var(--bg-accent); }
+.mana-onboarding-progress-fill { height:100%; width:12.5%; border-radius:inherit; background:var(--accent-color); transition:width .18s ease; }
+.mana-onboarding-title { margin:0; font-size:clamp(20px, 4vw, 25px); line-height:1.2; letter-spacing:-.02em; }
+.mana-onboarding-text { margin:0; color:var(--text-muted); font-size:14px; line-height:1.55; }
+.mana-onboarding-demo { display:flex; flex-direction:column; gap:7px; padding:11px; border:1px solid var(--border-color); border-radius:10px; background:var(--bg-secondary); }
+.mana-tour-demo-flow { display:flex; align-items:center; justify-content:center; gap:8px; flex-wrap:wrap; }
+.mana-tour-demo-flow span { padding:7px 9px; border:1px solid var(--border-color); border-radius:7px; background:var(--bg-primary); font-size:11px; font-weight:700; text-align:center; }
+.mana-tour-demo-flow b { color:var(--accent-color); }
+.mana-tour-demo-flow .is-accent { border-color:var(--accent-color); background:var(--bg-accent); }
+.mana-tour-demo-card { display:flex; flex-direction:column; gap:3px; padding:9px 10px; border:1px solid var(--border-color); border-radius:8px; background:var(--bg-primary); }
+.mana-tour-demo-card strong { font-size:13px; }
+.mana-tour-demo-card small,.mana-tour-demo-caption { color:var(--text-muted); font-size:11px; }
+.mana-tour-demo-rules { margin:0; padding:10px; border-radius:7px; background:#ece8dc; color:#28251f; font-family:Georgia,serif; font-size:14px; line-height:1.55; }
+.mana-tour-demo-rules mark { padding:1px 3px; border-radius:3px; color:#201b00; background:rgba(250,204,21,.93); box-shadow:inset 0 -2px 0 #ca8a04; }
+.mana-tour-demo-rank { display:flex; justify-content:space-between; gap:12px; padding:7px 9px; border:1px solid var(--border-color); border-radius:6px; background:var(--bg-primary); font-size:12px; }
+.mana-tour-demo-rank.is-accent { border-color:var(--accent-color); background:var(--bg-accent); }
+.mana-tour-demo-chips { display:flex; flex-wrap:wrap; gap:6px; }
+.mana-tour-demo-chips span { padding:5px 8px; border:1px solid var(--accent-color); border-radius:999px; background:var(--bg-primary); font-size:11px; }
+.mana-tour-demo-search { display:flex; align-items:center; justify-content:space-between; gap:10px; padding:10px 13px; border:1px solid var(--accent-color); border-radius:8px; background:var(--bg-accent); font-size:13px; font-weight:800; }
+.mana-tour-demo-search span { color:var(--accent-color); font-size:20px; }
+.mana-tour-demo-result { display:flex; flex-direction:column; gap:4px; padding:8px 9px; border:1px solid var(--border-color); border-radius:7px; background:var(--bg-primary); font-size:12px; }
+.mana-tour-demo-result strong { color:var(--text-muted); font-size:10px; font-weight:600; }
+.mana-tour-demo-result.is-accent { border-color:var(--accent-color); }
+.mana-tour-demo-pages { display:flex; align-items:center; justify-content:center; gap:7px; padding-top:2px; color:var(--text-muted); font-size:11px; }
+.mana-tour-demo-pages i { width:20px; height:18px; border:1px solid var(--border-color); border-radius:4px; background:var(--bg-primary); }
+.mana-tour-demo-pages i:first-child { border-color:var(--accent-color); background:var(--bg-accent); }
+.mana-onboarding-hint { margin:0; padding-left:9px; border-left:2px solid var(--accent-color); color:var(--text-muted); font-size:11px; line-height:1.45; }
+.mana-onboarding-footer { display:flex; align-items:center; justify-content:space-between; gap:10px; padding-top:4px; }
+.mana-onboarding-nav { display:flex; align-items:center; gap:8px; }
+.mana-onboarding-back,.mana-onboarding-skip { padding:9px 12px; border:1px solid var(--border-color); border-radius:8px; background:var(--bg-secondary); color:var(--text-main); font-size:12px; font-weight:700; }
+.mana-onboarding-back:disabled { opacity:.45; }
+.mana-onboarding-next { min-width:100px; padding:9px 15px; border:1px solid var(--accent-color); border-radius:8px; background:var(--accent-color); color:#fff; font-size:12px; font-weight:800; }
+.mana-onboarding-back:focus-visible,.mana-onboarding-skip:focus-visible,.mana-onboarding-next:focus-visible,.mana-onboarding-close:focus-visible { outline:2px solid var(--accent-color); outline-offset:2px; }
+/* Elevate and outline one item so the user knows where the current step refers to. */
+.mana-onboarding-spotlight { position:relative !important; z-index:10091 !important; box-shadow:0 0 0 9999px rgba(7,7,11,.76) !important; border-radius:8px; pointer-events:none !important; }
+@media (max-width:560px) {
+    .first-use-help-actions { flex:1 0 100%; justify-content:flex-end; }
+    .first-use-help-hint { flex-wrap:wrap; }
+    .guided-tour-header-btn { padding:7px 9px; }
+    .mana-onboarding-card { width:calc(100vw - 20px); max-height:min(74dvh, 640px); padding:15px; gap:10px; border-radius:13px; }
+    .mana-onboarding-text { font-size:13px; }
+    .mana-onboarding-demo { padding:9px; }
+}
+@media (max-width:380px) {
+    .guided-tour-header-btn { font-size:12px; padding:6px 7px; }
+    .mana-onboarding-card { width:calc(100vw - 16px); padding:13px; }
+    .mana-onboarding-footer { align-items:stretch; flex-wrap:wrap; }
+    .mana-onboarding-skip { flex:1 1 auto; }
+    .mana-onboarding-nav { flex:1 1 auto; justify-content:flex-end; }
+}
+@media (prefers-reduced-motion:reduce) {
+    .mana-onboarding-progress-fill,.first-use-help-hint.mana-tour-hint-after { transition:none !important; animation:none !important; }
+}
