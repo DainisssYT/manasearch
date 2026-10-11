@@ -5741,6 +5741,10 @@ body.mana-panel-open .card-item {
     font-size: 12px;
 }
 .mana-feature-help-popover strong { line-height: 1.4; }
+
+.mana-feature-help-popover[data-pinned="true"] { pointer-events: auto; touch-action: pan-y; }
+.mana-feature-help-popover[data-pinned="false"] { pointer-events: none; }
+
 .mana-feature-help-preview { padding: 7px 9px; border: 1px dashed var(--border-color); border-radius: 6px; color: var(--text-secondary); background: var(--bg-secondary); }
 
 /* Attribute sorts are intentionally strict; their labels remain readable in the order modal. */
@@ -6072,4 +6076,87 @@ button:focus-visible { outline: 2px solid var(--accent-color); outline-offset: 2
 .mana-onboarding-card { z-index: 10092; }
 @media (hover: none), (pointer: coarse) {
   .mana-feature-help-marker, .mana-inline-help-marker { width: 32px; min-width: 32px; height: 32px; min-height: 32px; flex-basis: 32px; font-size: 14px; }
+}
+
+
+/* v54: enlarged card previews are readable on hover and on touchscreens. */
+.mana-image-magnifier {
+    max-width: min(420px, 46vw);
+    border-color: color-mix(in srgb, var(--accent-color) 55%, var(--border-color));
+}
+.mana-image-magnifier img { max-height: 84vh; }
+.card-art-wrap > img { transition: transform .22s ease; transform-origin: center center; }
+.card-art-wrap.is-legacy-flip-rotated > img { transform: rotate(180deg); }
+.card-art-wrap.is-legacy-flip-rotated .card-flip-btn { background: rgba(0,0,0,.42) !important; }
+.mana-card-preview-overlay {
+    position: fixed;
+    z-index: 10120;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: max(12px, env(safe-area-inset-top)) 12px max(12px, env(safe-area-inset-bottom));
+    box-sizing: border-box;
+    background: rgba(4,4,8,.88);
+    overscroll-behavior: contain;
+}
+.mana-card-preview-panel {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+    width: min(680px, 100%);
+    max-height: 100%;
+    padding: 10px;
+    box-sizing: border-box;
+    border: 1px solid var(--border-color);
+    border-radius: 14px;
+    background: var(--bg-primary);
+    box-shadow: 0 18px 60px rgba(0,0,0,.5);
+}
+.mana-card-preview-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    width: 100%;
+    min-height: 38px;
+}
+.mana-card-preview-header strong { min-width: 0; overflow-wrap: anywhere; }
+.mana-card-preview-close {
+    flex: 0 0 auto;
+    min-width: 42px;
+    min-height: 42px;
+    padding: 0;
+    border: 1px solid var(--border-color);
+    border-radius: 9px;
+    background: var(--bg-secondary);
+    color: var(--text-main);
+    font-size: 26px;
+    line-height: 1;
+}
+.mana-card-preview-image {
+    display: block;
+    width: auto;
+    height: auto;
+    max-width: 100%;
+    max-height: min(79dvh, calc(100dvh - 112px));
+    object-fit: contain;
+    border-radius: 8px;
+}
+.mana-card-preview-image.is-legacy-flip-rotated { transform: rotate(180deg); }
+.mana-card-preview-note { margin: 0; color: var(--text-muted); text-align: center; font-size: 11px; }
+@media (hover: none), (pointer: coarse) {
+    .mana-card-preview-panel { width: min(680px, 100%); padding: 8px; }
+    .mana-card-preview-image { max-width: 92vw; max-height: calc(100dvh - 116px); }
+}
+@media (prefers-reduced-motion: reduce) {
+    .card-art-wrap > img { transition: none !important; }
+}
+
+
+.source-card-art-wrap > img { transition: transform .24s ease; transform-origin: center center; }
+.source-card-art-wrap.is-source-legacy-flip-rotated > img { transform: rotate(180deg); }
+@media (prefers-reduced-motion: reduce) {
+    .source-card-art-wrap > img { transition: none !important; }
 }

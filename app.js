@@ -1,6 +1,6 @@
-/* ManaSearch build 20261012-53 */
+/* ManaSearch build 20261012-54 */
 // ManaSearch deployment build marker. Bump this whenever app.js changes so cached-module issues are easy to diagnose.
-const MANASEARCH_APP_BUILD = '20261012-53';
+const MANASEARCH_APP_BUILD = '20261012-54';
 console.info(`[ManaSearch] app.js build ${MANASEARCH_APP_BUILD}`);
 
 // State Management
@@ -16028,12 +16028,30 @@ function initColorPips() {
     });
 }
 
+// The first-use hint must be dismissible even if another, unrelated help/control initializer
+// fails. Use a delegated capture listener independent of the larger visual-help setup.
+let manaFirstUseHintDismissalInstalled = false;
+function installFirstUseHintDismissal() {
+    if (manaFirstUseHintDismissalInstalled || typeof document === 'undefined') return;
+    manaFirstUseHintDismissalInstalled = true;
+    document.addEventListener('click', event => {
+        const button = event.target?.closest?.('#dismiss-first-use-help-hint');
+        if (!button) return;
+        event.preventDefault();
+        event.stopPropagation();
+        document.getElementById('first-use-help-hint')?.classList.add('hidden');
+        document.getElementById('first-use-help-hint')?.classList.remove('mana-tour-hint-after');
+        try { localStorage.setItem('manaSearchFirstUseHelpV51', 'dismissed'); } catch (_) {}
+    }, true);
+}
+
 // Start static-data loading independently of the lengthy UI initialization. On mobile, one
 // unrelated control setup can throw before initApp reaches its final statements; in that case
 // the previous arrangement never called loadStaticSearchResources() and the status stayed at
 // 'Search data is preparing…' forever. Starting the asset promises first guarantees the real
 // loader runs regardless of later UI wiring, and initApp immediately reflects its loading state.
 function startManaSearchApp() {
+    installFirstUseHintDismissal();
     // Install help/tour separately from the rest of the UI. A failure while binding an unrelated
     // control must not leave tutorial entry points inert. Both installers are idempotent.
     try { installFeatureHelpPopovers(); }
@@ -16101,6 +16119,7 @@ let manaImageMagnifierInstalled = false;
 function installCardImageMagnifier() {
     if (manaImageMagnifierInstalled || typeof document === 'undefined') return;
     manaImageMagnifierInstalled = true;
+    const selector = '#source-card-image, .card-art-wrap img, .selected-related-card-art-wrap img, .compare-card-art';
     const magnifier = document.createElement('div');
     magnifier.className = 'mana-image-magnifier';
     magnifier.setAttribute('aria-hidden', 'true');
@@ -16109,30 +16128,116 @@ function installCardImageMagnifier() {
     magnifier.appendChild(image);
     document.body.appendChild(magnifier);
     const hide = () => magnifier.classList.remove('visible');
+    const coarsePointer = () => {
+        try { return window.matchMedia('(hover: none), (pointer: coarse)').matches; }
+        catch (_) { return false; }
+    };
+
+    // A card preview modal gives touch users the same readable zoom they get by hovering on
+    // desktop. Keep it separate from the floating hover magnifier so the image can fit the phone.
+    let previewLayer = null;
+    let priorBodyOverflow = '';
+    let priorFocus = null;
+    const closePreview = () => {
+        if (!previewLayer) return;
+        previewLayer.remove();
+        previewLayer = null;
+        document.body.style.overflow = priorBodyOverflow;
+        document.removeEventListener('keydown', onPreviewKeydown, true);
+        if (priorFocus?.isConnected) priorFocus.focus({ preventScroll: true });
+        priorFocus = null;
+    };
+    const onPreviewKeydown = event => {
+        if (event.key === 'Escape') { event.preventDefault(); closePreview(); }
+    };
+    const openPreview = target => {
+        if (!target) return;
+        closePreview();
+        hide();
+        priorFocus = document.activeElement;
+        priorBodyOverflow = document.body.style.overflow;
+        const source = target.currentSrc || target.src;
+        if (!source || source.startsWith('data:')) return;
+        const card = target.closest('.card-item, .selected-related-card, #source-card-loaded, #compare-modal');
+        const titleText = card?.querySelector('.card-item-title, h3, h4, strong')?.textContent?.trim()
+            || target.alt || 'Card preview';
+        const layer = document.createElement('div');
+        layer.className = 'mana-card-preview-overlay';
+        layer.setAttribute('role', 'dialog');
+        layer.setAttribute('aria-modal', 'true');
+        layer.setAttribute('aria-label', `${titleText} enlarged card image`);
+        layer.tabIndex = -1;
+        const panel = document.createElement('div');
+        panel.className = 'mana-card-preview-panel';
+        const head = document.createElement('div');
+        head.className = 'mana-card-preview-header';
+        const title = document.createElement('strong');
+        title.textContent = titleText;
+        const closeButton = document.createElement('button');
+        closeButton.type = 'button';
+        closeButton.className = 'mana-card-preview-close';
+        closeButton.textContent = '×';
+        closeButton.setAttribute('aria-label', 'Close enlarged card image');
+        head.append(title, closeButton);
+        const enlarged = document.createElement('img');
+        enlarged.className = 'mana-card-preview-image';
+        enlarged.src = source;
+        enlarged.alt = target.alt || titleText;
+        const rotated = Boolean(target.closest('.card-art-wrap')?.classList.contains('is-legacy-flip-rotated')
+            || target.closest('.source-card-art-wrap')?.classList.contains('is-source-legacy-flip-rotated'));
+        if (rotated) enlarged.classList.add('is-legacy-flip-rotated');
+        const note = document.createElement('p');
+        note.className = 'mana-card-preview-note';
+        note.textContent = 'Tap outside the card or press × to close.';
+        panel.append(head, enlarged, note);
+        layer.appendChild(panel);
+        layer.addEventListener('click', event => {
+            if (event.target === layer || event.target === closeButton) { event.preventDefault(); closePreview(); }
+        });
+        document.body.appendChild(layer);
+        previewLayer = layer;
+        document.body.style.overflow = 'hidden';
+        document.addEventListener('keydown', onPreviewKeydown, true);
+        closeButton.focus({ preventScroll: true });
+    };
+
     document.addEventListener('pointerover', event => {
-        const target = event.target?.closest?.('#source-card-image, .card-art-wrap img, .selected-related-card-art-wrap img, .compare-card-art');
-        if (!target || !target.currentSrc && !target.src) return;
+        if (event.pointerType === 'touch' || coarsePointer()) return;
+        const target = event.target?.closest?.(selector);
+        if (!target || !(target.currentSrc || target.src)) return;
         if (event.relatedTarget && target.contains(event.relatedTarget)) return;
         const source = target.currentSrc || target.src;
         if (!source || source.startsWith('data:')) return;
         image.src = source;
+        const rotated = Boolean(target.closest('.card-art-wrap')?.classList.contains('is-legacy-flip-rotated')
+            || target.closest('.source-card-art-wrap')?.classList.contains('is-source-legacy-flip-rotated'));
+        image.classList.toggle('is-legacy-flip-rotated', rotated);
         const rect = target.getBoundingClientRect();
-        const desiredWidth = Math.min(330, Math.max(220, window.innerWidth * 0.27));
-        const left = rect.right + desiredWidth + 16 < window.innerWidth ? rect.right + 12 : Math.max(8, rect.left - desiredWidth - 12);
-        const top = Math.max(8, Math.min(rect.top, window.innerHeight - Math.min(window.innerHeight * 0.82, desiredWidth * 1.45) - 8));
-        magnifier.style.width = `${desiredWidth}px`;
+        const desiredWidth = Math.min(420, Math.max(250, window.innerWidth * 0.34));
+        const width = Math.min(desiredWidth, window.innerWidth - 16);
+        const left = rect.right + width + 16 < window.innerWidth ? rect.right + 12 : Math.max(8, rect.left - width - 12);
+        const top = Math.max(8, Math.min(rect.top, window.innerHeight - Math.min(window.innerHeight * 0.86, width * 1.45) - 8));
+        magnifier.style.width = `${width}px`;
         magnifier.style.left = `${left}px`;
         magnifier.style.top = `${top}px`;
         magnifier.classList.add('visible');
     });
     document.addEventListener('pointerout', event => {
-        const target = event.target?.closest?.('#source-card-image, .card-art-wrap img, .selected-related-card-art-wrap img, .compare-card-art');
+        const target = event.target?.closest?.(selector);
         if (target && (!event.relatedTarget || !target.contains(event.relatedTarget))) hide();
     });
+    // Explicit tap/click enlarges a card on touchscreens where hover is unavailable. Capture
+    // phase prevents a card's unrelated selection handler from stealing the tap.
+    document.addEventListener('click', event => {
+        const target = event.target?.closest?.(selector);
+        if (!target || !coarsePointer()) return;
+        event.preventDefault();
+        event.stopPropagation();
+        openPreview(target);
+    }, true);
     document.addEventListener('scroll', hide, true);
     window.addEventListener('resize', hide);
 }
-
 let manaFeatureHelpInstalled = false;
 function installFeatureHelpPopovers() {
     if (manaFeatureHelpInstalled || typeof document === 'undefined') return;
@@ -16503,14 +16608,17 @@ function installFeatureHelpPopovers() {
 
     // A once-per-browser first-use hint teaches people to look for the visual help and demonstrates highlighting.
     const firstHint = document.getElementById('first-use-help-hint');
-    const dismissHint = document.getElementById('dismiss-first-use-help-hint');
     let hintDismissed = false;
-    try { hintDismissed = localStorage.getItem('manaSearchFirstUseHelpV51') === 'dismissed'; } catch (_) {}
-    if (firstHint && !hintDismissed) firstHint.classList.remove('hidden');
-    dismissHint?.addEventListener('click', () => {
-        firstHint?.classList.add('hidden');
-        try { localStorage.setItem('manaSearchFirstUseHelpV51', 'dismissed'); } catch (_) {}
-    });
+    try {
+        hintDismissed = localStorage.getItem('manaSearchFirstUseHelpV51') === 'dismissed';
+        // v52 could mark the tour complete but accidentally show the quick-tip again. Migrate
+        // existing users so a completed tour really dismisses the new-user panel permanently.
+        if (!hintDismissed && localStorage.getItem('manaSearchOnboardingV52') === 'completed') {
+            hintDismissed = true;
+            localStorage.setItem('manaSearchFirstUseHelpV51', 'dismissed');
+        }
+    } catch (_) {}
+    if (firstHint) firstHint.classList.toggle('hidden', hintDismissed);
 
     let hoverCloseTimer = 0;
     const cancelHoverClose = () => { if (hoverCloseTimer) window.clearTimeout(hoverCloseTimer); hoverCloseTimer = 0; };
@@ -16555,18 +16663,10 @@ function installFeatureHelpPopovers() {
         close();
     });
     document.addEventListener('click', event => {
-        // On touch devices an option name itself is a usable help target, not just the tiny ?.
-        // Keep the normal option-card click alive so the chosen method/order is still selected.
-        const optionName = event.target?.closest?.('#search-methods-modal .method-card .method-text strong, #order-modal .method-card .method-text strong');
         const touchLike = (() => {
             try { return window.matchMedia('(hover: none), (pointer: coarse)').matches; }
             catch (_) { return false; }
         })();
-        if (optionName && touchLike && optionName.dataset.featureTip) {
-            cancelHoverClose();
-            show(optionName, true);
-            return; // deliberately do not prevent/bubble-block the selection click
-        }
         const target = event.target?.closest?.('.mana-feature-help-interactive');
         if (target) {
             event.preventDefault();
@@ -16574,6 +16674,20 @@ function installFeatureHelpPopovers() {
             cancelHoverClose();
             if (pinned && activeTrigger === target) close();
             else show(target, true);
+            return;
+        }
+        // In touch mode, any tap on an option row outside its actual checkbox/radio means
+        // "explain this option". This prevents the label's default action from silently toggling
+        // the option when the user is trying to learn what Divergent Search (or another option) does.
+        const optionCard = event.target?.closest?.('#search-methods-modal .method-card, #order-modal .method-card');
+        const inputTarget = event.target?.closest?.('input[type="checkbox"], input[type="radio"]');
+        if (touchLike && optionCard && !inputTarget) {
+            const optionName = optionCard.querySelector('.method-text strong');
+            const trigger = optionName?.dataset?.featureTip ? optionName : optionCard;
+            event.preventDefault();
+            event.stopPropagation();
+            cancelHoverClose();
+            if (trigger.dataset.featureTip) show(trigger, true);
             return;
         }
         // A focused hover-only label may open a tooltip just before its click arrives. Pin it
@@ -16706,21 +16820,32 @@ function installManaSearchOnboarding() {
         try { localStorage.setItem(tourKey, status); } catch (_) {}
     };
     const closeTour = status => {
+        const finalStatus = status || 'skipped';
         removeSpotlight();
         if (layer) layer.remove();
         layer = null;
-        persist(status || 'skipped');
+        persist(finalStatus);
         const hint = document.getElementById('first-use-help-hint');
-        let hintDismissed = false;
-        try { hintDismissed = localStorage.getItem('manaSearchFirstUseHelpV51') === 'dismissed'; } catch (_) {}
-        if (hint) {
-            if (hintDismissed) hint.classList.add('hidden');
-            else {
-                hint.classList.remove('hidden');
-                hint.classList.add('mana-tour-hint-after');
+        if (finalStatus === 'completed') {
+            // Finishing the guided tour replaces the quick-tip panel; don't bring that panel back
+            // immediately after the user has just completed onboarding.
+            try { localStorage.setItem('manaSearchFirstUseHelpV51', 'dismissed'); } catch (_) {}
+            hint?.classList.add('hidden');
+            hint?.classList.remove('mana-tour-hint-after');
+        } else {
+            let hintDismissed = false;
+            try { hintDismissed = localStorage.getItem('manaSearchFirstUseHelpV51') === 'dismissed'; } catch (_) {}
+            if (hint) {
+                if (hintDismissed) hint.classList.add('hidden');
+                else {
+                    hint.classList.remove('hidden');
+                    hint.classList.add('mana-tour-hint-after');
+                }
             }
         }
-        if (lastFocused && lastFocused.isConnected) lastFocused.focus({ preventScroll: true });
+        const focusTarget = lastFocused && lastFocused.isConnected && !lastFocused.closest('.hidden')
+            ? lastFocused : document.getElementById('start-onboarding-tour-btn');
+        if (focusTarget?.isConnected) focusTarget.focus({ preventScroll: true });
     };
 
     const openTour = () => {
@@ -17953,17 +18078,27 @@ function updateSourceCardFaceDisplay(card = currentSourceCard, animate = false) 
     if (!sourceCardFlipBtn) sourceCardFlipBtn = document.getElementById('source-card-flip-btn');
     if (!sourceCardImage) return;
     const faces = getSourceCardFaceImages(card);
-    const canFlip = faces.length > 1;
+    const isLegacyFlip = String(card?.layout || '').toLowerCase() === 'flip' && Boolean(card?.image_uris?.normal);
+    const canFlip = faces.length > 1 || isLegacyFlip;
+    const wrap = document.getElementById('source-card-art-wrap');
+    wrap?.classList.toggle('is-source-legacy-flip-rotated', isLegacyFlip && currentSourceCardFaceIndex === 1);
     if (sourceCardFlipBtn) {
         sourceCardFlipBtn.classList.toggle('hidden', !canFlip);
         sourceCardFlipBtn.disabled = !canFlip || sourceCardFlipBtn.dataset.animating === 'true';
-        sourceCardFlipBtn.textContent = 'Flip';
-        sourceCardFlipBtn.setAttribute('aria-label', canFlip ? `Flip source card to ${faces[(currentSourceCardFaceIndex + 1) % faces.length]?.name || 'its other face'}` : 'This card has no other face');
+        sourceCardFlipBtn.textContent = isLegacyFlip ? 'Rotate' : 'Flip';
+        sourceCardFlipBtn.setAttribute('aria-label', !canFlip ? 'This card has no other face' : isLegacyFlip
+            ? (currentSourceCardFaceIndex === 1 ? 'Rotate source card back to its front half' : 'Rotate source card to read its other half')
+            : `Flip source card to ${faces[(currentSourceCardFaceIndex + 1) % faces.length]?.name || 'its other face'}`);
     }
-    const url = getSourceCardFaceImageUrl(card, currentSourceCardFaceIndex);
-    sourceCardImage.alt = faces[currentSourceCardFaceIndex]?.name || card?.name || 'Card Artwork';
+    const url = isLegacyFlip ? getCardImageUrl(card) : getSourceCardFaceImageUrl(card, currentSourceCardFaceIndex);
+    sourceCardImage.alt = isLegacyFlip
+        ? `${card?.name || 'Card Artwork'}${currentSourceCardFaceIndex === 1 ? ' (rotated to read the other half)' : ''}`
+        : (faces[currentSourceCardFaceIndex]?.name || card?.name || 'Card Artwork');
     sourceCardImage.style.display = url ? 'block' : 'none';
     if (!animate) { sourceCardImage.src = url; return; }
+    // Classic flip cards use one image containing both halves. CSS rotates it as one physical
+    // card; do not run the double-faced image-swap timer on this layout.
+    if (isLegacyFlip) { sourceCardImage.src = url; return; }
     const reducedMotion = document.body?.classList.contains('reduce-motion') || window.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches;
     if (reducedMotion) { sourceCardImage.src = url; return; }
     const wrap = document.getElementById('source-card-art-wrap');
@@ -17983,8 +18118,11 @@ function updateSourceCardFaceDisplay(card = currentSourceCard, animate = false) 
 
 function flipCurrentSourceCardFace() {
     const faces = getSourceCardFaceImages(currentSourceCard);
-    if (faces.length < 2 || sourceCardFlipBtn?.dataset.animating === 'true') return;
-    currentSourceCardFaceIndex = (currentSourceCardFaceIndex + 1) % faces.length;
+    const isLegacyFlip = String(currentSourceCard?.layout || '').toLowerCase() === 'flip' && Boolean(currentSourceCard?.image_uris?.normal);
+    if ((!isLegacyFlip && faces.length < 2) || sourceCardFlipBtn?.dataset.animating === 'true') return;
+    currentSourceCardFaceIndex = isLegacyFlip
+        ? (currentSourceCardFaceIndex === 0 ? 1 : 0)
+        : (currentSourceCardFaceIndex + 1) % faces.length;
     updateSourceCardFaceDisplay(currentSourceCard, true);
 }
 
@@ -21789,15 +21927,21 @@ async function flipResultCardFace(cardElement, flipButton) {
     if (!cardElement || !flipButton || resultCardFlipInProgress.has(cardElement)) return;
     const card = visibleResultCardData.get(cardElement.dataset.cardKey) || cardElement._resultCardData;
     const faces = getResultCardFaceImages(card);
-    if (!card || faces.length < 2) return;
+    const isLegacyFlip = String(card?.layout || '').toLowerCase() === 'flip' && Boolean(card?.image_uris?.normal);
+    if (!card || (!isLegacyFlip && faces.length < 2)) return;
 
     const img = cardElement.querySelector('.card-art-wrap img');
-    if (!img) return;
+    const artWrap = cardElement.querySelector('.card-art-wrap');
+    if (!img || !artWrap) return;
     const stateKey = getResultCardStateKey(card);
-    const currentIndex = Math.max(0, Math.min(faces.length - 1, Number(resultCardFaceState.get(stateKey)) || 0));
-    const nextIndex = (currentIndex + 1) % faces.length;
-    const nextFace = faces[nextIndex];
-    const nextSrc = nextFace.image_uris.normal;
+    const currentIndex = isLegacyFlip
+        ? (Number(resultCardFaceState.get(stateKey)) === 1 ? 1 : 0)
+        : Math.max(0, Math.min(faces.length - 1, Number(resultCardFaceState.get(stateKey)) || 0));
+    const nextIndex = isLegacyFlip ? (currentIndex === 0 ? 1 : 0) : (currentIndex + 1) % faces.length;
+    const nextFace = isLegacyFlip ? null : faces[nextIndex];
+    const nextSrc = isLegacyFlip ? (img.dataset.cardImageSrc || getCardImageUrl(card)) : nextFace.image_uris.normal;
+    const currentOrientation = isLegacyFlip && currentIndex === 1 ? 180 : 0;
+    const nextOrientation = isLegacyFlip && nextIndex === 1 ? 180 : 0;
     const reducedMotion = typeof window.matchMedia === 'function'
         && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
     const canAnimate = typeof img.animate === 'function' && !reducedMotion;
@@ -21810,37 +21954,45 @@ async function flipResultCardFace(cardElement, flipButton) {
     flipButton.disabled = true;
     flipButton.setAttribute('aria-busy', 'true');
     try {
-        // Rotate the current face nearly edge-on, swap the artwork, then rotate the new face in.
-        // Updating the visible image directly avoids it being delayed by the lazy-image queue.
         if (canAnimate) {
             closeAnimation = img.animate([
-                { transform: 'perspective(900px) rotateY(0deg) scale(1)', filter: 'brightness(1)' },
-                { transform: 'perspective(900px) rotateY(88deg) scale(.97)', filter: 'brightness(.75)' }
+                { transform: `perspective(900px) rotate(${currentOrientation}deg) rotateY(0deg) scale(1)`, filter: 'brightness(1)' },
+                { transform: `perspective(900px) rotate(${currentOrientation}deg) rotateY(88deg) scale(.97)`, filter: 'brightness(.75)' }
             ], { duration: 170, easing: 'ease-in', fill: 'forwards' });
             try { await closeAnimation.finished; } catch (_) {}
         }
 
         resultCardFaceState.set(stateKey, nextIndex);
-        resultImageLoadQueue.delete(img);
-        img.dataset.cardImageSrc = nextSrc;
-        img.dataset.cardImageLoaded = nextSrc;
-        img.alt = nextFace.name || card.name;
-        img.src = nextSrc;
-        flipButton.title = `Flip to ${faces[(nextIndex + 1) % faces.length].name || 'other face'}`;
-        flipButton.setAttribute('aria-label', `Flip ${card.name} to ${faces[(nextIndex + 1) % faces.length].name || 'the other face'}`);
+        if (isLegacyFlip) {
+            // Classic Kamigawa flip cards have both halves printed on one image, one upside down.
+            // Rotate the complete physical-card image 180 degrees instead of searching for a
+            // nonexistent separate card_faces image.
+            artWrap.classList.toggle('is-legacy-flip-rotated', nextIndex === 1);
+            img.alt = `${card.name}${nextIndex === 1 ? ' (rotated to read the other half)' : ''}`;
+            flipButton.textContent = 'Rotate';
+            flipButton.title = nextIndex === 1 ? 'Rotate card back to its front half' : 'Rotate card to read its other half';
+            flipButton.setAttribute('aria-label', nextIndex === 1 ? `Rotate ${card.name} back` : `Rotate ${card.name} to read its other half`);
+        } else {
+            resultImageLoadQueue.delete(img);
+            img.dataset.cardImageSrc = nextSrc;
+            img.dataset.cardImageLoaded = nextSrc;
+            img.alt = nextFace.name || card.name;
+            img.src = nextSrc;
+            flipButton.textContent = 'Flip';
+            flipButton.title = `Flip to ${faces[(nextIndex + 1) % faces.length].name || 'other face'}`;
+            flipButton.setAttribute('aria-label', `Flip ${card.name} to ${faces[(nextIndex + 1) % faces.length].name || 'the other face'}`);
+        }
 
         if (canAnimate) {
             openAnimation = img.animate([
-                { transform: 'perspective(900px) rotateY(-88deg) scale(.97)', filter: 'brightness(.75)' },
-                { transform: 'perspective(900px) rotateY(0deg) scale(1)', filter: 'brightness(1)' }
+                { transform: `perspective(900px) rotate(${nextOrientation}deg) rotateY(-88deg) scale(.97)`, filter: 'brightness(.75)' },
+                { transform: `rotate(${nextOrientation}deg) scale(1)`, filter: 'brightness(1)' }
             ], { duration: 190, easing: 'ease-out', fill: 'forwards' });
             try { await openAnimation.finished; } catch (_) {}
         }
     } catch (error) {
         console.warn('Could not flip result card face:', error?.message || error);
     } finally {
-        // WAAPI's filled animation holds its last frame. Cancel both effects after the new face
-        // has come to rest so they do not interfere with later image or layout updates.
         try { openAnimation?.cancel(); } catch (_) {}
         try { closeAnimation?.cancel(); } catch (_) {}
         resultCardFlipInProgress.delete(cardElement);
@@ -21850,7 +22002,6 @@ async function flipResultCardFace(cardElement, flipButton) {
         flipButton.removeAttribute('aria-busy');
     }
 }
-
 function getRenderableResultCards(cards) {
     if (!Array.isArray(cards)) return [];
     const seenNames = new Set();
@@ -22273,12 +22424,13 @@ function renderResults(cards, internalOptions = {}) {
         const image = card.image_uris?.normal || card.card_faces?.[0]?.image_uris?.normal || '';
         const stateKey = getResultCardStateKey(card);
         const faces = Array.isArray(card.card_faces) ? card.card_faces.filter(face => face?.image_uris?.normal) : [];
+        const isLegacyFlip = String(card.layout || '').toLowerCase() === 'flip' && Boolean(card.image_uris?.normal);
         const faceIndex = faces.length > 1
             ? Math.max(0, Math.min(faces.length - 1, Number(resultCardFaceState.get(stateKey)) || 0))
-            : 0;
+            : isLegacyFlip ? (Number(resultCardFaceState.get(stateKey)) === 1 ? 1 : 0) : 0;
         return JSON.stringify([
             key, card.id || '', card.name || '', card.type_line || '', image,
-            faces.length > 1 ? (faces[faceIndex]?.image_uris?.normal || '') : '', faceIndex,
+            faces.length > 1 ? (faces[faceIndex]?.image_uris?.normal || '') : '', isLegacyFlip, faceIndex,
             valueAsPercent(card.similarityScore ?? card._previewScore),
             valueAsPercent(card.mechanicalScore),
             valueAsPercent(card.functionScore ?? card.functionalSimilarityScore),
@@ -22321,13 +22473,17 @@ function renderResults(cards, internalOptions = {}) {
         cardElement.dataset.cardKey = getCardKey(card);
 
         const img = cardElement.querySelector('.card-art-wrap img');
+        const artWrap = cardElement.querySelector('.card-art-wrap');
         const faceImages = getResultCardFaceImages(card);
         const hasMultipleFaces = faceImages.length > 1;
+        const isLegacyFlip = String(card.layout || '').toLowerCase() === 'flip' && Boolean(card.image_uris?.normal);
+        const hasFlipControl = hasMultipleFaces || isLegacyFlip;
         const stateKey = getResultCardStateKey(card);
         const faceIndex = hasMultipleFaces
             ? Math.max(0, Math.min(faceImages.length - 1, Number(resultCardFaceState.get(stateKey)) || 0))
-            : 0;
+            : isLegacyFlip && Number(resultCardFaceState.get(stateKey)) === 1 ? 1 : 0;
         const desiredSrc = hasMultipleFaces ? faceImages[faceIndex].image_uris.normal : cardImg;
+        if (artWrap) artWrap.classList.toggle('is-legacy-flip-rotated', isLegacyFlip && faceIndex === 1);
         if (img) {
             const previousDesired = img.dataset.cardImageSrc || '';
             if (previousDesired !== desiredSrc || !img.getAttribute('src')) {
@@ -22340,13 +22496,20 @@ function renderResults(cards, internalOptions = {}) {
                 }
             }
         }
-        if (img) img.alt = hasMultipleFaces ? (faceImages[faceIndex].name || card.name) : card.name;
+        if (img) {
+            img.alt = hasMultipleFaces ? (faceImages[faceIndex].name || card.name) : isLegacyFlip
+                ? `${card.name}${faceIndex === 1 ? ' (rotated to read the other half)' : ''}` : card.name;
+        }
 
         const flipBtn = cardElement.querySelector('.card-flip-btn');
         if (flipBtn) {
-            flipBtn.hidden = !hasMultipleFaces;
+            flipBtn.hidden = !hasFlipControl;
             flipBtn.disabled = cardElement.dataset.isFlipping === 'true';
-            if (hasMultipleFaces) {
+            flipBtn.textContent = isLegacyFlip ? 'Rotate' : 'Flip';
+            if (isLegacyFlip) {
+                flipBtn.title = faceIndex === 1 ? 'Rotate card back to its front half' : 'Rotate card to read its other half';
+                flipBtn.setAttribute('aria-label', faceIndex === 1 ? `Rotate ${card.name} back` : `Rotate ${card.name} to read its other half`);
+            } else if (hasMultipleFaces) {
                 const nextFace = faceImages[(faceIndex + 1) % faceImages.length];
                 flipBtn.title = `Flip to ${nextFace.name || 'other face'}`;
                 flipBtn.setAttribute('aria-label', `Flip ${card.name} to ${nextFace.name || 'the other face'}`);
