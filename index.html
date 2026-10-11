@@ -5,7 +5,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>ManaSearch</title>
-    <link rel="stylesheet" href="style.css?v=20261011-46">
+    <link rel="stylesheet" href="style.css?v=20261011-48">
 </head>
 <body>
     <header class="site-header">
@@ -453,6 +453,7 @@
             </div>
             <div class="modal-body">
                 <p class="modal-intro">These filters are hard constraints: matching cards must satisfy them.</p>
+                <p class="constraint-autofill-help">Fill Empty From Source copies known types, subtypes, keywords, colors, mana value, numeric power/toughness, rarity, and set code into <strong>empty</strong> fields only. These become hard filters, so use them only when you want those restrictions. Format stays under your control.</p>
                 <div class="filters-grid">
                     <div class="filter-group filter-group-wide">
                         <label>Card Types <span class="filter-help">All selected types must be present</span></label>
@@ -463,12 +464,20 @@
                                     <option value="">Add a type…</option>
                                     <option value="artifact">Artifact</option>
                                     <option value="battle">Battle</option>
+                                    <option value="conspiracy">Conspiracy</option>
                                     <option value="creature">Creature</option>
+                                    <option value="dungeon">Dungeon</option>
                                     <option value="enchantment">Enchantment</option>
                                     <option value="instant">Instant</option>
+                                    <option value="kindred">Kindred</option>
                                     <option value="land">Land</option>
+                                    <option value="phenomenon">Phenomenon</option>
+                                    <option value="plane">Plane</option>
                                     <option value="planeswalker">Planeswalker</option>
+                                    <option value="scheme">Scheme</option>
                                     <option value="sorcery">Sorcery</option>
+                                    <option value="tribal">Tribal (legacy)</option>
+                                    <option value="vanguard">Vanguard</option>
                                 </select>
                             </div>
                         </div>
@@ -572,6 +581,7 @@
                             <button type="button" class="color-pip pip-b" data-color="b" title="Black">B</button>
                             <button type="button" class="color-pip pip-r" data-color="r" title="Red">R</button>
                             <button type="button" class="color-pip pip-g" data-color="g" title="Green">G</button>
+                            <button type="button" class="color-pip pip-c" data-color="c" title="Colorless">C</button>
                         </div>
                         <input type="hidden" id="filter-colors">
                     </div>
@@ -593,7 +603,9 @@
                     </div>
                 </div>
             </div>
+            <p id="constraint-autofill-status" class="constraint-autofill-status hidden" role="status" aria-live="polite"></p>
             <div class="modal-footer constraints-modal-footer">
+                <button type="button" id="autofill-source-constraints-btn" class="secondary-preference-btn" disabled data-feature-tip="Fill only empty constraint fields using properties of the selected source card." data-feature-preview="Type · Subtype · Keywords · Colors · Mana value · Stats · Rarity · Set">Fill Empty From Source</button>
                 <button type="button" id="clear-all-constraints-btn" class="secondary-preference-btn">Clear All Constraints</button>
                 <button type="button" id="save-card-constraints-btn">Done</button>
             </div>
@@ -778,6 +790,7 @@
         import * as transformers from "https://cdn.jsdelivr.net/npm/@xenova/transformers@2.16.0";
         window.transformers = transformers;
     </script>
-    <script type="module" src="app.js?v=20261011-46"></script>
+    <script src="pako.min.js?v=20261011-48"></script>
+    <script type="module" src="app.js?v=20261011-48"></script>
 </body>
 </html>

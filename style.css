@@ -5727,3 +5727,89 @@ button:focus-visible { outline: 2px solid var(--accent-color); outline-offset: 2
 @media (max-width: 760px) {
     .source-card-art-wrap { width: min(100%, 300px); flex: 0 1 auto; margin-inline: auto; }
 }
+
+
+/* v47: removable Recent Searches entries and source-aware constraint autofill. */
+#history-list .history-entry,
+#favorites-list .favorite-entry {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 3px 4px;
+    min-width: 0;
+}
+.history-card-open {
+    display: block;
+    flex: 1 1 auto;
+    min-width: 0;
+    padding: 5px 4px;
+    border: 0;
+    border-radius: 5px;
+    background: transparent;
+    color: var(--text-main);
+    font: inherit;
+    text-align: left;
+    overflow-wrap: anywhere;
+    cursor: pointer;
+}
+.history-card-open:hover,
+.history-card-open:focus-visible {
+    background: var(--bg-accent);
+    outline-color: var(--accent-color);
+}
+.history-card-remove {
+    flex: 0 0 26px;
+    width: 26px;
+    min-width: 26px;
+    height: 26px;
+    padding: 0;
+    border: 1px solid transparent;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--text-muted);
+    font-size: 19px;
+    line-height: 1;
+    cursor: pointer;
+    transition: color .15s ease, background-color .15s ease, border-color .15s ease;
+}
+.history-card-remove:hover,
+.history-card-remove:focus-visible {
+    color: var(--text-main);
+    background: var(--bg-accent);
+    border-color: var(--border-color);
+    outline-color: var(--accent-color);
+}
+.constraints-modal-footer {
+    flex-wrap: wrap;
+    align-items: center;
+}
+.constraint-autofill-status {
+    margin: 12px 0 0;
+    padding: 9px 11px;
+    border-left: 3px solid var(--accent-color);
+    border-radius: 5px;
+    background: var(--bg-accent);
+    color: var(--text-muted);
+    font-size: 12px;
+    line-height: 1.45;
+}
+.color-pip-group .pip-c {
+    border-color: #888b98;
+    background: linear-gradient(135deg, #d7d9e0, #878b99);
+    color: #1a1a1e;
+}
+@media (max-width: 520px) {
+    .constraints-modal-footer {
+        justify-content: stretch;
+    }
+    .constraints-modal-footer button {
+        flex: 1 1 100%;
+    }
+}
+
+.constraint-autofill-help {
+    margin: -4px 0 14px;
+    color: var(--text-muted);
+    font-size: 12px;
+    line-height: 1.45;
+}

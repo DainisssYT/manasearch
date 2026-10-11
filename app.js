@@ -1,6 +1,6 @@
-/* ManaSearch build 20261011-46 */
+/* ManaSearch build 20261011-47 */
 // ManaSearch deployment build marker. Bump this whenever app.js changes so cached-module issues are easy to diagnose.
-const MANASEARCH_APP_BUILD = '20261011-46';
+const MANASEARCH_APP_BUILD = '20261011-47';
 console.info(`[ManaSearch] app.js build ${MANASEARCH_APP_BUILD}`);
 
 // State Management
@@ -467,6 +467,9 @@ let activeSearchStreamProgressReporter = null;
 // Local Storage Keys
 const HISTORY_KEY = 'manamatch_history';
 const HISTORY_CARD_PREVIEWS_KEY = 'manamatch_history_card_previews';
+// Explicitly dismissed recent cards stay out of the sidebar and empty-query picker suggestions,
+// but remain searchable by name and are not removed from Favorites or the in-memory cache.
+const HISTORY_DISMISSED_KEY = 'manamatch_history_dismissed';
 const FAVORITES_KEY = 'manamatch_favorites';
 const THEME_KEY = 'manamatch_theme';
 const DISPLAY_PREFERENCES_KEY = 'manasearch_display_preferences_v1';
@@ -670,6 +673,8 @@ function runCandidatePreferenceRegressionSuite({ log = true } = {}) {
     }
 }
 if (typeof window !== 'undefined') window.runCandidatePreferenceRegressionSuite = runCandidatePreferenceRegressionSuite;
+if (typeof window !== 'undefined') window.autofillEmptyConstraintsFromSource = autofillEmptyConstraintsFromSource;
+if (typeof window !== 'undefined') window.removeRecentSearchCard = removeRecentSearchCard;
 
 function getDisplayedResultLimit() {
     return clampDisplayResultLimit(displayPreferences?.maxResults);
@@ -11442,6 +11447,105 @@ function readConstraintFilters() {
     };
 }
 
+/**
+ * Fill only currently empty hard-constraint fields from the selected source card. This is an
+ * explicit user action rather than an automatic side effect of choosing a source: constraints are
+ * hard filters and silently copying them during source selection would hide valid alternatives.
+ * Set/rarity/format/oracle filters are intentionally excluded because they are deck/context choices
+ * rather than card characteristics that should usually transfer to similar cards.
+ */
+function autofillEmptyConstraintsFromSource(source = currentSourceCard) {
+    if (!source) return { filled: [], skipped: ['No source card is selected'] };
+    const filled = [];
+    const skipped = [];
+    const isEmpty = id => {
+        const el = document.getElementById(id);
+        return !el || !String(el.value || '').trim();
+    };
+    const setInput = (id, value, label = id) => {
+        const el = document.getElementById(id);
+        const text = String(value ?? '').trim();
+        if (!el || !text || !isEmpty(id)) return false;
+        el.value = text;
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+        if (el.tagName === 'SELECT') el.dispatchEvent(new Event('change', { bubbles: true }));
+        filled.push(label);
+        return true;
+    };
+    const setList = (id, values, label) => {
+        const el = document.getElementById(id);
+        const clean = [...new Set((Array.isArray(values) ? values : []).map(v => String(v || '').trim().toLowerCase()).filter(Boolean))];
+        if (!el || !clean.length || !isEmpty(id)) return false;
+        el.value = clean.join('|');
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+        const chips = document.getElementById(`${id}-chips`);
+        if (chips) syncConstraintChipField(id, `${id}-chips`);
+        filled.push(label);
+        return true;
+    };
+
+    // The active type line shown in the Source Card panel is authoritative and avoids combining
+    // unrelated front/back types on transforming or modal double-faced cards.
+    const typeLine = String(source.card_faces?.[0]?.type_line || (source === currentSourceCard ? sourceCardType?.textContent : '') || source.type_line || '').trim();
+    const typeParts = getTypeLineParts(typeLine);
+    const typeTokens = new Set(['artifact', 'battle', 'conspiracy', 'creature', 'dungeon', 'enchantment', 'instant', 'kindred', 'land', 'phenomenon', 'plane', 'planeswalker', 'scheme', 'sorcery', 'tribal', 'vanguard']);
+    const supertypeTokens = new Set(['basic', 'legendary', 'ongoing', 'snow', 'world']);
+    const leftTokens = String(typeParts.left || '').toLowerCase().split(/\s+/).filter(Boolean);
+    const types = leftTokens.filter(token => typeTokens.has(token));
+    const supertypes = leftTokens.filter(token => supertypeTokens.has(token));
+    setList('filter-type', types, 'card types');
+    setList('filter-supertype', supertypes, 'supertypes');
+    // Keep the entire subtype sequence as one phrase. This safely supports multiword subtypes
+    // (e.g. Time Lord) and avoids guessing where a multiword subtype ends and another begins.
+    const subtypePhrase = String(typeParts.subtypes || '').trim().replace(/\s+/g, ' ');
+    if (subtypePhrase) setList('filter-subtype', [subtypePhrase], 'subtypes');
+
+    const keywords = Array.isArray(source.keywords) ? source.keywords : [];
+    setList('filter-keyword', keywords, 'keywords');
+
+    const identity = Array.isArray(source.color_identity)
+        ? source.color_identity.map(color => String(color).toLowerCase()).filter(color => 'wubrg'.includes(color)).sort().join('')
+        : '';
+    if (Array.isArray(source.color_identity) && isEmpty('filter-identity')) {
+        setInput('filter-identity', identity || 'c', 'color identity');
+    }
+
+    const colors = Array.isArray(source.colors)
+        ? source.colors.map(color => String(color).toLowerCase()).filter(color => 'wubrg'.includes(color)).sort().join('')
+        : '';
+    if (Array.isArray(source.colors) && isEmpty('filter-colors')) setInput('filter-colors', colors || 'c', 'exact colors');
+
+    const rarity = String(source.rarity || '').toLowerCase();
+    if (['common', 'uncommon', 'rare', 'mythic'].includes(rarity) && isEmpty('filter-rarity')) {
+        setInput('filter-rarity', rarity, 'rarity');
+    }
+    const setCode = String(source.set || '').trim().toLowerCase();
+    if (/^[a-z0-9]{2,3}$/.test(setCode) && isEmpty('filter-set')) setInput('filter-set', setCode, 'set code');
+
+    const cmc = Number(source.cmc ?? source.mana_value);
+    if (Number.isFinite(cmc) && cmc >= 0 && isEmpty('filter-cmc')) setInput('filter-cmc', String(cmc), 'mana value');
+    const activeFace = Array.isArray(source.card_faces) ? source.card_faces[0] : null;
+    const numericConstraint = value => {
+        const text = String(value ?? '').trim();
+        return /^-?\d+(?:\.\d+)?$/.test(text) ? text : '';
+    };
+    const power = numericConstraint(source.power ?? activeFace?.power);
+    const toughness = numericConstraint(source.toughness ?? activeFace?.toughness);
+    if (power) setInput('filter-power', power, 'power');
+    if (toughness) setInput('filter-toughness', toughness, 'toughness');
+
+    const button = document.getElementById('autofill-source-constraints-btn');
+    const status = document.getElementById('constraint-autofill-status');
+    if (status) {
+        status.textContent = filled.length
+            ? `Filled empty fields from ${source.name}: ${filled.join(', ')}. These are hard filters; remove any that should not limit the search.`
+            : `No empty constraint fields could be filled from ${source.name}. Existing values were left unchanged.`;
+        status.classList.remove('hidden');
+    }
+    if (button) button.title = `Fill empty constraints using ${source.name}`;
+    return { filled, skipped };
+}
+
 function hasActiveConstraintFilters(filters) {
     if (!filters) return false;
     return Boolean(
@@ -11461,7 +11565,7 @@ function buildScryfallConstraintParts(filters) {
     (filters?.types || []).forEach(type => parts.push(`type:${escapeScryfallValue(type)}`));
     // Supertypes such as legendary are searchable through Scryfall's type: syntax.
     (filters?.supertypes || []).forEach(supertype => parts.push(`type:${escapeScryfallValue(supertype)}`));
-    (filters?.subtypes || []).forEach(subtype => parts.push(`subtype:${escapeScryfallValue(subtype)}`));
+    (filters?.subtypes || []).forEach(subtype => parts.push(`subtype:"${escapeScryfallValue(subtype)}"`));
     (filters?.keywords || []).forEach(keyword => parts.push(`keyword:"${escapeScryfallValue(keyword)}"`));
     if (filters?.format) parts.push(`f:${filters.format}`);
     if (filters?.rarity) parts.push(`r:${filters.rarity}`);
@@ -11589,7 +11693,8 @@ function explainFilterFailures(card, filters, broadFallbackFilters) {
     if (filters.colors) {
         const required = filters.colors.toLowerCase().replace(/[^wubrgc]/g, '').split('').sort().join('');
         const actual = (card.colors || []).map(c => c.toLowerCase()).sort().join('');
-        if (actual !== required) failures.push({ field: 'colors', expected: `{${required}}`, actual: `{${actual}}` });
+        const exactColorlessMatch = required === 'c' && actual === '';
+        if (!exactColorlessMatch && actual !== required) failures.push({ field: 'colors', expected: `{${required}}`, actual: actual ? `{${actual}}` : '{colorless}' });
     }
     if (filters.cmc) {
         const cmcFilter = parseComparisonFilter(filters.cmc);
@@ -11668,7 +11773,10 @@ function matchesActiveFilters(card, filters, broadFallbackFilters) {
     if (filters.colors) {
         const requiredColors = filters.colors.toLowerCase().replace(/[^wubrgc]/g, '').split('').sort().join('');
         const cardColors = (card.colors || []).map(c => c.toLowerCase()).sort().join('');
-        if (cardColors !== requiredColors) return false;
+        // In Exact Colors, C means exactly colorless. It must not be treated as a fifth/sixth
+        // colored pip because Scryfall's card.colors array represents colorless as an empty array.
+        const matchesColorless = requiredColors === 'c' && cardColors === '';
+        if (!matchesColorless && cardColors !== requiredColors) return false;
     }
 
     if (filters.cmc) {
@@ -12553,7 +12661,7 @@ let semanticCosineBaselineReady = false;
 const STATIC_CARD_CORPUS_FILENAME = 'cards.bin';
 const STATIC_CARD_CORPUS_VERSION = 1;
 const STATIC_CARD_CORPUS_MAGIC = 'MSCARD1G';
-const STATIC_CARD_CORPUS_CACHE_VERSION = '20261009-27';
+const STATIC_CARD_CORPUS_CACHE_VERSION = '20261011-48';
 const STATIC_DATA_META_FILENAME = 'static-data-meta.json';
 let staticDataMetaPromise = null;
 let staticDataBuildId = null;
@@ -12631,7 +12739,8 @@ function updateStaticSearchStatus(message = null) {
         if (staticSearchStatusSpinner) staticSearchStatusSpinner.classList.add('hidden');
         if (staticSearchRetryBtn) staticSearchRetryBtn.classList.add('hidden');
     } else if (failed) {
-        staticSearchStatusText.textContent = message || 'Search data could not be loaded after 3 attempts. Find Similar Cards is disabled.';
+        const failureDetail = String(staticSearchResourceState.lastError || '').trim();
+        staticSearchStatusText.textContent = message || `Search data could not be loaded after 3 attempts. Find Similar Cards is disabled.${failureDetail ? ` Details: ${failureDetail}` : ''}`;
         staticSearchStatus.classList.add('is-error');
         if (staticSearchStatusSpinner) staticSearchStatusSpinner.classList.add('hidden');
         if (staticSearchRetryBtn) staticSearchRetryBtn.classList.remove('hidden');
@@ -12768,9 +12877,20 @@ async function loadStaticSearchResources({ forceRetry = false } = {}) {
     return staticSearchResourcesPromise;
 }
 
+function getStaticAssetsBaseUrl() {
+    // Resolve data next to this module, not relative to the current address bar URL. On a
+    // project GitHub Pages site, opening `/manasearch` without the trailing slash can otherwise
+    // resolve `cards.bin` against the account root instead of `/manasearch/` on some browsers.
+    try {
+        return new URL('.', import.meta.url);
+    } catch (_) {
+        return new URL('.', document.baseURI || window.location.href);
+    }
+}
+
 function getStaticDataMetaUrl() {
     try {
-        const url = new URL(STATIC_DATA_META_FILENAME, document.baseURI || window.location.href);
+        const url = new URL(STATIC_DATA_META_FILENAME, getStaticAssetsBaseUrl());
         // Metadata is tiny and must be revalidated so newly generated static assets receive
         // a fresh cache key without requiring an app.js deployment.
         url.searchParams.set('v', `${STATIC_CARD_CORPUS_CACHE_VERSION}-meta`);
@@ -12815,7 +12935,7 @@ function getStaticAssetCacheKey() {
 
 function getStaticCardCorpusUrl(retryAttempt = 0) {
     try {
-        const url = new URL(STATIC_CARD_CORPUS_FILENAME, document.baseURI || window.location.href);
+        const url = new URL(STATIC_CARD_CORPUS_FILENAME, getStaticAssetsBaseUrl());
         url.searchParams.set('v', getStaticAssetCacheKey());
         if (retryAttempt > 1) url.searchParams.set('retry', String(retryAttempt));
         return url.href;
@@ -12851,12 +12971,164 @@ function prepareStaticCardRecord(card) {
     return { ...card, _localSearchText: searchText, _localNameKey: normalizeCardNameForIdentity(card.name) };
 }
 
-function parseStaticCardCorpusBinary(buffer) {
+// Decode cards.bin incrementally. The compressed file is only ~13 MB, but its JSON expands to
+// ~100 MB. Building one giant JSON string + JSON.parse() temporarily duplicates that payload and
+// can exceed the memory limit of mobile browser tabs. This parser processes one card object at a
+// time, keeping the same card records and lexical index while avoiding that large transient heap.
+async function* decompressStaticCardCorpusChunks(buffer, payloadBytes) {
+    const compressed = new Uint8Array(buffer, 24, payloadBytes);
+    if (typeof window.DecompressionStream === 'function' && typeof ReadableStream !== 'undefined') {
+        let offset = 0;
+        const compressedStream = new ReadableStream({
+            pull(controller) {
+                if (offset >= compressed.length) {
+                    controller.close();
+                    return;
+                }
+                const end = Math.min(offset + 64 * 1024, compressed.length);
+                controller.enqueue(compressed.subarray(offset, end));
+                offset = end;
+            }
+        });
+        let reader;
+        try {
+            reader = compressedStream.pipeThrough(new window.DecompressionStream('gzip')).getReader();
+            const decoder = new TextDecoder();
+            while (true) {
+                const { value, done } = await reader.read();
+                if (done) break;
+                const text = decoder.decode(value, { stream: true });
+                if (text) yield text;
+            }
+            const finalText = decoder.decode();
+            if (finalText) yield finalText;
+            return;
+        } catch (error) {
+            throw new Error(`Could not decompress cards.bin using the browser's gzip decoder: ${error?.message || error}`);
+        } finally {
+            try { reader?.releaseLock(); } catch (_) {}
+        }
+    }
+
+    // Older mobile Safari/WebViews do not expose DecompressionStream. A small bundled pako
+    // fallback keeps the exact same gzip asset usable without requiring a separate 100 MB JSON
+    // download or a third-party CDN at runtime.
+    const pakoApi = window.pako;
+    if (pakoApi?.Inflate) {
+        const inflater = new pakoApi.Inflate({ to: 'string' });
+        let output = [];
+        inflater.onData = chunk => { if (chunk) output.push(chunk); };
+        const chunkBytes = 24 * 1024;
+        for (let offset = 0; offset < compressed.length; offset += chunkBytes) {
+            const end = Math.min(offset + chunkBytes, compressed.length);
+            inflater.push(compressed.subarray(offset, end), end >= compressed.length);
+            if (inflater.err) throw new Error(`Could not decompress cards.bin (fallback decoder): ${inflater.msg || inflater.err}`);
+            if (output.length) {
+                const ready = output;
+                output = [];
+                for (const text of ready) yield text;
+            }
+            if ((offset & 0x3ffff) === 0) await yieldForManaSearchResponsiveness();
+        }
+        if (!inflater.ended) throw new Error('The cards.bin gzip stream ended unexpectedly.');
+        if (output.length) for (const text of output) yield text;
+        return;
+    }
+    throw new Error('This browser lacks built-in gzip streaming and the bundled fallback decoder did not load. Reload the page or update your browser.');
+}
+
+async function buildStaticCardCorpusIndex(cards, { version, payloadBuildId, expectedBuildId, byteLength }) {
+    if (!cards.length) throw new Error('Static card corpus contains no usable cards.');
+
+    // Build the local lexical index once, after cards.bin has been decoded. Use a packed Uint32
+    // posting array instead of Map<string, Set<number>>. Work is still split into short slices.
+    let buildSliceStartedAt = getManaResponsivenessNow();
+    const tokenCounts = new Map();
+    for (let cardIndex = 0; cardIndex < cards.length; cardIndex++) {
+        const tokens = getLocalCorpusIndexTokens(cards[cardIndex]?._localSearchText || '');
+        for (const token of tokens) tokenCounts.set(token, (tokenCounts.get(token) || 0) + 1);
+        if ((cardIndex & 7) === 7) {
+            const now = getManaResponsivenessNow();
+            if (now - buildSliceStartedAt >= getManaSearchSliceBudgetMs()) {
+                await yieldForManaSearchResponsiveness();
+                buildSliceStartedAt = getManaResponsivenessNow();
+            }
+        }
+    }
+    let postingCount = 0;
+    const tokenIndex = new Map();
+    let tokenOps = 0;
+    buildSliceStartedAt = getManaResponsivenessNow();
+    for (const [token, count] of tokenCounts) {
+        tokenIndex.set(token, { offset: postingCount, length: count });
+        postingCount += count;
+        tokenOps++;
+        if ((tokenOps & 255) === 0) {
+            const now = getManaResponsivenessNow();
+            if (now - buildSliceStartedAt >= getManaSearchSliceBudgetMs()) {
+                await yieldForManaSearchResponsiveness();
+                buildSliceStartedAt = getManaResponsivenessNow();
+            }
+        }
+    }
+    const postingData = new Uint32Array(postingCount);
+    const tokenWriteOffsets = new Map();
+    tokenOps = 0;
+    buildSliceStartedAt = getManaResponsivenessNow();
+    for (const [token, meta] of tokenIndex) {
+        tokenWriteOffsets.set(token, meta.offset);
+        tokenOps++;
+        if ((tokenOps & 255) === 0) {
+            const now = getManaResponsivenessNow();
+            if (now - buildSliceStartedAt >= getManaSearchSliceBudgetMs()) {
+                await yieldForManaSearchResponsiveness();
+                buildSliceStartedAt = getManaResponsivenessNow();
+            }
+        }
+    }
+    buildSliceStartedAt = getManaResponsivenessNow();
+    for (let cardIndex = 0; cardIndex < cards.length; cardIndex++) {
+        const tokens = getLocalCorpusIndexTokens(cards[cardIndex]?._localSearchText || '');
+        for (const token of tokens) {
+            const writeAt = tokenWriteOffsets.get(token);
+            if (writeAt == null) continue;
+            postingData[writeAt] = cardIndex;
+            tokenWriteOffsets.set(token, writeAt + 1);
+        }
+        if ((cardIndex & 7) === 7) {
+            const now = getManaResponsivenessNow();
+            if (now - buildSliceStartedAt >= getManaSearchSliceBudgetMs()) {
+                await yieldForManaSearchResponsiveness();
+                buildSliceStartedAt = getManaResponsivenessNow();
+            }
+        }
+    }
+    const byName = new Map();
+    buildSliceStartedAt = getManaResponsivenessNow();
+    for (let cardIndex = 0; cardIndex < cards.length; cardIndex++) {
+        const card = cards[cardIndex];
+        byName.set(normalizeCardNameForIdentity(card.name), card);
+        if ((cardIndex & 7) === 7) {
+            const now = getManaResponsivenessNow();
+            if (now - buildSliceStartedAt >= getManaSearchSliceBudgetMs()) {
+                await yieldForManaSearchResponsiveness();
+                buildSliceStartedAt = getManaResponsivenessNow();
+            }
+        }
+    }
+    return {
+        source: 'static', version, buildId: payloadBuildId || expectedBuildId || null,
+        total: cards.length, cards, byName, tokenIndex, postingData,
+        indexedPostingCount: postingCount, byteLength
+    };
+}
+
+async function parseStaticCardCorpusBinary(buffer) {
     if (!(buffer instanceof ArrayBuffer) || buffer.byteLength < 24) {
         throw new Error('Static card corpus is too small or empty.');
     }
-    const bytes = new Uint8Array(buffer);
-    const magic = new TextDecoder().decode(bytes.subarray(0, 8));
+    const bytes = new Uint8Array(buffer, 0, 8);
+    const magic = new TextDecoder().decode(bytes);
     if (magic !== STATIC_CARD_CORPUS_MAGIC) throw new Error('Static card corpus has an unknown format.');
     const view = new DataView(buffer);
     const version = view.getUint32(8, true);
@@ -12864,135 +13136,115 @@ function parseStaticCardCorpusBinary(buffer) {
     const declaredCount = view.getUint32(16, true);
     if (version !== STATIC_CARD_CORPUS_VERSION) throw new Error(`Static card corpus version ${version} is not supported.`);
     if (!payloadBytes || 24 + payloadBytes > buffer.byteLength) throw new Error('Static card corpus payload is truncated.');
+    if (24 + payloadBytes !== buffer.byteLength) throw new Error('Static card corpus contains unexpected trailing bytes.');
 
-    const compressed = buffer.slice(24, 24 + payloadBytes);
-    return (async () => {
-        if (!('DecompressionStream' in window)) {
-            throw new Error('This browser does not support gzip decompression for the static card corpus.');
-        }
-        const stream = new Blob([compressed]).stream().pipeThrough(new DecompressionStream('gzip'));
-        const decompressed = await new Response(stream).arrayBuffer();
-        const json = new TextDecoder().decode(new Uint8Array(decompressed));
-        // Let pending input/paint tasks run before the one-shot JSON.parse operation. Everything
-        // after parsing is processed cooperatively in short, time-budgeted slices below.
-        await yieldForManaSearchResponsiveness();
-        const payload = JSON.parse(json);
-        const sourceCards = Array.isArray(payload) ? payload : payload?.cards;
-        if (!Array.isArray(sourceCards) || !sourceCards.length) throw new Error('Static card corpus contains no cards.');
-        if (declaredCount && sourceCards.length !== declaredCount) {
-            throw new Error(`Static card corpus count mismatch (${sourceCards.length} vs ${declaredCount}).`);
-        }
-        const payloadBuildId = String(payload?.build_id || '').trim();
-        const expectedBuildId = staticDataBuildId || '';
-        if (expectedBuildId && payloadBuildId && payloadBuildId !== expectedBuildId) {
-            throw new Error('Static card corpus build ID does not match static-data-meta.json.');
-        }
-        const cards = [];
-        let buildSliceStartedAt = getManaResponsivenessNow();
-        for (let sourceIndex = 0; sourceIndex < sourceCards.length; sourceIndex++) {
-            const card = prepareStaticCardRecord(sourceCards[sourceIndex]);
-            if (card) cards.push(card);
-            if ((sourceIndex & 7) === 7) {
-                const now = getManaResponsivenessNow();
-                if (now - buildSliceStartedAt >= getManaSearchSliceBudgetMs()) {
-                    await yieldForManaSearchResponsiveness();
-                    buildSliceStartedAt = getManaResponsivenessNow();
-                }
-            }
-        }
-        if (!cards.length) throw new Error('Static card corpus contains no usable cards.');
+    const cards = [];
+    let sourceCardCount = 0;
+    let payloadBuildId = '';
+    let prefix = '';
+    let foundCardsArray = false;
+    let cardsArrayClosed = false;
+    let inCard = false;
+    let depth = 0;
+    let inString = false;
+    let escaped = false;
+    let currentCardParts = [];
+    let sliceStartedAt = getManaResponsivenessNow();
 
-        // Build the local lexical index once, after cards.bin has been decoded. Use a packed
-        // Uint32 posting array instead of Map<string, Set<number>>. Every pass yields by elapsed
-        // time, so indexing all ~35k cards does not monopolize the UI while input or scroll events
-        // are waiting to be handled.
-        const tokenCounts = new Map();
-        buildSliceStartedAt = getManaResponsivenessNow();
-        for (let cardIndex = 0; cardIndex < cards.length; cardIndex++) {
-            const tokens = getLocalCorpusIndexTokens(cards[cardIndex]?._localSearchText || '');
-            for (const token of tokens) tokenCounts.set(token, (tokenCounts.get(token) || 0) + 1);
-            if ((cardIndex & 7) === 7) {
-                const now = getManaResponsivenessNow();
-                if (now - buildSliceStartedAt >= getManaSearchSliceBudgetMs()) {
-                    await yieldForManaSearchResponsiveness();
-                    buildSliceStartedAt = getManaResponsivenessNow();
+    const parseCardObject = raw => {
+        let sourceCard;
+        try { sourceCard = JSON.parse(raw); }
+        catch (error) { throw new Error(`cards.bin contains an invalid card record near item ${sourceCardCount + 1}: ${error?.message || error}`); }
+        sourceCardCount++;
+        const card = prepareStaticCardRecord(sourceCard);
+        if (card) cards.push(card);
+    };
+
+    for await (let text of decompressStaticCardCorpusChunks(buffer, payloadBytes)) {
+        if (!foundCardsArray) {
+            prefix += text;
+            const marker = /"cards"\s*:\s*\[/.exec(prefix);
+            if (!marker) {
+                if (prefix.length > 1024 * 1024) throw new Error('cards.bin JSON header is unexpectedly large or missing the cards array.');
+                continue;
+            }
+            const buildMatch = /"build_id"\s*:\s*("(?:\\.|[^"\\])*")/.exec(prefix.slice(0, marker.index));
+            if (buildMatch) {
+                try { payloadBuildId = String(JSON.parse(buildMatch[1]) || '').trim(); } catch (_) { payloadBuildId = ''; }
+            }
+            const expectedBuildId = staticDataBuildId || '';
+            if (expectedBuildId && payloadBuildId && payloadBuildId !== expectedBuildId) {
+                throw new Error('Static card corpus build ID does not match static-data-meta.json.');
+            }
+            text = prefix.slice(marker.index + marker[0].length);
+            prefix = '';
+            foundCardsArray = true;
+        }
+        if (cardsArrayClosed) continue;
+
+        let i = 0;
+        let segmentStart = inCard ? 0 : -1;
+        while (i < text.length) {
+            if (!inCard) {
+                const ch = text[i];
+                if (ch === ' ' || ch === '\n' || ch === '\r' || ch === '\t' || ch === ',') { i++; continue; }
+                if (ch === ']') { cardsArrayClosed = true; i++; break; }
+                if (ch !== '{') throw new Error(`cards.bin card array is malformed near item ${sourceCardCount + 1}.`);
+                inCard = true;
+                depth = 1;
+                inString = false;
+                escaped = false;
+                segmentStart = i;
+                i++;
+                continue;
+            }
+
+            const ch = text[i];
+            if (inString) {
+                if (escaped) escaped = false;
+                else if (ch === '\\') escaped = true;
+                else if (ch === '"') inString = false;
+            } else {
+                if (ch === '"') inString = true;
+                else if (ch === '{') depth++;
+                else if (ch === '}') {
+                    depth--;
+                    if (depth === 0) {
+                        currentCardParts.push(text.slice(segmentStart, i + 1));
+                        parseCardObject(currentCardParts.join(''));
+                        currentCardParts = [];
+                        inCard = false;
+                        segmentStart = -1;
+                        i++;
+                        if ((sourceCardCount & 7) === 0) {
+                            const now = getManaResponsivenessNow();
+                            if (now - sliceStartedAt >= getManaSearchSliceBudgetMs()) {
+                                await yieldForManaSearchResponsiveness();
+                                sliceStartedAt = getManaResponsivenessNow();
+                            }
+                        }
+                        continue;
+                    }
                 }
             }
+            i++;
         }
-        let postingCount = 0;
-        const tokenIndex = new Map();
-        let tokenOps = 0;
-        buildSliceStartedAt = getManaResponsivenessNow();
-        for (const [token, count] of tokenCounts) {
-            tokenIndex.set(token, { offset: postingCount, length: count });
-            postingCount += count;
-            tokenOps++;
-            if ((tokenOps & 255) === 0) {
-                const now = getManaResponsivenessNow();
-                if (now - buildSliceStartedAt >= getManaSearchSliceBudgetMs()) {
-                    await yieldForManaSearchResponsiveness();
-                    buildSliceStartedAt = getManaResponsivenessNow();
-                }
-            }
+        if (inCard && segmentStart >= 0) {
+            currentCardParts.push(text.slice(segmentStart));
         }
-        const postingData = new Uint32Array(postingCount);
-        const tokenWriteOffsets = new Map();
-        tokenOps = 0;
-        buildSliceStartedAt = getManaResponsivenessNow();
-        for (const [token, meta] of tokenIndex) {
-            tokenWriteOffsets.set(token, meta.offset);
-            tokenOps++;
-            if ((tokenOps & 255) === 0) {
-                const now = getManaResponsivenessNow();
-                if (now - buildSliceStartedAt >= getManaSearchSliceBudgetMs()) {
-                    await yieldForManaSearchResponsiveness();
-                    buildSliceStartedAt = getManaResponsivenessNow();
-                }
-            }
-        }
-        buildSliceStartedAt = getManaResponsivenessNow();
-        for (let cardIndex = 0; cardIndex < cards.length; cardIndex++) {
-            const tokens = getLocalCorpusIndexTokens(cards[cardIndex]?._localSearchText || '');
-            for (const token of tokens) {
-                const writeAt = tokenWriteOffsets.get(token);
-                if (writeAt == null) continue;
-                postingData[writeAt] = cardIndex;
-                tokenWriteOffsets.set(token, writeAt + 1);
-            }
-            if ((cardIndex & 7) === 7) {
-                const now = getManaResponsivenessNow();
-                if (now - buildSliceStartedAt >= getManaSearchSliceBudgetMs()) {
-                    await yieldForManaSearchResponsiveness();
-                    buildSliceStartedAt = getManaResponsivenessNow();
-                }
-            }
-        }
-        const byName = new Map();
-        buildSliceStartedAt = getManaResponsivenessNow();
-        for (let cardIndex = 0; cardIndex < cards.length; cardIndex++) {
-            const card = cards[cardIndex];
-            byName.set(normalizeCardNameForIdentity(card.name), card);
-            if ((cardIndex & 7) === 7) {
-                const now = getManaResponsivenessNow();
-                if (now - buildSliceStartedAt >= getManaSearchSliceBudgetMs()) {
-                    await yieldForManaSearchResponsiveness();
-                    buildSliceStartedAt = getManaResponsivenessNow();
-                }
-            }
-        }
-        return {
-            source: 'static',
-            version,
-            buildId: payloadBuildId || expectedBuildId || null,
-            total: cards.length,
-            cards,
-            byName,
-            tokenIndex,
-            postingData,
-            indexedPostingCount: postingCount,
-            byteLength: buffer.byteLength
-        };
-    })();
+    }
+
+    if (!foundCardsArray) throw new Error('cards.bin JSON does not contain a cards array.');
+    if (inCard) throw new Error('cards.bin ended in the middle of a card record.');
+    if (!cardsArrayClosed) throw new Error('cards.bin cards array is truncated.');
+    if (declaredCount && sourceCardCount !== declaredCount) {
+        throw new Error(`Static card corpus count mismatch (${sourceCardCount} vs ${declaredCount}).`);
+    }
+    if (!cards.length) throw new Error('Static card corpus contains no usable cards.');
+
+    return buildStaticCardCorpusIndex(cards, {
+        version, payloadBuildId, expectedBuildId: staticDataBuildId || '', byteLength: buffer.byteLength
+    });
 }
 
 async function loadStaticCardCorpus({ retryAttempt = 1 } = {}) {
@@ -13467,7 +13719,7 @@ let fullSemanticIndexUnavailableReason = null;
 
 function getStaticSemanticIndexUrl(retryAttempt = 0) {
     try {
-        const url = new URL(STATIC_SEMANTIC_INDEX_FILENAME, document.baseURI || window.location.href);
+        const url = new URL(STATIC_SEMANTIC_INDEX_FILENAME, getStaticAssetsBaseUrl());
         url.searchParams.set('v', getStaticAssetCacheKey());
         if (retryAttempt > 1) url.searchParams.set('retry', String(retryAttempt));
         return url.href;
@@ -15667,6 +15919,23 @@ function initApp() {
             cardConstraintsBadge.style.backgroundColor = 'var(--accent-color)';
         }
     }
+    const autofillSourceConstraintsBtn = document.getElementById('autofill-source-constraints-btn');
+    if (autofillSourceConstraintsBtn) {
+        autofillSourceConstraintsBtn.disabled = !currentSourceCard;
+        autofillSourceConstraintsBtn.addEventListener('click', () => {
+            const result = autofillEmptyConstraintsFromSource(currentSourceCard);
+            updateCardConstraintsBadge();
+            if (result.filled.length) {
+                // Dispatching hidden-field events updates badges and chip controls; synchronize
+                // color pips as well for programmatically populated WUBRG values.
+                document.querySelectorAll('.color-pip-group').forEach(group => {
+                    const input = document.getElementById(group.dataset.target);
+                    const active = String(input?.value || '').toLowerCase().split('');
+                    group.querySelectorAll('.color-pip').forEach(pip => pip.classList.toggle('active', active.includes(pip.dataset.color)));
+                });
+            }
+        });
+    }
     const clearAllConstraintsBtn = document.getElementById('clear-all-constraints-btn');
     if (clearAllConstraintsBtn) clearAllConstraintsBtn.addEventListener('click', () => {
         const ids = ['filter-type', 'filter-supertype', 'filter-subtype', 'filter-keyword', 'filter-format', 'filter-rarity', 'filter-identity', 'filter-colors', 'filter-cmc', 'filter-power', 'filter-toughness', 'filter-set', 'filter-extra-oracle'];
@@ -15682,6 +15951,8 @@ function initApp() {
         }
         document.querySelectorAll('#card-constraints-modal .color-pip.active').forEach(pip => pip.classList.remove('active'));
         document.querySelectorAll('#card-constraints-modal .constraint-chips').forEach(chips => chips.replaceChildren());
+        const autofillStatus = document.getElementById('constraint-autofill-status');
+        if (autofillStatus) { autofillStatus.textContent = ''; autofillStatus.classList.add('hidden'); }
         updateCardConstraintsBadge();
     });
 
@@ -15930,17 +16201,57 @@ function getHistoryCardPreviews() {
 }
 
 function addToHistory(cardName, card = currentSourceCard) {
+    const normalizedName = String(cardName || '').trim();
+    if (!normalizedName) return;
     if (card) storeHistoryCardPreview(card);
+    // Selecting a card again explicitly opts it back into Recent Searches after a prior dismissal.
+    const dismissed = getStoredArray(HISTORY_DISMISSED_KEY)
+        .filter(name => String(name || '').toLowerCase() !== normalizedName.toLowerCase());
+    try { localStorage.setItem(HISTORY_DISMISSED_KEY, JSON.stringify(dismissed)); } catch (_) {}
     let history = getStoredArray(HISTORY_KEY);
-    history = history.filter(name => name.toLowerCase() !== cardName.toLowerCase());
-    history.unshift(cardName);
-    if (history.length > 10) history.pop();
+    history = history.filter(name => String(name || '').toLowerCase() !== normalizedName.toLowerCase());
+    history.unshift(normalizedName);
+    if (history.length > 10) history = history.slice(0, 10);
     try {
         localStorage.setItem(HISTORY_KEY, JSON.stringify(history));
     } catch (err) {
         console.warn("Search history could not be saved:", err.message);
     }
     renderSidebarLists();
+}
+
+/**
+ * Removes one card from Recent Searches only. It does not affect Favorites, the active source card,
+ * or cached card data; typing the name in the picker still finds it, and selecting it again puts it
+ * back into history. The dismissed list also excludes it from the picker's unfiltered recent tiles.
+ */
+function removeRecentSearchCard(cardName) {
+    const normalizedName = String(cardName || '').trim();
+    if (!normalizedName) return false;
+    const key = normalizedName.toLowerCase();
+    const history = getStoredArray(HISTORY_KEY).filter(name => String(name || '').toLowerCase() !== key);
+    const dismissed = getStoredArray(HISTORY_DISMISSED_KEY).filter(name => String(name || '').toLowerCase() !== key);
+    dismissed.unshift(normalizedName);
+    try {
+        localStorage.setItem(HISTORY_KEY, JSON.stringify(history));
+        localStorage.setItem(HISTORY_DISMISSED_KEY, JSON.stringify(dismissed.slice(0, 100)));
+        const favoriteNames = new Set(getStoredArray(FAVORITES_KEY).map(name => String(name || '').toLowerCase()));
+        // The preview cache also backs Favorites. Retain a removed history preview when the card
+        // is still favorited, but the dismissed-key filter keeps it out of recent picker suggestions.
+        const previews = getStoredArray(HISTORY_CARD_PREVIEWS_KEY)
+            .filter(card => String(card?.name || '').toLowerCase() !== key || favoriteNames.has(key));
+        localStorage.setItem(HISTORY_CARD_PREVIEWS_KEY, JSON.stringify(previews));
+    } catch (err) {
+        console.warn('Recent Search could not be removed:', err.message);
+        return false;
+    }
+    renderSidebarLists();
+    // Refresh only an open picker showing its recent suggestions. A typed search should not be
+    // interrupted by this cleanup.
+    if (sourceCardPickerModal && !sourceCardPickerModal.classList.contains('hidden') && !sourceCardPickerInput?.value.trim()) {
+        void searchSourceCardPicker('');
+    }
+    return true;
 }
 
 function setFavoriteState(cardName, shouldFavorite) {
@@ -16006,32 +16317,59 @@ function toggleFavorite() {
 function renderSidebarLists() {
     const history = getStoredArray(HISTORY_KEY);
     const favorites = getStoredArray(FAVORITES_KEY);
-
     const previewByName = new Map(getHistoryCardPreviews().map(card => [String(card.name || '').toLowerCase(), card]));
 
-    historyList.innerHTML = '';
-    history.forEach(name => {
-        const li = document.createElement('li');
-        li.textContent = name;
-        const preview = mergeCardRecords(
-            previewByName.get(String(name).toLowerCase()) || null,
-            sourceCardCache.get(String(name).toLowerCase()) || null
-        );
-        li.addEventListener('click', () => loadSourceCard(name, preview));
-        historyList.appendChild(li);
-    });
+    if (historyList) {
+        historyList.replaceChildren();
+        history.forEach(name => {
+            const li = document.createElement('li');
+            li.className = 'history-entry';
+            const preview = mergeCardRecords(
+                previewByName.get(String(name).toLowerCase()) || null,
+                sourceCardCache.get(String(name).toLowerCase()) || null
+            );
+            const open = document.createElement('button');
+            open.type = 'button';
+            open.className = 'history-card-open';
+            open.textContent = name;
+            open.title = `Load ${name} as the source card`;
+            open.addEventListener('click', () => loadSourceCard(name, preview));
 
-    favoritesList.innerHTML = '';
-    favorites.forEach(name => {
-        const li = document.createElement('li');
-        li.textContent = name;
-        const preview = mergeCardRecords(
-            previewByName.get(String(name).toLowerCase()) || null,
-            sourceCardCache.get(String(name).toLowerCase()) || null
-        );
-        li.addEventListener('click', () => loadSourceCard(name, preview));
-        favoritesList.appendChild(li);
-    });
+            const remove = document.createElement('button');
+            remove.type = 'button';
+            remove.className = 'history-card-remove';
+            remove.textContent = '\u00D7';
+            remove.title = `Remove ${name} from Recent Searches`;
+            remove.setAttribute('aria-label', `Remove ${name} from Recent Searches`);
+            remove.addEventListener('click', event => {
+                event.preventDefault();
+                event.stopPropagation();
+                removeRecentSearchCard(name);
+            });
+            li.append(open, remove);
+            historyList.appendChild(li);
+        });
+    }
+
+    if (favoritesList) {
+        favoritesList.replaceChildren();
+        favorites.forEach(name => {
+            const li = document.createElement('li');
+            li.className = 'favorite-entry';
+            const preview = mergeCardRecords(
+                previewByName.get(String(name).toLowerCase()) || null,
+                sourceCardCache.get(String(name).toLowerCase()) || null
+            );
+            const open = document.createElement('button');
+            open.type = 'button';
+            open.className = 'history-card-open';
+            open.textContent = name;
+            open.title = `Load ${name} as the source card`;
+            open.addEventListener('click', () => loadSourceCard(name, preview));
+            li.appendChild(open);
+            favoritesList.appendChild(li);
+        });
+    }
 }
 
 function checkFavoriteStatus(cardName) {
@@ -16292,11 +16630,12 @@ function closeSourceCardPicker() {
 function getSourceCardPickerMatches() {
     const previews = getHistoryCardPreviews();
     const cached = Array.from(sourceCardCache.values()).filter(card => card && card.name);
+    const dismissed = new Set(getStoredArray(HISTORY_DISMISSED_KEY).map(name => String(name || '').toLowerCase()));
     const merged = [];
     const seen = new Set();
     [...previews, ...cached].forEach(card => {
         const key = String(card.name || '').toLowerCase();
-        if (!key || seen.has(key)) return;
+        if (!key || seen.has(key) || dismissed.has(key)) return;
         seen.add(key);
         merged.push(card);
     });
@@ -16539,6 +16878,10 @@ function clearSourceCard() {
     sourceCardLoaded?.classList.add('hidden');
     sourceCardSection?.classList.remove('hidden');
     if (findSimilarBtn) findSimilarBtn.disabled = true;
+    const autofillConstraintsBtn = document.getElementById('autofill-source-constraints-btn');
+    if (autofillConstraintsBtn) autofillConstraintsBtn.disabled = true;
+    const autofillStatus = document.getElementById('constraint-autofill-status');
+    if (autofillStatus) { autofillStatus.textContent = ''; autofillStatus.classList.add('hidden'); }
     updateStaticSearchAvailability();
     if (resultsSection) resultsSection.classList.add('hidden');
     if (resultsGrid) resultsGrid.innerHTML = '';
@@ -16694,6 +17037,10 @@ async function loadSourceCard(query, providedCard = null) {
         }
 
         currentSourceCard = cardData;
+        const autofillConstraintsBtn = document.getElementById('autofill-source-constraints-btn');
+        if (autofillConstraintsBtn) autofillConstraintsBtn.disabled = false;
+        const autofillStatus = document.getElementById('constraint-autofill-status');
+        if (autofillStatus) { autofillStatus.textContent = ''; autofillStatus.classList.add('hidden'); }
         sourceCards.clear();
         primarySourceCardKey = getSourceCardIdentity(cardData);
         if (primarySourceCardKey) sourceCards.set(primarySourceCardKey, cardData);
@@ -16716,6 +17063,10 @@ async function loadSourceCard(query, providedCard = null) {
             throw error;
         }
         currentSourceCard = null;
+        const autofillConstraintsBtn = document.getElementById('autofill-source-constraints-btn');
+        if (autofillConstraintsBtn) autofillConstraintsBtn.disabled = true;
+        const autofillStatus = document.getElementById('constraint-autofill-status');
+        if (autofillStatus) { autofillStatus.textContent = ''; autofillStatus.classList.add('hidden'); }
         activeTags = [];
         manualHighlights = [];
         highlightComposerOpen = false;
