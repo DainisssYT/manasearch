@@ -1,6 +1,6 @@
-/* ManaSearch build 20261012-52 */
+/* ManaSearch build 20261012-53 */
 // ManaSearch deployment build marker. Bump this whenever app.js changes so cached-module issues are easy to diagnose.
-const MANASEARCH_APP_BUILD = '20261012-52';
+const MANASEARCH_APP_BUILD = '20261012-53';
 console.info(`[ManaSearch] app.js build ${MANASEARCH_APP_BUILD}`);
 
 // State Management
@@ -16034,6 +16034,12 @@ function initColorPips() {
 // 'Search data is preparing…' forever. Starting the asset promises first guarantees the real
 // loader runs regardless of later UI wiring, and initApp immediately reflects its loading state.
 function startManaSearchApp() {
+    // Install help/tour separately from the rest of the UI. A failure while binding an unrelated
+    // control must not leave tutorial entry points inert. Both installers are idempotent.
+    try { installFeatureHelpPopovers(); }
+    catch (error) { console.error('[ManaSearch] Visual help setup failed:', error?.stack || error); }
+    try { installManaSearchOnboarding(); }
+    catch (error) { console.error('[ManaSearch] Guided tour setup failed:', error?.stack || error); }
     try {
         initApp();
     } catch (error) {
@@ -16277,6 +16283,7 @@ function installFeatureHelpPopovers() {
     };
 
     const close = () => {
+        if (activeTrigger) activeTrigger.setAttribute('aria-expanded', 'false');
         if (popover) popover.remove();
         popover = null;
         activeTrigger = null;
@@ -16291,6 +16298,7 @@ function installFeatureHelpPopovers() {
                 pinned = true;
                 popover.dataset.pinned = 'true';
                 popover.setAttribute('role', 'dialog');
+                activeTrigger.setAttribute('aria-expanded', 'true');
             }
             return;
         }
@@ -16326,6 +16334,9 @@ function installFeatureHelpPopovers() {
         document.body.appendChild(popover);
         activeTrigger = trigger;
         pinned = pin;
+        trigger.setAttribute('aria-expanded', 'true');
+        trigger.setAttribute('aria-controls', 'mana-feature-help-popover');
+        popover.id = 'mana-feature-help-popover';
         positionPopover(trigger);
     };
 
@@ -16368,6 +16379,26 @@ function installFeatureHelpPopovers() {
     setHelp(document.getElementById('find-similar-btn'), 'Find Similar Cards', 'Starts the search using the selected source card, highlights, retrieval settings, and constraints.', 'highlight', 'Choose a source card, optionally highlight an important phrase, then press Find Similar Cards.');
     setHelp(document.getElementById('autofill-source-constraints-btn'), 'Fill Empty From Source', 'Copies reliable properties from the selected source card into empty constraint fields only.', 'constraints', 'Review the filled fields; they become hard filters.');
 
+    // Action buttons keep their normal click behavior. A separate, high-contrast ? button opens
+    // help on touch devices, so tapping Methods/Order/Constraints still opens the actual control.
+    const addActionHelpMarker = (target, title, description, example, howTo) => {
+        if (!target || target.dataset.manaActionHelpAdded === 'true') return;
+        const marker = el('button', 'mana-feature-help-marker mana-feature-help-interactive mana-action-help-marker', '?');
+        marker.type = 'button';
+        marker.setAttribute('aria-label', `Show visual help for ${title}`);
+        marker.dataset.featureTitle = title;
+        marker.dataset.featureTip = description;
+        marker.dataset.featureExample = example;
+        marker.dataset.featureHowto = howTo || '';
+        target.dataset.manaActionHelpAdded = 'true';
+        target.insertAdjacentElement('afterend', marker);
+    };
+    addActionHelpMarker(document.getElementById('toggle-search-methods-btn'), 'Search Methods', examples.methods.description, 'methods', examples.methods.howTo);
+    addActionHelpMarker(document.getElementById('toggle-order-btn'), 'Order Results', examples.order.description, 'order', examples.order.howTo);
+    addActionHelpMarker(document.getElementById('toggle-card-constraints-btn'), 'Constraints', examples.constraints.description, 'constraints', examples.constraints.howTo);
+    addActionHelpMarker(document.getElementById('source-card-add-btn'), 'Choose a source card', 'Choose the card whose mechanics or text you want to search from.', 'highlight', 'After choosing a card, select an important phrase in its type line or rules text.');
+    addActionHelpMarker(document.getElementById('find-similar-btn'), 'Find Similar Cards', 'Starts the search using the selected source card, highlights, retrieval settings, and constraints.', 'highlight', 'Choose a source card, optionally highlight an important phrase, then press Find Similar Cards.');
+
     // Keep the previously available help tips but provide the nearest matching visual example.
     const tipExamples = {
         'preferences-btn': 'generic', 'source-card-flip-btn': 'flip', 'favorite-btn': 'favorite',
@@ -16392,9 +16423,8 @@ function installFeatureHelpPopovers() {
         setHelp(nameNode, name, config[0], config[1], config[2], false);
         nameNode.setAttribute('tabindex', '0');
         nameNode.setAttribute('aria-label', `${name}. Hover for explanation; use the question mark for visual help on touch screens.`);
-        const marker = el('span', 'mana-inline-help-marker mana-feature-help-interactive', '?');
-        marker.setAttribute('role', 'button');
-        marker.setAttribute('tabindex', '0');
+        const marker = el('button', 'mana-inline-help-marker mana-feature-help-interactive', '?');
+        marker.type = 'button';
         marker.setAttribute('aria-label', `Show visual help for ${name}`);
         marker.dataset.featureTitle = name;
         marker.dataset.featureTip = config[0];
@@ -16430,26 +16460,42 @@ function installFeatureHelpPopovers() {
     });
 
     const addInlineHelpMarker = (target, title, description, example, howTo) => {
-        if (!target) return;
-        const marker = el('span', 'mana-inline-help-marker mana-feature-help-interactive', '?');
-        marker.setAttribute('role', 'button');
-        marker.setAttribute('tabindex', '0');
+        if (!target || target.dataset.manaInlineHelpAdded === 'true') return;
+        const marker = el('button', 'mana-inline-help-marker mana-feature-help-interactive', '?');
+        marker.type = 'button';
         marker.setAttribute('aria-label', `Show visual help for ${title}`);
         marker.dataset.featureTitle = title;
         marker.dataset.featureTip = description;
         marker.dataset.featureExample = example;
         marker.dataset.featureHowto = howTo || '';
+        target.dataset.manaInlineHelpAdded = 'true';
         target.insertAdjacentElement('afterend', marker);
     };
 
-    const oracleHeading = document.querySelector('#source-card-loaded .oracle-container > strong');
-    setHelp(oracleHeading, 'Highlight rules text', examples.highlight.description, 'highlight', examples.highlight.howTo, true);
-    addInlineHelpMarker(oracleHeading, 'Highlight rules text', examples.highlight.description, 'highlight', examples.highlight.howTo);
-    const typeLabel = document.querySelector('#source-card-type')?.parentElement?.querySelector('strong');
-    const typeDescription = 'You can highlight a type-line phrase as well as rules text to focus on a card type or subtype.';
-    const typeHowTo = 'Select a phrase such as “Creature — Elf” in the source card type line.';
-    setHelp(typeLabel, 'Highlight the type line', typeDescription, 'highlight', typeHowTo, true);
-    addInlineHelpMarker(typeLabel, 'Highlight the type line', typeDescription, 'highlight', typeHowTo);
+    // The source-card panel is rebuilt whenever a different card is selected. Install highlight
+    // help on current and future nodes so mobile users always have an explicit, tappable ? button.
+    const installSourceHighlightHelp = () => {
+        const oracleHeading = document.querySelector('#source-card-loaded .oracle-container > strong');
+        if (oracleHeading) {
+            setHelp(oracleHeading, 'Highlight rules text', examples.highlight.description, 'highlight', examples.highlight.howTo, true);
+            addInlineHelpMarker(oracleHeading, 'Highlight rules text', examples.highlight.description, 'highlight', examples.highlight.howTo);
+        }
+        const typeLabel = document.querySelector('#source-card-type')?.parentElement?.querySelector('strong');
+        const typeDescription = 'You can highlight a type-line phrase as well as rules text to focus on a card type or subtype.';
+        const typeHowTo = 'Select a phrase such as “Creature — Elf” in the source card type line.';
+        if (typeLabel) {
+            setHelp(typeLabel, 'Highlight the type line', typeDescription, 'highlight', typeHowTo, true);
+            addInlineHelpMarker(typeLabel, 'Highlight the type line', typeDescription, 'highlight', typeHowTo);
+        }
+        const oracleHelp = document.querySelector('#source-card-loaded .oracle-help');
+        if (oracleHelp) setHelp(oracleHelp, 'How highlighting works', examples.highlight.description, 'highlight', examples.highlight.howTo, true);
+    };
+    installSourceHighlightHelp();
+    const sourceCardObserverRoot = document.getElementById('source-card-loaded') || document.getElementById('source-card-section');
+    if (sourceCardObserverRoot && typeof MutationObserver === 'function') {
+        const sourceHelpObserver = new MutationObserver(() => installSourceHighlightHelp());
+        sourceHelpObserver.observe(sourceCardObserverRoot, { childList: true, subtree: true });
+    }
     const searchDepthLabel = document.querySelector('#search-methods-modal .search-depth-label strong');
     setHelp(searchDepthLabel, 'Search Depth', methodHelp['Search Depth'][0], 'methods', methodHelp['Search Depth'][2], true);
     const oracleHelp = document.querySelector('#source-card-loaded .oracle-help');
@@ -16466,24 +16512,37 @@ function installFeatureHelpPopovers() {
         try { localStorage.setItem('manaSearchFirstUseHelpV51', 'dismissed'); } catch (_) {}
     });
 
+    let hoverCloseTimer = 0;
+    const cancelHoverClose = () => { if (hoverCloseTimer) window.clearTimeout(hoverCloseTimer); hoverCloseTimer = 0; };
+    const scheduleHoverClose = () => {
+        cancelHoverClose();
+        hoverCloseTimer = window.setTimeout(() => {
+            if (!pinned) close();
+        }, 180);
+    };
     document.addEventListener('pointerover', event => {
         if (event.pointerType === 'touch') return;
+        if (popover && (popover.contains(event.target) || activeTrigger?.contains(event.target))) {
+            cancelHoverClose();
+            return;
+        }
         const target = event.target?.closest?.('[data-feature-tip]');
-        if (target && !target.contains(event.relatedTarget) && !pinned) show(target, false);
+        if (target && !target.contains(event.relatedTarget) && !pinned) {
+            cancelHoverClose();
+            show(target, false);
+        }
     });
     document.addEventListener('pointerout', event => {
         if (!popover || pinned) return;
         const related = event.relatedTarget;
-        // Keep the hover panel open while the pointer enters it, then close when it leaves both panel and trigger.
-        if (popover.contains(event.target)) {
-            if (related && (popover.contains(related) || activeTrigger?.contains(related))) return;
-            close();
+        // Leave enough time to cross the small gap between a help label and the visual panel.
+        if (related && (popover.contains(related) || activeTrigger?.contains(related))) return;
+        if (popover.contains(event.target) || activeTrigger?.contains(event.target) || event.target === activeTrigger) {
+            scheduleHoverClose();
             return;
         }
         const target = event.target?.closest?.('[data-feature-tip]');
-        if (!target || activeTrigger !== target) return;
-        if (related && (target.contains(related) || popover.contains(related))) return;
-        close();
+        if (target && activeTrigger === target) scheduleHoverClose();
     });
     document.addEventListener('focusin', event => {
         const target = event.target?.closest?.('[data-feature-tip]');
@@ -16496,15 +16555,41 @@ function installFeatureHelpPopovers() {
         close();
     });
     document.addEventListener('click', event => {
+        // On touch devices an option name itself is a usable help target, not just the tiny ?.
+        // Keep the normal option-card click alive so the chosen method/order is still selected.
+        const optionName = event.target?.closest?.('#search-methods-modal .method-card .method-text strong, #order-modal .method-card .method-text strong');
+        const touchLike = (() => {
+            try { return window.matchMedia('(hover: none), (pointer: coarse)').matches; }
+            catch (_) { return false; }
+        })();
+        if (optionName && touchLike && optionName.dataset.featureTip) {
+            cancelHoverClose();
+            show(optionName, true);
+            return; // deliberately do not prevent/bubble-block the selection click
+        }
         const target = event.target?.closest?.('.mana-feature-help-interactive');
         if (target) {
             event.preventDefault();
             event.stopPropagation();
+            cancelHoverClose();
             if (pinned && activeTrigger === target) close();
             else show(target, true);
             return;
         }
-        if (popover && !popover.contains(event.target)) close();
+        // A focused hover-only label may open a tooltip just before its click arrives. Pin it
+        // rather than closing it instantly, which is particularly important on touch browsers.
+        if (popover && !popover.contains(event.target)) {
+            const activeLabel = event.target?.closest?.('.mana-help-hover-target[data-feature-tip]');
+            if (activeLabel && activeLabel === activeTrigger) {
+                pinned = true;
+                popover.dataset.pinned = 'true';
+                popover.setAttribute('role', 'dialog');
+                activeLabel.setAttribute('aria-expanded', 'true');
+                cancelHoverClose();
+            } else {
+                close();
+            }
+        }
     }, true);
     document.addEventListener('keydown', event => {
         const target = event.target?.closest?.('.mana-feature-help-interactive');
@@ -16732,8 +16817,15 @@ function installManaSearchOnboarding() {
         nextButton.focus({ preventScroll: true });
     };
 
-    document.getElementById('start-onboarding-tour-btn')?.addEventListener('click', () => openTour());
-    document.getElementById('replay-onboarding-tour-btn')?.addEventListener('click', () => openTour());
+    // Delegate from document: both entry points remain functional even if the header/hint is
+    // regenerated after initialization. Capture phase prevents an enclosing action from stealing taps.
+    document.addEventListener('click', event => {
+        const launcher = event.target?.closest?.('#start-onboarding-tour-btn, #replay-onboarding-tour-btn');
+        if (!launcher) return;
+        event.preventDefault();
+        event.stopPropagation();
+        openTour();
+    }, true);
     let tourStatus = '';
     let hasPriorUse = false;
     try {

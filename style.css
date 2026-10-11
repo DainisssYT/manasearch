@@ -5882,9 +5882,13 @@ button:focus-visible { outline: 2px solid var(--accent-color); outline-offset: 2
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    width: 20px;
-    height: 20px;
+    width: 28px;
+    min-width: 28px;
+    height: 28px;
+    min-height: 28px;
     margin: 0 0 0 5px;
+    flex: 0 0 28px;
+    touch-action: manipulation;
     padding: 0;
     border: 1px solid var(--border-color);
     border-radius: 50%;
@@ -5967,11 +5971,14 @@ button:focus-visible { outline: 2px solid var(--accent-color); outline-offset: 2
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    flex: 0 0 20px;
+    flex: 0 0 28px;
     align-self: flex-start;
-    width: 20px;
-    height: 20px;
+    width: 28px;
+    min-width: 28px;
+    height: 28px;
+    min-height: 28px;
     margin: 0 0 0 auto;
+    touch-action: manipulation;
     padding: 0;
     border: 1px solid var(--border-color);
     border-radius: 50%;
@@ -5988,13 +5995,13 @@ button:focus-visible { outline: 2px solid var(--accent-color); outline-offset: 2
 #order-modal .method-card > .method-text { flex: 1 1 auto; min-width: 0; }
 
 
-/* v52: touch-friendly, step-by-step onboarding overlay. Each screen teaches one action. */
+/* v53: touch-first help controls and reliably stacked guided tour overlay. */
 .first-use-help-actions { display:flex; flex:0 0 auto; gap:6px; align-items:center; }
 .guided-tour-header-btn { border:1px solid var(--border-color); color:var(--text-main); background:var(--bg-secondary); }
 .guided-tour-header-btn:hover { border-color:var(--accent-color); }
 .first-use-help-hint.mana-tour-hint-after { animation:mana-tour-hint-in .18s ease-out both; }
 @keyframes mana-tour-hint-in { from { opacity:0; transform:translateY(-4px); } to { opacity:1; transform:translateY(0); } }
-.mana-onboarding-layer { position:fixed; inset:0; z-index:auto; isolation:auto; pointer-events:none; }
+.mana-onboarding-layer { position:static; z-index:auto; isolation:auto; pointer-events:none; }
 .mana-onboarding-scrim { position:fixed; z-index:10090; inset:0; background:rgba(7,7,11,.76); pointer-events:auto; }
 .mana-onboarding-card { position:fixed; z-index:10092; pointer-events:auto; left:50%; bottom:max(14px, env(safe-area-inset-bottom)); transform:translateX(-50%); width:min(460px, calc(100vw - 24px)); max-height:min(72dvh, 590px); overflow-y:auto; overscroll-behavior:contain; padding:18px; border:1px solid var(--border-color); border-top:3px solid var(--accent-color); border-radius:16px; background:var(--bg-primary); color:var(--text-main); box-shadow:0 24px 90px rgba(0,0,0,.52); display:flex; flex-direction:column; gap:12px; }
 .mana-onboarding-card.is-top { top:max(12px, env(safe-area-inset-top)); bottom:auto; }
@@ -6055,4 +6062,14 @@ button:focus-visible { outline: 2px solid var(--accent-color); outline-offset: 2
 }
 @media (prefers-reduced-motion:reduce) {
     .mana-onboarding-progress-fill,.first-use-help-hint.mana-tour-hint-after { transition:none !important; animation:none !important; }
+}
+
+/* v53: touch-first help affordances and a tour overlay that participates in the root stacking order. */
+.mana-feature-help-marker, .mana-inline-help-marker { cursor: pointer; user-select: none; -webkit-tap-highlight-color: transparent; }
+.mana-action-help-marker { vertical-align: middle; margin-inline: 5px; }
+.mana-onboarding-layer { /* Must not create a stacking context: the fixed scrim/card use root z-indexes. */ position: static; inset: auto; z-index: auto; isolation: auto; pointer-events: none; }
+.mana-onboarding-scrim { z-index: 10090; }
+.mana-onboarding-card { z-index: 10092; }
+@media (hover: none), (pointer: coarse) {
+  .mana-feature-help-marker, .mana-inline-help-marker { width: 32px; min-width: 32px; height: 32px; min-height: 32px; flex-basis: 32px; font-size: 14px; }
 }
