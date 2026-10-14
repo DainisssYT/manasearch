@@ -1,6 +1,6 @@
-/* ManaSearch build 20261012-56 */
+/* ManaSearch build 20261014-59 */
 // ManaSearch deployment build marker. Bump this whenever app.js changes so cached-module issues are easy to diagnose.
-const MANASEARCH_APP_BUILD = '20261012-56';
+const MANASEARCH_APP_BUILD = '20261014-59';
 console.info(`[ManaSearch] app.js build ${MANASEARCH_APP_BUILD}`);
 
 // State Management
@@ -4073,6 +4073,12 @@ function reapplyOracleHighlights() {
  * Captures a completed Oracle-text selection and records its exact text offsets so the same
  * occurrence can be re-rendered without accidentally highlighting every matching phrase.
  */
+function notifyManaSearchHighlightsChanged() {
+    window.dispatchEvent(new CustomEvent('manasearch:source-highlights-changed', {
+        detail: { highlights: manualHighlights.map(h => ({ text: h.text, mode: h.mode, field: h.field, origin: h.origin })) }
+    }));
+}
+
 function handleSourceTextSelection(root = sourceCardOracle, field = 'oracle') {
     if (!root) return;
     const selection = window.getSelection?.();
@@ -4120,6 +4126,7 @@ function handleSourceTextSelection(root = sourceCardOracle, field = 'oracle') {
         renderHighlightChips();
     }
     selection.removeAllRanges();
+    notifyManaSearchHighlightsChanged();
 }
 
 function handleOracleTextSelection() {
@@ -4425,9 +4432,10 @@ function renderHighlightChips() {
 
     const relatedHighlightsToggle = document.getElementById('related-use-highlights');
     if (relatedHighlightsToggle) {
-        relatedHighlightsToggle.disabled = manualHighlights.filter(h => h && h.origin !== 'user').length === 0;
+        // Keep the control interactive at all times. With no source highlights enabled, checking
+        // it simply has no additional text to contribute; disabling it made the checkbox feel broken.
+        relatedHighlightsToggle.disabled = false;
         relatedHighlightsToggle.checked = includeSourceHighlightsInRelatedSearch;
-        if (!relatedHighlightsToggle.disabled && relatedHighlightsToggle.checked) includeSourceHighlightsInRelatedSearch = true;
     }
 
     if (manualHighlights.length > 0) {
@@ -4601,6 +4609,7 @@ function toggleHighlightMode(idx) {
     renderHighlightChips();
     reapplyOracleHighlights();
     reapplyTypeLineHighlights();
+    notifyManaSearchHighlightsChanged();
 }
 
 function removeHighlight(idx) {
@@ -4617,6 +4626,7 @@ function removeHighlight(idx) {
     renderHighlightChips();
     reapplyOracleHighlights();
     reapplyTypeLineHighlights();
+    notifyManaSearchHighlightsChanged();
 }
 
 // Configurable tag weights (Primary: 1.0, Secondary: 0.5, Broad Category: 0.2, Default fallback: 0.5)
@@ -16441,7 +16451,11 @@ function installFeatureHelpPopovers() {
 
     const close = () => {
         if (activeTrigger) activeTrigger.setAttribute('aria-expanded', 'false');
-        if (popover) popover.remove();
+        const closingPopover = popover;
+        if (closingPopover) {
+            closingPopover.classList.add('is-closing');
+            window.setTimeout(() => closingPopover.remove(), 170);
+        }
         popover = null;
         activeTrigger = null;
         pinned = false;
@@ -16673,8 +16687,16 @@ function installFeatureHelpPopovers() {
     if (firstHint) firstHint.classList.toggle('hidden', hintDismissed);
 
     let hoverCloseTimer = 0;
+    let hoverOpenTimer = 0;
+    let pendingHoverTarget = null;
+    const cancelHoverOpen = () => {
+        if (hoverOpenTimer) window.clearTimeout(hoverOpenTimer);
+        hoverOpenTimer = 0;
+        pendingHoverTarget = null;
+    };
     const cancelHoverClose = () => { if (hoverCloseTimer) window.clearTimeout(hoverCloseTimer); hoverCloseTimer = 0; };
     const scheduleHoverClose = () => {
+        cancelHoverOpen();
         cancelHoverClose();
         hoverCloseTimer = window.setTimeout(() => {
             if (!pinned) close();
@@ -16688,11 +16710,22 @@ function installFeatureHelpPopovers() {
         }
         const target = event.target?.closest?.('[data-feature-tip]');
         if (target && !target.contains(event.relatedTarget) && !pinned) {
+            let finePointer = false;
+            try { finePointer = window.matchMedia('(hover: hover) and (pointer: fine)').matches; } catch (_) {}
+            if (!finePointer) return;
             cancelHoverClose();
-            show(target, false);
+            cancelHoverOpen();
+            pendingHoverTarget = target;
+            hoverOpenTimer = window.setTimeout(() => {
+                if (pendingHoverTarget === target && target.isConnected && !pinned) show(target, false);
+                hoverOpenTimer = 0;
+                pendingHoverTarget = null;
+            }, 3000);
         }
     });
     document.addEventListener('pointerout', event => {
+        const hoveredTarget = event.target?.closest?.('[data-feature-tip]');
+        if (hoveredTarget && hoveredTarget === pendingHoverTarget && !(event.relatedTarget && hoveredTarget.contains(event.relatedTarget))) cancelHoverOpen();
         if (!popover || pinned) return;
         const related = event.relatedTarget;
         // Leave enough time to cross the small gap between a help label and the visual panel.
@@ -16705,8 +16738,10 @@ function installFeatureHelpPopovers() {
         if (target && activeTrigger === target) scheduleHoverClose();
     });
     document.addEventListener('focusin', event => {
-        const target = event.target?.closest?.('[data-feature-tip]');
-        if (target && !pinned) show(target, false);
+        // Avoid surprising popovers on incidental focus. Help opens by sustained desktop hover
+        // or an explicit activation of a help marker (keyboard included).
+        const target = event.target?.closest?.('.mana-feature-help-interactive[data-feature-tip]');
+        if (target && !pinned && target.matches('button')) return;
     });
     document.addEventListener('focusout', event => {
         if (!activeTrigger || pinned || event.target !== activeTrigger) return;
@@ -16724,6 +16759,7 @@ function installFeatureHelpPopovers() {
             event.preventDefault();
             event.stopPropagation();
             cancelHoverClose();
+            cancelHoverOpen();
             if (pinned && activeTrigger === target) close();
             else show(target, true);
             return;
@@ -16777,55 +16813,70 @@ function installManaSearchOnboarding() {
     if (window.__manaSearchOnboardingInstalled) return;
     window.__manaSearchOnboardingInstalled = true;
 
-    const tourKey = 'manaSearchOnboardingV52';
+    const tourKey = 'manaSearchFirstSearchTourV59';
+    const firstUseHintKey = 'manaSearchFirstUseHelpV51';
+    // Starter cards demonstrate different kinds of search intent. Buttons open the normal picker
+    // with the chosen name prefilled, so the user still explicitly selects the source card.
+    const starterCards = [
+        { name: 'Phyrexian Arena', reason: 'Recurring card draw', prompt: 'Find cards that generate value over multiple turns.' },
+        { name: 'Sol Ring', reason: 'Fast mana', prompt: 'Find artifacts that produce mana efficiently.' },
+        { name: 'Counterspell', reason: 'Counter a spell', prompt: 'Find other ways to stop a spell from resolving.' },
+        { name: 'Young Pyromancer', reason: 'Repeatable token creation', prompt: 'Find cards that reward casting spells with tokens.' }
+    ];
     const steps = [
         {
             title: 'Welcome to ManaSearch',
-            text: 'Find Magic cards that do a similar job—even when their wording is different. This quick tour shows the basic workflow. It takes about a minute.',
+            text: 'Let’s complete a real search together. You will choose a card, focus on one useful part of its Oracle text, and run a search so you finish the tour with results.',
             example: 'welcome', target: null,
-            hint: 'You can replay this tour later with the Guided tour button.'
+            hint: 'This tour is interactive. It pauses when you need to use the real card picker or highlight text.'
         },
         {
-            title: '1. Choose a source card',
-            text: 'Start with a card you want to find alternatives for. Search by name and select it. Choosing a different source clears the old candidate results so searches never get mixed together.',
+            title: '1. Choose a card to explore',
+            text: 'Pick a card you want alternatives for, or try one of the suggested starting points. The suggested card only fills the search box; you still choose the matching card in the picker.',
             example: 'source', target: '#source-card-add-btn', fallback: '#source-card-section',
-            hint: 'You only need one source card to start.'
+            hint: 'Phyrexian Arena is a good first search for recurring draw; Sol Ring is good for fast mana.'
         },
         {
-            title: '2. Highlight what matters',
-            text: 'Select a phrase in the source card’s rules text or type line. ManaSearch gives it a color and uses it to focus the search. On a phone, press and select the words; on desktop, drag across them.',
-            example: 'highlight', target: '#source-card-loaded .oracle-container', fallback: '#source-card-section',
-            hint: 'Example: highlight “draw a card” to focus on card-draw effects. Select the same passage again to remove it.'
+            title: '2. Highlight a short Exact anchor',
+            text: 'Select a meaningful fragment of the card’s Oracle text—not the whole sentence. Keep a distinctive trigger or condition Exact, such as “At the beginning of your upkeep”.',
+            example: 'highlight-exact', target: '#source-card-loaded .oracle-container', fallback: '#source-card-section',
+            hint: 'Press “Select exact phrase” to temporarily reveal the card text. On a phone, long-press and adjust the selection handles.'
         },
         {
-            title: '3. Choose Methods',
-            text: 'Methods control how ManaSearch finds candidate cards. The Standard setup is a good place to begin; broaden the search if you are missing useful alternatives.',
+            title: '3. Add a Flexible fragment too',
+            text: 'Select a second, separate phrase from the same effect—for example “draw a card”. Keep the trigger/anchor Exact, then change the second highlight from “= Exact” to “≈ Flexible”. This keeps the search focused while allowing equivalent wording.',
+            example: 'highlight-mixed', target: '#highlight-chips-list', fallback: '#source-card-loaded .oracle-container',
+            hint: 'Avoid making the entire sentence Flexible: that loses the narrow anchor. Use a short Exact anchor plus a short Flexible effect phrase.'
+        },
+        {
+            title: '4. Choose search Methods',
+            text: 'Methods control how ManaSearch discovers candidates. Standard is a strong first choice; you can enable more methods later if you want a wider candidate pool.',
             example: 'methods', target: '#toggle-search-methods-btn', fallback: '#filter-section',
-            hint: 'Tap or click Methods to see the available retrieval options.'
+            hint: 'You can use the question-mark help on touch devices or hover a dotted-underlined name on desktop.'
         },
         {
-            title: '4. Choose Order',
-            text: 'Order controls which candidates appear first. It changes ranking, not which candidates were retrieved. Overall Match is a useful default; Mechanical emphasizes similar game actions.',
+            title: '5. Choose result Order',
+            text: 'Order changes which candidates appear first, not which cards were retrieved. Overall Match is a good starting point because it balances the scoring signals.',
             example: 'order', target: '#toggle-order-btn', fallback: '#filter-section',
-            hint: 'You can change the order after a search without starting over.'
+            hint: 'Mechanical emphasizes similar game actions; Semantic emphasizes related meaning.'
         },
         {
-            title: '5. Add Constraints only when needed',
-            text: 'Constraints are hard filters: a card must satisfy every active one to appear. Keep them broad at first, then narrow by type, color, mana value, or format when you need to.',
+            title: '6. Keep Constraints broad at first',
+            text: 'Constraints are hard filters: every active constraint must be satisfied. For your first search, leave them broad unless you already know you need a particular color, type, mana value, or format.',
             example: 'constraints', target: '#toggle-card-constraints-btn', fallback: '#filter-section',
-            hint: 'Use Clear All Constraints if your filters remove too many cards.'
+            hint: 'If too few cards appear, clear constraints before weakening a useful highlight.'
         },
         {
-            title: '6. Find Similar Cards',
-            text: 'Press Find Similar Cards to start. The button becomes available once the source card and search data are ready. You can keep the default settings for your first search.',
+            title: '7. Run your first search',
+            text: 'You have chosen a source card and refined the text signal. Start the actual search now; the tour will wait while ManaSearch retrieves and ranks candidates, then return with your results.',
             example: 'search', target: '#find-similar-btn', fallback: '#filter-section',
-            hint: 'A search can take time when a large pool of candidates needs to be scored.'
+            hint: 'The button runs the same full search pipeline as the main Find Similar Cards button.'
         },
         {
-            title: '7. Explore and compare results',
-            text: 'Browse every result page, open Compare to read the differences, flip double-faced cards, or save useful cards as Favorites. Search Deeper can find more candidates when it is available.',
+            title: 'Your first search is ready',
+            text: 'Your search has finished. Browse the results, open Compare to understand differences, favorite useful cards, or adjust highlights and search again.',
             example: 'results', target: '#results-section', fallback: '#find-similar-btn',
-            hint: 'Use the score breakdown and Compare together—similarity is made from several signals.'
+            hint: 'You can replay the Guided tour from the header any time.'
         }
     ];
 
@@ -16839,7 +16890,30 @@ function installManaSearchOnboarding() {
     let highlighted = null;
     let currentStep = 0;
     let lastFocused = null;
+    let waitingForSource = false;
+    let tourSourceChosen = false;
+    let waitingForSearch = false;
+    let waitingForHighlight = '';
+    let secondHighlightAdded = false;
+    let waitingForMixedMode = false;
+    let tourMessage = '';
+    let renderStep = null;
+    let closeTour = null;
 
+    const sourceOracleHighlights = () => (Array.isArray(manualHighlights) ? manualHighlights : [])
+        .filter(h => h && h.origin === 'source' && h.field !== 'type' && String(h.text || '').trim());
+    const hasExactAnchor = () => sourceOracleHighlights().some(h => h.mode !== 'variable');
+    const hasMixedHighlightModes = () => {
+        const items = sourceOracleHighlights();
+        return items.length >= 2 && items.some(h => h.mode !== 'variable') && items.some(h => h.mode === 'variable');
+    };
+    const skipHighlightTutorial = () => {
+        waitingForHighlight = '';
+        waitingForMixedMode = false;
+        currentStep = 4;
+        tourMessage = 'No problem. You can search without highlights, but a short Exact anchor plus a Flexible effect phrase often narrows results better.';
+        renderStep?.();
+    };
     const getVisibleTarget = step => {
         if (!step.target) return null;
         const isVisible = node => {
@@ -16852,47 +16926,57 @@ function installManaSearchOnboarding() {
         if (!isVisible(target) && step.fallback) target = document.querySelector(step.fallback);
         return isVisible(target) ? target : null;
     };
-
     const demoMarkup = {
-        welcome: '<div class="mana-tour-demo-flow"><span>Source card</span><b>→</b><span>Highlight</span><b>→</b><span>Similar cards</span></div>',
-        source: '<div class="mana-tour-demo-card"><strong>Phyrexian Arena</strong><small>Choose the card you want alternatives for.</small></div>',
-        highlight: '<div class="mana-tour-demo-rules">At the beginning of your upkeep, <mark>draw a card</mark> and lose 1 life.</div><small class="mana-tour-demo-caption">Select a phrase in the real source card to highlight it.</small>',
-        methods: '<div class="mana-tour-demo-flow"><span>Standard</span><b>→</b><span class="is-accent">Broader retrieval</span></div>',
-        order: '<div class="mana-tour-demo-rank"><span>Mechanical</span><strong>92%</strong></div><div class="mana-tour-demo-rank is-accent"><span>Overall Match</span><strong>86%</strong></div><div class="mana-tour-demo-rank"><span>Semantic</span><strong>79%</strong></div>',
-        constraints: '<div class="mana-tour-demo-chips"><span>Creature</span><span>Green</span><span>Commander legal</span></div><small class="mana-tour-demo-caption">Every active constraint must match.</small>',
+        welcome: '<div class="mana-tour-demo-flow"><span>Choose a card</span><b>→</b><span>Mix Exact + Flexible</span><b>→</b><span>Search results</span></div>',
+        source: '<div class="mana-tour-demo-caption">Choose a starter idea, then select the card from the normal picker.</div>',
+        'highlight-exact': '<div class="mana-tour-demo-rules">At the beginning of your upkeep, <mark>draw a card</mark> and lose 1 life.</div><small class="mana-tour-demo-caption">Example: keep “At the beginning of your upkeep” Exact as the anchor.</small>',
+        'highlight-mixed': '<div class="mana-tour-demo-rules"><mark class="tour-mark-exact">At the beginning of your upkeep</mark>, <mark class="tour-mark-flexible">draw a card</mark> and lose 1 life.</div><small class="mana-tour-demo-caption">Exact anchor + Flexible effect phrase. Select separate fragments, not the whole sentence as Flexible.</small>',
+        methods: '<div class="mana-tour-demo-flow"><span>Standard</span><b>→</b><span class="is-accent">More retrieval options</span></div>',
+        order: '<div class="mana-tour-demo-rank"><span>Mechanical</span><strong>Similar actions</strong></div><div class="mana-tour-demo-rank is-accent"><span>Overall Match</span><strong>Balanced default</strong></div><div class="mana-tour-demo-rank"><span>Semantic</span><strong>Related meaning</strong></div>',
+        constraints: '<div class="mana-tour-demo-chips"><span>Type</span><span>Color</span><span>Mana value</span></div><small class="mana-tour-demo-caption">Every active constraint must match.</small>',
         search: '<div class="mana-tour-demo-search">Find Similar Cards <span>→</span></div>',
-        results: '<div class="mana-tour-demo-result"><span>Similar card</span><strong>Mechanical · Functional · Semantic</strong></div><div class="mana-tour-demo-result is-accent"><span>Compare</span><strong>Read what differs</strong></div><div class="mana-tour-demo-pages"><i></i><i></i><i></i><span>Next page →</span></div>'
+        results: '<div class="mana-tour-demo-result"><span>Your search</span><strong class="mana-tour-results-count">Results are ready</strong></div><div class="mana-tour-demo-result is-accent"><span>Next</span><strong>Compare · Favorite · Explore pages</strong></div>'
     };
 
     const removeSpotlight = () => {
         if (highlighted) highlighted.classList.remove('mana-onboarding-spotlight');
         highlighted = null;
     };
-    const persist = status => {
-        try { localStorage.setItem(tourKey, status); } catch (_) {}
+    const persist = status => { try { localStorage.setItem(tourKey, status); } catch (_) {} };
+
+    const showTour = () => {
+        if (!layer) return;
+        layer.classList.remove('hidden');
+        renderStep?.();
+        const next = layer.querySelector('.mana-onboarding-next');
+        next?.focus({ preventScroll: true });
     };
-    const closeTour = status => {
+    const hideTourForRealAction = () => {
+        removeSpotlight();
+        layer?.classList.add('hidden');
+    };
+
+    closeTour = status => {
         const finalStatus = status || 'skipped';
         removeSpotlight();
         if (layer) layer.remove();
         layer = null;
+        waitingForSource = waitingForSearch = waitingForMixedMode = false;
+        tourSourceChosen = false;
+        waitingForHighlight = '';
+        window.__manaSearchTourSelectingSource = false;
         persist(finalStatus);
         const hint = document.getElementById('first-use-help-hint');
         if (finalStatus === 'completed') {
-            // Finishing the guided tour replaces the quick-tip panel; don't bring that panel back
-            // immediately after the user has just completed onboarding.
-            try { localStorage.setItem('manaSearchFirstUseHelpV51', 'dismissed'); } catch (_) {}
+            try { localStorage.setItem(firstUseHintKey, 'dismissed'); } catch (_) {}
             hint?.classList.add('hidden');
             hint?.classList.remove('mana-tour-hint-after');
         } else {
             let hintDismissed = false;
-            try { hintDismissed = localStorage.getItem('manaSearchFirstUseHelpV51') === 'dismissed'; } catch (_) {}
+            try { hintDismissed = localStorage.getItem(firstUseHintKey) === 'dismissed'; } catch (_) {}
             if (hint) {
                 if (hintDismissed) hint.classList.add('hidden');
-                else {
-                    hint.classList.remove('hidden');
-                    hint.classList.add('mana-tour-hint-after');
-                }
+                else { hint.classList.remove('hidden'); hint.classList.add('mana-tour-hint-after'); }
             }
         }
         const focusTarget = lastFocused && lastFocused.isConnected && !lastFocused.closest('.hidden')
@@ -16900,12 +16984,37 @@ function installManaSearchOnboarding() {
         if (focusTarget?.isConnected) focusTarget.focus({ preventScroll: true });
     };
 
+    const openPickerFromTour = query => {
+        if (!layer) return;
+        waitingForSource = true;
+        window.__manaSearchTourSelectingSource = true;
+        hideTourForRealAction();
+        openSourceCardPicker();
+        if (!sourceCardPickerModal || sourceCardPickerModal.classList.contains('hidden')) {
+            waitingForSource = false;
+            window.__manaSearchTourSelectingSource = false;
+            tourMessage = 'The card picker could not open. Close this tour and use Add Source Card, then replay the tour.';
+            showTour();
+            return;
+        }
+        if (query && sourceCardPickerInput) {
+            sourceCardPickerInput.value = query;
+            void searchSourceCardPicker(query);
+        }
+    };
+
     const openTour = () => {
-        if (layer) return;
+        if (layer) { showTour(); return; }
         lastFocused = document.activeElement;
         const hint = document.getElementById('first-use-help-hint');
         if (hint) hint.classList.add('hidden');
         currentStep = 0;
+        waitingForSource = waitingForSearch = waitingForMixedMode = false;
+        tourSourceChosen = false;
+        window.__manaSearchTourSelectingSource = false;
+        waitingForHighlight = '';
+        secondHighlightAdded = false;
+        tourMessage = '';
         layer = make('div', 'mana-onboarding-layer');
         layer.setAttribute('role', 'presentation');
         const scrim = make('div', 'mana-onboarding-scrim');
@@ -16916,20 +17025,17 @@ function installManaSearchOnboarding() {
         dialog.setAttribute('aria-describedby', 'mana-onboarding-text');
 
         const top = make('div', 'mana-onboarding-top');
-        const brand = make('span', 'mana-onboarding-kicker', 'MANASEARCH QUICK TOUR');
+        const brand = make('span', 'mana-onboarding-kicker', 'YOUR FIRST MANASEARCH');
         const closeButton = make('button', 'mana-onboarding-close', '×');
         closeButton.type = 'button';
         closeButton.setAttribute('aria-label', 'Skip guided tour');
         top.append(brand, closeButton);
-
         const progressWrap = make('div', 'mana-onboarding-progress-wrap');
         const progressText = make('span', 'mana-onboarding-progress-text');
-        progressText.id = 'mana-onboarding-progress-text';
         const progressTrack = make('div', 'mana-onboarding-progress-track');
         const progressFill = make('div', 'mana-onboarding-progress-fill');
         progressTrack.appendChild(progressFill);
         progressWrap.append(progressText, progressTrack);
-
         const title = make('h2', 'mana-onboarding-title');
         title.id = 'mana-onboarding-title';
         const description = make('p', 'mana-onboarding-text');
@@ -16950,11 +17056,88 @@ function installManaSearchOnboarding() {
         layer.append(scrim, dialog);
         document.body.appendChild(layer);
 
-        const renderStep = () => {
+        const makeActionButton = (label, className, handler) => {
+            const button = make('button', className || 'mana-tour-action', label);
+            button.type = 'button';
+            button.addEventListener('click', handler);
+            return button;
+        };
+        const sourceControls = () => {
+            const group = make('div', 'mana-tour-source-options');
+            starterCards.forEach(card => {
+                const button = make('button', 'mana-tour-starter-card');
+                button.type = 'button';
+                const strong = make('strong', '', card.name);
+                const detail = make('small', '', `${card.reason} · ${card.prompt}`);
+                button.append(strong, detail);
+                button.addEventListener('click', () => openPickerFromTour(card.name));
+                group.appendChild(button);
+            });
+            group.appendChild(makeActionButton('Choose a different card…', 'mana-tour-action mana-tour-action-secondary', () => openPickerFromTour('')));
+            return group;
+        };
+        const addHighlightControls = step => {
+            const group = make('div', 'mana-tour-action-row');
+            if (step.example === 'highlight-exact') {
+                group.appendChild(makeActionButton('Select an Exact phrase on the card', 'mana-tour-action', () => {
+                    if (!currentSourceCard) { tourMessage = 'Choose a source card first.'; renderStep(); return; }
+                    waitingForHighlight = 'first';
+                    hideTourForRealAction();
+                    const oracle = document.querySelector('#source-card-loaded .oracle-container');
+                    (oracle || document.getElementById('source-card-section'))?.scrollIntoView({ block: 'center', behavior: 'smooth' });
+                }));
+                group.appendChild(makeActionButton('Search without highlights', 'mana-tour-action mana-tour-action-secondary', skipHighlightTutorial));
+            } else {
+                const itemCount = sourceOracleHighlights().length;
+                if (!secondHighlightAdded && itemCount < 2) {
+                    group.appendChild(makeActionButton('Select a second phrase', 'mana-tour-action', () => {
+                        waitingForHighlight = 'second';
+                        tourMessage = '';
+                        hideTourForRealAction();
+                        document.querySelector('#source-card-loaded .oracle-container')?.scrollIntoView({ block: 'center', behavior: 'smooth' });
+                    }));
+                } else if (!hasMixedHighlightModes()) {
+                    group.appendChild(makeActionButton('Change a highlight to Flexible', 'mana-tour-action', () => {
+                        waitingForMixedMode = true;
+                        hideTourForRealAction();
+                        document.getElementById('highlight-chips-list')?.scrollIntoView({ block: 'center', behavior: 'smooth' });
+                    }));
+                    group.appendChild(makeActionButton('Continue with Exact only', 'mana-tour-action mana-tour-action-secondary', () => {
+                        currentStep = 4;
+                        tourMessage = 'You can search with Exact highlights only. A mixed Exact + Flexible pair is recommended when you want an exact anchor but allow alternate wording for the effect.';
+                        renderStep();
+                    }));
+                }
+            }
+            return group;
+        };
+        const startTourSearch = async () => {
+            if (!currentSourceCard) {
+                tourMessage = 'Choose a source card first.';
+                currentStep = 1;
+                renderStep();
+                return;
+            }
+            if (!staticSearchResourcesReady()) {
+                tourMessage = 'Search data is still loading. Wait for the ready message, then press Run my search again.';
+                renderStep();
+                return;
+            }
+            waitingForSearch = true;
+            hideTourForRealAction();
+            try { await findSimilarCards(); }
+            catch (error) {
+                waitingForSearch = false;
+                tourMessage = `The search could not finish: ${error?.message || 'unknown error'}. You can retry.`;
+                showTour();
+            }
+        };
+
+        renderStep = () => {
             removeSpotlight();
             const step = steps[currentStep];
             const target = getVisibleTarget(step);
-            if (target) {
+            if (target && !layer.classList.contains('hidden')) {
                 target.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'auto' });
                 target.classList.add('mana-onboarding-spotlight');
                 highlighted = target;
@@ -16964,28 +17147,63 @@ function installManaSearchOnboarding() {
             title.textContent = step.title;
             description.textContent = step.text;
             demo.innerHTML = demoMarkup[step.example] || demoMarkup.welcome;
-            hintText.textContent = step.hint;
-            backButton.disabled = currentStep === 0;
-            nextButton.textContent = currentStep === steps.length - 1 ? 'Finish tour' : currentStep === 0 ? 'Start tour' : 'Next';
+            if (step.example === 'source') demo.appendChild(sourceControls());
+            if (step.example === 'highlight-exact' || step.example === 'highlight-mixed') demo.appendChild(addHighlightControls(step));
+            if (step.example === 'search') {
+                const run = makeActionButton('Run my first search', 'mana-tour-action', () => { void startTourSearch(); });
+                run.disabled = !currentSourceCard;
+                demo.appendChild(run);
+            }
+            if (step.example === 'results') {
+                const count = Array.isArray(lastSearchResults) ? lastSearchResults.length : 0;
+                const countEl = demo.querySelector('.mana-tour-results-count');
+                if (countEl) countEl.textContent = count ? `${count.toLocaleString()} candidate cards found` : 'Search finished — no candidates passed your filters';
+            }
+            hintText.textContent = tourMessage || (step.hint || '');
+            backButton.disabled = currentStep === 0 || waitingForSearch;
+            nextButton.textContent = currentStep === steps.length - 1 ? 'Finish tour' : currentStep === 0 ? 'Start tour' : currentStep === 7 ? 'Run search below' : 'Next';
+            nextButton.disabled = currentStep === 7;
             dialog.classList.toggle('is-top', Boolean(target && target.getBoundingClientRect().top > window.innerHeight * 0.52));
             dialog.scrollTop = 0;
         };
-        const skip = () => closeTour('skipped');
+
+        const skip = () => closeTour?.('skipped');
         closeButton.addEventListener('click', skip);
         skipButton.addEventListener('click', skip);
-        backButton.addEventListener('click', () => { if (currentStep > 0) { currentStep--; renderStep(); } });
-        nextButton.addEventListener('click', () => {
-            if (currentStep >= steps.length - 1) { closeTour('completed'); return; }
-            currentStep++;
+        scrim.addEventListener('click', () => { tourMessage = 'Use Skip tour to exit, or continue through the steps to complete a real search.'; hintText.textContent = tourMessage; });
+        backButton.addEventListener('click', () => {
+            if (currentStep <= 0) return;
+            currentStep--;
+            tourMessage = '';
             renderStep();
+        });
+        nextButton.addEventListener('click', () => {
+            if (currentStep === 0) { currentStep = 1; tourMessage = ''; renderStep(); return; }
+            if (currentStep === 1) {
+                if (!tourSourceChosen || !currentSourceCard) { tourMessage = 'Choose a recommended card or select your own card to continue.'; renderStep(); return; }
+                currentStep = hasUsableOracleText(currentSourceCard) ? 2 : 4;
+                tourMessage = hasUsableOracleText(currentSourceCard) ? '' : 'This card has no Oracle text, so we will continue without text highlights.';
+                renderStep(); return;
+            }
+            if (currentStep === 2) {
+                if (!hasExactAnchor()) { tourMessage = 'First select a short phrase in Oracle Text and keep it Exact. Don’t select the whole sentence.'; renderStep(); return; }
+                currentStep = 3; tourMessage = ''; renderStep(); return;
+            }
+            if (currentStep === 3) {
+                if (!hasMixedHighlightModes()) { tourMessage = 'For a tighter search, keep one short phrase Exact and make a second, non-overlapping phrase Flexible. You can also continue with Exact only.'; renderStep(); return; }
+                currentStep = 4; tourMessage = ''; renderStep(); return;
+            }
+            if (currentStep === 6) { currentStep = 7; tourMessage = ''; renderStep(); return; }
+            if (currentStep === 7) { void startTourSearch(); return; }
+            if (currentStep >= steps.length - 1) { closeTour?.('completed'); return; }
+            currentStep++; tourMessage = ''; renderStep();
         });
         dialog.addEventListener('keydown', event => {
             if (event.key === 'Escape') { event.preventDefault(); skip(); return; }
             if (event.key === 'Tab') {
                 const controls = Array.from(dialog.querySelectorAll('button:not(:disabled)'));
                 if (!controls.length) return;
-                const first = controls[0];
-                const last = controls[controls.length - 1];
+                const first = controls[0], last = controls[controls.length - 1];
                 if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
                 else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
             }
@@ -16994,8 +17212,88 @@ function installManaSearchOnboarding() {
         nextButton.focus({ preventScroll: true });
     };
 
-    // Delegate from document: both entry points remain functional even if the header/hint is
-    // regenerated after initialization. Capture phase prevents an enclosing action from stealing taps.
+    // When the tour opens the normal picker, keep its stage in memory while the user interacts
+    // with the real application. These callbacks are re-bound whenever the tour is opened.
+    window.addEventListener('manasearch:source-selected', event => {
+        if (!waitingForSource || !layer) return;
+        waitingForSource = false;
+        tourSourceChosen = true;
+        window.__manaSearchTourSelectingSource = false;
+        const card = event.detail?.card || currentSourceCard;
+        currentStep = hasUsableOracleText(card) ? 2 : 4;
+        tourMessage = hasUsableOracleText(card)
+            ? `Selected ${card?.name || 'source card'}. Next, select one short Exact phrase from its Oracle text.`
+            : `${card?.name || 'This card'} has no Oracle text to highlight, so we will continue without highlights.`;
+        showTour();
+    });
+    window.addEventListener('manasearch:source-picker-closed', () => {
+        if (!waitingForSource || !layer) return;
+        waitingForSource = false;
+        window.__manaSearchTourSelectingSource = false;
+        tourMessage = 'The picker was closed. Choose a suggested starter or browse for any card to continue.';
+        showTour();
+    });
+    window.addEventListener('manasearch:source-selection-failed', event => {
+        if (!waitingForSource || !layer) return;
+        waitingForSource = false;
+        window.__manaSearchTourSelectingSource = false;
+        tourMessage = event.detail?.message || 'That card could not be loaded. Please choose another card.';
+        showTour();
+    });
+    window.addEventListener('manasearch:source-highlights-changed', () => {
+        if (!layer || layer.classList.contains('hidden')) {
+            if (!waitingForHighlight && !waitingForMixedMode) return;
+        }
+        const items = sourceOracleHighlights();
+        if (waitingForHighlight === 'first' && items.some(h => h.mode !== 'variable')) {
+            waitingForHighlight = '';
+            currentStep = 3;
+            secondHighlightAdded = false;
+            tourMessage = 'Great. Keep that short phrase Exact. Now select a second, separate phrase from the same effect.';
+            showTour();
+            return;
+        }
+        if (waitingForHighlight === 'second' && items.length >= 2) {
+            waitingForHighlight = '';
+            secondHighlightAdded = true;
+            tourMessage = hasMixedHighlightModes()
+                ? 'Nice—you already have both modes. Keep the distinctive phrase Exact and the second phrase Flexible.'
+                : 'Second phrase added. Now change only that second highlight from = Exact to ≈ Flexible.';
+            if (hasMixedHighlightModes()) currentStep = 4;
+            showTour();
+            return;
+        }
+        if (waitingForMixedMode && hasMixedHighlightModes()) {
+            waitingForMixedMode = false;
+            currentStep = 4;
+            tourMessage = 'Perfect: the Exact anchor narrows the search, while the Flexible phrase lets equivalent wording match.';
+            showTour();
+            return;
+        }
+        // Never leave a user trapped behind a hidden tutorial if a duplicate tap removed a
+        // highlight or a mode tap did not produce the requested Exact/Flexible pair.
+        if (waitingForHighlight === 'first' && items.length === 0) {
+            tourMessage = 'No new phrase was added. Select a short, non-empty phrase in the Oracle Text area, then try again.';
+            showTour();
+        } else if (waitingForHighlight === 'second' && items.length < 2) {
+            tourMessage = 'The second phrase was not added (selecting the same highlight removes it). Choose a different, non-overlapping phrase.';
+            showTour();
+        } else if (waitingForMixedMode && !hasMixedHighlightModes()) {
+            tourMessage = 'The modes are not mixed yet. Keep the distinctive phrase Exact and switch the other phrase to Flexible.';
+            showTour();
+        }
+    });
+    window.addEventListener('manasearch:search-finished', event => {
+        if (!waitingForSearch || !layer) return;
+        waitingForSearch = false;
+        currentStep = 8;
+        const count = Number(event.detail?.resultCount) || 0;
+        tourMessage = count
+            ? `Your search finished with ${count.toLocaleString()} results. The cards below are ready to explore.`
+            : 'Your search finished. No cards passed the current filters; you can clear constraints or adjust highlights and try again.';
+        showTour();
+    });
+
     document.addEventListener('click', event => {
         const launcher = event.target?.closest?.('#start-onboarding-tour-btn, #replay-onboarding-tour-btn');
         if (!launcher) return;
@@ -17003,13 +17301,12 @@ function installManaSearchOnboarding() {
         event.stopPropagation();
         openTour();
     }, true);
+
     let tourStatus = '';
     let hasPriorUse = false;
     try {
         tourStatus = localStorage.getItem(tourKey) || '';
-        // Do not surprise returning ManaSearch users with a forced tour after an update. New
-        // installations have no history, favorites, saved preferences, or dismissed-help marker.
-        const priorUseKeys = [HISTORY_KEY, FAVORITES_KEY, DISPLAY_PREFERENCES_KEY, THEME_KEY, 'manaSearchFirstUseHelpV51'];
+        const priorUseKeys = [HISTORY_KEY, FAVORITES_KEY, DISPLAY_PREFERENCES_KEY, THEME_KEY, firstUseHintKey, 'manaSearchOnboardingV52'];
         hasPriorUse = priorUseKeys.some(key => {
             const value = localStorage.getItem(key);
             if (!value) return false;
@@ -17028,7 +17325,7 @@ function installManaSearchOnboarding() {
     } else {
         const hint = document.getElementById('first-use-help-hint');
         let hintDismissed = false;
-        try { hintDismissed = localStorage.getItem('manaSearchFirstUseHelpV51') === 'dismissed'; } catch (_) {}
+        try { hintDismissed = localStorage.getItem(firstUseHintKey) === 'dismissed'; } catch (_) {}
         if (hint && !hintDismissed) hint.classList.remove('hidden');
     }
 }
@@ -17408,9 +17705,17 @@ function toggleSelectRelatedCard(card) {
 }
 
 function clearSelectedRelatedCards() {
-    if (selectedRelatedCards.size === 0) return;
+    // Treat Clear All as an authoritative reset, even if the Map and visible checkbox/chip
+    // state drifted out of sync after a fast sequence of result updates.
     invalidateInFlightRelatedSearch();
     selectedRelatedCards.clear();
+    document.querySelectorAll('.card-item input.related-checkbox, .card-item input[type="checkbox"][data-related-select], .card-item .related-card-select, .card-item .select-related-card').forEach(input => {
+        if ('checked' in input) input.checked = false;
+        input.setAttribute('aria-checked', 'false');
+    });
+    document.querySelectorAll('.card-item.is-related-selected, .card-item.related-selected, .card-item.selected-for-related').forEach(node => {
+        node.classList.remove('is-related-selected', 'related-selected', 'selected-for-related');
+    });
     updateRelatedBar();
     if (lastSearchResults) renderResults(lastSearchResults);
 }
@@ -17534,12 +17839,17 @@ const SOURCE_CARD_STARTER_SUGGESTIONS = Object.freeze([
 ]);
 const SOURCE_CARD_SUGGESTION_THRESHOLD = 4;
 
-function closeSourceCardPicker() {
+function closeSourceCardPicker({ selectionInProgress = false } = {}) {
     if (!sourceCardPickerModal) return;
     sourceCardPickerModal.classList.add('hidden');
     if (sourceCardPickerDebounce) {
         clearTimeout(sourceCardPickerDebounce);
         sourceCardPickerDebounce = null;
+    }
+    // The first-search tour temporarily hides its dialog while the user chooses a source card.
+    // Distinguish a deliberate close from the close that immediately precedes source loading.
+    if (!selectionInProgress) {
+        window.dispatchEvent(new CustomEvent('manasearch:source-picker-closed'));
     }
 }
 
@@ -17636,11 +17946,20 @@ function createSourceCardPickerTile(card, { removable = false } = {}) {
     body.append(name, type);
     button.appendChild(body);
     button.addEventListener('click', () => {
+        // During the first-search tour, choosing a card means choosing the primary source, even
+        // for a returning user who already has one loaded. Keep the ordinary multi-source behavior
+        // unchanged outside the tour.
+        cardSearchInput.value = card.name;
+        if (window.__manaSearchTourSelectingSource) {
+            window.__manaSearchTourSelectingSource = false;
+            closeSourceCardPicker({ selectionInProgress: true });
+            void loadSourceCard(card.name, card);
+            return;
+        }
         // Merely displaying a suggestion or caching a search match never records history.
         // A recent entry is saved by loadSourceCard/addAdditionalSourceCard only after success.
-        cardSearchInput.value = card.name;
         if (currentSourceCard) void addAdditionalSourceCard(card);
-        else { closeSourceCardPicker(); void loadSourceCard(card.name, card); }
+        else { closeSourceCardPicker({ selectionInProgress: true }); void loadSourceCard(card.name, card); }
     });
     tile.appendChild(button);
 
@@ -17934,7 +18253,9 @@ async function loadSourceCard(query, providedCard = null) {
         const evaluatedPreflight = enrichCardForPreferenceEvaluation(preflightRecord);
         const hiddenReason = getPreferenceHiddenReason(evaluatedPreflight);
         if (preflightRecord && hiddenReason) {
-            alert(`${evaluatedPreflight.name || query} is hidden by your current Preferences (${hiddenReason}). Enable the relevant option in Preferences to use it as a source card.`);
+            const message = `${evaluatedPreflight.name || query} is hidden by your current Preferences (${hiddenReason}). Enable the relevant option in Preferences to use it as a source card.`;
+            alert(message);
+            window.dispatchEvent(new CustomEvent('manasearch:source-selection-failed', { detail: { message } }));
             return;
         }
     }
@@ -18085,6 +18406,9 @@ async function loadSourceCard(query, providedCard = null) {
         checkFavoriteStatus(cardData.name);
         const removeBtn = document.getElementById('discard-source-card-btn');
         if (removeBtn) removeBtn.disabled = false;
+        if (!benchmarkColdMode) {
+            window.dispatchEvent(new CustomEvent('manasearch:source-selected', { detail: { card: cardData } }));
+        }
     } catch (error) {
         activeSearchStreamProgressReporter = null;
         if (requestId !== searchRequestId) return;
@@ -18102,6 +18426,7 @@ async function loadSourceCard(query, providedCard = null) {
         highlightComposerOpen = false;
         selectedRelatedCards.clear();
         alert(error.message);
+        window.dispatchEvent(new CustomEvent('manasearch:source-selection-failed', { detail: { message: error?.message || 'The card could not be loaded.' } }));
         sourceCardSection.classList.remove('hidden');
         sourceCardLoaded?.classList.add('hidden');
         sourceCardEmpty?.classList.remove('hidden');
@@ -20017,6 +20342,9 @@ async function findSimilarCards() {
     const timings = {};
 
     showLoading(true);
+    window.dispatchEvent(new CustomEvent('manasearch:search-started', {
+        detail: { sourceName: currentSourceCard?.name || '', highlightCount: manualHighlights.length }
+    }));
     // Keep the Results area visible during the search. The user should be able to see the
     // first-pass candidates as soon as they arrive instead of waiting for the entire pipeline.
     if (resultsSection) resultsSection.classList.remove('hidden');
@@ -21545,6 +21873,13 @@ if (candidates.length > 0) {
         if (requestId === searchRequestId && activeResultView.mode === 'main' && activeResultView.requestId === requestId) {
             updateProgress(null, null, "All done! Candidates retrieved and ranked purely by similarity.");
             showLoading(false);
+            window.dispatchEvent(new CustomEvent('manasearch:search-finished', {
+                detail: {
+                    sourceName: currentSourceCard?.name || '',
+                    resultCount: Array.isArray(lastSearchResults) ? lastSearchResults.length : 0,
+                    diagnostics: lastSearchDiagnostics || null
+                }
+            }));
         }
     }
 }

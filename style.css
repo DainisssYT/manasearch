@@ -3133,6 +3133,10 @@ section {
     --status-positive: #10b981;
     --status-negative: #ef4444;
     --status-warning: #b8860b;
+    --score-band-low: #f87171;
+    --score-band-medium: #fbbf24;
+    --score-band-high: #4ade80;
+    --score-band-excellent: #67e8f9;
     /* Low-saturation status colors are easier on the eyes in dark mode. */
     --legality-legal: #8bc6a2;
     --legality-illegal: #d59a9f;
@@ -3148,6 +3152,11 @@ body.light-theme {
     --status-positive: #047857;
     --status-negative: #b91c1c;
     --status-warning: #9a6700;
+    /* Use darker score accents on white/light cards so score labels remain readable. */
+    --score-band-low: #b4232f;
+    --score-band-medium: #92400e;
+    --score-band-high: #166534;
+    --score-band-excellent: #0e7490;
     --legality-legal: #166534;
     --legality-illegal: #b4232f;
     --legality-restricted: #8a6700;
@@ -3202,8 +3211,10 @@ select option {
     color: var(--text-main) !important;
 }
 
-button:not(.color-pip):not(.clear-btn) {
-    color: var(--text-on-accent);
+/* Do not force white text onto every button. Individual controls own their foreground
+   color so themed/outlined buttons can correctly use --text-main on light surfaces. */
+button.add-source-card-btn {
+    color: var(--text-main);
 }
 
 button.clear-btn,
@@ -5704,10 +5715,10 @@ body.mana-panel-open .card-item {
 .related-use-highlights-label { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; }
 #favorite-btn.is-favorited { color: #f5c542; border-color: rgba(245,197,66,.65); }
 #favorite-btn.is-favorited::first-letter { color: #f5c542; }
-.card-match-line.score-band-low { color: #f87171; }
-.card-match-line.score-band-medium { color: #fbbf24; }
-.card-match-line.score-band-high { color: #4ade80; }
-.card-match-line.score-band-excellent { color: #67e8f9; }
+.card-match-line.score-band-low { color: var(--score-band-low); }
+.card-match-line.score-band-medium { color: var(--score-band-medium); }
+.card-match-line.score-band-high { color: var(--score-band-high); }
+.card-match-line.score-band-excellent { color: var(--score-band-excellent); }
 
 .mana-image-magnifier {
     position: fixed;
@@ -6159,4 +6170,66 @@ button:focus-visible { outline: 2px solid var(--accent-color); outline-offset: 2
 .source-card-art-wrap.is-source-legacy-flip-rotated > img { transform: rotate(180deg); }
 @media (prefers-reduced-motion: reduce) {
     .source-card-art-wrap > img { transition: none !important; }
+}
+
+
+/* v57: Fix light-theme contrast. The previous broad button selector forced a white foreground
+   on all buttons, overriding many later neutral-control rules and causing white-on-white text. */
+body.light-theme {
+    color-scheme: light;
+}
+body.light-theme :is(input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="color"]), textarea, select, option, [contenteditable="true"]) {
+    color: var(--text-main);
+    caret-color: var(--text-main);
+}
+body.light-theme :is(input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="color"]), textarea, select) {
+    background-color: var(--bg-secondary);
+    border-color: var(--border-color);
+}
+body.light-theme :is(.add-source-card-btn, .methods-trigger-btn, .compare-btn, .source-card-add-btn,
+    .source-picker-card, .secondary-preference-btn, .first-use-help-dismiss,
+    .mana-onboarding-back, .mana-onboarding-skip, .history-card-open, .history-card-remove,
+    .constraint-add-btn, .highlight-add-btn, .highlight-add-cancel,
+    .selected-cards-more-btn, .selected-related-modal-close,
+    .mana-card-preview-close, .discard-source-card-btn, .copy-card-name-btn, .close-btn,
+    #close-modal, #theme-toggle) {
+    color: var(--text-main);
+}
+body.light-theme .card-match-line.score-band-low { color: var(--score-band-low); }
+body.light-theme .card-match-line.score-band-medium { color: var(--score-band-medium); }
+body.light-theme .card-match-line.score-band-high { color: var(--score-band-high); }
+body.light-theme .card-match-line.score-band-excellent { color: var(--score-band-excellent); }
+
+
+/* v58: keep ? help affordances off mouse/trackpad layouts; desktop help is hover-delayed. */
+@media (hover: hover) and (pointer: fine) {
+  .mana-feature-help-marker, .mana-inline-help-marker { display: none !important; }
+}
+@media (hover: none) and (pointer: coarse) {
+  .mana-feature-help-marker, .mana-inline-help-marker { display: inline-flex; }
+}
+.mana-feature-help-popover { opacity: 1; transform: translateY(0); transition: opacity .16s ease, transform .16s ease; }
+.mana-feature-help-popover.is-closing { opacity: 0; transform: translateY(4px); pointer-events: none; }
+@media (prefers-reduced-motion: reduce) { .mana-feature-help-popover { transition: none !important; } }
+.related-use-highlights-label { position: relative; z-index: 2; display: inline-flex; align-items: center; gap: 6px; cursor: pointer; pointer-events: auto; }
+.related-use-highlights-label input { position: relative; z-index: 3; pointer-events: auto; cursor: pointer; }
+
+
+/* v59: interactive first-search onboarding actions and starter-card choices */
+.mana-tour-source-options { display:flex; flex-direction:column; gap:7px; margin-top:5px; }
+.mana-tour-starter-card { display:flex; flex-direction:column; align-items:flex-start; gap:3px; width:100%; padding:10px 12px; text-align:left; border:1px solid var(--border-color); border-radius:10px; color:var(--text-main); background:var(--bg-primary); cursor:pointer; }
+.mana-tour-starter-card strong { font-size:13px; }
+.mana-tour-starter-card small { font-size:11px; line-height:1.4; color:var(--text-muted); }
+.mana-tour-starter-card:hover,.mana-tour-starter-card:focus-visible { border-color:var(--accent-color); outline-color:var(--accent-color); }
+.mana-tour-action-row { display:flex; align-items:stretch; flex-wrap:wrap; gap:7px; margin-top:4px; }
+.mana-tour-action { display:inline-flex; align-items:center; justify-content:center; min-height:42px; padding:10px 13px; border:1px solid var(--accent-color); border-radius:9px; background:var(--accent-color); color:#fff; font-size:12px; font-weight:800; cursor:pointer; }
+.mana-tour-action-secondary { background:var(--bg-primary); color:var(--text-main); border-color:var(--border-color); }
+.mana-tour-action:disabled { opacity:.5; cursor:not-allowed; }
+.mana-tour-demo-rules .tour-mark-exact { background:#e4b83f; color:#211a04; border-radius:3px; padding:1px 3px; }
+.mana-tour-demo-rules .tour-mark-flexible { background:#8de2ce; color:#073c31; border-radius:3px; padding:1px 3px; text-decoration:underline dashed; }
+@media (max-width:560px) {
+  .mana-tour-source-options { gap:6px; }
+  .mana-tour-starter-card { min-height:48px; padding:9px 10px; }
+  .mana-tour-action-row > button { flex:1 1 100%; }
+  .mana-onboarding-demo { max-height:42dvh; overflow-y:auto; }
 }
