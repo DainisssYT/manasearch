@@ -1,6 +1,6 @@
-/* ManaSearch build 20261014-59 */
+/* ManaSearch build 20261014-60 */
 // ManaSearch deployment build marker. Bump this whenever app.js changes so cached-module issues are easy to diagnose.
-const MANASEARCH_APP_BUILD = '20261014-59';
+const MANASEARCH_APP_BUILD = '20261014-60';
 console.info(`[ManaSearch] app.js build ${MANASEARCH_APP_BUILD}`);
 
 // State Management
@@ -17500,6 +17500,7 @@ function updateFavoriteButtons(cardName) {
         button.textContent = isFavorite ? '★' : '☆';
         button.title = isFavorite ? `Remove ${button.dataset.favoriteCardName} from favorites` : `Add ${button.dataset.favoriteCardName} to favorites`;
         button.setAttribute('aria-label', button.title);
+        button.setAttribute('aria-pressed', isFavorite ? 'true' : 'false');
         button.classList.toggle('is-favorited', isFavorite);
     });
 }
@@ -22915,7 +22916,9 @@ function renderResults(cards, internalOptions = {}) {
             matchLine.classList.remove('score-band-low', 'score-band-medium', 'score-band-high', 'score-band-excellent');
             const scoreBand = matchPercentage < 40 ? 'score-band-low' : matchPercentage < 60 ? 'score-band-medium' : matchPercentage < 80 ? 'score-band-high' : 'score-band-excellent';
             matchLine.classList.add(scoreBand);
-            matchLine.style.color = ({ 'score-band-low': '#f87171', 'score-band-medium': '#fbbf24', 'score-band-high': '#4ade80', 'score-band-excellent': '#67e8f9' })[scoreBand];
+            // Keep score colors theme-aware. An inline color here overrides the darker
+            // score-band variables used by the light theme and can make labels unreadable.
+            matchLine.style.removeProperty('color');
         }
 
         const badge = cardElement.querySelector('.weak-match-badge');
@@ -22965,11 +22968,16 @@ function renderResults(cards, internalOptions = {}) {
 
         const favoriteBtn = cardElement.querySelector('.result-favorite-btn');
         if (favoriteBtn) {
+            // updateFavoriteButtons uses this shared identity to refresh visible result buttons
+            // immediately after a favorite is toggled. Without it, the stored state changed but
+            // candidate buttons did not visually update until a later full render.
+            favoriteBtn.dataset.favoriteCardName = String(card.name || '');
             const isFav = favoriteNameSet.has(String(card.name).toLowerCase());
             favoriteBtn.textContent = isFav ? '★' : '☆';
             favoriteBtn.classList.toggle('is-favorited', isFav);
             favoriteBtn.title = isFav ? `Remove ${card.name} from favorites` : `Add ${card.name} to favorites`;
             favoriteBtn.setAttribute('aria-label', favoriteBtn.title);
+            favoriteBtn.setAttribute('aria-pressed', isFav ? 'true' : 'false');
         }
         const checkbox = cardElement.querySelector('.related-checkbox');
         if (checkbox) checkbox.checked = isSelected;
@@ -23046,6 +23054,8 @@ function renderResults(cards, internalOptions = {}) {
         favoriteBtn.className = 'result-favorite-btn';
         favoriteBtn.style.alignSelf = 'center';
         favoriteBtn.dataset.role = 'favorite';
+        favoriteBtn.dataset.favoriteCardName = String(card.name || '');
+        favoriteBtn.setAttribute('aria-pressed', 'false');
         favoriteBtn.dataset.featureTip = 'Add this candidate to favorites for quick access later.';
         favoriteBtn.dataset.featurePreview = '☆ → ★ Saved in your local favorites';
         const compareBtn = document.createElement('button');
