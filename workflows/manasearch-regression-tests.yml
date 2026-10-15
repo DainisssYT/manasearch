@@ -1,0 +1,40 @@
+name: ManaSearch Regression Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  regression:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+
+      - name: Run dependency-free checks
+        run: |
+          node --check --input-type=module < app.js
+          node tests/run-static-regression.cjs
+          node tests/run-core-unit-regression.cjs
+          node tests/run-card-benchmark-data.cjs
+
+      - name: Install Playwright
+        run: npm install --no-save playwright@1.55.0
+
+      - name: Install Chromium
+        run: npx playwright install --with-deps chromium
+
+      - name: Run production mechanical regression and performance suites
+        run: node tests/run-browser-regression.cjs
