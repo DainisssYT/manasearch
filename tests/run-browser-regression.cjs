@@ -37,7 +37,11 @@ async function main() {
   const address = server.address();
   let browser;
   try {
-    browser = await chromium.launch({ headless: true, args: ['--no-sandbox'] });
+    const launchOptions = { headless: true, args: ['--no-sandbox'] };
+    // CI uses Playwright's installed Chromium; local/offline environments can point this runner
+    // at a preinstalled browser without changing the test code.
+    if (process.env.MANASEARCH_CHROMIUM_EXECUTABLE) launchOptions.executablePath = process.env.MANASEARCH_CHROMIUM_EXECUTABLE;
+    browser = await chromium.launch(launchOptions);
     const page = await browser.newPage();
     const pageErrors = [];
     page.on('pageerror', error => pageErrors.push(error.message));

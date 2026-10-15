@@ -109,6 +109,21 @@ check('CSS braces are balanced', () => {
   }
   assert.equal(depth, 0, 'unclosed CSS block');
 });
+check('static data downloads have deadlines and report a useful failure instead of spinning forever', () => {
+  assert.match(app, /async function fetchStaticAsset\(/);
+  assert.match(app, /Static card corpus \(cards\.bin\)/);
+  assert.match(app, /Static semantic index \(semantic-index\.bin\)/);
+  assert.match(app, /request timed out after/);
+  assert.match(app, /staticSearchResourceState\.lastError = errors\.join/);
+});
+check('asset cache-bust uses v75 and the app module declaration remains async', () => {
+  assert.match(app, /const MANASEARCH_APP_BUILD = ['\"]20261015-75['\"]/);
+  assert.match(app, /async function scoreCardBatch\(/);
+  assert.match(html, /app\.js\?v=20261015-75/);
+  assert.match(html, /pako\.min\.js\?v=20261015-75/);
+  assert.match(html, /style\.css\?v=20261015-75/);
+});
+
 check('browser console benchmark entry point loads the deployed static fixture', () => {
   assert.match(app, /window\.runManaSearchRealCardBenchmark\s*=\s*runManaSearchRealCardBenchmarkFromConsole/);
   assert.match(app, /tests\/fixtures\/mtg-mechanical-benchmark\.json/);
@@ -117,9 +132,21 @@ check('test automation files exist', () => {
   assert.ok(fs.existsSync(path.join(root, 'tests', 'run-browser-regression.cjs')));
   assert.ok(fs.existsSync(path.join(root, '.github', 'workflows', 'manasearch-regression-tests.yml')));
   assert.ok(fs.existsSync(path.join(root, '.github', 'workflows', 'deploy-pages.yml')));
+  assert.ok(fs.existsSync(path.join(root, '.github', 'workflows', 'recover-stuck-pages-deployment.yml')));
   const deploy = fs.readFileSync(path.join(root, '.github', 'workflows', 'deploy-pages.yml'), 'utf8');
-  assert.match(deploy, /cp\s+pako\.min\.js\s+_site\//);
+  assert.match(deploy, /for f in pako\.min\.js cards\.bin semantic-index\.bin static-data-meta\.json; do/);
+  assert.match(deploy, /cp \"\$f\" _site\//);
   assert.match(deploy, /cp\s+tests\/fixtures\/mtg-mechanical-benchmark\.json\s+_site\/tests\/fixtures\//);
+  assert.match(deploy, /cancel-in-progress:\s*false/);
+  assert.match(deploy, /uses:\s*actions\/deploy-pages@v5\.0\.1/);
+  assert.match(deploy, /uses:\s*actions\/configure-pages@v6/);
+  assert.match(deploy, /uses:\s*actions\/upload-pages-artifact@v5/);
+  assert.doesNotMatch(deploy, /setup-node|node --check|node tests\//, 'static deployment should not require a Node setup or run test scripts');
+  const recovery = fs.readFileSync(path.join(root, '.github', 'workflows', 'recover-stuck-pages-deployment.yml'), 'utf8');
+  assert.match(recovery, /pages\/deployments\/\$\{DEPLOYMENT_ID\}\/cancel/);
+  assert.match(recovery, /cancel-in-progress:\s*false/);
+  assert.match(app, /function getGraveyardReturnDestinationSignature\(/);
+  assert.match(app, /opponentUpkeepLifeLoss/);
   assert.ok(fs.existsSync(path.join(root, 'tests', 'fixtures', 'mtg-mechanical-benchmark.json')));
 });
 

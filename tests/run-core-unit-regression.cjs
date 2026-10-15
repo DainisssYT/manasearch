@@ -75,6 +75,20 @@ test('production contrast classifier separates reanimation from graveyard-to-han
   assert.equal(sandbox.result.kind, 'reanimation-vs-graveyard-recursion');
 });
 
+test('compound real-card text still distinguishes battlefield reanimation from hand recursion', () => {
+  const contrastBlock = sliceBetween('function getMechanicalContrastText(', 'function calculateMechanicalSimilarityDetailed(');
+  const sandbox = { result: null };
+  vm.runInNewContext(`
+    const OPPOSITE_MECHANICS = new Set([]);
+    ${contrastBlock}
+    result = inferExplicitMechanicalContrast(
+      [{raw:'Put target creature card from a graveyard onto the battlefield under your control. You lose life equal to its mana value.'}],
+      [{raw:'When this creature enters, you may return target card from your graveyard to your hand.'}]
+    );
+  `, sandbox);
+  assert.equal(sandbox.result.kind, 'reanimation-vs-graveyard-recursion');
+});
+
 test('production cadence rank factor strongly downranks one-shot substitutes without excluding them', () => {
   const penaltyStart = app.indexOf('const SOURCE_ACQUISITION_CADENCE_RANKING_PENALTY');
   const scoreBatch = app.indexOf('async function scoreCardBatch(', penaltyStart);

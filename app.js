@@ -1,6 +1,6 @@
-/* ManaSearch build 20261015-74 */
+/* ManaSearch build 20261015-75 */
 // ManaSearch deployment build marker. Bump this whenever app.js changes so cached-module issues are easy to diagnose.
-const MANASEARCH_APP_BUILD = '20261015-74';
+const MANASEARCH_APP_BUILD = '20261015-75';
 console.info(`[ManaSearch] app.js build ${MANASEARCH_APP_BUILD}`);
 
 // State Management
@@ -13500,7 +13500,7 @@ let semanticCosineBaselineReady = false;
 const STATIC_CARD_CORPUS_FILENAME = 'cards.bin';
 const STATIC_CARD_CORPUS_VERSION = 1;
 const STATIC_CARD_CORPUS_MAGIC = 'MSCARD1G';
-const STATIC_CARD_CORPUS_CACHE_VERSION = '20261015-74';
+const STATIC_CARD_CORPUS_CACHE_VERSION = '20261015-75';
 const STATIC_DATA_META_FILENAME = 'static-data-meta.json';
 
 // A failed/stalled static asset request must not leave the initial search status spinning forever.
@@ -14602,7 +14602,7 @@ const FULL_SEMANTIC_INDEX_SEARCH_LIMIT = 96;
 const STATIC_SEMANTIC_INDEX_FILENAME = 'semantic-index.bin';
 const STATIC_SEMANTIC_INDEX_VERSION = 1;
 const STATIC_SEMANTIC_INDEX_MAGIC = 'MSIDX1';
-const STATIC_SEMANTIC_INDEX_CACHE_VERSION = '20261015-74';
+const STATIC_SEMANTIC_INDEX_CACHE_VERSION = '20261015-75';
 let staticSemanticIndexPromise = null;
 let staticSemanticIndexAttempted = false;
 let staticSemanticIndexLoadError = null;

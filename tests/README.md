@@ -15,7 +15,7 @@ node tests/run-card-benchmark-data.cjs
 
 ## 2. Full browser regression + performance benchmark
 
-Requires Node.js 20+ and network access to install Playwright/Chromium:
+Requires Node.js 24+ and network access to install Playwright/Chromium:
 
 ```sh
 npm install --no-save playwright@1.55.0
@@ -60,7 +60,7 @@ The browser runner loads the JSON fixture and passes it to `runManaSearchRealCar
 
 ## 4. Run the real-card benchmark from the deployed browser console
 
-After the fixed v73 build has deployed, open ManaSearch, open DevTools, and run:
+After the v75 build has deployed, open ManaSearch, open DevTools, and run:
 
 ```js
 await runManaSearchRealCardBenchmark()
@@ -79,3 +79,10 @@ runManaSearchPerformanceSuite()
 ```
 
 The console helper requires the Pages artifact to include `tests/fixtures/mtg-mechanical-benchmark.json`; the deployment workflow now copies that fixture and `pako.min.js` to the published site. The repo remains a static GitHub Pages site: the benchmark uses a same-origin static JSON download, and all parsing/scoring happens locally in the browser.
+
+
+## GitHub Pages deployment failures
+
+The site itself is static: Node.js is not installed on or required by visitor devices. The separate regression workflow uses Node 24 only to run automated tests on GitHub-hosted runners. The Pages workflow assembles and uploads static files without a Node setup step.
+
+The deploy workflow uses `cancel-in-progress: false` to avoid canceling a live Pages deployment and leaving it blocked. If a pre-existing stale deployment still blocks the first run, copy the exact 40-character ID shown after `Please cancel` in the deploy log, then manually run `.github/workflows/recover-stuck-pages-deployment.yml` with that ID. It cancels only the specified deployment; then rerun the deployment workflow. Do not provide an arbitrary ID.
