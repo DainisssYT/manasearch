@@ -1,6 +1,6 @@
-/* ManaSearch build 20261015-77 */
+/* ManaSearch build 20261015-79 */
 // ManaSearch deployment build marker. Bump this whenever app.js changes so cached-module issues are easy to diagnose.
-const MANASEARCH_APP_BUILD = '20261015-77';
+const MANASEARCH_APP_BUILD = '20261015-79';
 console.info(`[ManaSearch] app.js build ${MANASEARCH_APP_BUILD}`);
 
 // State Management
@@ -482,7 +482,8 @@ const DEFAULT_DISPLAY_PREFERENCES = Object.freeze({
     showStreamProgress: true,
     includeDigitalCards: false,
     includeTokenEmblemFunnyCards: false,
-    showEdhrecButton: true
+    showEdhrecButton: true,
+    showSearchIntent: false
 });
 let displayPreferences = { ...DEFAULT_DISPLAY_PREFERENCES };
 
@@ -554,7 +555,9 @@ function loadDisplayPreferences() {
         includeDigitalCards: stored?.includeDigitalCards === true,
         includeTokenEmblemFunnyCards: stored?.includeTokenEmblemFunnyCards === true,
         // New preference defaults ON for existing users whose saved settings predate this option.
-        showEdhrecButton: stored?.showEdhrecButton !== false
+        showEdhrecButton: stored?.showEdhrecButton !== false,
+        // Optional Search intent explanation is off by default, including for users with older saved preferences.
+        showSearchIntent: stored?.showSearchIntent === true
     };
     return displayPreferences;
 }
@@ -4448,7 +4451,9 @@ function renderHighlightEditor(idx) {
 
         highlightEditIndex = null;
         reapplyOracleHighlights();
+        reapplyTypeLineHighlights();
         renderHighlightChips();
+        notifyManaSearchHighlightsChanged();
     };
     save.addEventListener('click', commit);
     input.addEventListener('keydown', (event) => {
@@ -4572,6 +4577,7 @@ function renderHighlightChips() {
             reapplyOracleHighlights();
             reapplyTypeLineHighlights();
             renderHighlightChips();
+            notifyManaSearchHighlightsChanged();
         });
         container.appendChild(clearAllButton);
     }
@@ -4699,6 +4705,7 @@ function renderHighlightChips() {
             input.value = '';
             highlightComposerOpen = false;
             renderHighlightChips();
+            notifyManaSearchHighlightsChanged();
         };
         addTagBtn.addEventListener('click', submit);
         input.addEventListener('keydown', (event) => {
@@ -11594,6 +11601,13 @@ try { window.runManaSearchMechanicalRegressionSuite = runManaSearchMechanicalReg
 // exercises the same parser, repeatability annotator, profile builder, and scorer used by searches.
 // The benchmark is opt-in and has no cost during normal site usage.
 function runManaSearchRealCardBenchmarkSuite({ benchmark = null, log = true } = {}) {
+    // Console-friendly behavior: when called without an explicit fixture, load the same static
+    // fixture as runManaSearchRealCardBenchmark(). Returning that Promise makes
+    // `await runManaSearchRealCardBenchmarkSuite()` safe and avoids a misleading 0/0 report.
+    // CI may still pass { benchmark: fixture } to run the scorer synchronously and offline.
+    if (benchmark == null) {
+        return runManaSearchRealCardBenchmarkFromConsole({ log });
+    }
     const cards = Array.isArray(benchmark?.cards) ? benchmark.cards : [];
     const pairs = Array.isArray(benchmark?.pairs) ? benchmark.pairs : [];
     const byId = new Map(cards.map(card => [String(card.id || ''), card]));
@@ -13500,7 +13514,7 @@ let semanticCosineBaselineReady = false;
 const STATIC_CARD_CORPUS_FILENAME = 'cards.bin';
 const STATIC_CARD_CORPUS_VERSION = 1;
 const STATIC_CARD_CORPUS_MAGIC = 'MSCARD1G';
-const STATIC_CARD_CORPUS_CACHE_VERSION = '20261015-77';
+const STATIC_CARD_CORPUS_CACHE_VERSION = '20261015-79';
 const STATIC_DATA_META_FILENAME = 'static-data-meta.json';
 
 // A failed/stalled static asset request must not leave the initial search status spinning forever.
@@ -14602,7 +14616,7 @@ const FULL_SEMANTIC_INDEX_SEARCH_LIMIT = 96;
 const STATIC_SEMANTIC_INDEX_FILENAME = 'semantic-index.bin';
 const STATIC_SEMANTIC_INDEX_VERSION = 1;
 const STATIC_SEMANTIC_INDEX_MAGIC = 'MSIDX1';
-const STATIC_SEMANTIC_INDEX_CACHE_VERSION = '20261015-77';
+const STATIC_SEMANTIC_INDEX_CACHE_VERSION = '20261015-79';
 let staticSemanticIndexPromise = null;
 let staticSemanticIndexAttempted = false;
 let staticSemanticIndexLoadError = null;
@@ -16337,6 +16351,7 @@ function initApp() {
     themeToggle = null;
     loadDisplayPreferences();
     applyPresentationPreferences();
+    installManaSearchIntentPanel();
 
     // --- PREFERENCES PANEL ---
     const preferencesBtn = document.getElementById('preferences-btn');
@@ -16347,6 +16362,7 @@ function initApp() {
     const preferenceResultLimit = document.getElementById('preference-result-limit');
     const preferenceScoreBreakdown = document.getElementById('preference-score-breakdown');
     const preferenceShowEdhrecButton = document.getElementById('preference-show-edhrec-button');
+    const preferenceShowSearchIntent = document.getElementById('preference-show-search-intent');
     const preferenceTheme = document.getElementById('preference-theme');
     const preferenceDensity = document.getElementById('preference-result-density');
     const preferenceReduceMotion = document.getElementById('preference-reduce-motion');
@@ -16358,6 +16374,7 @@ function initApp() {
         if (preferenceResultLimit) preferenceResultLimit.value = String(getDisplayedResultLimit());
         if (preferenceScoreBreakdown) preferenceScoreBreakdown.checked = Boolean(displayPreferences.showScoreBreakdown);
         if (preferenceShowEdhrecButton) preferenceShowEdhrecButton.checked = displayPreferences.showEdhrecButton !== false;
+        if (preferenceShowSearchIntent) preferenceShowSearchIntent.checked = displayPreferences.showSearchIntent === true;
         if (preferenceTheme) preferenceTheme.value = (displayPreferences.theme === 'light' || displayPreferences.theme === 'dark') ? displayPreferences.theme : 'dark';
         if (preferenceDensity) preferenceDensity.value = displayPreferences.resultDensity || 'comfortable';
         if (preferenceReduceMotion) preferenceReduceMotion.checked = Boolean(displayPreferences.reduceMotion);
@@ -16372,6 +16389,7 @@ function initApp() {
         if (displayPreferences.maxResults !== previousPageSize) currentResultsPage = 1;
         displayPreferences.showScoreBreakdown = preferenceScoreBreakdown?.checked !== false;
         displayPreferences.showEdhrecButton = preferenceShowEdhrecButton?.checked !== false;
+        displayPreferences.showSearchIntent = preferenceShowSearchIntent?.checked === true;
         displayPreferences.theme = ['dark', 'light'].includes(preferenceTheme?.value) ? preferenceTheme.value : DEFAULT_DISPLAY_PREFERENCES.theme;
         displayPreferences.resultDensity = ['comfortable', 'compact'].includes(preferenceDensity?.value) ? preferenceDensity.value : DEFAULT_DISPLAY_PREFERENCES.resultDensity;
         displayPreferences.reduceMotion = Boolean(preferenceReduceMotion?.checked);
@@ -16386,6 +16404,7 @@ function initApp() {
             localStorage.setItem(THEME_KEY, displayPreferences.theme);
         } catch (_) {}
         applyPresentationPreferences();
+        refreshManaSearchIntentPanel();
         if (resultsSection && !resultsSection.classList.contains('hidden') && Array.isArray(lastSearchResults)) {
             renderResults(lastSearchResults);
             updateResultsSummary();
@@ -19593,6 +19612,7 @@ function clearSourceCard() {
     if (cardSearchInput) cardSearchInput.value = '';
     updateRelatedBar();
     renderHighlightChips();
+    notifyManaSearchHighlightsChanged();
     renderTags();
     checkFavoriteStatus('');
     const removeBtn = document.getElementById('discard-source-card-btn');
@@ -21592,6 +21612,12 @@ function getSearchIntent(sourceCard, highlights = []) {
         colorIndex: Number.isInteger(h?.colorIndex) ? h.colorIndex : 0,
         mode: h?.mode === 'variable' ? 'variable' : 'exact',
         origin: h?.origin || 'user',
+        // Offsets are part of live highlight identity: selecting the same phrase in a different
+        // clause can produce a different grammatical context and therefore a different intent.
+        start: Number.isInteger(h?.start) ? h.start : null,
+        end: Number.isInteger(h?.end) ? h.end : null,
+        typeStart: Number.isInteger(h?.typeStart) ? h.typeStart : null,
+        typeEnd: Number.isInteger(h?.typeEnd) ? h.typeEnd : null,
         attachedTo: Number.isInteger(h?.attachedTo) ? h.attachedTo : null,
         intent: String(h?.intent || ''),
         benchmarkIntentOnly: Boolean(h?.benchmarkIntentOnly)
@@ -21637,6 +21663,351 @@ function getSearchIntent(sourceCard, highlights = []) {
     return intent;
 }
 
+
+// Search Intent is a live explanation of the same `getSearchIntent()` object consumed by the
+// production search/scoring path. It never calculates a second, competing interpretation of the
+// source card: canonical effects, repeatability, highlights, and role evidence are derived from
+// the active scoring profile.
+let manaSearchIntentPanelInstalled = false;
+let manaSearchIntentRenderGeneration = 0;
+let manaSearchIntentRenderFrame = 0;
+let manaSearchIntentRenderTimer = 0;
+
+const SEARCH_INTENT_FUNCTION_LABELS = Object.freeze({
+    card_draw: 'draw cards', mana_ability: 'produce mana', token_creation: 'create tokens',
+    token_multiplier: 'multiply token production', reanimate: 'return cards from graveyards to the battlefield',
+    recursion: 'return cards from graveyards to hand', bounce: 'return permanents to their owners’ hands',
+    tutor: 'search a library for a card', ramp_tutor: 'find a land and accelerate mana',
+    counter: 'counter a spell or ability', removal: 'remove permanents', exile_removal: 'exile permanents',
+    direct_damage: 'deal damage', place_counter: 'place counters', anthem: 'boost creatures or change their keywords',
+    tribal_anthem: 'boost a creature type', stat_buff: 'change power or toughness',
+    gain_life: 'gain life', lose_life: 'cause life loss', discard: 'discard cards', mill: 'mill cards',
+    tap: 'tap permanents', untap: 'untap permanents', cost_reduction: 'reduce costs',
+    gain_control: 'gain control of permanents', destroy: 'destroy permanents',
+    self_sacrifice: 'sacrifice a permanent as a cost', zone_change: 'move objects between zones',
+    tuck: 'put cards into libraries'
+});
+
+const SEARCH_INTENT_ROLE_LABELS = Object.freeze({
+    fast_mana: 'fast mana / acceleration', land_ramp: 'land ramp', catch_up_ramp: 'catch-up ramp',
+    card_advantage_engine: 'card-advantage engine', token_engine: 'repeatable token engine',
+    token_multiplier: 'token multiplier', tribal_anthem: 'tribal payoff', anthem: 'team-wide buff',
+    board_wipe: 'mass removal', single_target_removal: 'targeted removal', counterspell: 'countermagic',
+    bounce: 'bounce / tempo', burn: 'direct damage', graveyard_recursion: 'graveyard recursion',
+    tutor: 'tutoring', discard_engine: 'discard / disruption', mill_engine: 'mill strategy',
+    life_gain_engine: 'life-gain effect', life_loss_engine: 'life-loss effect'
+});
+
+function searchIntentFunctionLabel(effect) {
+    const canonical = effect?.canonical || (effect ? deriveCanonicalFunction(effect) : null);
+    const fn = canonical?.function || effect?.action || '';
+    const base = SEARCH_INTENT_FUNCTION_LABELS[fn] || String(fn).replace(/_/g, ' ');
+    const p = canonical?.params || {};
+    const details = [];
+    if (p.quantity != null && Number.isFinite(Number(p.quantity)) && Number(p.quantity) > 0) {
+        if (fn === 'card_draw') details.push(Number(p.quantity) === 1 ? 'usually one card per resolution' : `${p.quantity} cards per resolution`);
+        else if (fn === 'mana_ability') details.push(`${p.quantity} net mana when used`);
+        else if (fn === 'direct_damage') details.push(`${p.quantity} damage`);
+    }
+    if (p.subtype && !['all', 'other'].includes(p.subtype)) details.push(`subtype: ${p.subtype}`);
+    return { label: base, detail: details.join(' · '), canonical };
+}
+
+function searchIntentCadenceDescription(effect) {
+    const profile = getEffectRepeatabilityProfile(effect);
+    if (!profile || profile.group === 'unknown' || !profile.kind) return { label: 'Repeatability unclear', group: 'unknown', detail: '' };
+    const rawContext = String(effect?.contextClause || effect?.parentClauseRaw || effect?.raw || '');
+    const trigger = effect?.triggerProfile || effect?.canonical?.params?.triggerProfile || {};
+    if (profile.kind === 'periodic_trigger') {
+        const timing = profile.timingText || trigger.timingText || '';
+        return { label: 'Recurring turn trigger', group: profile.group, detail: timing ? `repeats ${timing}` : 'repeats in a recurring turn window' };
+    }
+    if (profile.kind === 'repeatable_trigger') {
+        let eventText = String(profile.eventText || '').trim();
+        if (!eventText && trigger.event) {
+            const eventLabels = { casts_spell: 'a spell is cast', enters_battlefield: 'a permanent enters the battlefield', dies: 'a creature dies', attacks: 'this creature attacks', blocks: 'this creature blocks', draw_card: 'a card is drawn', discard: 'a card is discarded', sacrifice: 'a permanent is sacrificed', deals_damage: 'damage is dealt', gain_life: 'life is gained', lose_life: 'life is lost', create: 'a token is created', zone_change: 'a permanent changes zones' };
+            eventText = eventLabels[trigger.event] || 'the triggering event occurs';
+        }
+        eventText = eventText.replace(/^[,\s]+|[,;.]\s*$/g, '');
+        return { label: 'Repeatable triggered ability', group: profile.group, detail: eventText ? `repeats when ${eventText.replace(/^(?:whenever|when)\s+/i, '')}` : 'can trigger repeatedly when its event happens' };
+    }
+    if (profile.kind === 'repeatable_activation') return { label: 'Repeatable activated ability', group: profile.group, detail: 'can be activated again when its costs and timing allow' };
+    if (profile.kind === 'ongoing_static') return { label: 'Ongoing effect', group: profile.group, detail: 'continues to apply while its conditions are met' };
+    if (profile.kind === 'entry_trigger') return { label: 'One-time enter-the-battlefield trigger', group: profile.group, detail: 'normally resolves once when this permanent enters' };
+    if (profile.kind === 'delayed_trigger') return { label: 'One-time delayed trigger', group: profile.group, detail: profile.timingText ? `happens once at ${profile.timingText}` : 'happens once at a specified later time' };
+    if (profile.kind === 'self_event') return { label: 'One-time self-event trigger', group: profile.group, detail: 'depends on a one-time event for this permanent' };
+    if (profile.kind === 'single_use_activation') return { label: 'Single-use activation', group: profile.group, detail: 'the source or resource is consumed by the activation' };
+    if (profile.kind === 'repeatable_spell') return { label: 'Repeatable spell', group: profile.group, detail: 'can be cast repeatedly through its rules text' };
+    if (profile.kind === 'recastable_spell') return { label: 'Spell with limited reuse', group: profile.group, detail: 'has a defined reuse mechanic' };
+    if (profile.kind === 'one_shot') return { label: 'One-shot effect', group: profile.group, detail: 'does not itself indicate a repeatable engine' };
+    return { label: profile.label || 'Effect cadence', group: profile.group, detail: rawContext.slice(0, 130) };
+}
+
+function buildSearchIntentPresentationModel(sourceCard = currentSourceCard, highlights = manualHighlights) {
+    if (!sourceCard) return null;
+    const activeHighlights = Array.isArray(highlights) ? highlights : [];
+    const intent = getSearchIntent(sourceCard, activeHighlights);
+    const sourceText = String(intent.sourceText || getCurrentSourceOracleText(sourceCard) || '');
+    const parsed = Array.isArray(intent.parsedEffects) ? intent.parsedEffects.filter(effect => effect && !effect.isCostEffect) : [];
+    // The scorer's no-highlight parse is already annotated; highlight-derived profiles are parsed
+    // excerpts, so attach the same repeatability metadata before presenting them.
+    annotateEffectRepeatability(sourceCard, parsed, sourceText);
+    const roles = inferStrategicRoleProfile(sourceCard, parsed, intent.targetText || sourceText);
+    const seen = new Set();
+    const effectViews = parsed
+        .filter(effect => effect.canonical || effect.action && effect.action !== 'generic')
+        .map(effect => {
+            const fn = effect.canonical?.function || effect.action || 'unknown';
+            const cadence = searchIntentCadenceDescription(effect);
+            const trigger = effect.triggerProfile || effect.canonical?.params?.triggerProfile || {};
+            const eventKey = trigger.event || cadence.detail || '';
+            const key = `${fn}|${effect.canonical?.outcome || effect.outcome || ''}|${cadence.label}|${eventKey}`;
+            if (seen.has(key)) return null;
+            seen.add(key);
+            return { effect, fn, ...searchIntentFunctionLabel(effect), cadence, importance: Number(effect.importance) || 0, trigger };
+        })
+        .filter(Boolean)
+        .sort((a, b) => b.importance - a.importance)
+        .slice(0, 4);
+
+    const highlightsView = activeHighlights.filter(h => h && String(h.text || '').trim()).map(h => ({
+        text: String(h.text).trim(),
+        field: h.field === 'type' ? 'type line' : 'Oracle text',
+        mode: h.mode === 'variable' ? 'Flexible' : 'Exact',
+        origin: h.origin === 'user' ? 'Search detail' : 'Selected text',
+        attached: Number.isInteger(h.attachedTo)
+    }));
+    const primary = effectViews[0] || null;
+    let summary;
+    if (primary) {
+        const action = primary.label;
+        if (primary.cadence.group === 'repeatable_engine') {
+            if (primary.effect?.repeatabilityProfile?.kind === 'periodic_trigger') {
+                summary = `Look for cards that ${action} repeatedly${primary.cadence.detail ? ` (${primary.cadence.detail})` : ''}.`;
+            } else if (primary.effect?.repeatabilityProfile?.kind === 'repeatable_trigger') {
+                const trigger = String(primary.cadence.detail || '').replace(/^repeats when\s*/i, '').trim();
+                summary = `Look for cards that ${action}${trigger ? ` whenever ${trigger}` : ' through repeatable triggered abilities'}.`;
+            } else if (primary.cadence.label === 'Ongoing effect') {
+                summary = `Look for cards that ${action} through an ongoing effect.`;
+            } else {
+                summary = `Look for cards that ${action} through a repeatable ability.`;
+            }
+        } else if (primary.cadence.group === 'single_use') {
+            summary = `Look for cards that ${action} in a one-time effect. Recurring effects are related, but their cadence differs.`;
+        } else {
+            summary = `Look for cards that ${action}, comparing the actual rules outcome and context rather than wording alone.`;
+        }
+    } else {
+        summary = 'The selected text did not produce a clear canonical action. ManaSearch will still use the active text, semantic context, card type, and other available scoring evidence.';
+    }
+    if (highlightsView.length) {
+        const exact = highlightsView.some(h => h.mode === 'Exact');
+        const flexible = highlightsView.some(h => h.mode === 'Flexible');
+        const modes = [exact ? 'Exact highlights require matching text in candidate Oracle text' : '', flexible ? 'Flexible highlights focus on matching mechanics even when wording differs' : ''].filter(Boolean);
+        if (modes.length) summary += ` Highlight behavior: ${modes.join('; ')}.`;
+    }
+    const coverage = effectViews.length > 0;
+    const roleViews = roles.slice(0, 3).map(role => ({
+        role: SEARCH_INTENT_ROLE_LABELS[role.role] || String(role.role || '').replace(/_/g, ' '),
+        score: Number(role.score) || 0,
+        anchors: Array.isArray(role.anchors) ? role.anchors.filter(Boolean).slice(0, 2) : []
+    }));
+    const focusExplanation = highlightsView.length
+        ? 'The selected spans are the active focus passed to the scorer. Exact spans also participate in literal-match requirements; Flexible spans allow the wording or numeric values to differ.'
+        : 'No highlight is active, so the scorer uses the source card’s full Oracle text as its target context.';
+    const rankingEvidence = [
+        { title: 'Mechanical structure', detail: 'Parsed actions and outcomes, affected objects, targets, quantities, restrictions, conditions, and effect relationships.' },
+        { title: 'Repeatability and timing', detail: coverage ? 'Where the parser can identify it, recurring triggers/activations are distinguished from one-time, delayed, and enter-the-battlefield effects.' : 'Cadence will be compared when the source effect can be parsed confidently.' },
+        { title: 'Function, role, and semantic context', detail: roleViews.length ? `Recognized role evidence: ${roleViews.map(r => r.role).join(', ')}. These signals supplement rather than replace mechanical similarity.` : 'Broader function, role, card type, and semantic context supplement mechanical similarity.' }
+    ];
+    return { sourceName: sourceCard.name || 'Source card', summary, effectViews, highlightsView, roleViews, rankingEvidence, focusExplanation, parsedEffectCount: parsed.length, canonicalEffectCount: effectViews.length, hasHighlight: highlightsView.length > 0, semanticText: intent.semanticText || '', targetText: intent.targetText || sourceText };
+}
+
+function setSearchIntentText(node, text) {
+    if (node) node.textContent = String(text ?? '');
+}
+
+function appendSearchIntentNode(parent, tag, className, text) {
+    const node = document.createElement(tag);
+    if (className) node.className = className;
+    if (text !== undefined) node.textContent = String(text);
+    parent.appendChild(node);
+    return node;
+}
+
+function renderManaSearchIntentModel(model) {
+    const body = document.getElementById('search-intent-body');
+    if (!body) return;
+    body.replaceChildren();
+    if (!model) {
+        appendSearchIntentNode(body, 'p', 'search-intent-placeholder', 'Choose a source card to see the current search intent.');
+        return;
+    }
+    appendSearchIntentNode(body, 'p', 'search-intent-summary', model.summary);
+    appendSearchIntentNode(body, 'p', 'search-intent-focus-explanation', model.focusExplanation);
+
+    if (model.highlightsView.length) {
+        const section = appendSearchIntentNode(body, 'div', 'search-intent-subsection');
+        appendSearchIntentNode(section, 'h4', '', 'Active highlight focus');
+        const chips = appendSearchIntentNode(section, 'div', 'search-intent-chips');
+        model.highlightsView.forEach(highlight => {
+            const chip = appendSearchIntentNode(chips, 'span', `search-intent-chip ${highlight.mode === 'Exact' ? 'is-exact' : 'is-flexible'}`);
+            appendSearchIntentNode(chip, 'strong', '', highlight.mode);
+            appendSearchIntentNode(chip, 'span', '', `“${highlight.text}”`);
+            appendSearchIntentNode(chip, 'small', '', highlight.field);
+            if (highlight.origin === 'Search detail') chip.title = 'User-added search detail; not asserted to be literal source Oracle wording.';
+        });
+    }
+
+    const effectsSection = appendSearchIntentNode(body, 'div', 'search-intent-subsection');
+    appendSearchIntentNode(effectsSection, 'h4', '', 'Effects recognized by the scorer');
+    if (model.effectViews.length) {
+        const list = appendSearchIntentNode(effectsSection, 'div', 'search-intent-effect-list');
+        model.effectViews.forEach((view, index) => {
+            const row = appendSearchIntentNode(list, 'div', 'search-intent-effect-row');
+            const main = appendSearchIntentNode(row, 'div', 'search-intent-effect-main');
+            const title = appendSearchIntentNode(main, 'strong', 'search-intent-effect-title', view.label);
+            if (index === 0) title.insertAdjacentText('beforeend', ' · highest parsed importance');
+            if (view.detail) appendSearchIntentNode(main, 'p', 'search-intent-effect-detail', view.detail);
+            appendSearchIntentNode(row, 'span', `search-intent-cadence ${view.cadence.group === 'repeatable_engine' ? 'is-repeatable' : view.cadence.group === 'single_use' ? 'is-one-shot' : ''}`, view.cadence.label);
+            if (view.cadence.detail) appendSearchIntentNode(row, 'p', 'search-intent-cadence-detail', view.cadence.detail);
+        });
+    } else {
+        appendSearchIntentNode(effectsSection, 'p', 'search-intent-muted', 'No canonical effect was recognized from this active focus. Broader text and semantic evidence remain available.');
+    }
+
+    if (model.roleViews.length) {
+        const rolesSection = appendSearchIntentNode(body, 'div', 'search-intent-subsection');
+        appendSearchIntentNode(rolesSection, 'h4', '', 'Strategic roles recognized');
+        const roleChips = appendSearchIntentNode(rolesSection, 'div', 'search-intent-chips');
+        model.roleViews.forEach(role => {
+            const chip = appendSearchIntentNode(roleChips, 'span', 'search-intent-chip is-role', role.role);
+            if (role.anchors.length) chip.title = `Role evidence: ${role.anchors.join(', ')}`;
+        });
+    }
+
+    const rankingSection = appendSearchIntentNode(body, 'div', 'search-intent-subsection');
+    appendSearchIntentNode(rankingSection, 'h4', '', 'What influences ranking');
+    const rankingList = appendSearchIntentNode(rankingSection, 'ol', 'search-intent-ranking-list');
+    model.rankingEvidence.forEach((item, index) => {
+        const li = appendSearchIntentNode(rankingList, 'li', '');
+        appendSearchIntentNode(li, 'strong', '', item.title);
+        appendSearchIntentNode(li, 'p', '', item.detail);
+    });
+}
+
+function refreshManaSearchIntentPanel() {
+    const panel = document.getElementById('search-intent-panel');
+    const body = document.getElementById('search-intent-body');
+    const spinner = document.getElementById('search-intent-spinner');
+    const statusText = document.getElementById('search-intent-status-text');
+    if (!panel || !body) return;
+    const generation = ++manaSearchIntentRenderGeneration;
+    if (manaSearchIntentRenderFrame) cancelAnimationFrame(manaSearchIntentRenderFrame);
+    if (manaSearchIntentRenderTimer) clearTimeout(manaSearchIntentRenderTimer);
+    manaSearchIntentRenderFrame = 0;
+    manaSearchIntentRenderTimer = 0;
+
+    const enabled = displayPreferences?.showSearchIntent === true;
+    const hasSource = Boolean(currentSourceCard && String(currentSourceCard.name || '').trim());
+    if (!enabled || !hasSource) {
+        panel.classList.add('hidden');
+        panel.setAttribute('aria-busy', 'false');
+        spinner?.classList.add('hidden');
+        setSearchIntentText(statusText, '');
+        return;
+    }
+
+    panel.classList.remove('hidden');
+    panel.setAttribute('aria-busy', 'true');
+    spinner?.classList.remove('hidden');
+    setSearchIntentText(statusText, 'Updating from current highlights…');
+    if (!body.childElementCount) appendSearchIntentNode(body, 'p', 'search-intent-placeholder', 'Updating search intent…');
+
+    // Let the spinner paint before parsing. A generation check prevents a slow refresh from
+    // overwriting a newer source/highlight state when users click several highlight controls fast.
+    manaSearchIntentRenderFrame = requestAnimationFrame(() => {
+        manaSearchIntentRenderFrame = 0;
+        manaSearchIntentRenderTimer = window.setTimeout(() => {
+            manaSearchIntentRenderTimer = 0;
+            if (generation !== manaSearchIntentRenderGeneration) return;
+            try {
+                const model = buildSearchIntentPresentationModel(currentSourceCard, manualHighlights);
+                if (generation !== manaSearchIntentRenderGeneration) return;
+                renderManaSearchIntentModel(model);
+                setSearchIntentText(statusText, 'Live');
+                panel.dataset.intentKey = `${String(currentSourceCard?.name || '')}|${(manualHighlights || []).map(h => `${h.field || 'oracle'}:${h.mode || 'exact'}:${h.text}`).join('|')}`;
+            } catch (error) {
+                console.error('[ManaSearch] Search intent refresh failed:', error?.message || error);
+                body.replaceChildren();
+                appendSearchIntentNode(body, 'p', 'search-intent-error', 'Search intent could not be refreshed. Search itself is unaffected; try changing the highlight again or reloading the page.');
+                setSearchIntentText(statusText, 'Could not update');
+            } finally {
+                if (generation === manaSearchIntentRenderGeneration) {
+                    panel.setAttribute('aria-busy', 'false');
+                    spinner?.classList.add('hidden');
+                }
+            }
+        }, 0);
+    });
+}
+
+function installManaSearchIntentPanel() {
+    if (manaSearchIntentPanelInstalled || typeof window === 'undefined' || typeof document === 'undefined') return;
+    manaSearchIntentPanelInstalled = true;
+    window.addEventListener('manasearch:source-selected', () => refreshManaSearchIntentPanel());
+    window.addEventListener('manasearch:source-highlights-changed', () => refreshManaSearchIntentPanel());
+    window.addEventListener('manasearch:source-selection-failed', () => refreshManaSearchIntentPanel());
+    const sourceLoaded = document.getElementById('source-card-loaded');
+    if (typeof MutationObserver === 'function' && sourceLoaded) {
+        const observer = new MutationObserver(() => {
+            if (sourceLoaded.classList.contains('hidden')) refreshManaSearchIntentPanel();
+        });
+        observer.observe(sourceLoaded, { attributes: true, attributeFilter: ['class'] });
+    }
+    refreshManaSearchIntentPanel();
+}
+
+function runManaSearchIntentRegressionSuite() {
+    const checks = [];
+    const check = (id, pass, detail = '') => checks.push({ id, pass: Boolean(pass), detail });
+    const source = currentSourceCard;
+    const oldHighlights = manualHighlights;
+    try {
+        const rhystic = { name: 'Rhystic Study', type_line: 'Enchantment', oracle_text: 'Whenever an opponent casts a spell, you may draw a card unless that player pays {1}.' };
+        currentSourceCard = rhystic;
+        manualHighlights = [];
+        const full = buildSearchIntentPresentationModel(rhystic, []);
+        check('full-source-intent-identifies-card-draw', /draw cards/i.test(full?.summary || '') && full?.effectViews?.some(e => e.fn === 'card_draw'), full?.summary || '');
+        const start = rhystic.oracle_text.toLowerCase().indexOf('draw a card');
+        manualHighlights = [{ text: 'draw a card', field: 'oracle', mode: 'exact', origin: 'source', start, end: start + 'draw a card'.length, colorIndex: 0, attachedTo: null }];
+        const exact = buildSearchIntentPresentationModel(rhystic, manualHighlights);
+        check('exact-highlight-is-described-in-live-intent', exact?.hasHighlight && exact.highlightsView.some(h => h.text === 'draw a card' && h.mode === 'Exact') && /Exact highlights require matching text/i.test(exact.summary), exact?.summary || '');
+        manualHighlights = [{ text: 'draw a card', field: 'oracle', mode: 'variable', origin: 'source', start, end: start + 'draw a card'.length, colorIndex: 0, attachedTo: null }];
+        const flexible = buildSearchIntentPresentationModel(rhystic, manualHighlights);
+        check('flexible-highlight-changes-match-guidance', flexible?.hasHighlight && flexible.highlightsView.some(h => h.mode === 'Flexible') && /Flexible highlights allow/i.test(flexible.summary), flexible?.summary || '');
+        const chronicler = { name: 'Chronicler of Heroes', type_line: 'Creature — Centaur Wizard', oracle_text: 'When Chronicler of Heroes enters the battlefield, draw a card if you control a creature with a +1/+1 counter on it.' };
+        currentSourceCard = chronicler;
+        manualHighlights = [];
+        const etb = buildSearchIntentPresentationModel(chronicler, []);
+        check('one-time-etb-draw-is-described-as-one-time', /one-time effect/i.test(etb?.summary || '') && etb?.effectViews?.some(e => e.cadence.label === 'One-time enter-the-battlefield trigger'), etb?.summary || '');
+    } catch (error) {
+        check('search-intent-regression-suite-executes', false, error?.stack || error?.message || String(error));
+    } finally {
+        currentSourceCard = source;
+        manualHighlights = oldHighlights;
+    }
+    const failed = checks.filter(item => !item.pass);
+    console.table(checks);
+    const report = { pass: failed.length === 0, passed: checks.length - failed.length, total: checks.length, checks, failures: failed };
+    console.info(`[ManaSearch] Search intent regression suite: ${report.passed}/${report.total}`, report);
+    return report;
+}
+
+if (typeof window !== 'undefined') {
+    window.runManaSearchIntentRegressionSuite = runManaSearchIntentRegressionSuite;
+    window.refreshManaSearchIntentPanel = refreshManaSearchIntentPanel;
+}
 
 function runMechanicalRegressionSuite() {
     const checks = [];

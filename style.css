@@ -6790,3 +6790,73 @@ body.light-theme .card-actions .edhrec-link-btn:hover {
 @media (hover: none), (pointer: coarse) {
     .card-actions .edhrec-link-btn:hover { transform: none; }
 }
+
+
+/* Optional live Search Intent explanation. Uses theme variables and only appears when opted in. */
+.search-intent-panel {
+    width: 100%;
+    box-sizing: border-box;
+    margin: 16px 0 12px;
+    padding: 16px;
+    border: 1px solid var(--border-color);
+    border-left: 3px solid var(--accent-color);
+    border-radius: 11px;
+    background: var(--bg-secondary);
+    color: var(--text-main);
+}
+.search-intent-heading {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 14px;
+}
+.search-intent-heading h3 { margin: 2px 0 2px; font-size: 18px; }
+.search-intent-explainer { margin: 3px 0 0; color: var(--text-muted); font-size: 12px; }
+.search-intent-status { display: inline-flex; flex: 0 0 auto; align-items: center; gap: 7px; color: var(--text-muted); font-size: 11px; }
+.search-intent-spinner {
+    width: 13px; height: 13px; display: inline-block; border: 2px solid var(--border-color);
+    border-top-color: var(--accent-color); border-radius: 50%; animation: search-intent-spin .75s linear infinite;
+}
+@keyframes search-intent-spin { to { transform: rotate(360deg); } }
+.search-intent-body { margin-top: 12px; }
+.search-intent-summary {
+    margin: 0; padding: 12px 14px; border-radius: 8px; background: var(--bg-accent);
+    border: 1px solid var(--border-color); font-size: 14px; line-height: 1.55; font-weight: 650;
+}
+.search-intent-focus-explanation { margin: 8px 0 0; color: var(--text-muted); font-size: 12px; line-height: 1.5; }
+.search-intent-subsection { margin-top: 14px; }
+.search-intent-subsection h4 { margin: 0 0 7px; font-size: 12px; font-weight: 800; color: var(--text-main); }
+.search-intent-chips { display: flex; flex-wrap: wrap; gap: 7px; }
+.search-intent-chip {
+    display: inline-flex; align-items: center; flex-wrap: wrap; gap: 5px; max-width: 100%;
+    padding: 5px 8px; border: 1px solid var(--border-color); border-radius: 7px;
+    background: var(--bg-primary); color: var(--text-main); font-size: 12px; overflow-wrap: anywhere;
+}
+.search-intent-chip.is-exact { border-color: var(--accent-color); }
+.search-intent-chip.is-flexible { border-style: dashed; border-color: var(--accent-color); }
+.search-intent-chip small { color: var(--text-muted); font-size: 10px; }
+.search-intent-chip.is-role { font-weight: 650; }
+.search-intent-effect-list { display: grid; gap: 7px; }
+.search-intent-effect-row {
+    display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 3px 12px; align-items: start;
+    padding: 10px 11px; border: 1px solid var(--border-color); border-radius: 8px; background: var(--bg-primary);
+}
+.search-intent-effect-title { font-size: 12px; }
+.search-intent-effect-detail, .search-intent-cadence-detail { margin: 3px 0 0; color: var(--text-muted); font-size: 11px; line-height: 1.45; }
+.search-intent-cadence { align-self: start; justify-self: end; max-width: 210px; padding: 3px 6px; border-radius: 6px; background: var(--bg-accent); color: var(--text-muted); font-size: 10px; font-weight: 750; text-align: right; }
+.search-intent-cadence.is-repeatable { color: var(--text-main); border: 1px solid var(--accent-color); }
+.search-intent-cadence.is-one-shot { border: 1px dashed var(--border-color); }
+.search-intent-ranking-list { margin: 0; padding-left: 22px; display: grid; gap: 7px; }
+.search-intent-ranking-list li { padding-left: 2px; font-size: 12px; }
+.search-intent-ranking-list p { margin: 2px 0 0; color: var(--text-muted); font-size: 11px; line-height: 1.45; }
+.search-intent-placeholder, .search-intent-muted { margin: 0; color: var(--text-muted); font-size: 12px; }
+.search-intent-error { margin: 0; color: #ef8f8f; font-size: 12px; }
+@media (max-width: 700px) {
+    .search-intent-panel { padding: 12px; }
+    .search-intent-heading { gap: 8px; }
+    .search-intent-heading h3 { font-size: 16px; }
+    .search-intent-status { max-width: 105px; text-align: right; }
+    .search-intent-effect-row { grid-template-columns: minmax(0, 1fr); }
+    .search-intent-cadence { justify-self: start; max-width: 100%; text-align: left; }
+}
+@media (prefers-reduced-motion: reduce) { .search-intent-spinner { animation: none; } }

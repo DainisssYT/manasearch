@@ -58,15 +58,17 @@ node tests/run-card-benchmark-data.cjs
 The browser runner loads the JSON fixture and passes it to `runManaSearchRealCardBenchmarkSuite`, which uses production parsing, repeatability annotation, profile construction, and scoring. Fixture card pages are provenance links only; the tests are deterministic/offline and do not fetch card data during runs. When modifying a card Oracle-text fixture, recheck its linked reference page and retain the card source URL.
 
 
-## 4. Run the real-card benchmark from the deployed browser console
+## 4. Run the benchmarks from the deployed browser console
 
-After the v76 build has deployed, open ManaSearch, open DevTools, and run:
+After the current build has deployed, open ManaSearch, open DevTools, and run:
 
 ```js
 await runManaSearchRealCardBenchmark()
+// The suite-named entry point also works without passing a fixture:
+await runManaSearchRealCardBenchmarkSuite()
 ```
 
-This no-argument console helper downloads the small JSON benchmark fixture from the same GitHub Pages deployment, then runs the production parser/profile/mechanical scorer in the current browser tab. It makes no Scryfall requests and requires no backend, paid service, or additional hosting. The returned report includes `pass`, `passed`, `total`, `cardChecks`, `pairChecks`, `categories`, and `failures`.
+Both no-argument entry points download the small JSON benchmark fixture from the same GitHub Pages deployment, then run the production parser/profile/mechanical scorer in the current browser tab. They make no Scryfall requests and require no backend, paid service, or additional hosting. The returned report includes `pass`, `passed`, `total`, `cardChecks`, `pairChecks`, `categories`, and `failures`.
 
 To run the other local suites individually in the console:
 
@@ -86,3 +88,14 @@ The console helper requires the Pages artifact to include `tests/fixtures/mtg-me
 The site itself is static: Node.js is not installed on or required by visitor devices. The separate regression workflow uses Node 24 only to run automated tests on GitHub-hosted runners. The Pages workflow assembles and uploads static files without a Node setup step.
 
 The deploy workflow uses `cancel-in-progress: false` to avoid canceling a live Pages deployment and leaving it blocked. If a pre-existing stale deployment still blocks the first run, copy the exact 40-character ID shown after `Please cancel` in the deploy log, then manually run `.github/workflows/recover-stuck-pages-deployment.yml` with that ID. It cancels only the specified deployment; then rerun the deployment workflow. Do not provide an arbitrary ID.
+
+
+### Which benchmark should I run?
+
+- `await runLocalBenchmarkInApp()` is the end-to-end search/retrieval benchmark. It intentionally runs the 12 predefined scenarios in `BENCHMARK_SUITE` (including Counterspell twice for different highlight/constraint conditions). It is not intended to iterate over every card fixture in the scorer corpus, and it changes the active source card/search UI as it runs.
+- `await runManaSearchRealCardBenchmark()` and `await runManaSearchRealCardBenchmarkSuite()` run the offline mechanical-scoring benchmark: currently 31 card parsing checks plus 22 pairwise comparisons (53 checks total across 17 categories). They do not launch full similarity searches or mutate the UI search state.
+- `runManaSearchRealCardBenchmarkSuite({ benchmark: fixture })` remains available for callers that already loaded the fixture; with an explicit fixture the core suite stays synchronous. With no argument it now loads the static fixture and returns a Promise, so use `await`.
+
+### Optional Search intent UI regression
+
+In the live browser console, call `runManaSearchIntentRegressionSuite()` to exercise the production search-intent model against Rhystic Study and Chronicler of Heroes, including Exact vs Flexible highlights. To see the panel itself, enable **Show Search intent panel** in Preferences. The regression suite does not start a search or change ranking weights.

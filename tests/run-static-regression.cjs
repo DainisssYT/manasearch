@@ -53,7 +53,7 @@ check('regression and performance suites are available in the production app', (
     'runManaSearchHighlightIsolationSuite',
     'runManaSearchPerformanceSuite',
     'runManaSearchRealCardBenchmarkSuite',
-    'runManaSearchRealCardBenchmarkFromConsole'
+    'runManaSearchRealCardBenchmarkFromConsole', 'runManaSearchIntentRegressionSuite'
   ]) assert.ok(app.includes(`function ${name}(`), `missing ${name}`);
 });
 check('mechanical suite contains blink, token-multiplier, and cadence guards', () => {
@@ -131,9 +131,28 @@ check('asset cache-busts match the app build marker and the app module declarati
   assert.doesNotMatch(deploy, /grep -Fq ['\"](?:app\.js|pako\.min\.js|style\.css)\?v=20261015-\d+['\"]/);
 });
 
-check('browser console benchmark entry point loads the deployed static fixture', () => {
+check('both real-card benchmark console entry points load the static fixture when called without arguments', () => {
   assert.match(app, /window\.runManaSearchRealCardBenchmark\s*=\s*runManaSearchRealCardBenchmarkFromConsole/);
+  assert.match(app, /window\.runManaSearchRealCardBenchmarkSuite\s*=\s*runManaSearchRealCardBenchmarkSuite/);
+  assert.match(app, /if \(benchmark == null\) \{\s*return runManaSearchRealCardBenchmarkFromConsole\(\{ log \}\);/);
   assert.match(app, /tests\/fixtures\/mtg-mechanical-benchmark\.json/);
+});
+check('optional live Search intent preference is off by default and exposed in Preferences', () => {
+  assert.match(app, /showSearchIntent:\s*false/);
+  assert.match(app, /showSearchIntent:\s*stored\?\.showSearchIntent\s*===\s*true/);
+  assert.match(html, /id="preference-show-search-intent"/);
+  assert.match(html, /id="search-intent-panel"[^>]*class="search-intent-panel hidden"/);
+});
+check('Search intent refreshes from the production source/highlight model and is generation-safe', () => {
+  assert.match(app, /buildSearchIntentPresentationModel\(sourceCard = currentSourceCard, highlights = manualHighlights\)/);
+  assert.match(app, /getSearchIntent\(sourceCard, activeHighlights\)/);
+  const intentFn = app.slice(app.indexOf('function getSearchIntent('), app.indexOf('function searchIntentFunctionLabel('));
+  assert.match(intentFn, /start: Number\.isInteger\(h\?\.start\) \? h\.start : null/);
+  assert.match(intentFn, /typeStart: Number\.isInteger\(h\?\.typeStart\) \? h\.typeStart : null/);
+  assert.match(app, /window\.addEventListener\('manasearch:source-highlights-changed',\s*\(\) => refreshManaSearchIntentPanel\(\)\)/);
+  assert.match(app, /notifyManaSearchHighlightsChanged\(\);[\s\S]{0,120}highlight/i);
+  assert.match(app, /manaSearchIntentRenderGeneration/);
+  assert.match(app, /requestAnimationFrame\(\(\) =>/);
 });
 check('test automation files exist', () => {
   assert.ok(fs.existsSync(path.join(root, 'tests', 'run-browser-regression.cjs')));

@@ -55,7 +55,8 @@ async function main() {
       typeof window.runManaSearchHighlightIsolationSuite === 'function' &&
       typeof window.runManaSearchPerformanceSuite === 'function' &&
       typeof window.runManaSearchRealCardBenchmarkSuite === 'function' &&
-      typeof window.runManaSearchRealCardBenchmark === 'function',
+      typeof window.runManaSearchRealCardBenchmark === 'function' &&
+      typeof window.runManaSearchIntentRegressionSuite === 'function',
       null, { timeout: 60000 }
     );
     const report = await page.evaluate(async () => ({
@@ -63,10 +64,13 @@ async function main() {
       mechanical: window.runManaSearchMechanicalRegressionSuite({ log: false }),
       repeatability: window.runManaSearchRepeatabilityRegressionSuite({ log: false }),
       highlights: window.runManaSearchHighlightIsolationSuite({ log: false }),
+      searchIntent: window.runManaSearchIntentRegressionSuite(),
       performance: window.runManaSearchPerformanceSuite({ iterations: 12, maxDurationMs: 15000, log: false }),
       // Exercise the same no-argument helper users call from DevTools. It fetches only the static
       // JSON fixture on this same test server; scoring remains local and deterministic.
-      realCardBenchmark: await window.runManaSearchRealCardBenchmark({ log: false })
+      realCardBenchmark: await window.runManaSearchRealCardBenchmark({ log: false }),
+      // Also exercise the suite-named public console entry point with no fixture argument.
+      realCardBenchmarkSuiteNoArgs: await window.runManaSearchRealCardBenchmarkSuite({ log: false })
     }));
     const summarize = (label, suite) => {
       if (suite?.checks) {
@@ -85,7 +89,14 @@ async function main() {
       summarize('Mechanical family/ranking regressions', report.mechanical),
       summarize('Repeatability regression suite', report.repeatability),
       summarize('Highlight-isolation suite', report.highlights),
-      summarize('Real-card mechanical benchmark', {
+      summarize('Live Search intent model/highlight suite', {
+        pass: report.searchIntent?.pass,
+        passed: report.searchIntent?.passed,
+        total: report.searchIntent?.total,
+        results: report.searchIntent?.checks || [],
+        failures: report.searchIntent?.failures
+      }),
+      summarize('Real-card mechanical benchmark (console wrapper)', {
         pass: report.realCardBenchmark?.pass,
         passed: report.realCardBenchmark?.passed,
         total: report.realCardBenchmark?.total,
@@ -93,6 +104,15 @@ async function main() {
         failures: report.realCardBenchmark?.failures,
         cardCount: report.realCardBenchmark?.cardCount,
         pairCount: report.realCardBenchmark?.pairCount
+      }),
+      summarize('Real-card mechanical benchmark (suite name, no arguments)', {
+        pass: report.realCardBenchmarkSuiteNoArgs?.pass,
+        passed: report.realCardBenchmarkSuiteNoArgs?.passed,
+        total: report.realCardBenchmarkSuiteNoArgs?.total,
+        results: [...(report.realCardBenchmarkSuiteNoArgs?.cardChecks || []), ...(report.realCardBenchmarkSuiteNoArgs?.pairChecks || [])],
+        failures: report.realCardBenchmarkSuiteNoArgs?.failures,
+        cardCount: report.realCardBenchmarkSuiteNoArgs?.cardCount,
+        pairCount: report.realCardBenchmarkSuiteNoArgs?.pairCount
       })
     ];
     console.log('Mechanical scorer performance:', JSON.stringify(report.performance));
