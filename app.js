@@ -1,4 +1,4 @@
-/* ManaSearch build 20261015-67 */
+/* ManaSearch build 20261015-69 */
 // ManaSearch deployment build marker. Bump this whenever app.js changes so cached-module issues are easy to diagnose.
 const MANASEARCH_APP_BUILD = '20261015-67';
 console.info(`[ManaSearch] app.js build ${MANASEARCH_APP_BUILD}`);
@@ -567,6 +567,25 @@ function saveDisplayPreferences() {
     }
 }
 
+// Apply the EDHREC visibility preference directly to existing result cards before any deferred
+// full render. Result rendering intentionally yields while dialogs are open or the user is active;
+// a presentation-only toggle must not depend on that deferred render eventually flushing.
+function syncEdhrecCandidateButtonVisibility(root = document) {
+    if (!root || typeof root.querySelectorAll !== 'function') return;
+    const shouldShow = displayPreferences?.showEdhrecButton !== false;
+    const selector = root === document ? '#results-grid .card-item .edhrec-link-btn' : '.card-item .edhrec-link-btn';
+    root.querySelectorAll(selector).forEach(link => {
+        link.hidden = !shouldShow;
+        if (shouldShow) {
+            link.removeAttribute('aria-hidden');
+            link.removeAttribute('tabindex');
+        } else {
+            link.setAttribute('aria-hidden', 'true');
+            link.setAttribute('tabindex', '-1');
+        }
+    });
+}
+
 // Candidate inclusion preferences are presentation filters: they are applied after ranking so
 // changing a toggle can immediately reveal previously-ranked results without forcing an expensive
 // new search. The ranked pool and Search Deeper continuation remain intact.
@@ -581,28 +600,78 @@ function isDigitalOnlyCard(card) {
 
 const MANA_SEARCH_UN_SET_CODES = new Set(['ugl', 'unh', 'ust', 'und', 'unf']);
 const MANA_SEARCH_KNOWN_LEGALITY_VALUES = new Set(['legal', 'not_legal', 'banned', 'restricted']);
+// Nontraditional layouts are often intentionally not legal in constructed formats, but they are
+// still useful to ManaSearch users who explicitly enable unusual/funny cards. Do not require these
+// entries to have a complete legalities object (tokens, schemes, and planes often do not).
+const MANA_SEARCH_NONTRADITIONAL_LAYOUTS = new Set([
+    'token', 'double_faced_token', 'emblem', 'scheme', 'plane', 'phenomenon', 'vanguard',
+    'conspiracy', 'planar', 'dungeon', 'attraction', 'art_series', 'augment', 'host', 'minigame'
+]);
+
+function getCardMetadataForLegality(card) {
+    // Prefer the full static card record when a result or recent-search preview contains partial
+    // legality metadata. The helper is declared later and is safely hoisted.
+    return card && typeof enrichCardForPreferenceEvaluation === 'function'
+        ? enrichCardForPreferenceEvaluation(card)
+        : card;
+}
+
+function getSupportedLegalityStatuses(card) {
+    const metadata = getCardMetadataForLegality(card);
+    const legalities = metadata?.legalities && typeof metadata.legalities === 'object' ? metadata.legalities : {};
+    return Object.values(legalities)
+        .map(value => String(value || '').trim().toLowerCase())
+        .filter(Boolean);
+}
+
+function isBannedInEveryTrackedFormat(card) {
+    const statuses = getSupportedLegalityStatuses(card);
+    // Require a substantial legality set and at least one explicit ban. 'not_legal' alone means
+    // a card is not part of a format, not that the card itself was banned.
+    return statuses.length >= 8 &&
+        statuses.includes('banned') &&
+        statuses.every(value => value === 'banned' || value === 'not_legal');
+}
+
+function isBannedInCommander(card) {
+    const metadata = getCardMetadataForLegality(card);
+    const legalities = metadata?.legalities && typeof metadata.legalities === 'object' ? metadata.legalities : {};
+    return String(legalities.commander || '').trim().toLowerCase() === 'banned';
+}
+
+function shouldShowBannedCardArtStamp(card) {
+    // Also mark Commander-banned cards to match the EDH-focused reference treatment. The title
+    // and accessible label state the scope so a Commander ban is not misrepresented as a ban in
+    // every format.
+    return isBannedInEveryTrackedFormat(card) || isBannedInCommander(card);
+}
+
+function getBannedCardArtStampDescription(card) {
+    if (isBannedInEveryTrackedFormat(card)) return 'Banned in all tracked formats';
+    if (isBannedInCommander(card)) return 'Banned in Commander';
+    return 'Ban status unavailable';
+}
+
 function isTokenEmblemOrAllFormatBannedCard(card) {
     if (!card || typeof card !== 'object') return false;
-    const layout = String(card.layout || '').trim().toLowerCase();
-    const typeLine = String(card.type_line || '').toLowerCase();
-    if (layout === 'token' || layout.includes('token') || layout === 'emblem' ||
+    const metadata = getCardMetadataForLegality(card) || card;
+    const layout = String(metadata.layout || '').trim().toLowerCase();
+    const typeLine = String(metadata.type_line || '').toLowerCase();
+    if (MANA_SEARCH_NONTRADITIONAL_LAYOUTS.has(layout) || layout.includes('token') ||
         /\bemblem\b/.test(typeLine) || /\btoken\b/.test(typeLine)) return true;
 
-    const legalities = card.legalities && typeof card.legalities === 'object' ? Object.values(card.legalities) : [];
-    const statuses = legalities.map(value => String(value || '').trim().toLowerCase()).filter(value => MANA_SEARCH_KNOWN_LEGALITY_VALUES.has(value));
-    const allFormatsUnavailable = statuses.length >= 8 && statuses.every(value => value === 'not_legal' || value === 'banned');
-    if (!allFormatsUnavailable) return false;
-
-    const setCode = String(card.set || '').trim().toLowerCase();
-    const securityStamp = String(card.security_stamp || '').trim().toLowerCase();
-    const promoTypes = Array.isArray(card.promo_types) ? card.promo_types.map(value => String(value || '').toLowerCase()) : [];
-    const hasAnyExplicitBan = statuses.includes('banned');
-    // Cards marked banned in one or more formats and not_legal in every other format are excluded
-    // as all-format-unavailable. Un-set/playtest cards often use only not_legal (rather than banned),
-    // so those require a known funny/fake marker before they are excluded.
+    const setCode = String(metadata.set || '').trim().toLowerCase();
+    const securityStamp = String(metadata.security_stamp || '').trim().toLowerCase();
+    const promoTypes = Array.isArray(metadata.promo_types) ? metadata.promo_types.map(value => String(value || '').toLowerCase()) : [];
     const knownFunnyOrFake = MANA_SEARCH_UN_SET_CODES.has(setCode) || setCode === 'mb2' ||
         securityStamp === 'acorn' || promoTypes.some(value => /playtest|funny|acorn/.test(value));
-    return hasAnyExplicitBan || knownFunnyOrFake;
+    if (knownFunnyOrFake || isBannedInEveryTrackedFormat(metadata)) return true;
+
+    // Some imported/legacy weird cards have no usable legality records. Explicitly-known
+    // nontraditional layouts are handled above; otherwise avoid treating an unknown record as banned.
+    const statuses = getSupportedLegalityStatuses(metadata);
+    return statuses.length >= 8 && statuses.every(value => value === 'not_legal' || value === 'banned') &&
+        statuses.includes('banned');
 }
 
 function isAllowedByCandidatePreferences(card) {
@@ -666,7 +735,7 @@ function hasCompleteCardPreferenceMetadata(card) {
 function getPreferenceHiddenReason(card) {
     if (!displayPreferences?.includeDigitalCards && isDigitalOnlyCard(card)) return 'digital-only';
     if (!displayPreferences?.includeTokenEmblemFunnyCards && isTokenEmblemOrAllFormatBannedCard(card)) {
-        return 'token, emblem, or all-format-banned funny card';
+        return 'token, emblem, nontraditional, funny, or all-format-banned card';
     }
     return '';
 }
@@ -680,7 +749,10 @@ function runCandidatePreferenceRegressionSuite({ log = true } = {}) {
         digital: { name: 'Digital Test Card', games: ['arena'], layout: 'normal', type_line: 'Creature — Test', legalities: { ...legalities, standard: 'not_legal' }, set: 'digital' },
         token: { name: 'Test Token', games: ['paper'], layout: 'token', type_line: 'Token Creature — Test', legalities: {}, set: 'tst' },
         emblem: { name: 'Test Emblem', games: ['paper'], layout: 'emblem', type_line: 'Emblem', legalities: {}, set: 'tst' },
-        funny: { name: 'Funny Test Card', games: ['paper'], layout: 'normal', type_line: 'Creature — Test', legalities: Object.fromEntries(['standard','future','historic','gladiator','pioneer','modern','legacy','pauper','vintage','penny'].map(format => [format, 'not_legal'])), set: 'unf', promo_types: ['funny'] }
+        funny: { name: 'Funny Test Card', games: ['paper'], layout: 'normal', type_line: 'Creature — Test', legalities: Object.fromEntries(['standard','future','historic','gladiator','pioneer','modern','legacy','pauper','vintage','penny'].map(format => [format, 'not_legal'])), set: 'unf', promo_types: ['funny'] },
+        scheme: { name: 'Scheme Test Card', games: ['paper'], layout: 'scheme', type_line: 'Scheme', legalities: {}, set: 'oe01' },
+        allBanned: { name: 'All Formats Banned Test', games: ['paper'], layout: 'normal', type_line: 'Creature — Test', legalities: Object.fromEntries(['standard','future','historic','gladiator','pioneer','modern','legacy','pauper','vintage','penny'].map((format, index) => [format, index < 3 ? 'banned' : 'not_legal'])), set: 'tst' },
+        commanderBanned: { name: 'Commander Banned Test', games: ['paper'], layout: 'normal', type_line: 'Legendary Creature — Test', legalities: { standard: 'legal', future: 'legal', historic: 'legal', gladiator: 'legal', pioneer: 'legal', modern: 'legal', legacy: 'legal', pauper: 'not_legal', vintage: 'legal', commander: 'banned' }, set: 'tst' }
     };
     const record = (id, pass, details = '') => results.push({ id, pass: Boolean(pass), details });
     try {
@@ -690,6 +762,14 @@ function runCandidatePreferenceRegressionSuite({ log = true } = {}) {
         record('token-hidden-by-default', !isAllowedByCandidatePreferences(cards.token));
         record('emblem-hidden-by-default', !isAllowedByCandidatePreferences(cards.emblem));
         record('all-format-banned-funny-card-hidden', !isAllowedByCandidatePreferences(cards.funny));
+        record('scheme-layout-hidden-by-default', !isAllowedByCandidatePreferences(cards.scheme));
+        record('all-format-banned-card-hidden-by-default', !isAllowedByCandidatePreferences(cards.allBanned));
+        record('all-format-ban-detection', isBannedInEveryTrackedFormat(cards.allBanned));
+        record('all-format-banned-card-gets-art-stamp', shouldShowBannedCardArtStamp(cards.allBanned));
+        record('all-format-ban-stamp-description-is-accurate', getBannedCardArtStampDescription(cards.allBanned) === 'Banned in all tracked formats');
+        record('partial-format-ban-not-misclassified-as-all-format-ban', !isBannedInEveryTrackedFormat(cards.commanderBanned));
+        record('commander-only-ban-does-not-trigger-all-format-filter', isAllowedByCandidatePreferences(cards.commanderBanned));
+        record('commander-ban-gets-art-stamp', shouldShowBannedCardArtStamp(cards.commanderBanned));
         const previewCorpus = { byName: new Map(Object.values(cards).map(card => [normalizeCardNameForIdentity(card.name), card])) };
         record('source-history-digital-preview-hidden', filterSourceCardsByCurrentPreferences([{ name: cards.digital.name }], previewCorpus).length === 0);
         record('source-history-token-preview-hidden', filterSourceCardsByCurrentPreferences([{ name: cards.token.name }], previewCorpus).length === 0);
@@ -700,7 +780,9 @@ function runCandidatePreferenceRegressionSuite({ log = true } = {}) {
         record('token-still-hidden-when-only-digital-enabled', filterSourceCardsByCurrentPreferences([cards.token]).length === 0);
         displayPreferences = { ...displayPreferences, includeTokenEmblemFunnyCards: true };
         record('token-and-emblem-toggle-allows-them', filterSourceCardsByCurrentPreferences([cards.token, cards.emblem]).length === 2);
+        record('special-layout-toggle-allows-scheme', filterSourceCardsByCurrentPreferences([cards.scheme]).length === 1);
         record('funny-card-toggle-allows-it', filterSourceCardsByCurrentPreferences([cards.funny]).length === 1);
+        record('all-format-banned-toggle-allows-card', filterSourceCardsByCurrentPreferences([cards.allBanned]).length === 1);
         if (log) {
             console.groupCollapsed(`ManaSearch candidate/source preference regression: ${results.filter(result => result.pass).length}/${results.length} passed`);
             results.forEach(result => console[result.pass ? 'info' : 'error'](`${result.pass ? 'PASS' : 'FAIL'} ${result.id}${result.details ? ` — ${result.details}` : ''}`));
@@ -15882,6 +15964,9 @@ function initApp() {
         displayPreferences.includeDigitalCards = preferenceIncludeDigitalCards?.checked === true;
         displayPreferences.includeTokenEmblemFunnyCards = preferenceIncludeTokenEmblemFunny?.checked === true;
         saveDisplayPreferences();
+        // This preference only changes existing link visibility. Update live cards synchronously,
+        // even if the full result repaint below is deferred to protect UI responsiveness.
+        syncEdhrecCandidateButtonVisibility();
         try {
             localStorage.setItem(THEME_KEY, displayPreferences.theme);
         } catch (_) {}
@@ -18971,7 +19056,7 @@ async function searchSourceCardPicker(query) {
                         : 'No matching cards';
             }
             renderSourceCardPickerCards(cards, nameMatches.length
-                ? 'Matching cards are hidden by current Preferences. Adjust the Digital-only or Tokens/Emblems/Funny cards preferences to include them.'
+                ? 'Matching cards are hidden by current Preferences. Adjust the Digital-only or Tokens/Emblems/Nontraditional cards preferences to include them.'
                 : 'No matching cards.');
             return;
         }
@@ -18999,7 +19084,7 @@ async function searchSourceCardPicker(query) {
                 : fetchedCards.length ? 'Matching cards are hidden by current Preferences' : 'No matching cards';
         }
         renderSourceCardPickerCards(cards, fetchedCards.length
-            ? 'Matching cards are hidden by current Preferences. Adjust the Digital-only or Tokens/Emblems/Funny cards preferences to include them.'
+            ? 'Matching cards are hidden by current Preferences. Adjust the Digital-only or Tokens/Emblems/Nontraditional cards preferences to include them.'
             : 'No matching cards.');
     } catch (error) {
         if (requestId !== sourceCardPickerRequestId) return;
@@ -23657,6 +23742,9 @@ function renderCardLegalityPanel(card, panel) {
 }
 
 function renderResults(cards, internalOptions = {}) {
+    // Keep this presentation-only toggle immediate even if card score/order rendering must yield
+    // while a modal is open or the user is interacting with controls.
+    syncEdhrecCandidateButtonVisibility();
     // A final/search-deeper/user-triggered render is authoritative. Drop any queued progressive
     // snapshot before painting, otherwise a timer could repaint an older partial order afterward.
     if (internalOptions?.progressive !== true && internalOptions?.preservePendingProgressive !== true) {
@@ -23756,7 +23844,8 @@ function renderResults(cards, internalOptions = {}) {
             card.prices?.usd ?? '', card.prices?.eur ?? '', Boolean(card._weakBackfillMatch),
             selectedRelatedCards.has(card.id), favoriteNameSet.has(String(card.name || '').toLowerCase()),
             displayPreferences.showScoreBreakdown !== false,
-            displayPreferences.showEdhrecButton !== false
+            displayPreferences.showEdhrecButton !== false,
+            shouldShowBannedCardArtStamp(card), getBannedCardArtStampDescription(card)
         ]);
     };
 
@@ -23790,6 +23879,15 @@ function renderResults(cards, internalOptions = {}) {
 
         const img = cardElement.querySelector('.card-art-wrap img');
         const artWrap = cardElement.querySelector('.card-art-wrap');
+        const banStamp = cardElement.querySelector('.card-banned-stamp');
+        if (banStamp) {
+            const showBanStamp = shouldShowBannedCardArtStamp(card);
+            const banDescription = getBannedCardArtStampDescription(card);
+            banStamp.hidden = !showBanStamp;
+            banStamp.title = banDescription;
+            banStamp.setAttribute('aria-label', banDescription);
+            banStamp.dataset.banScope = isBannedInEveryTrackedFormat(card) ? 'all-formats' : 'commander';
+        }
         const faceImages = getResultCardFaceImages(card);
         const hasMultipleFaces = faceImages.length > 1;
         const isLegacyFlip = String(card.layout || '').toLowerCase() === 'flip' && Boolean(card.image_uris?.normal);
@@ -23942,6 +24040,14 @@ function renderResults(cards, internalOptions = {}) {
         img.decoding = 'async';
         img.src = RESULT_IMAGE_PLACEHOLDER;
         artWrap.appendChild(img);
+        const banStamp = document.createElement('div');
+        banStamp.className = 'card-banned-stamp';
+        banStamp.textContent = 'BANNED';
+        banStamp.hidden = true;
+        banStamp.setAttribute('role', 'img');
+        banStamp.setAttribute('aria-label', 'Banned in all tracked formats');
+        banStamp.title = 'Banned in all tracked formats';
+        artWrap.appendChild(banStamp);
         const flipBtn = document.createElement('button');
         flipBtn.type = 'button';
         flipBtn.className = 'card-flip-btn';
@@ -24073,6 +24179,11 @@ function renderResults(cards, internalOptions = {}) {
         if (img) resultImageLoadQueue.delete(img);
         node.remove();
     });
+
+    // Final presentation sync covers both stable/reused nodes and newly-created nodes. This is
+    // intentionally cheap (one attribute update per rendered EDHREC link) and independent of score
+    // signatures so a preference change can never be skipped by DOM reuse.
+    syncEdhrecCandidateButtonVisibility(resultsGrid);
 
     // One delegated listener set handles both stable/reused nodes and newly-created nodes. This
     // avoids index-based closures becoming stale when progressive ranking reorders the grid.
