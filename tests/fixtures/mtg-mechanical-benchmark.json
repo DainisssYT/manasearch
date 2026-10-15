@@ -1,0 +1,645 @@
+{
+  "schemaVersion": 1,
+  "title": "ManaSearch Real-Card Mechanical Benchmark",
+  "curatedOn": "2026-10-15",
+  "methodology": "Deterministic offline fixtures transcribed from linked MTG card reference pages. Each URL points to an online Oracle-text reference. Tests run the production ManaSearch parser, repeatability annotator, mechanic-profile builder, and mechanical scorer; no Scryfall requests are made during test runs.",
+  "sourcesNote": "Card text and card identities were reviewed against the linked card reference pages. Source links are provided per fixture for maintenance and manual review.",
+  "cards": [
+    {
+      "id": "sol-ring",
+      "name": "Sol Ring",
+      "type_line": "Artifact",
+      "oracle_text": "{T}: Add {C}{C}.",
+      "source_url": "https://mtg.wtf/card/sld/2467/Sol-Ring",
+      "families": [
+        "mana-production",
+        "ramp",
+        "colorless-mana"
+      ]
+    },
+    {
+      "id": "thran-dynamo",
+      "name": "Thran Dynamo",
+      "type_line": "Artifact",
+      "oracle_text": "{T}: Add {C}{C}{C}.",
+      "source_url": "https://mtg.wtf/card/msc/290/Thran-Dynamo",
+      "families": [
+        "mana-production",
+        "ramp",
+        "colorless-mana"
+      ]
+    },
+    {
+      "id": "arcane-signet",
+      "name": "Arcane Signet",
+      "type_line": "Artifact",
+      "oracle_text": "{T}: Add one mana of any color in your commander's color identity.",
+      "source_url": "https://mtg.wtf/card/tdc/105/Arcane-Signet",
+      "families": [
+        "mana-production",
+        "ramp",
+        "color-fixing"
+      ]
+    },
+    {
+      "id": "ephemerate",
+      "name": "Ephemerate",
+      "type_line": "Instant",
+      "oracle_text": "Exile target creature you control, then return it to the battlefield under its owner's control. Rebound.",
+      "source_url": "https://mtg.wtf/card/sta/5/Ephemerate",
+      "families": [
+        "blink",
+        "zone-change",
+        "one-shot-spell"
+      ]
+    },
+    {
+      "id": "cloudshift",
+      "name": "Cloudshift",
+      "type_line": "Instant",
+      "oracle_text": "Exile target creature you control, then return that card to the battlefield under your control.",
+      "source_url": "https://mtg.wtf/card/avr/12/Cloudshift",
+      "families": [
+        "blink",
+        "zone-change",
+        "one-shot-spell"
+      ]
+    },
+    {
+      "id": "swords-to-plowshares",
+      "name": "Swords to Plowshares",
+      "type_line": "Instant",
+      "oracle_text": "Exile target creature. Its controller gains life equal to its power.",
+      "source_url": "https://mtg.wtf/card/ath/16/Swords-to-Plowshares",
+      "families": [
+        "exile-removal",
+        "life-gain",
+        "one-shot-spell"
+      ]
+    },
+    {
+      "id": "doubling-season",
+      "name": "Doubling Season",
+      "type_line": "Enchantment",
+      "oracle_text": "If an effect would create one or more tokens under your control, it creates twice that many of those tokens instead. If an effect would put one or more counters on a permanent you control, it puts twice that many of those counters on that permanent instead.",
+      "source_url": "https://mtg.wtf/card/cmm/557/Doubling-Season",
+      "families": [
+        "replacement-effect",
+        "token-multiplier",
+        "counter-multiplier"
+      ]
+    },
+    {
+      "id": "parallel-lives",
+      "name": "Parallel Lives",
+      "type_line": "Enchantment",
+      "oracle_text": "If an effect would create one or more tokens under your control, it creates twice that many of those tokens instead.",
+      "source_url": "https://mtg.wtf/card/isd/199/Parallel-Lives",
+      "families": [
+        "replacement-effect",
+        "token-multiplier"
+      ]
+    },
+    {
+      "id": "raise-the-alarm",
+      "name": "Raise the Alarm",
+      "type_line": "Instant",
+      "oracle_text": "Create two 1/1 white Soldier creature tokens.",
+      "source_url": "https://mtg.wtf/card/m15/26/Raise-the-Alarm",
+      "families": [
+        "token-creation",
+        "one-shot-spell"
+      ]
+    },
+    {
+      "id": "hardened-scales",
+      "name": "Hardened Scales",
+      "type_line": "Enchantment",
+      "oracle_text": "If one or more +1/+1 counters would be put on a creature you control, that many plus one +1/+1 counters are put on it instead.",
+      "source_url": "https://mtg.wtf/card/c16/152/Hardened-Scales",
+      "families": [
+        "replacement-effect",
+        "counter-modification",
+        "+1/+1-counters"
+      ]
+    },
+    {
+      "id": "vorinclex-monstrous-raider",
+      "name": "Vorinclex, Monstrous Raider",
+      "type_line": "Legendary Creature — Phyrexian Praetor",
+      "oracle_text": "Trample, haste. If you would put one or more counters on a permanent or player, put twice that many of each of those kinds of counters on that permanent or player instead. If an opponent would put one or more counters on a permanent or player, they put half that many of each of those kinds of counters on that permanent or player instead, rounded down.",
+      "source_url": "https://mtg.wtf/card/khm/199/Vorinclex-Monstrous-Raider",
+      "families": [
+        "replacement-effect",
+        "counter-multiplier",
+        "counter-hate"
+      ]
+    },
+    {
+      "id": "ashnods-altar",
+      "name": "Ashnod's Altar",
+      "type_line": "Artifact",
+      "oracle_text": "Sacrifice a creature: Add {C}{C}.",
+      "source_url": "https://mtg.wtf/card/atq/38/Ashnods-Altar",
+      "families": [
+        "sacrifice-outlet",
+        "mana-production",
+        "repeatable-activation"
+      ]
+    },
+    {
+      "id": "phyrexian-altar",
+      "name": "Phyrexian Altar",
+      "type_line": "Artifact",
+      "oracle_text": "Sacrifice a creature: Add one mana of any color.",
+      "source_url": "https://mtg.wtf/card/inv/306/Phyrexian-Altar",
+      "families": [
+        "sacrifice-outlet",
+        "mana-production",
+        "repeatable-activation",
+        "color-fixing"
+      ]
+    },
+    {
+      "id": "goblin-bombardment",
+      "name": "Goblin Bombardment",
+      "type_line": "Enchantment",
+      "oracle_text": "Sacrifice a creature: This enchantment deals 1 damage to any target.",
+      "source_url": "https://mtg.wtf/card/wot/43/Goblin-Bombardment",
+      "families": [
+        "sacrifice-outlet",
+        "direct-damage",
+        "repeatable-activation"
+      ]
+    },
+    {
+      "id": "village-rites",
+      "name": "Village Rites",
+      "type_line": "Instant",
+      "oracle_text": "As an additional cost to cast this spell, sacrifice a creature. Draw two cards.",
+      "source_url": "https://mtg.wtf/card/m21/126/Village-Rites",
+      "families": [
+        "sacrifice-cost",
+        "card-draw",
+        "one-shot-spell"
+      ]
+    },
+    {
+      "id": "deadly-dispute",
+      "name": "Deadly Dispute",
+      "type_line": "Instant",
+      "oracle_text": "As an additional cost to cast this spell, sacrifice an artifact or creature. Draw two cards and create a Treasure token.",
+      "source_url": "https://mtg.wtf/card/otc/131/Deadly-Dispute",
+      "families": [
+        "sacrifice-cost",
+        "card-draw",
+        "token-creation",
+        "one-shot-spell"
+      ]
+    },
+    {
+      "id": "rhystic-study",
+      "name": "Rhystic Study",
+      "type_line": "Enchantment",
+      "oracle_text": "Whenever an opponent casts a spell, you may draw a card unless that player pays {1}.",
+      "source_url": "https://mtg.wtf/card/jmp/169/Rhystic-Study",
+      "families": [
+        "triggered-ability",
+        "card-draw",
+        "repeatable-engine"
+      ]
+    },
+    {
+      "id": "beast-whisperer",
+      "name": "Beast Whisperer",
+      "type_line": "Creature — Elf Druid",
+      "oracle_text": "Whenever you cast a creature spell, draw a card.",
+      "source_url": "https://mtg.wtf/card/sld/1099/Beast-Whisperer",
+      "families": [
+        "triggered-ability",
+        "card-draw",
+        "repeatable-engine"
+      ]
+    },
+    {
+      "id": "phyrexian-arena",
+      "name": "Phyrexian Arena",
+      "type_line": "Enchantment",
+      "oracle_text": "At the beginning of your upkeep, you draw a card and lose 1 life.",
+      "source_url": "https://mtg.wtf/card/td0/A46/Phyrexian-Arena",
+      "families": [
+        "periodic-trigger",
+        "card-draw",
+        "life-loss",
+        "repeatable-engine"
+      ]
+    },
+    {
+      "id": "chronicler-of-heroes",
+      "name": "Chronicler of Heroes",
+      "type_line": "Creature — Centaur Wizard",
+      "oracle_text": "When Chronicler of Heroes enters the battlefield, draw a card if you control a creature with a +1/+1 counter on it.",
+      "source_url": "https://mtg.wtf/card/ths/190/Chronicler-of-Heroes",
+      "families": [
+        "etb-trigger",
+        "card-draw",
+        "conditional",
+        "one-shot-effect"
+      ]
+    },
+    {
+      "id": "skullclamp",
+      "name": "Skullclamp",
+      "type_line": "Artifact — Equipment",
+      "oracle_text": "Equipped creature gets +1/-1. Whenever equipped creature dies, draw two cards. Equip {1}.",
+      "source_url": "https://mtg.wtf/card/cmd/260/Skullclamp",
+      "families": [
+        "death-trigger",
+        "card-draw",
+        "repeatable-engine",
+        "equipment"
+      ]
+    },
+    {
+      "id": "impact-tremors",
+      "name": "Impact Tremors",
+      "type_line": "Enchantment",
+      "oracle_text": "Whenever a creature you control enters, this enchantment deals 1 damage to each opponent.",
+      "source_url": "https://mtg.wtf/card/dtk/140/Impact-Tremors",
+      "families": [
+        "triggered-ability",
+        "direct-damage",
+        "creature-entry-trigger",
+        "repeatable-engine"
+      ]
+    },
+    {
+      "id": "purphoros-god-of-the-forge",
+      "name": "Purphoros, God of the Forge",
+      "type_line": "Legendary Enchantment Creature — God",
+      "oracle_text": "Indestructible. As long as your devotion to red is less than five, Purphoros isn't a creature. Whenever another creature you control enters, Purphoros deals 2 damage to each opponent. {2}{R}: Creatures you control get +1/+0 until end of turn.",
+      "source_url": "https://mtg.wtf/card/cmm/547/Purphoros-God-of-the-Forge",
+      "families": [
+        "triggered-ability",
+        "direct-damage",
+        "creature-entry-trigger",
+        "repeatable-engine",
+        "activated-ability"
+      ]
+    },
+    {
+      "id": "counterspell",
+      "name": "Counterspell",
+      "type_line": "Instant",
+      "oracle_text": "Counter target spell.",
+      "source_url": "https://mtg.wtf/card/cmm/630/Counterspell",
+      "families": [
+        "counterspell",
+        "one-shot-spell"
+      ]
+    },
+    {
+      "id": "negate",
+      "name": "Negate",
+      "type_line": "Instant",
+      "oracle_text": "Counter target noncreature spell.",
+      "source_url": "https://mtg.wtf/card/m20/69/Negate",
+      "families": [
+        "counterspell",
+        "noncreature-restriction",
+        "one-shot-spell"
+      ]
+    },
+    {
+      "id": "reanimate",
+      "name": "Reanimate",
+      "type_line": "Sorcery",
+      "oracle_text": "Put target creature card from a graveyard onto the battlefield under your control. You lose life equal to that card's mana value.",
+      "source_url": "https://mtg.wtf/card/cc2/5/Reanimate",
+      "families": [
+        "reanimation",
+        "graveyard-to-battlefield",
+        "one-shot-spell",
+        "life-loss"
+      ]
+    },
+    {
+      "id": "eternal-witness",
+      "name": "Eternal Witness",
+      "type_line": "Creature — Human Shaman",
+      "oracle_text": "When this creature enters, you may return target card from your graveyard to your hand.",
+      "source_url": "https://mtg.wtf/card/prm/31431/Eternal-Witness",
+      "families": [
+        "etb-trigger",
+        "graveyard-to-hand",
+        "recursion",
+        "conditional-choice"
+      ]
+    },
+    {
+      "id": "animate-dead",
+      "name": "Animate Dead",
+      "type_line": "Enchantment — Aura",
+      "oracle_text": "Enchant creature card in a graveyard. When this Aura enters, if it's on the battlefield, it loses 'enchant creature card in a graveyard' and gains 'enchant creature put onto the battlefield with this Aura.' Return enchanted creature card to the battlefield under your control and attach this Aura to it. When this Aura leaves the battlefield, that creature's controller sacrifices it. Enchanted creature gets -1/-0.",
+      "source_url": "https://mtg.wtf/card/30a/389/Animate-Dead",
+      "families": [
+        "reanimation",
+        "graveyard-to-battlefield",
+        "aura",
+        "replacement-and-leaves-trigger"
+      ]
+    },
+    {
+      "id": "go-for-the-throat",
+      "name": "Go for the Throat",
+      "type_line": "Instant",
+      "oracle_text": "Destroy target nonartifact creature.",
+      "source_url": "https://mtg.wtf/card/c17/114/Go-for-the-Throat",
+      "families": [
+        "destroy-removal",
+        "one-shot-spell",
+        "restriction"
+      ]
+    },
+    {
+      "id": "alhammarrets-archive",
+      "name": "Alhammarret's Archive",
+      "type_line": "Legendary Artifact",
+      "oracle_text": "If you would gain life, you gain twice that much life instead. If you would draw a card except the first one you draw in each of your draw steps, draw two cards instead.",
+      "source_url": "https://mtg.wtf/card/c21/233/Alhammarrets-Archive",
+      "families": [
+        "replacement-effect",
+        "card-draw-modification",
+        "life-gain-modification"
+      ]
+    },
+    {
+      "id": "gaea-s-blessing",
+      "name": "Gaea's Blessing",
+      "type_line": "Sorcery",
+      "oracle_text": "Target player shuffles up to three target cards from their graveyard into their library. Draw a card. When this card is put into your graveyard from your library, shuffle your graveyard into your library.",
+      "source_url": "https://mtg.wtf/card/tsb/77/Gaeas-Blessing",
+      "families": [
+        "graveyard-to-library",
+        "card-draw",
+        "library-shuffle",
+        "mill-protection"
+      ]
+    }
+  ],
+  "pairs": [
+    {
+      "id": "mana-sol-ring-thran-dynamo",
+      "category": "mana-production",
+      "a": "sol-ring",
+      "b": "thran-dynamo",
+      "purpose": "Similar tap abilities that produce different amounts of colorless mana.",
+      "expect": {
+        "minScore": 0.45,
+        "scoreAbove": "mana-sol-ring-arcane-signet"
+      }
+    },
+    {
+      "id": "mana-sol-ring-arcane-signet",
+      "category": "mana-production",
+      "a": "sol-ring",
+      "b": "arcane-signet",
+      "purpose": "Both are two-mana-accelerating rocks, but colorless output differs from color fixing.",
+      "expect": {
+        "minScore": 0.25
+      }
+    },
+    {
+      "id": "blink-ephemerate-cloudshift",
+      "category": "blink-and-zone-change",
+      "a": "ephemerate",
+      "b": "cloudshift",
+      "purpose": "Two blink effects using different but equivalent wording.",
+      "expect": {
+        "minScore": 0.45,
+        "scoreAbove": "blink-ephemerate-swords"
+      }
+    },
+    {
+      "id": "blink-ephemerate-swords",
+      "category": "blink-and-zone-change",
+      "a": "ephemerate",
+      "b": "swords-to-plowshares",
+      "purpose": "Blink versus exile removal; the returned creature is not left exiled.",
+      "expect": {
+        "maxScore": 0.52,
+        "contrastKind": "blink-vs-exile-removal"
+      }
+    },
+    {
+      "id": "replacement-doubling-parallel-lives",
+      "category": "replacement-effects-and-tokens",
+      "a": "doubling-season",
+      "b": "parallel-lives",
+      "purpose": "Both are token-creation replacement effects; Doubling Season also changes counters.",
+      "expect": {
+        "minScore": 0.48,
+        "scoreAbove": "replacement-doubling-vs-raise-alarm"
+      }
+    },
+    {
+      "id": "replacement-doubling-vs-raise-alarm",
+      "category": "replacement-effects-and-tokens",
+      "a": "parallel-lives",
+      "b": "raise-the-alarm",
+      "purpose": "Token multiplication is not the same as a spell creating tokens.",
+      "expect": {
+        "maxScore": 0.58,
+        "contrastKind": "token-multiplier-vs-token-creation"
+      }
+    },
+    {
+      "id": "counter-replacement-scales-vorinclex",
+      "category": "counters-and-replacement",
+      "a": "hardened-scales",
+      "b": "vorinclex-monstrous-raider",
+      "purpose": "Both change counter placement via replacement effects, with different scopes and outcomes.",
+      "expect": {
+        "minScore": 0.24
+      }
+    },
+    {
+      "id": "sacrifice-mana-ashnod-phyrexian-altar",
+      "category": "sacrifice-outlets",
+      "a": "ashnods-altar",
+      "b": "phyrexian-altar",
+      "purpose": "Both repeatedly sacrifice a creature as a cost to produce mana.",
+      "expect": {
+        "minScore": 0.38
+      }
+    },
+    {
+      "id": "sacrifice-outlet-ashnod-bombardment",
+      "category": "sacrifice-outlets",
+      "a": "ashnods-altar",
+      "b": "goblin-bombardment",
+      "purpose": "Shared repeatable sacrifice outlet structure, different outcomes (mana versus damage).",
+      "expect": {
+        "minScore": 0.18,
+        "maxScore": 0.92
+      }
+    },
+    {
+      "id": "sacrifice-cost-village-deadly-dispute",
+      "category": "sacrifice-costs-and-card-draw",
+      "a": "village-rites",
+      "b": "deadly-dispute",
+      "purpose": "Both are one-shot spells that sacrifice a permanent as an additional cost and draw two cards; Deadly Dispute also makes a Treasure.",
+      "expect": {
+        "minScore": 0.4
+      }
+    },
+    {
+      "id": "repeatable-draw-rhystic-beast-whisperer",
+      "category": "triggered-card-draw",
+      "a": "rhystic-study",
+      "b": "beast-whisperer",
+      "purpose": "Both are repeatable triggered card-draw engines with different triggering events.",
+      "expect": {
+        "minScore": 0.28,
+        "scoreAbove": "repeatable-draw-rhystic-chronicler"
+      }
+    },
+    {
+      "id": "repeatable-draw-rhystic-chronicler",
+      "category": "repeatable-versus-one-shot",
+      "a": "rhystic-study",
+      "b": "chronicler-of-heroes",
+      "purpose": "Repeatable spell-cast trigger versus a single conditional ETB draw.",
+      "expect": {
+        "maxScore": 0.76
+      }
+    },
+    {
+      "id": "repeatable-draw-phyrexian-arena-rhystic",
+      "category": "upkeep-triggered-draw",
+      "a": "phyrexian-arena",
+      "b": "rhystic-study",
+      "purpose": "Recurring upkeep draw versus recurring opponent-spell trigger draw.",
+      "expect": {
+        "minScore": 0.24
+      }
+    },
+    {
+      "id": "death-trigger-skullclamp-village-rites",
+      "category": "death-triggers-and-sacrifice",
+      "a": "skullclamp",
+      "b": "village-rites",
+      "purpose": "Card draw after a creature dies versus a one-shot spell with a sacrifice cost.",
+      "expect": {
+        "maxScore": 0.88
+      }
+    },
+    {
+      "id": "creature-entry-damage-tremors-purphoros",
+      "category": "repeatable-triggers",
+      "a": "impact-tremors",
+      "b": "purphoros-god-of-the-forge",
+      "purpose": "Both trigger damage to each opponent when creatures enter under your control.",
+      "expect": {
+        "minScore": 0.35
+      }
+    },
+    {
+      "id": "counterspell-counterspell-negate",
+      "category": "counterspells",
+      "a": "counterspell",
+      "b": "negate",
+      "purpose": "Counter any spell versus countering noncreature spells only.",
+      "expect": {
+        "minScore": 0.42,
+        "scoreAbove": "counterspell-unrelated-removal"
+      }
+    },
+    {
+      "id": "counterspell-unrelated-removal",
+      "category": "negative-controls",
+      "a": "counterspell",
+      "b": "go-for-the-throat",
+      "purpose": "Countering a spell versus destroying an on-board nonartifact creature.",
+      "expect": {
+        "maxScore": 0.38,
+        "contrastKind": "different-primary-effects"
+      }
+    },
+    {
+      "id": "reanimation-reanimate-animate-dead",
+      "category": "graveyard-recursion",
+      "a": "reanimate",
+      "b": "animate-dead",
+      "purpose": "Both return a creature card from graveyard to battlefield, with different costs and Aura attachment behavior.",
+      "expect": {
+        "minScore": 0.25,
+        "scoreAbove": "reanimation-vs-hand-recursion"
+      }
+    },
+    {
+      "id": "reanimation-vs-hand-recursion",
+      "category": "graveyard-recursion",
+      "a": "reanimate",
+      "b": "eternal-witness",
+      "purpose": "Battlefield reanimation versus returning a card to hand.",
+      "expect": {
+        "maxScore": 0.72,
+        "contrastKind": "reanimation-vs-graveyard-recursion"
+      }
+    },
+    {
+      "id": "removal-swords-vs-destroy",
+      "category": "removal-and-restrictions",
+      "a": "swords-to-plowshares",
+      "b": "go-for-the-throat",
+      "purpose": "Exile removal with life compensation versus destroy removal with an artifact restriction.",
+      "expect": {
+        "minScore": 0.12,
+        "maxScore": 0.95
+      }
+    },
+    {
+      "id": "replacement-archive-vs-rhystic",
+      "category": "replacement-versus-trigger",
+      "a": "alhammarrets-archive",
+      "b": "rhystic-study",
+      "purpose": "Card-draw replacement effect versus a triggered ability that may draw a card.",
+      "expect": {
+        "minScore": 0.1,
+        "maxScore": 0.95
+      }
+    },
+    {
+      "id": "graveyard-library-vs-reanimation",
+      "category": "graveyard-destinations",
+      "a": "gaea-s-blessing",
+      "b": "reanimate",
+      "purpose": "Graveyard-to-library recovery and graveyard reshuffling versus graveyard-to-battlefield reanimation.",
+      "expect": {
+        "minScore": 0.05,
+        "maxScore": 0.92
+      }
+    }
+  ],
+  "requiredCoverage": [
+    "mana-production",
+    "blink-and-zone-change",
+    "replacement-effects-and-tokens",
+    "counters-and-replacement",
+    "sacrifice-outlets",
+    "sacrifice-costs-and-card-draw",
+    "triggered-card-draw",
+    "repeatable-versus-one-shot",
+    "upkeep-triggered-draw",
+    "death-triggers-and-sacrifice",
+    "repeatable-triggers",
+    "counterspells",
+    "negative-controls",
+    "graveyard-recursion",
+    "removal-and-restrictions",
+    "replacement-versus-trigger",
+    "graveyard-destinations"
+  ]
+}

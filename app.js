@@ -1,6 +1,6 @@
-/* ManaSearch build 20261015-69 */
+/* ManaSearch build 20261015-72 */
 // ManaSearch deployment build marker. Bump this whenever app.js changes so cached-module issues are easy to diagnose.
-const MANASEARCH_APP_BUILD = '20261015-67';
+const MANASEARCH_APP_BUILD = '20261015-72';
 console.info(`[ManaSearch] app.js build ${MANASEARCH_APP_BUILD}`);
 
 // State Management
@@ -10918,7 +10918,14 @@ function getSinglePrimaryEffectSignature(text) {
     // Order-independent signatures deliberately prefer the actual destination/action over generic
     // words such as "return" or "target".
     add(/\b(?:return|put)\b[\s\S]*\bfrom (?:your )?graveyard\b[\s\S]*\b(?:to|onto) the battlefield\b|\bfrom (?:your )?graveyard\b[\s\S]*\b(?:return|put)\b[\s\S]*\b(?:to|onto) the battlefield\b/, 'reanimate');
-    add(/\breturn\b[\s\S]*\bto (?:its owner's|their owner's|your) hand\b/, 'bounce');
+    // Returning a card from the graveyard to hand is recursion/card recovery, not a bounce
+    // effect. Only return-to-hand effects that do not originate in a graveyard use the bounce
+    // signature.
+    if (/\breturn\b[\s\S]*\bfrom (?:your )?graveyard\b[\s\S]*\bto (?:its owner's|their owner's|your) hand\b/.test(input)) {
+        found.add('recursion');
+    } else {
+        add(/\breturn\b[\s\S]*\bto (?:its owner's|their owner's|your) hand\b/, 'bounce');
+    }
     add(/\bdestroy\b/, 'destroy');
     add(/\bexile\b/, 'exile');
     add(/\bdraw\s+(?:a|one|two|three|four|five|\d+)\s+cards?\b/, 'draw');
@@ -10943,7 +10950,7 @@ function getSinglePrimaryEffectSignature(text) {
 
 function mechanicalEffectFamily(signature) {
     if (['destroy', 'exile', 'sacrifice'].includes(signature)) return 'removal';
-    if (signature === 'reanimate') return 'recursion';
+    if (signature === 'reanimate' || signature === 'recursion') return 'recursion';
     if (signature === 'bounce') return 'tempo';
     if (signature === 'draw' || signature === 'search_library') return 'card_advantage';
     if (signature === 'tap' || signature === 'untap') return 'board_state';
@@ -10958,14 +10965,72 @@ function mechanicalEffectFamily(signature) {
     return signature;
 }
 
+
+// Detect ordered zone-change effects that a verb-only matcher can mistake for removal.
+// Flicker/blink exiles a permanent and returns it to the battlefield; ordinary exile removal
+// leaves it in exile. Both contain "exile", but they have different outcomes and play patterns.
+function classifyZoneTransitionIntent(text) {
+    const input = String(text || '').toLowerCase().replace(/[’]/g, "'");
+    const exileAt = input.search(/\bexile\b/);
+    if (exileAt < 0) return 'none';
+    const tail = input.slice(exileAt);
+    const returnsToBattlefield = /\b(?:then\s+)?(?:return|put)\s+(?:it|that card|that permanent|those cards|those permanents|them)\b[\s\S]{0,220}\b(?:to|onto)\s+the battlefield\b/i.test(tail);
+    if (returnsToBattlefield) return 'blink';
+    // Do not classify "exile it until end of turn, then return it" as removal if return text
+    // was separated into a second parsed atom: getMechanicalContrastText() reconstructs atoms
+    // in source order, so this check sees the whole effect sequence.
+    return 'exile_removal';
+}
+
+function classifyTokenProductionIntent(text) {
+    const input = String(text || '').toLowerCase();
+    if (/\b(?:twice|three times|double|doubles|triple|triples|multiplied by|that many)\b[\s\S]{0,180}\btokens?\b/i.test(input) &&
+        /\b(?:would be created|would create|create|created instead|creates instead)\b/i.test(input)) {
+        return 'token_multiplier';
+    }
+    if (/\bcreate(?:s)?\b[\s\S]{0,180}\btokens?\b/i.test(input)) return 'token_creation';
+    return 'none';
+}
+
 function inferExplicitMechanicalContrast(parsedA = [], parsedB = []) {
     const textA = getMechanicalContrastText(parsedA);
     const textB = getMechanicalContrastText(parsedB);
     if (!textA || !textB) return { kind: 'none', signatures: [] };
+
+    // Compare full effect sequences before reducing them to a single verb signature. This protects
+    // mechanically distinct cards that share the word "exile" or "create token".
+    const zoneA = classifyZoneTransitionIntent(textA);
+    const zoneB = classifyZoneTransitionIntent(textB);
+    if ((zoneA === 'blink' && zoneB === 'exile_removal') ||
+        (zoneB === 'blink' && zoneA === 'exile_removal')) {
+        return {
+            kind: 'blink-vs-exile-removal',
+            signatures: [zoneA, zoneB],
+            reason: 'exile-and-return sequence differs from permanent exile'
+        };
+    }
+    const tokenA = classifyTokenProductionIntent(textA);
+    const tokenB = classifyTokenProductionIntent(textB);
+    if ((tokenA === 'token_multiplier' && tokenB === 'token_creation') ||
+        (tokenB === 'token_multiplier' && tokenA === 'token_creation')) {
+        return {
+            kind: 'token-multiplier-vs-token-creation',
+            signatures: [tokenA, tokenB],
+            reason: 'replacement multiplier changes another effect instead of independently creating tokens'
+        };
+    }
+
     const a = getSinglePrimaryEffectSignature(textA);
     const b = getSinglePrimaryEffectSignature(textB);
     if (a && b) {
         const key = `${a}|${b}`;
+        if ((a === 'reanimate' && b === 'recursion') || (b === 'reanimate' && a === 'recursion')) {
+            return {
+                kind: 'reanimation-vs-graveyard-recursion',
+                signatures: [a, b],
+                reason: 'graveyard card returns to different destination zones'
+            };
+        }
         if (OPPOSITE_MECHANICS.has(key)) return { kind: 'opposite', signatures: [a, b], reason: 'opposite primary actions' };
         if (mechanicalEffectFamily(a) !== mechanicalEffectFamily(b)) {
             return { kind: 'different-primary-effects', signatures: [a, b], reason: 'single primary effects belong to different mechanical families' };
@@ -11040,6 +11105,9 @@ function calculateMechanicalSimilarityDetailed(parsedA, parsedB, profileA = null
     if (explicitContrast.kind === 'opposite') score = Math.min(score, 0.55);
     else if (explicitContrast.kind === 'different-primary-effects') score = Math.min(score, 0.38);
     else if (explicitContrast.kind === 'mana-choice-vs-simultaneous') score = Math.min(0.89, score * 0.94);
+    else if (explicitContrast.kind === 'blink-vs-exile-removal') score = Math.min(score, 0.52);
+    else if (explicitContrast.kind === 'token-multiplier-vs-token-creation') score = Math.min(score, 0.58);
+    else if (explicitContrast.kind === 'reanimation-vs-graveyard-recursion') score = Math.min(score, 0.72);
 
     return {
         score,
@@ -11407,6 +11475,50 @@ function runManaSearchMechanicalRegressionSuite({ log = true } = {}) {
             results.push({ id: test.id, score: 0, expected: [test.min, test.max], pass: false, error: error?.message || String(error) });
         }
     }
+    // Ordered outcomes matter: blink returns the exiled permanent, while exile removal does not.
+    try {
+        const blinkA = parseMTGEffect("Exile target creature, then return that card to the battlefield under its owner's control.");
+        const exileB = parseMTGEffect("Exile target creature.");
+        const blinkDetail = calculateMechanicalSimilarityDetailed(blinkA, exileB);
+        results.push({
+            id: 'blink-sequence-is-not-exile-removal',
+            pass: blinkDetail.explicitContrast?.kind === 'blink-vs-exile-removal' && blinkDetail.score <= 0.52,
+            score: blinkDetail.score,
+            contrast: blinkDetail.explicitContrast
+        });
+
+        const multiplier = parseMTGEffect("If an effect would create one or more tokens under your control, it creates three times that many of those tokens instead.");
+        const creator = parseMTGEffect("Create three 1/1 green Saproling creature tokens.");
+        const tokenDetail = calculateMechanicalSimilarityDetailed(multiplier, creator);
+        results.push({
+            id: 'token-multiplier-is-not-token-creation',
+            pass: tokenDetail.explicitContrast?.kind === 'token-multiplier-vs-token-creation' && tokenDetail.score <= 0.58,
+            score: tokenDetail.score,
+            contrast: tokenDetail.explicitContrast
+        });
+
+        const reanimate = parseMTGEffect('Return target creature card from your graveyard to the battlefield.');
+        const recursion = parseMTGEffect('Return target creature card from your graveyard to your hand.');
+        const recursionDetail = calculateMechanicalSimilarityDetailed(reanimate, recursion);
+        results.push({
+            id: 'graveyard-return-destination-is-mechanically-distinct',
+            pass: recursionDetail.explicitContrast?.kind === 'reanimation-vs-graveyard-recursion' && recursionDetail.score <= 0.72,
+            score: recursionDetail.score,
+            contrast: recursionDetail.explicitContrast
+        });
+
+        const oneShotRankFactor = sourceAcquisitionCadenceRankFactor(0.98);
+        const repeatableRankFactor = sourceAcquisitionCadenceRankFactor(0);
+        results.push({
+            id: 'repeatable-acquisition-rank-adjustment-is-directional',
+            pass: oneShotRankFactor < 0.50 && repeatableRankFactor === 1,
+            oneShotRankFactor,
+            repeatableRankFactor
+        });
+    } catch (error) {
+        results.push({ id: 'mechanic-family-contrast-regressions', pass: false, error: error?.message || String(error) });
+    }
+
     // A draw-step reference is phase/timing text, not card draw. At the same time, a real draw
     // action elsewhere on the card must remain scoreable even if its text also names the draw step.
     try {
@@ -11439,6 +11551,217 @@ function runManaSearchMechanicalRegressionSuite({ log = true } = {}) {
 
 // Available for development/benchmark diagnostics without changing the public UI.
 try { window.runManaSearchMechanicalRegressionSuite = runManaSearchMechanicalRegressionSuite; } catch (_) {}
+
+// V72: curated real-card benchmark. The fixture corpus lives in tests/fixtures/ so card additions
+// do not require editing production logic. CI passes that offline fixture into this diagnostic and
+// exercises the same parser, repeatability annotator, profile builder, and scorer used by searches.
+// The benchmark is opt-in and has no cost during normal site usage.
+function runManaSearchRealCardBenchmarkSuite({ benchmark = null, log = true } = {}) {
+    const cards = Array.isArray(benchmark?.cards) ? benchmark.cards : [];
+    const pairs = Array.isArray(benchmark?.pairs) ? benchmark.pairs : [];
+    const byId = new Map(cards.map(card => [String(card.id || ''), card]));
+    const parsedById = new Map();
+    const cardChecks = [];
+    const pairChecks = [];
+
+    for (const card of cards) {
+        try {
+            const oracle = String(card.oracle_text || '');
+            const rawEffects = parseMTGEffect(oracle);
+            const effects = annotateEffectRepeatability(card, rawEffects, oracle);
+            const profile = buildUniversalMechanicProfile(card, oracle, effects);
+            const graph = buildMechanicalEffectGraph(card, oracle, effects);
+            const functions = [...new Set((effects || []).flatMap(effect => [
+                effect?.canonical?.function,
+                effect?.function,
+                effect?.action
+            ]).map(value => String(value || '').trim()).filter(Boolean))].sort();
+            const entry = { card, oracle, rawEffects, effects, profile, graph, functions };
+            parsedById.set(card.id, entry);
+            const pass = oracle.trim().length > 0 && effects.length > 0;
+            cardChecks.push({
+                id: `card-parses:${card.id}`,
+                pass,
+                card: card.name,
+                sourceUrl: card.source_url || '',
+                parsedEffectCount: effects.length,
+                recognizedFunctions: functions,
+                expectedFamilies: card.families || []
+            });
+        } catch (error) {
+            cardChecks.push({ id: `card-parses:${card.id}`, pass: false, card: card.name, sourceUrl: card.source_url || '', error: error?.message || String(error) });
+        }
+    }
+
+    for (const test of pairs) {
+        const a = byId.get(test.a), b = byId.get(test.b);
+        const parsedA = parsedById.get(test.a), parsedB = parsedById.get(test.b);
+        if (!a || !b || !parsedA || !parsedB) {
+            pairChecks.push({ id: test.id, pass: false, error: `missing or unparsed card fixture: ${test.a} / ${test.b}` });
+            continue;
+        }
+        try {
+            const detail = calculateMechanicalSimilarityDetailed(parsedA.effects, parsedB.effects, parsedA.profile, parsedB.profile);
+            const score = Number(detail?.score);
+            const expectation = test.expect || {};
+            const failures = [];
+            if (!Number.isFinite(score) || score < 0 || score > 1) failures.push('score-not-finite-or-out-of-range');
+            if (expectation.minScore != null && score < Number(expectation.minScore)) failures.push(`score-below-min:${expectation.minScore}`);
+            if (expectation.maxScore != null && score > Number(expectation.maxScore)) failures.push(`score-above-max:${expectation.maxScore}`);
+            if (expectation.contrastKind && detail?.explicitContrast?.kind !== expectation.contrastKind) failures.push(`contrast-mismatch:${expectation.contrastKind}`);
+            pairChecks.push({
+                id: test.id,
+                category: test.category || 'uncategorized',
+                a: a.name,
+                b: b.name,
+                purpose: test.purpose || '',
+                sourceUrls: [a.source_url || '', b.source_url || ''],
+                score: Number.isFinite(score) ? Number(score.toFixed(4)) : null,
+                rawScore: Number.isFinite(Number(detail?.rawScore)) ? Number(Number(detail.rawScore).toFixed(4)) : null,
+                repeatabilityMismatch: Number(detail?.repeatabilityMismatch) || 0,
+                contrast: detail?.explicitContrast || null,
+                expectation,
+                failures,
+                pass: failures.length === 0
+            });
+        } catch (error) {
+            pairChecks.push({ id: test.id, category: test.category || 'uncategorized', a: a.name, b: b.name, pass: false, error: error?.message || String(error) });
+        }
+    }
+
+    // Relative checks keep thresholds meaningful when scores shift slightly after parser changes.
+    // They verify ranking preferences rather than freezing every score to a brittle exact value.
+    const resultByPairId = new Map(pairChecks.map(result => [result.id, result]));
+    for (const test of pairs) {
+        const result = resultByPairId.get(test.id);
+        const expectation = test.expect || {};
+        const relations = [];
+        if (expectation.scoreAbove) relations.push({ targetId: expectation.scoreAbove, shouldBeAbove: true });
+        for (const targetId of (expectation.scoreAboveAny || [])) relations.push({ targetId, shouldBeAbove: true });
+        if (expectation.scoreBelow) relations.push({ targetId: expectation.scoreBelow, shouldBeAbove: false });
+        for (const relation of relations) {
+            const other = resultByPairId.get(relation.targetId);
+            if (!result) continue;
+            const passed = Boolean(other && Number.isFinite(result.score) && Number.isFinite(other.score) &&
+                (relation.shouldBeAbove ? result.score > other.score : result.score < other.score));
+            result.rankingRelations = result.rankingRelations || [];
+            result.rankingRelations.push({ targetId: relation.targetId, relation: relation.shouldBeAbove ? 'above' : 'below', targetScore: other?.score ?? null, pass: passed });
+            if (!passed) {
+                result.failures = result.failures || [];
+                result.failures.push(`ranking-relation-failed:${relation.shouldBeAbove ? 'above' : 'below'}:${relation.targetId}`);
+                result.pass = false;
+            }
+        }
+    }
+
+    const coverage = [...new Set(pairs.map(pair => pair.category || 'uncategorized'))].sort();
+    const requiredCoverage = Array.isArray(benchmark?.requiredCoverage) ? benchmark.requiredCoverage : [];
+    const missingCoverage = requiredCoverage.filter(category => !coverage.includes(category));
+    const results = [...cardChecks, ...pairChecks];
+    const failed = results.filter(result => !result.pass);
+    const report = {
+        pass: failed.length === 0 && missingCoverage.length === 0 && cards.length >= 20 && pairs.length >= 15,
+        passed: results.length - failed.length,
+        total: results.length,
+        cardCount: cards.length,
+        pairCount: pairs.length,
+        categories: coverage,
+        missingCoverage,
+        failures: failed.map(result => ({ id: result.id, error: result.error || result.failures?.join(', ') || 'failed' })),
+        cardChecks,
+        pairChecks
+    };
+    if (log) {
+        console.groupCollapsed(`[ManaSearch] Real-card mechanical benchmark: ${report.passed}/${report.total} checks passed`);
+        console.log('Coverage:', { cards: report.cardCount, pairs: report.pairCount, categories: report.categories, missingCoverage });
+        for (const result of results) console.log(`${result.pass ? 'PASS' : 'FAIL'} ${result.id}`, result);
+        console.groupEnd();
+    }
+    return report;
+}
+try { window.runManaSearchRealCardBenchmarkSuite = runManaSearchRealCardBenchmarkSuite; } catch (_) {}
+
+// Reproducible microbenchmark over the real production parser, repeatability annotator, universal
+// mechanic profiles, and mechanical pair scorer. It intentionally does not launch a network search
+// or mutate UI state, so CI can measure scorer regressions deterministically without Scryfall.
+function runManaSearchPerformanceSuite({ iterations = 12, maxDurationMs = 15000, log = true } = {}) {
+    const fixtures = [
+        [
+            { name: 'Rhystic Study', type_line: 'Enchantment', oracle_text: 'Whenever an opponent casts a spell, you may draw a card unless that player pays {1}.' },
+            { name: 'Chronicler of Heroes', type_line: 'Creature — Centaur Wizard', oracle_text: 'When Chronicler of Heroes enters the battlefield, draw a card if you control a creature with a +1/+1 counter on it.' }
+        ],
+        [
+            { name: 'Upkeep Engine', type_line: 'Enchantment', oracle_text: 'At the beginning of your upkeep, draw a card.' },
+            { name: 'End Step Engine', type_line: 'Enchantment', oracle_text: 'At the beginning of your end step, draw a card.' }
+        ],
+        [
+            { name: 'Blink', type_line: 'Instant', oracle_text: "Exile target creature, then return that card to the battlefield under its owner's control." },
+            { name: 'Exile Removal', type_line: 'Instant', oracle_text: 'Exile target creature.' }
+        ],
+        [
+            { name: 'Token Multiplier', type_line: 'Enchantment', oracle_text: 'If an effect would create one or more tokens under your control, it creates twice that many of those tokens instead.' },
+            { name: 'Token Maker', type_line: 'Sorcery', oracle_text: 'Create two 1/1 white Soldier creature tokens.' }
+        ],
+        [
+            { name: 'Choice Rock', type_line: 'Artifact', oracle_text: '{T}: Add {R}, {G}, or {W}.' },
+            { name: 'Three Mana Rock', type_line: 'Artifact', oracle_text: '{T}: Add {R}{G}{W}.' }
+        ],
+        [
+            { name: 'Counterspell', type_line: 'Instant', oracle_text: 'Counter target spell.' },
+            { name: 'Negate', type_line: 'Instant', oracle_text: 'Counter target noncreature spell.' }
+        ],
+        [
+            { name: 'Phyrexian Arena', type_line: 'Enchantment', oracle_text: 'At the beginning of your upkeep, you draw a card and you lose 1 life.' },
+            { name: 'Divination', type_line: 'Sorcery', oracle_text: 'Draw two cards.' }
+        ]
+    ];
+    const timed = [];
+    const errors = [];
+    let comparisons = 0;
+    let finiteScores = true;
+    const runPair = ([cardA, cardB]) => {
+        const start = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+        try {
+            const effectsA = annotateEffectRepeatability(cardA, parseMTGEffect(cardA.oracle_text), cardA.oracle_text);
+            const effectsB = annotateEffectRepeatability(cardB, parseMTGEffect(cardB.oracle_text), cardB.oracle_text);
+            const profileA = buildUniversalMechanicProfile(cardA, cardA.oracle_text, effectsA);
+            const profileB = buildUniversalMechanicProfile(cardB, cardB.oracle_text, effectsB);
+            const detail = calculateMechanicalSimilarityDetailed(effectsA, effectsB, profileA, profileB);
+            const score = Number(detail?.score);
+            if (!Number.isFinite(score) || score < 0 || score > 1) finiteScores = false;
+            comparisons++;
+        } catch (error) {
+            errors.push({ pair: `${cardA.name} / ${cardB.name}`, error: error?.message || String(error) });
+        }
+        const end = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+        return end - start;
+    };
+    // Warm caches first so reported throughput reflects the normal repeat-search path. Keep warm-up
+    // separate from the measured loops; include parse/profile construction in every measured pair.
+    for (let i = 0; i < 2; i++) fixtures.forEach(runPair);
+    comparisons = 0;
+    const startedAt = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+    for (let i = 0; i < Math.max(1, Math.min(100, Number(iterations) || 12)); i++) {
+        for (const fixture of fixtures) timed.push(runPair(fixture));
+    }
+    const endedAt = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+    const elapsedMs = Math.max(0, endedAt - startedAt);
+    const sorted = timed.slice().sort((a, b) => a - b);
+    const p95Ms = sorted.length ? sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * 0.95))] : 0;
+    const report = {
+        pass: errors.length === 0 && finiteScores && comparisons === timed.length && elapsedMs <= maxDurationMs,
+        comparisons,
+        elapsedMs: Number(elapsedMs.toFixed(2)),
+        msPerComparison: Number((elapsedMs / Math.max(1, comparisons)).toFixed(3)),
+        p95PairMs: Number(p95Ms.toFixed(3)),
+        maxDurationMs,
+        finiteScores,
+        errors
+    };
+    if (log) console.info('[ManaSearch] Production mechanical-scoring performance:', report);
+    return report;
+}
+try { window.runManaSearchPerformanceSuite = runManaSearchPerformanceSuite; } catch (_) {}
 
 // V24: highlighted-mechanic isolation checks. These specifically guard against a common semantic
 // ranking failure: copying every keyword from a multi-mechanic source card into a short highlight.
@@ -18091,7 +18414,25 @@ function installManaSearchOnboarding() {
             dialog.scrollTop = 0;
         };
 
-        const skip = () => closeTour?.('skipped');
+        // Skipping is irreversible for this tour session, so ask before closing.
+        // Use the browser's native confirmation UI for reliable keyboard and mobile support;
+        // cancelling leaves the tour, current step, and all selected progress untouched.
+        const skip = () => {
+            let confirmed = false;
+            try {
+                confirmed = window.confirm(
+                    'Are you sure you want to skip the guided tour? You can start it again later using the Guided tour button.'
+                );
+            } catch (error) {
+                // If confirmation is unavailable in a restricted embedded context, do not
+                // unexpectedly dismiss the guide.
+                console.warn('[ManaSearch] Skip confirmation could not be shown; keeping the guide open.', error);
+                tourMessage = 'To leave the guide, use Skip tour and confirm the browser prompt. You can also continue the guide.';
+                if (hintText) hintText.textContent = tourMessage;
+                return;
+            }
+            if (confirmed) closeTour?.('skipped');
+        };
         closeButton.addEventListener('click', skip);
         skipButton.addEventListener('click', skip);
         scrim.addEventListener('click', () => { tourMessage = 'Use Skip tour to exit, or continue through the steps to complete a real search.'; hintText.textContent = tourMessage; });
@@ -19474,7 +19815,15 @@ function displaySourceCard(card) {
 // 1. Batch NLP embedding calculations and chunk thread yields
 // NOTE: takes a single options object (not positional args) specifically to prevent
 // the class of argument-order bug that previously broke related-card search scoring.
-async function scoreCardBatch({
+async // A one-time card-draw effect should remain discoverable, but it should not outrank true
+// recurring draw engines just because several non-mechanical channels happen to be high.
+const SOURCE_ACQUISITION_CADENCE_RANKING_PENALTY = 0.55;
+function sourceAcquisitionCadenceRankFactor(mismatch) {
+    const severity = Math.max(0, Math.min(1, Number(mismatch) || 0));
+    return Math.max(0, Math.min(1, 1 - SOURCE_ACQUISITION_CADENCE_RANKING_PENALTY * severity));
+}
+
+function scoreCardBatch({
     cards,
     sourceCard,
     targetText,
@@ -20267,9 +20616,10 @@ async function scoreCardBatch({
         // score when the source is explicitly a repeatable card-advantage engine. It is a soft
         // down-rank, not exclusion, so discovery and all search methods still work.
         card.acquisitionCadenceMismatch = acquisitionCadenceMismatch;
+        card.acquisitionCadenceRankFactor = sourceAcquisitionCadenceRankFactor(acquisitionCadenceMismatch);
         card.similarityBeforeCadenceAdjustment = preCadenceSimilarityScore;
         card.similarityScore = Math.max(0, Math.min(1,
-            preCadenceSimilarityScore * (1 - 0.30 * acquisitionCadenceMismatch)
+            preCadenceSimilarityScore * card.acquisitionCadenceRankFactor
         ));
 
         const finalRankNow = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
@@ -21264,6 +21614,7 @@ function runMechanicalRegressionSuite() {
     else console.info('[ManaSearch] Mechanical regression suite passed:', checks.length, 'checks.');
     return report;
 }
+try { window.runMechanicalRegressionSuite = runMechanicalRegressionSuite; } catch (_) {}
 
 function createSearchCancellationError() {
     const error = new Error('Search superseded by a newer search.');
