@@ -6951,6 +6951,64 @@ function hasRepeatableEffectForFunctions(parsedEffects, functionNames) {
         getEffectRepeatabilityProfile(effect)?.group === 'repeatable_engine');
 }
 
+
+// Card acquisition cadence is important for substitution: a one-time ETB cantrip is not a
+// functional substitute for a permanent that repeatedly draws cards. Keep this classification
+// tied to effects that actually acquire cards; a phrase like "whenever you draw a card" in a
+// creature-buff trigger must not be mistaken for that creature drawing cards itself.
+function isDirectCardDrawOutcome(effect) {
+    if (!effect || effect.isCostEffect || effect.canonical?.params?.isCostEffect) return false;
+    const fn = effect.canonical?.function || effect.function || '';
+    if (!(fn === 'card_draw' || fn === 'draw' || effect.action === 'draw')) return false;
+    // If a clause starts with a draw event, that draw may be the TRIGGER condition rather than
+    // the resolution. Only count a draw after the trigger comma as an outcome (e.g. "Whenever
+    // you draw a card, this gets +2/+2" must not become a card-draw effect).
+    const clause = String(effect.contextClause || effect.parentClauseRaw || effect.raw || effect.canonical?.params?.raw || '').trim();
+    const triggerParts = clause.match(/\b(?:when|whenever)\b[^,;]{1,220},\s*([^.;]+)/i);
+    const resolution = triggerParts ? triggerParts[1] : clause;
+    return /\b(?:draw|draws)\s+(?:a|one|two|three|four|five|\d+|x)\s+cards?\b/i.test(resolution);
+}
+
+function getDirectCardAcquisitionCadence(card, parsedEffects = []) {
+    const effects = Array.isArray(parsedEffects) ? parsedEffects : [];
+    const directDrawEffects = effects.filter(isDirectCardDrawOutcome);
+    const profiles = directDrawEffects.map(effect => getEffectRepeatabilityProfile(effect)).filter(Boolean);
+    const repeatable = profiles.some(profile => profile.group === 'repeatable_engine');
+    const singleUse = profiles.length > 0 && profiles.every(profile => profile.group === 'single_use');
+    const entryOnly = profiles.length > 0 && profiles.every(profile =>
+        profile.kind === 'entry_trigger' || profile.kind === 'delayed_trigger' || profile.kind === 'one_shot' || profile.kind === 'self_event' || profile.kind === 'single_use_activation'
+    );
+    return {
+        hasAcquisition: directDrawEffects.length > 0,
+        repeatable,
+        singleUse,
+        entryOnly,
+        profiles,
+        cardName: String(card?.name || '')
+    };
+}
+
+function calculateCardAcquisitionCadenceMismatch(parsedA = [], parsedB = []) {
+    const a = getDirectCardAcquisitionCadence(null, parsedA);
+    const b = getDirectCardAcquisitionCadence(null, parsedB);
+    if (!a.hasAcquisition || !b.hasAcquisition) return 0;
+    // Only compare cadence when one side provides a genuine repeatable engine and the other
+    // side's matching card-draw effects are all one-use. A repeatable effect on either card is
+    // enough to avoid treating a mixed-cadence card as a pure one-shot substitute.
+    if (a.repeatable && !b.repeatable && b.singleUse) return b.entryOnly ? 0.98 : 0.90;
+    if (b.repeatable && !a.repeatable && a.singleUse) return a.entryOnly ? 0.98 : 0.90;
+    return 0;
+}
+
+function calculateSourceAcquisitionCadenceMismatch(sourceCadence, candidateCard, candidateEffects = []) {
+    if (!sourceCadence?.hasAcquisition || !sourceCadence.repeatable) return 0;
+    const candidate = getDirectCardAcquisitionCadence(candidateCard, candidateEffects);
+    if (!candidate.hasAcquisition || candidate.repeatable || !candidate.singleUse) return 0;
+    // This is deliberately a ranking penalty, not a hard filter: one-shot draw creatures can
+    // still appear as related cards, but they should not outrank genuine recurring draw engines.
+    return candidate.entryOnly ? 0.98 : 0.90;
+}
+
 function strategicRoleMaxNumber(parsedEffects, fn) {
     let max = 0;
     for (const e of (parsedEffects || [])) {
@@ -10848,10 +10906,13 @@ function calculateMechanicalSimilarityDetailed(parsedA, parsedB, profileA = null
         Math.max(structuredBlend, keywordRescue * 0.92, universal.score * 0.62)
         * (1 - Math.min(0.42, contradictionPenalty * 0.72))
     ));
-    const repeatabilityMismatch = calculateRepeatabilityMismatchSeverity(safeA, safeB);
+    const repeatabilityMismatch = Math.max(
+        calculateRepeatabilityMismatchSeverity(safeA, safeB),
+        calculateCardAcquisitionCadenceMismatch(safeA, safeB)
+    );
     // A shared verb cannot fully compensate for one card being an ongoing engine and the other
-    // being a one-shot resolution. Keep the rest of the scoring channels intact and apply a
-    // bounded mechanical-only penalty when the same canonical function has a strong cadence gap.
+    // being a one-shot resolution. Card-acquisition cadence receives explicit coverage because
+    // this is a common false match: repeatable draw engines vs. one-time ETB cantrips.
     const repeatabilityFactor = 1 - (0.52 * repeatabilityMismatch);
     const explicitContrast = inferExplicitMechanicalContrast(safeA, safeB);
     let score = rawScore * repeatabilityFactor;
@@ -11057,6 +11118,33 @@ function runManaSearchRepeatabilityRegressionSuite({ log = true } = {}) {
         }
     }
     try {
+        // A recurring draw engine should outrank an ETB cantrip, while the draw condition on
+        // Burlfist Oak must not be mistaken for a draw outcome at all.
+        const rhystic = { name: 'Rhystic Study', type_line: 'Enchantment', oracle_text: 'Whenever an opponent casts a spell, you may draw a card unless that player pays {1}.' };
+        const chronicler = { name: 'Chronicler of Heroes', type_line: 'Creature — Centaur Wizard', oracle_text: 'When Chronicler of Heroes enters the battlefield, draw a card if you control a creature with a +1/+1 counter on it.' };
+        const oak = { name: 'Burlfist Oak', type_line: 'Creature — Treefolk', oracle_text: 'Whenever you draw a card, Burlfist Oak gets +2/+2 until end of turn.' };
+        const rhysticEffects = annotateEffectRepeatability(rhystic, parseMTGEffect(rhystic.oracle_text), rhystic.oracle_text);
+        const chroniclerEffects = annotateEffectRepeatability(chronicler, parseMTGEffect(chronicler.oracle_text), chronicler.oracle_text);
+        const oakEffects = annotateEffectRepeatability(oak, parseMTGEffect(oak.oracle_text), oak.oracle_text);
+        const rhysticCadence = getDirectCardAcquisitionCadence(rhystic, rhysticEffects);
+        const chroniclerCadence = getDirectCardAcquisitionCadence(chronicler, chroniclerEffects);
+        const oakCadence = getDirectCardAcquisitionCadence(oak, oakEffects);
+        const repeatableTwin = { name: 'Rhystic Study Twin', type_line: 'Enchantment', oracle_text: rhystic.oracle_text };
+        const twinEffects = annotateEffectRepeatability(repeatableTwin, parseMTGEffect(repeatableTwin.oracle_text), repeatableTwin.oracle_text);
+        const etbSimilarity = calculateMechanicalSimilarityDetailed(rhysticEffects, chroniclerEffects).score;
+        const repeatableSimilarity = calculateMechanicalSimilarityDetailed(rhysticEffects, twinEffects).score;
+        const etbMismatch = calculateSourceAcquisitionCadenceMismatch(rhysticCadence, chronicler, chroniclerEffects);
+        results.push({
+            id: 'repeatable-draw-engine-not-equivalent-to-etb-cantrip',
+            pass: rhysticCadence.hasAcquisition && rhysticCadence.repeatable && chroniclerCadence.hasAcquisition && chroniclerCadence.singleUse && chroniclerCadence.entryOnly && etbMismatch >= 0.9 && repeatableSimilarity > etbSimilarity,
+            sourceCadence: rhysticCadence, candidateCadence: chroniclerCadence, mismatch: etbMismatch, etbSimilarity, repeatableSimilarity
+        });
+        results.push({
+            id: 'draw-trigger-condition-is-not-a-draw-outcome',
+            pass: oakCadence.hasAcquisition === false,
+            oakCadence
+        });
+
         const mixedCard = { name: 'Mixed Cadence Draw', type_line: 'Enchantment', oracle_text: 'At the beginning of your upkeep, draw a card. Draw a card.' };
         const mixedEffects = annotateEffectRepeatability(mixedCard, parseMTGEffect(mixedCard.oracle_text), mixedCard.oracle_text);
         const mixedDrawProfiles = mixedEffects.filter(e => e?.canonical?.function === 'card_draw').map(e => getEffectRepeatabilityProfile(e)?.kind).filter(Boolean);
@@ -19387,6 +19475,7 @@ async function scoreCardBatch({
     // times. The separate parsedSourceCard above remains unchanged for highlight-aware mechanics.
     const sourceSynergyText = strategicRoleCardText(sourceCard);
     const sourceSynergyEffects = getCachedParsedEffects(sourceCard, sourceSynergyText);
+    const sourceAcquisitionCadence = getDirectCardAcquisitionCadence(sourceCard, sourceSynergyEffects);
     const sourceSynergyRoleProfile = inferStrategicRoleProfile(sourceCard, sourceSynergyEffects, '');
 
     // Category previously rebuilt these source-side profiles for every candidate using full source
@@ -20040,8 +20129,20 @@ async function scoreCardBatch({
             : 1;
         card.relatedConsensusGate = relatedConsensusGate;
         card.rankingEvidence = { mechanical: structural, mechanicalTrusted: structuralTrusted, mechanicalConfidence, rawSemantic, functionSemantic: functionSemanticAugmented, roleSemantic, effectCoverage, balancedCoverage, primaryEffectMatch, evidenceAgreement: agreement, retrievalSimilarity: Number(card._semanticRetrievalSimilarity) || 0, rankingIntent: rankingIntent.kind, rankingIntentConfidence: rankingIntent.confidence, relatedConsensus: relatedConsensus ? { score: relatedConsensus.score, functionMatch: relatedConsensus.functionMatch, quantityFit: relatedConsensus.quantityFit, roleFit: relatedConsensus.roleFit, artifactFit: relatedConsensus.artifactFit, dominantFunction: relatedIntentProfile?.dominantFunction || null, targetQuantity: relatedIntentProfile?.numericTarget ?? null, confidence: relatedIntentProfile?.confidence || 0 } : null };
-        card.similarityScore = Math.max(0, Math.min(1,
+        const preCadenceSimilarityScore = Math.max(0, Math.min(1,
             (channelScore + agreementBonus + rankingRefinement) * evidenceGate * contradictionPenalty * relatedConsensusGate
+        ));
+        const acquisitionCadenceMismatch = calculateSourceAcquisitionCadenceMismatch(
+            sourceAcquisitionCadence, card, candidateParsedEffects
+        );
+        // Keep the full scorer ensemble and its user-configurable weights. This final directional
+        // gate only prevents a candidate that draws once on entry from inheriting a near-perfect
+        // score when the source is explicitly a repeatable card-advantage engine. It is a soft
+        // down-rank, not exclusion, so discovery and all search methods still work.
+        card.acquisitionCadenceMismatch = acquisitionCadenceMismatch;
+        card.similarityBeforeCadenceAdjustment = preCadenceSimilarityScore;
+        card.similarityScore = Math.max(0, Math.min(1,
+            preCadenceSimilarityScore * (1 - 0.30 * acquisitionCadenceMismatch)
         ));
 
         const finalRankNow = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
