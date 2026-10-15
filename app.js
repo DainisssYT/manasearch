@@ -1,6 +1,6 @@
-/* ManaSearch build 20261014-60 */
+/* ManaSearch build 20261015-64 */
 // ManaSearch deployment build marker. Bump this whenever app.js changes so cached-module issues are easy to diagnose.
-const MANASEARCH_APP_BUILD = '20261014-60';
+const MANASEARCH_APP_BUILD = '20261015-64';
 console.info(`[ManaSearch] app.js build ${MANASEARCH_APP_BUILD}`);
 
 // State Management
@@ -5970,6 +5970,7 @@ function extractClauseAtoms(effectText, primaryAction) {
         if (atom && atom.action && !seenActions.has(atom.action)) {
             seenActions.add(atom.action);
             atom.raw = slice.trim();
+            atom.contextClause = String(effectText || '').trim();
             atom.isSecondaryAtom = true;
             atoms.push(atom);
         }
@@ -6033,32 +6034,112 @@ function parseQuantityProfile(text, parsedQuantity = null) {
     return out;
 }
 
+// Turn timing is parsed separately from the effect that follows it. This matters mechanically:
+// "At the beginning of your upkeep, draw a card" is recurring, while
+// "At the beginning of your next upkeep, draw a card" is a one-time delayed trigger.
+// Older Oracle wording used "draw phase"; treat it as the same cadence family as draw step.
+function parseTurnTimingProfile(text) {
+    const t = String(text || '').toLowerCase().replace(/[’]/g, "'").replace(/\s+/g, ' ');
+    const timingNames = '(?:precombat main phase|postcombat main phase|main phase|draw step|draw phase|upkeep|end step|end phase|end of combat|combat phase|combat|turn)';
+    const candidates = [];
+    const addMatches = (regex) => {
+        let match;
+        while ((match = regex.exec(t)) !== null) {
+            const matchedText = match[0].trim();
+            const cleanText = matchedText.replace(/^[.;\n]+\s*/, '').trim();
+            const leadingOffset = Math.max(0, matchedText.indexOf(cleanText));
+            candidates.push({ text: cleanText, index: match.index + leadingOffset, timing: String(match[1] || '').trim() });
+            if (match[0].length === 0) regex.lastIndex++;
+        }
+    };
+    // Full turn-window expressions, including "each opponent's upkeep", "each player's end step",
+    // "combat on your turn", and one-shot "next upkeep/end step" templates.
+    addMatches(new RegExp(`\\bat (?:the )?(?:beginning|start|end) of\\s+[^.;,\\n]{0,80}?\\b(${timingNames})\\b`, 'gi'));
+    // Shorthand / older phrasing that omits "at the beginning of". Require an explicit timing
+    // preposition here; otherwise "Skip your draw step" would look like a recurring trigger.
+    addMatches(new RegExp(`\\b(?:during|at)\\s+(?:(?:each|every|your|each player's|each opponent's|each players'|each opponents')\\s+)?(${timingNames})\\b`, 'gi'));
+    // Standalone clauses like "Each upkeep, ..." are accepted only at a clause boundary.
+    // Do not misread "the first time you cast a spell each turn" as a turn-window trigger.
+    addMatches(new RegExp(`(?:^|[.;\\n]\\s*)\\b(?:each|every)\\s+(?:(?:player|opponent)s?'?s?\\s+|of your\\s+|of each\\s+)?(${timingNames})\\b`, 'gi'));
+    if (!candidates.length) return null;
+
+    candidates.sort((a, b) => a.index - b.index || b.text.length - a.text.length);
+    const candidate = candidates[0];
+    const delayed = /\b(?:next|following)\b/i.test(candidate.text);
+    const normalizedTiming = candidate.timing.toLowerCase().replace(/\s+/g, '_');
+    // Legacy "draw phase" wording refers to the same recurring turn window as the modern draw step.
+    const canonicalTiming = normalizedTiming === 'draw_phase' ? 'draw_step' : normalizedTiming;
+    const prefix = candidate.text;
+    const explicitEnd = /\bat (?:the )?end of\b/i.test(prefix);
+    const explicitBeginning = /\bat (?:the )?(?:beginning|start) of\b/i.test(prefix);
+    // Informal/legacy phrasings like "at your upkeep" or "each upkeep" describe the same
+    // recurring start-of-window cadence as the standard "at the beginning of your upkeep".
+    const shorthandBeginning = /^at\s+(?:your|each|every|each player's|each opponent's)\s+/i.test(prefix) || /^(?:each|every)\s+/i.test(prefix);
+    const duringWindow = /^during\s+/i.test(prefix);
+    const window = explicitEnd
+        ? `end_of_${canonicalTiming}`
+        : (explicitBeginning || shorthandBeginning)
+            ? `beginning_of_${canonicalTiming}`
+            : duringWindow ? `during_${canonicalTiming}` : canonicalTiming;
+    return {
+        cadence: delayed ? 'delayed' : 'periodic',
+        timingText: candidate.text,
+        timing: canonicalTiming.replace(/_/g, ' '),
+        window,
+        confidence: delayed ? 0.86 : 0.96
+    };
+}
+
 function parseTriggerProfile(text) {
-    const t = String(text || '').toLowerCase();
-    if (!/\b(?:when|whenever|at the beginning of|at the end of|at the start of|at the end of|if)\b/.test(t)) return null;
-    let type = 'conditional';
-    if (/\bwhenever\b/.test(t)) type = 'event';
-    else if (/\bwhen\b/.test(t)) type = 'event';
-    else if (/\bat the beginning of\b|\bat the start of\b/.test(t)) type = 'turn_window';
-    else if (/\bat the end of\b/.test(t)) type = 'turn_window';
-    const window = /\bat the beginning of your turn\b|\bat the start of your turn\b/.test(t) ? 'beginning_of_your_turn'
-        : /\bat the end of your turn\b/.test(t) ? 'end_of_your_turn'
-        : /\bat the beginning of each turn\b/.test(t) ? 'beginning_of_each_turn'
-        : null;
+    const t = String(text || '').toLowerCase().replace(/[’]/g, "'");
+    const timing = parseTurnTimingProfile(t);
+    const hasEventTrigger = /\b(?:when|whenever)\b/.test(t);
+    const hasConditional = /\bif\b/.test(t);
+    if (!timing && !hasEventTrigger && !hasConditional) return null;
+    const type = timing ? 'turn_window' : (hasEventTrigger ? 'event' : 'conditional');
     let event = null;
+
+    // Event identity must come from the trigger condition, not from the resolution after the
+    // comma. Otherwise "Whenever you cast a spell, draw a card" is misread as a draw trigger.
+    const eventCondition = (t.match(/\b(?:when|whenever)\b\s+([^,.;]+)/i) || [null, ''])[1];
     const eventPatterns = [
-        ['enters','enter_battlefield'], ['dies','dies'], ['attacks','attacks'], ['blocks','blocks'],
-        ['casts','casts_spell'], ['cast','casts_spell'], ['draws a card','draw_card'], ['draw a card','draw_card'],
-        ['discards','discard'], ['sacrifices','sacrifice'], ['deals damage','deals_damage'],
-        ['gains life','gain_life'], ['loses life','lose_life'], ['creates','create'], ['is put into','zone_change']
+        [/\benters? (?:the )?battlefield\b|\bcomes into play\b/, 'enter_battlefield'],
+        [/\bdies\b|\bis put into a graveyard\b|\bgoes? to a graveyard\b/, 'dies'],
+        [/\battacks?\b/, 'attacks'],
+        [/\bblocks?\b/, 'blocks'],
+        [/\bcasts?\b|\bcast (?:an? )?(?:instant|sorcery|spell)\b/, 'casts_spell'],
+        [/\bdraws?\b[^,.;]{0,40}\bcards?\b/, 'draw_card'],
+        [/\bdiscards?\b/, 'discard'],
+        [/\bsacrifices?\b/, 'sacrifice'],
+        [/\bdeals? (?:combat )?damage\b/, 'deals_damage'],
+        [/\bgains? life\b/, 'gain_life'],
+        [/\bloses? life\b/, 'lose_life'],
+        [/\b(?:a|one|another|that) (?:token|permanent|creature|artifact|enchantment) is created\b|\bcreates?\b/, 'create'],
+        [/\bleaves? the battlefield\b|\bis put into\b/, 'zone_change']
     ];
-    for (const [needle, value] of eventPatterns) { if (t.includes(needle)) { event=value; break; } }
+    if (hasEventTrigger) {
+        for (const [pattern, value] of eventPatterns) {
+            if (pattern.test(eventCondition)) { event = value; break; }
+        }
+    }
     const threshold = (t.match(/\b(?:three|four|five|six|seven|eight|nine|ten|\d+)\+?\b/) || [null])[0];
-    return { type, event, window, threshold, conditional: type === 'conditional' };
+    return {
+        type,
+        event,
+        window: timing?.window || null,
+        timingText: timing?.timingText || null,
+        cadence: timing?.cadence || (hasEventTrigger ? 'event' : null),
+        threshold,
+        conditional: hasConditional || type === 'conditional'
+    };
 }
 
 function annotateEffectRelationships(effect, sourceText) {
     const raw = String(effect.raw || sourceText || '');
+    // Secondary action atoms retain their parent clause. Use that clause for trigger semantics so
+    // "At the beginning of your upkeep, draw a card and lose 1 life" gives both atoms the upkeep
+    // cadence, while keeping the atom's own raw text for action/target/quantity parsing.
+    const relationshipText = String(effect.contextClause || '').trim() || raw;
     const targetProfile = parseStructuredTarget(raw);
     effect.targetProfile = targetProfile;
     if (!effect.target && targetProfile.kind) effect.target = targetProfile.kind;
@@ -6070,9 +6151,9 @@ function annotateEffectRelationships(effect, sourceText) {
         ]));
     }
     effect.quantityProfile = parseQuantityProfile(raw, effect.quantity);
-    effect.triggerProfile = parseTriggerProfile(raw);
-    effect.isTriggered = Boolean(effect.triggerProfile && effect.triggerProfile.type === 'event');
-    effect.isConditional = Boolean(effect.condition || effect.triggerProfile?.conditional);
+    effect.triggerProfile = parseTriggerProfile(relationshipText);
+    effect.isTriggered = Boolean(effect.triggerProfile && (effect.triggerProfile.type === 'event' || effect.triggerProfile.type === 'turn_window'));
+    effect.isConditional = Boolean(effect.condition || effect.triggerProfile?.conditional || /\bif\b/i.test(relationshipText));
     effect.dependencyProfile = {
         hasThen: /\bthen\b/i.test(raw),
         hasIfYouDo: /\bif you do\b/i.test(raw),
@@ -6655,6 +6736,7 @@ const REPEATABILITY_PROFILE_META = Object.freeze({
     repeatable_spell:       { group: 'limited_reuse',     strength: 0.66, label: 'Repeatable spell' },
     recastable_spell:       { group: 'limited_reuse',     strength: 0.44, label: 'Spell with another cast available' },
     entry_trigger:          { group: 'single_use',        strength: 0.30, label: 'Entry-triggered effect' },
+    delayed_trigger:        { group: 'single_use',        strength: 0.26, label: 'One-time delayed trigger' },
     self_event:             { group: 'single_use',        strength: 0.28, label: 'One-time event for this permanent' },
     single_use_activation:  { group: 'single_use',        strength: 0.18, label: 'Single-use activation' },
     one_shot:               { group: 'single_use',        strength: 0.05, label: 'One-shot effect' },
@@ -6684,12 +6766,16 @@ function findRepeatabilityContextClause(effectRaw, fullText) {
         if (!norm) continue;
         let score = 0;
         if (norm.includes(rawNorm) || rawNorm.includes(norm)) score += 100;
+        // Exact clause alignment beats the small preference for finding a timed trigger. This
+        // avoids assigning a standalone "Draw a card." clause to a different upkeep trigger just
+        // because both clauses contain the same action words.
+        if (norm === rawNorm) score += 40;
         const words = norm.split(' ').filter(w => w.length > 2);
         const overlap = words.reduce((n, w) => n + (rawWords.has(w) ? 1 : 0), 0);
         score += overlap / Math.max(1, Math.min(rawWords.size, words.length)) * 20;
         // When a selected/highlighted fragment such as "draw a card" appears in multiple
         // clauses, prefer the clause that carries explicit ability timing/cost context.
-        if (/\b(?:at the beginning of|at the end of|each upkeep|each turn|every turn|whenever|when|\{t\}|activate only)\b/i.test(clause)) score += 3;
+        if (parseTurnTimingProfile(clause) || /\b(?:whenever|when|\{t\}|activate only)\b/i.test(clause)) score += 3;
         if (norm.includes(rawNorm)) score += Math.min(8, norm.length / 30);
         if (score > bestScore) { best = clause; bestScore = score; }
     }
@@ -6699,7 +6785,8 @@ function findRepeatabilityContextClause(effectRaw, fullText) {
 function inferEffectRepeatabilityProfile(card, effect, fullText = '') {
     if (!effect || effect.isCostEffect) return { kind: 'unknown', group: 'unknown', strength: null, confidence: 0 };
     const raw = String(effect.raw || effect.canonical?.params?.raw || '').trim();
-    const context = findRepeatabilityContextClause(raw, fullText || strategicRoleCardText(card));
+    const contextSeed = String(effect.contextClause || effect.parentClauseRaw || raw).trim();
+    const context = findRepeatabilityContextClause(contextSeed, fullText || strategicRoleCardText(card));
     const combined = `${context} ${raw}`.trim();
     const lower = combined.toLowerCase();
     const typeLine = String(card?.type_line || '').toLowerCase();
@@ -6709,8 +6796,10 @@ function inferEffectRepeatabilityProfile(card, effect, fullText = '') {
     const escapedName = cardName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     const selfReference = /\bthis(?: creature| artifact| enchantment| permanent| planeswalker| land| card| spell)?\b/i.test(combined) ||
         Boolean(escapedName && new RegExp(`\\b${escapedName}\\b`, 'i').test(combined));
-    const periodicTiming = /\bat the beginning of (?:your|each|every|each player's|each players') (?:upkeep|draw step|main phase|combat|end step|turn)\b|\bat the end of (?:your|each|every|each player's|each players') (?:turn|end step|upkeep)\b|\beach upkeep\b|\beach turn\b|\bevery turn\b/i.exec(combined);
-    const timingText = periodicTiming ? periodicTiming[0].replace(/\s+/g, ' ').trim() : '';
+    const timingProfile = parseTurnTimingProfile(combined);
+    const periodicTiming = timingProfile?.cadence === 'periodic';
+    const delayedTiming = timingProfile?.cadence === 'delayed';
+    const timingText = timingProfile?.timingText || '';
     const activation = Boolean(effect.activationCost) || /(?:^|[.;]\s*)[^.;]*:\s*(?:add|draw|create|put|return|exile|search|destroy|tap|untap|gain|deal|discard|mill|counter)\b/i.test(raw);
     // Replacement effects (for example, doubling tokens or preventing damage) are continuous
     // rules modifications on permanents, not one-shot actions merely because their text lacks a
@@ -6733,7 +6822,11 @@ function inferEffectRepeatabilityProfile(card, effect, fullText = '') {
         // turn timing is still strong evidence of cadence in that case; do not downgrade it
         // to one-shot merely because the partial record lacks its card type.
         kind = 'periodic_trigger';
-        confidence = typeLine ? 0.96 : 0.90;
+        confidence = typeLine ? (timingProfile?.confidence || 0.96) : 0.90;
+    } else if (delayedTiming && (isPermanent || !typeLine)) {
+        // "Next upkeep/end step" creates a one-time delayed trigger, not a recurring engine.
+        kind = 'delayed_trigger';
+        confidence = timingProfile?.confidence || 0.86;
     } else if (activation && isPermanent) {
         kind = consumesSource ? 'single_use_activation' : 'repeatable_activation';
         confidence = 0.88;
@@ -6776,7 +6869,7 @@ function inferEffectRepeatabilityProfile(card, effect, fullText = '') {
 function annotateEffectRepeatability(card, parsedEffects, textOverride = '') {
     if (!Array.isArray(parsedEffects) || !card) return parsedEffects || [];
     const fullText = strategicRoleCardText(card) || String(textOverride || '');
-    const signature = `${String(card.type_line || '')}|${fullText}`;
+    const signature = `${String(card.name || '')}|${String(card.type_line || '')}|${fullText}`;
     if (parsedEffects._repeatabilityContextKey === signature) return parsedEffects;
     for (const effect of parsedEffects) {
         if (!effect || typeof effect !== 'object') continue;
@@ -9889,11 +9982,13 @@ function extractKeywordAnchorSet(card, text = '') {
 
 function inferMechanicalEvent(effect) {
     const raw = String(effect?.raw || '').toLowerCase();
+    const relationshipText = `${String(effect?.contextClause || '').toLowerCase()} ${raw}`.trim();
     if (effect?.activationCost) return 'activated';
     if (effect?.triggerProfile?.event) return effect.triggerProfile.event;
-    if (/\bwhenever\b/.test(raw)) return 'triggered_event';
-    if (/\bwhen\b/.test(raw)) return 'triggered_event';
-    if (/\bat the beginning of\b|\bat the end of\b/.test(raw)) return 'turn_trigger';
+    if (effect?.triggerProfile?.type === 'turn_window') return 'turn_trigger';
+    if (/\bwhenever\b/.test(relationshipText)) return 'triggered_event';
+    if (/\bwhen\b/.test(relationshipText)) return 'triggered_event';
+    if (/\bat (?:the )?(?:beginning|start|end) of\b|\beach upkeep\b|\beach end step\b|\bevery turn\b/.test(relationshipText)) return 'turn_trigger';
     if (/\binstead\b/.test(raw)) return 'replacement';
     if (/\bprevent(?:s|ed)?\b/.test(raw)) return 'prevention';
     if (/\b(?:can't|cannot)\b/.test(raw)) return 'prohibition';
@@ -10901,6 +10996,46 @@ function runManaSearchRepeatabilityRegressionSuite({ log = true } = {}) {
             id: 'repeated-treasure-trigger-is-engine',
             card: { name: 'Treasure Trigger', type_line: 'Creature — Rogue', oracle_text: 'Whenever one or more artifacts you control are put into a graveyard from the battlefield, create a Treasure token.' },
             fn: 'token_creation', expected: 'repeatable_trigger', engine: true, repeatable: true
+        },
+        {
+            id: 'at-your-upkeep-shorthand-is-periodic',
+            card: { name: 'Upkeep Shorthand Engine', type_line: 'Enchantment', oracle_text: 'At your upkeep, draw a card.' },
+            fn: 'card_draw', expected: 'periodic_trigger', engine: true
+        },
+        {
+            id: 'at-your-end-step-shorthand-is-periodic',
+            card: { name: 'End Step Shorthand Engine', type_line: 'Enchantment', oracle_text: 'At your end step, create a Treasure token.' },
+            fn: 'token_creation', expected: 'periodic_trigger', engine: true
+        },
+        {
+            id: 'draw-step-trigger-is-periodic',
+            card: { name: 'Draw Step Engine', type_line: 'Enchantment', oracle_text: 'At the beginning of your draw step, draw a card.' },
+            fn: 'card_draw', expected: 'periodic_trigger', engine: true
+        },
+        {
+            id: 'legacy-draw-phase-trigger-is-periodic',
+            card: { name: 'Draw Phase Engine', type_line: 'Enchantment', oracle_text: 'At the beginning of your draw phase, draw a card.' },
+            fn: 'card_draw', expected: 'periodic_trigger', engine: true
+        },
+        {
+            id: 'each-opponents-upkeep-is-periodic',
+            card: { name: 'Opponent Upkeep Tax', type_line: 'Enchantment', oracle_text: "At the beginning of each opponent's upkeep, that player loses 1 life." },
+            fn: 'lose_life', expected: 'periodic_trigger', engine: true, role: 'life_loss_engine'
+        },
+        {
+            id: 'end-step-token-production-is-periodic',
+            card: { name: 'End Step Nursery', type_line: 'Enchantment', oracle_text: 'At the beginning of your end step, create a 1/1 green Saproling creature token.' },
+            fn: 'token_creation', expected: 'periodic_trigger', engine: true
+        },
+        {
+            id: 'each-end-step-token-production-is-periodic',
+            card: { name: 'Every End Step Nursery', type_line: 'Enchantment', oracle_text: 'At the beginning of each end step, create a 1/1 green Saproling creature token.' },
+            fn: 'token_creation', expected: 'periodic_trigger', engine: true
+        },
+        {
+            id: 'next-upkeep-is-one-time-delayed-trigger',
+            card: { name: 'Delayed Token', type_line: 'Enchantment', oracle_text: 'At the beginning of your next upkeep, create a 1/1 green Saproling creature token.' },
+            fn: 'token_creation', expected: 'delayed_trigger', engine: false, repeatable: false
         }
     ];
     const results = [];
@@ -10920,6 +11055,19 @@ function runManaSearchRepeatabilityRegressionSuite({ log = true } = {}) {
         } catch (error) {
             results.push({ id: item.id, pass: false, error: error?.message || String(error) });
         }
+    }
+    try {
+        const mixedCard = { name: 'Mixed Cadence Draw', type_line: 'Enchantment', oracle_text: 'At the beginning of your upkeep, draw a card. Draw a card.' };
+        const mixedEffects = annotateEffectRepeatability(mixedCard, parseMTGEffect(mixedCard.oracle_text), mixedCard.oracle_text);
+        const mixedDrawProfiles = mixedEffects.filter(e => e?.canonical?.function === 'card_draw').map(e => getEffectRepeatabilityProfile(e)?.kind).filter(Boolean);
+        results.push({ id: 'same-action-can-be-periodic-and-one-shot-on-same-card', pass: mixedDrawProfiles.includes('periodic_trigger') && mixedDrawProfiles.includes('one_shot'), profiles: mixedDrawProfiles });
+
+        const compoundCard = { name: 'Upkeep Token and Draw', type_line: 'Enchantment', oracle_text: 'At the beginning of your upkeep, create a Treasure token and draw a card.' };
+        const compoundEffects = annotateEffectRepeatability(compoundCard, parseMTGEffect(compoundCard.oracle_text), compoundCard.oracle_text);
+        const compoundDraw = compoundEffects.filter(e => e?.canonical?.function === 'card_draw');
+        results.push({ id: 'secondary-effect-inherits-parent-turn-trigger', pass: compoundDraw.length > 0 && compoundDraw.some(e => e.contextClause && getEffectRepeatabilityProfile(e)?.kind === 'periodic_trigger' && e.triggerProfile?.type === 'turn_window'), profileKinds: compoundDraw.map(e => getEffectRepeatabilityProfile(e)?.kind), triggerTypes: compoundDraw.map(e => e.triggerProfile?.type) });
+    } catch (error) {
+        results.push({ id: 'mixed-cadence-context-regression', pass: false, error: error?.message || String(error) });
     }
     try {
         const engineA = parsedCases.find(x => x.item.id === 'periodic-draw-is-engine');
@@ -10943,6 +11091,15 @@ function runManaSearchRepeatabilityRegressionSuite({ log = true } = {}) {
                 const secondTokenEngine = annotateEffectRepeatability(secondTokenEngineCard, parseMTGEffect(secondTokenEngineCard.oracle_text), secondTokenEngineCard.oracle_text);
                 const repeatTokenScore = calculateMechanicalSimilarityDetailed(tokenEngineItem.effects, secondTokenEngine).score;
                 results.push({ id: 'repeatable-token-vs-one-shot-token-score', pass: repeatTokenScore > oneShotTokenScore, repeatableScore: repeatTokenScore, oneShotScore: oneShotTokenScore });
+            }
+            const periodicTokenItem = parsedCases.find(x => x.item.id === 'end-step-token-production-is-periodic');
+            const delayedTokenItem = parsedCases.find(x => x.item.id === 'next-upkeep-is-one-time-delayed-trigger');
+            if (periodicTokenItem && delayedTokenItem) {
+                const periodicTwinCard = { name: 'End Step Nursery Twin', type_line: 'Enchantment', oracle_text: periodicTokenItem.item.card.oracle_text };
+                const periodicTwin = annotateEffectRepeatability(periodicTwinCard, parseMTGEffect(periodicTwinCard.oracle_text), periodicTwinCard.oracle_text);
+                const periodicMatchScore = calculateMechanicalSimilarityDetailed(periodicTokenItem.effects, periodicTwin).score;
+                const delayedMatchScore = calculateMechanicalSimilarityDetailed(periodicTokenItem.effects, delayedTokenItem.effects).score;
+                results.push({ id: 'recurring-trigger-matches-above-one-time-delayed-trigger', pass: periodicMatchScore > delayedMatchScore, periodicMatchScore, delayedMatchScore });
             }
             const arenaCard = { name: 'Phyrexian Arena', type_line: 'Enchantment', oracle_text: 'At the beginning of your upkeep, you draw a card and you lose 1 life.' };
             const arenaEffects = annotateEffectRepeatability(arenaCard, parseMTGEffect(arenaCard.oracle_text), arenaCard.oracle_text);
@@ -10981,6 +11138,23 @@ function runManaSearchRepeatabilityRegressionSuite({ log = true } = {}) {
         }
     } catch (error) {
         results.push({ id: 'comparison-and-scoring-check', pass: false, error: error?.message || String(error) });
+    }
+    // Trigger identity must describe the event that causes an ability, not the effect produced.
+    try {
+        const castThenDraw = parseTriggerProfile('Whenever you cast an instant or sorcery spell, draw a card.');
+        results.push({ id: 'cast-trigger-is-not-misidentified-as-draw-trigger', pass: castThenDraw?.type === 'event' && castThenDraw?.event === 'casts_spell', type: castThenDraw?.type, event: castThenDraw?.event });
+        const upkeepDraw = parseTriggerProfile('At the beginning of your upkeep, draw a card.');
+        results.push({ id: 'upkeep-trigger-has-turn-window-not-resolution-event', pass: upkeepDraw?.type === 'turn_window' && upkeepDraw?.event == null && /upkeep/.test(upkeepDraw?.timingText || ''), type: upkeepDraw?.type, event: upkeepDraw?.event, timingText: upkeepDraw?.timingText });
+        const currentDrawStep = parseTriggerProfile('At the beginning of your draw step, draw a card.');
+        const legacyDrawPhase = parseTriggerProfile('At the beginning of your draw phase, draw a card.');
+        results.push({ id: 'legacy-draw-phase-normalizes-to-draw-step', pass: currentDrawStep?.window === 'beginning_of_draw_step' && legacyDrawPhase?.window === currentDrawStep.window, currentWindow: currentDrawStep?.window, legacyWindow: legacyDrawPhase?.window });
+        const drawStepOnly = parseTriggerProfile('Skip your draw step.');
+        results.push({ id: 'draw-step-reference-alone-is-not-a-trigger', pass: drawStepOnly == null, profile: drawStepOnly });
+        const mixedClauses = 'At the beginning of your upkeep, draw a card. Draw a card.';
+        const oneShotContext = findRepeatabilityContextClause('Draw a card.', mixedClauses);
+        results.push({ id: 'standalone-effect-does-not-inherit-neighboring-trigger', pass: !/at the beginning of your upkeep/i.test(oneShotContext), context: oneShotContext });
+    } catch (error) {
+        results.push({ id: 'trigger-identity-and-timing-regressions', pass: false, error: error?.message || String(error) });
     }
     const passed = results.filter(r => r.pass).length;
     const summary = { passed, total: results.length, passRate: results.length ? passed / results.length : 1, results };
@@ -12309,7 +12483,10 @@ function scryfallThrottledFetch(url, options = {}) {
 }
 // ------------------------------------------------------------------------------------------
 
-async function fetchScryfallSearch(query, maxPagesOverride = MIN_SEARCH_PAGES, searchLabel = "Search") {
+async function fetchScryfallSearch(query, maxPagesOverride = MIN_SEARCH_PAGES, searchLabel = "Search", expectedSearchRequestId = null) {
+    // Capture the initiating search before the first await. Callers that themselves awaited before
+    // reaching this fallback may pass their original ID explicitly, so late pages still cancel.
+    const owningSearchRequestId = Number.isFinite(expectedSearchRequestId) ? expectedSearchRequestId : searchRequestId;
     const depthInput = parseFloat(document.getElementById('filter-depth-percent')?.value);
     const rawDepth = (!isNaN(depthInput) && depthInput > 0) ? depthInput : DEFAULT_SEARCH_DEPTH_PERCENT;
     const depthPercent = Math.max(1, Math.min(MAX_SEARCH_DEPTH_PERCENT, rawDepth));
@@ -12336,6 +12513,7 @@ async function fetchScryfallSearch(query, maxPagesOverride = MIN_SEARCH_PAGES, s
     let bailedAfterRetries = false;
 
     while (hasMore && url) {
+        if (owningSearchRequestId !== searchRequestId) return [];
         let response;
         try {
             // Goes through the shared, rate-limited queue (see above) instead of calling
@@ -12347,7 +12525,11 @@ async function fetchScryfallSearch(query, maxPagesOverride = MIN_SEARCH_PAGES, s
                     'Accept': 'application/json'
                 }
             });
+            if (owningSearchRequestId !== searchRequestId) return [];
         } catch (networkErr) {
+            // A late failure from a superseded search is not a current API failure and must not
+            // surface a stale cooldown notice over the newer run.
+            if (owningSearchRequestId !== searchRequestId) return [];
             // Browser-side CORS failures can hide an HTTP 429 as TypeError/ERR_FAILED. The shared
             // queue treats that as a client-wide circuit-breaker event, so this stream stops and
             // preserves its already-retrieved pages. Locally-generated circuit errors are handled
@@ -12363,6 +12545,7 @@ async function fetchScryfallSearch(query, maxPagesOverride = MIN_SEARCH_PAGES, s
         if (response.status === 200) {
             rateLimitRetries = 0;
             const data = await response.json();
+            if (owningSearchRequestId !== searchRequestId) return [];
             
             if (pagesFetched === 0) {
                 totalCardsForQuery = data.total_cards || 0;
@@ -12387,9 +12570,11 @@ async function fetchScryfallSearch(query, maxPagesOverride = MIN_SEARCH_PAGES, s
             pagesFetched++;
             
             const pageProgressMessage = `${pagesFetched}/${maxPages} pages searched`;
-            if (typeof activeSearchStreamProgressReporter === 'function') {
-                activeSearchStreamProgressReporter({ label: searchLabel, message: pageProgressMessage, kind: 'progress' });
-            } else {
+            const mayReportProgress = owningSearchRequestId === searchRequestId;
+            if (mayReportProgress && typeof activeSearchStreamProgressReporter === 'function') {
+                activeSearchStreamProgressReporter({ label: searchLabel, message: pageProgressMessage, kind: 'progress', ownerRequestId: owningSearchRequestId });
+            } else if (mayReportProgress && activeMainSearchRequestId === owningSearchRequestId &&
+                activeResultView.mode === 'main' && activeResultView.requestId === owningSearchRequestId) {
                 updateProgress(null, null, `[${searchLabel}] ${pageProgressMessage}...`);
             }
             if (pagesFetched >= maxPages) break;
@@ -12449,9 +12634,10 @@ async function fetchScryfallSearch(query, maxPagesOverride = MIN_SEARCH_PAGES, s
             }
             const backoffMs = Math.min(1000 * 2 ** rateLimitRetries, 15000);
             const retryMessage = `API error (${response.status}) — retry ${rateLimitRetries}/${MAX_RATE_LIMIT_RETRIES}`;
-            if (typeof activeSearchStreamProgressReporter === 'function') {
-                activeSearchStreamProgressReporter({ label: searchLabel, message: retryMessage, kind: 'error' });
-            } else {
+            if (owningSearchRequestId === searchRequestId && typeof activeSearchStreamProgressReporter === 'function') {
+                activeSearchStreamProgressReporter({ label: searchLabel, message: retryMessage, kind: 'error', ownerRequestId: owningSearchRequestId });
+            } else if (owningSearchRequestId === searchRequestId && activeMainSearchRequestId === owningSearchRequestId &&
+                activeResultView.mode === 'main' && activeResultView.requestId === owningSearchRequestId) {
                 updateProgress(null, null, `[${searchLabel}] ${retryMessage}...`);
             }
             await backgroundAwareDelay(backoffMs);
@@ -13376,8 +13562,10 @@ async function searchStaticCardCorpus(queryText, options = {}) {
     // events until an entire large chunk has been scanned. Time budgets adapt to current UI focus.
     const cards = corpus.cards;
     const useFilters = Boolean(options.filters && hasActiveConstraintFilters(options.filters));
+    const isCancelled = typeof options.isCancelled === 'function' ? options.isCancelled : null;
     let scanSliceStartedAt = getManaResponsivenessNow();
     for (let i = 0; i < cards.length; i++) {
+        if ((i & 7) === 0) throwIfSearchCancelled(isCancelled);
         const card = cards[i];
         if (card?.name && (card._localNameKey || normalizeCardNameForIdentity(card.name)) !== excludeKey &&
             !(options.highlights && options.highlights.length && !matchesExactHighlightConstraints(card, options.highlights)) &&
@@ -13461,7 +13649,7 @@ async function searchStaticCardCorpusAlternatives(queries, options = {}) {
     const previousContext = activeLocalCorpusBatchContext;
     let temporaryContext = null;
     if (!activeLocalCorpusBatchContext?.corpus?.cards?.length) {
-        temporaryContext = createLocalCorpusBatchContext(staticCardCorpusMemory);
+        temporaryContext = createLocalCorpusBatchContext(staticCardCorpusMemory, options.isCancelled || null);
         activeLocalCorpusBatchContext = temporaryContext;
     }
 
@@ -13492,9 +13680,10 @@ function getDepthScaledLocalLimit(requestedLimit, depthPercent = getCurrentSearc
     return Math.max(12, Math.min(1200, Math.round(base * scale)));
 }
 
-function createLocalCorpusBatchContext(corpus = staticCardCorpusMemory) {
+function createLocalCorpusBatchContext(corpus = staticCardCorpusMemory, isCancelled = null) {
     return {
         corpus,
+        isCancelled: typeof isCancelled === 'function' ? isCancelled : null,
         requests: [],
         promise: null,
         results: new Map(),
@@ -13529,6 +13718,8 @@ async function runLocalCorpusBatch(context) {
     const ctx = context;
     const corpus = ctx?.corpus;
     if (!ctx || !corpus?.cards?.length) return new Map();
+    const assertBatchCurrent = () => throwIfSearchCancelled(ctx.isCancelled);
+    assertBatchCurrent();
 
     // V20: every request is assigned a stable state index. This avoids requestStates.indexOf(state)
     // inside the hot candidate loop and, more importantly, keeps the empty-posting fallback local
@@ -13560,7 +13751,8 @@ async function runLocalCorpusBatch(context) {
                         state.candidateIndexes.add(cardIndex);
                         globalCandidateIndexes.add(cardIndex);
                         indexBuildOps++;
-                        if ((indexBuildOps & 2047) === 0) {
+                        if ((indexBuildOps & 255) === 0) {
+                            assertBatchCurrent();
                             const now = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
                             if (now - indexBuildSliceStartedAt >= getManaSearchSliceBudgetMs()) {
                                 await yieldForManaSearchResponsiveness();
@@ -13598,7 +13790,8 @@ async function runLocalCorpusBatch(context) {
             if (!list) statesByCard.set(cardIndex, list = []);
             list.push(state);
             statesBuildOps++;
-            if ((statesBuildOps & 2047) === 0) {
+            if ((statesBuildOps & 255) === 0) {
+                assertBatchCurrent();
                 const now = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
                 if (now - statesBuildSliceStartedAt >= getManaSearchSliceBudgetMs()) {
                     await yieldForManaSearchResponsiveness();
@@ -13608,7 +13801,17 @@ async function runLocalCorpusBatch(context) {
         }
     }
 
+    let candidateSliceStartedAt = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
     for (let candidatePosition = 0; candidatePosition < candidates.length; candidatePosition++) {
+        if ((candidatePosition & 31) === 0) {
+            assertBatchCurrent();
+            const now = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+            if (now - candidateSliceStartedAt >= getManaSearchSliceBudgetMs() || isManaUiInteractionPriorityActive()) {
+                await yieldForManaSearchResponsiveness();
+                assertBatchCurrent();
+                candidateSliceStartedAt = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+            }
+        }
         const cardIndex = candidates[candidatePosition];
         const card = corpus.cards[cardIndex];
         if (!card?.name) continue;
@@ -13637,15 +13840,11 @@ async function runLocalCorpusBatch(context) {
             }
         }
 
-        if (candidatePosition + 1 < candidates.length && (
-            candidatePosition % 1400 === 1399 ||
-            (isManaUiInteractionPriorityActive() && candidatePosition % 24 === 23)
-        )) {
-            await yieldForManaSearchResponsiveness();
-        }
     }
 
+    assertBatchCurrent();
     for (const state of requestStates) {
+        assertBatchCurrent();
         state.hits.sort((a, b) => b.score - a.score || String(a.card.name).localeCompare(String(b.card.name)));
         const merged = new Map();
         for (const hit of state.hits.slice(0, state.cap)) {
@@ -13746,19 +13945,29 @@ async function retrieveLocalFirst(localQueries, fallbackQuery, options = {}) {
         broadFallbackFilters = null,
         highlights
     } = options;
+    // Snapshot before the first await: a new source/search should stop this retrieval lane even
+    // if cards.bin was still resolving when the lane was launched.
+    const owningSearchRequestId = Number.isFinite(options.searchRequestId) ? options.searchRequestId : searchRequestId;
+    const isCancelled = typeof options.isCancelled === 'function'
+        ? options.isCancelled
+        : () => owningSearchRequestId !== searchRequestId;
+    if (isCancelled()) return [];
     const corpus = staticCardCorpusMemory || await loadStaticCardCorpus();
+    if (isCancelled()) return [];
     if (corpus?.cards?.length) {
         const unified = requestUnifiedLocalCorpusSearch(localQueries, fallbackQuery, {
-            label, limit, excludeName, filters, broadFallbackFilters, highlights
+            label, limit, excludeName, filters, broadFallbackFilters, highlights,
+            isCancelled
         });
         if (unified) return unified;
         const queries = (Array.isArray(localQueries) ? localQueries : [localQueries])
             .map(q => String(q || '').trim()).filter(Boolean);
-        const results = await searchStaticCardCorpusAlternatives(queries, { limit, excludeName, filters, broadFallbackFilters, highlights });
+        const results = await searchStaticCardCorpusAlternatives(queries, { limit, excludeName, filters, broadFallbackFilters, highlights, isCancelled });
         return decorateLocalCoverage(results, label, queries.join(' | '));
     }
     if (!fallbackQuery) return decorateLocalCoverage([], label, '[local corpus unavailable]');
-    return fetchScryfallSearch(fallbackQuery, fallbackMaxPages, `${label} (Scryfall fallback)`);
+    if (isCancelled()) return [];
+    return fetchScryfallSearch(fallbackQuery, fallbackMaxPages, `${label} (Scryfall fallback)`, owningSearchRequestId);
 }
 
 const FULL_SEMANTIC_INDEX_SEARCH_LIMIT = 96;
@@ -14188,6 +14397,8 @@ function getSemanticWorkerExcludeKey(excludeName) {
 
 async function findFullSemanticMatches(index, sourceVector, excludeName, limit = FULL_SEMANTIC_INDEX_SEARCH_LIMIT, minSimilarity = 0.42) {
     if (!index || !sourceVector) return [];
+    const owningSearchRequestId = searchRequestId;
+    const cancelled = () => owningSearchRequestId !== searchRequestId;
 
     // Benchmark-local corpora contain the full card payload in each chunk; the worker intentionally
     // transfers only names/ids/vectors, so keep benchmark queries on the main-thread fallback to
@@ -14197,6 +14408,7 @@ async function findFullSemanticMatches(index, sourceVector, excludeName, limit =
     try {
         if (benchmarkLocal) throw new Error('Benchmark-local corpus uses payload-preserving scan.');
         await runWhenIdle(() => ensureSemanticWorkerIndex(index), { timeout: 2500 });
+        if (cancelled()) return [];
         const queryVector = sourceVector instanceof Float32Array ? new Float32Array(sourceVector) : Float32Array.from(sourceVector);
         const results = await semanticWorkerRequest('query', {
             queryBuffer: queryVector.buffer,
@@ -14204,10 +14416,12 @@ async function findFullSemanticMatches(index, sourceVector, excludeName, limit =
             limit,
             minSimilarity,
             baseline: semanticCosineBaseline,
-            generation: searchRequestId
+            generation: owningSearchRequestId
         }, [queryVector.buffer]);
+        if (cancelled()) return [];
         return results || [];
     } catch (workerError) {
+        if (cancelled()) return [];
         if (!benchmarkLocal) console.info('Semantic worker unavailable; using yielding main-thread semantic scan where possible:', workerError?.message || workerError);
         const excludeKey = normalizeCardNameForIdentity(excludeName || '');
         const best = [];
@@ -14221,18 +14435,29 @@ async function findFullSemanticMatches(index, sourceVector, excludeName, limit =
                 best.length = keepCap;
             }
         };
+        let semanticScanSliceStartedAt = getManaResponsivenessNow();
         for (const chunk of index.chunks || []) {
+            if (cancelled()) throw createSearchCancellationError();
             if (!chunk?.vectors) continue;
             for (let i = 0; i < chunk.count; i++) {
+                if ((i & 15) === 0) {
+                    if (cancelled()) throw createSearchCancellationError();
+                    const now = getManaResponsivenessNow();
+                    if (now - semanticScanSliceStartedAt >= getManaSearchSliceBudgetMs() || isManaUiInteractionPriorityActive()) {
+                        await yieldForManaSearchResponsiveness();
+                        if (cancelled()) throw createSearchCancellationError();
+                        semanticScanSliceStartedAt = getManaResponsivenessNow();
+                    }
+                }
                 const name = chunk.names?.[i] || '';
                 if (!name || normalizeCardNameForIdentity(name) === excludeKey) continue;
                 const vector = chunk.vectors.subarray(i * index.dim, (i + 1) * index.dim);
                 const rawCos = approximateQuantizedCosine(sourceVector, vector, index.dim);
                 const calibrated = Math.max(0, Math.min(1, (rawCos - semanticCosineBaseline) / Math.max(0.05, 1 - semanticCosineBaseline)));
                 if (calibrated >= minSimilarity) pushBest({ name, id: chunk.ids?.[i] || null, card: chunk.cards?.[i] || null, similarity: calibrated });
-                if (isManaUiInteractionPriorityActive() && i % 24 === 23) await yieldForManaSearchResponsiveness();
             }
             await yieldForManaSearchResponsiveness();
+            if (cancelled()) throw createSearchCancellationError();
         }
         const sortedBest = await sortManaArrayResponsively(best, (a, b) => b.similarity - a.similarity);
         const seen = new Set();
@@ -14249,11 +14474,13 @@ async function findFullSemanticMatches(index, sourceVector, excludeName, limit =
 
 async function findFullSemanticExactMatches(index, highlights, excludeName, limit = 1024) {
     if (!index || !Array.isArray(highlights) || !highlights.length) return [];
+    const owningSearchRequestId = searchRequestId;
     const out = [];
     const excludeKey = normalizeCardNameForIdentity(excludeName || '');
     let sliceStartedAt = getManaResponsivenessNow();
     for (const chunk of index.chunks || []) {
         for (let i = 0; i < chunk.count; i++) {
+            if ((i & 31) === 0 && owningSearchRequestId !== searchRequestId) throw createSearchCancellationError();
             const card = chunk.cards?.[i];
             if (card?.name && normalizeCardNameForIdentity(card.name) !== excludeKey &&
                 matchesExactHighlightConstraints(card, highlights)) {
@@ -14420,7 +14647,7 @@ async function embedTextBatch(texts, extractor) {
     return vectors;
 }
 
-async function warmEmbeddingCache(texts, extractor, diagnostics, batchSize = 32) {
+async function warmEmbeddingCache(texts, extractor, diagnostics, batchSize = 32, isCancelled = null) {
     const unique = [...new Set(texts.filter(Boolean))].filter(t => !embeddingCache.has(t));
     // Length-bucket the inputs before batching. The feature-extraction pipeline pads each batch to
     // its longest input, so mixing a very long rules text with many short function summaries wastes
@@ -14430,11 +14657,11 @@ async function warmEmbeddingCache(texts, extractor, diagnostics, batchSize = 32)
     // above keeps padding efficient, while the adaptive caps below avoid large activation buffers
     // for long Oracle text. If the runtime still rejects a chunk, it is bisected recursively until
     // it succeeds, so larger batches do not compromise support for slower devices.
-    // Crucially, mere focus on an input is NOT active typing: reducing to singleton batches whenever
-    // a field remained focused serialized hundreds of model calls during benchmarks. During real
-    // keyboard edits use 4 texts, and for immediately recent other UI activity use 8; idle scoring
-    // uses the size appropriate for the texts. Every batch still yields to the event loop.
+    // Crucially, mere focus on an input is NOT active typing. During real keyboard edits, use
+    // singleton batches to minimize uninterrupted model work; immediately after other UI activity
+    // use smaller batches, while idle searches recover full batching throughput. Every batch yields.
     const embedChunkWithFallback = async (chunk) => {
+        throwIfSearchCancelled(isCancelled);
         try {
             const vectors = await embedTextBatch(chunk, extractor);
             chunk.forEach((t, idx) => {
@@ -14456,16 +14683,18 @@ async function warmEmbeddingCache(texts, extractor, diagnostics, batchSize = 32)
     };
     let i = 0;
     while (i < unique.length) {
+        throwIfSearchCancelled(isCancelled);
         const nextTextLength = String(unique[i] || '').length;
         const textBatchCap = nextTextLength > 1600 ? 4
             : (nextTextLength > 1000 ? 8 : (nextTextLength > 600 ? 16 : batchSize));
         const interactionBatchCap = isManaUserActivelyEditing()
-            ? 4
-            : (isManaUiInteractionRecentlyActive(250) ? 8 : batchSize);
+            ? 1
+            : (isManaUiInteractionRecentlyActive(250) ? 4 : batchSize);
         const effectiveBatchSize = Math.max(1, Math.min(batchSize, textBatchCap, interactionBatchCap));
         const chunk = unique.slice(i, i + effectiveBatchSize);
         i += chunk.length;
         await embedChunkWithFallback(chunk);
+        throwIfSearchCancelled(isCancelled);
         await yieldForManaSearchResponsiveness();
     }
 }
@@ -15843,7 +16072,7 @@ function initApp() {
         closeModalBtn.setAttribute('role', 'button');
         closeModalBtn.setAttribute('tabindex', '0');
         closeModalBtn.setAttribute('aria-label', 'Close card comparison');
-        const closeCompare = () => { compareModal.classList.add('hidden'); compareQueue = []; };
+        const closeCompare = () => { compareModal.classList.add('hidden'); compareQueue = []; syncCompareButtonFeedback(); };
         closeModalBtn.addEventListener('click', closeCompare);
         closeModalBtn.addEventListener('keydown', (event) => {
             if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); closeCompare(); }
@@ -15882,8 +16111,12 @@ function initApp() {
     const bindHighlightSelection = (root, field) => {
         if (!root) return;
         const handler = () => handleSourceTextSelection(root, field);
-        root.addEventListener('mouseup', event => { if (event.button === 0) handler(); });
-        root.addEventListener('touchend', () => setTimeout(handler, 0));
+        let touchFirst = false;
+        try { touchFirst = window.matchMedia('(hover: none), (pointer: coarse)').matches; } catch (_) {}
+        // Desktop selection commits naturally on mouseup. On touch devices, retain the native
+        // selection handles and let the explicit "Highlight selected…" action commit it. This
+        // avoids clearing an iOS/Android selection before the user has a chance to inspect it.
+        if (!touchFirst) root.addEventListener('mouseup', event => { if (event.button === 0) handler(); });
         root.addEventListener('keyup', event => { if (event.shiftKey || event.key.startsWith('Arrow')) handler(); });
     };
     bindHighlightSelection(sourceCardOracle, 'oracle');
@@ -16101,13 +16334,489 @@ function installFirstUseHintDismissal() {
     }, true);
 }
 
+// A lightweight, persistent quick-start guide makes the main workflow understandable even when
+// a new user skips the interactive tour. It deliberately reuses the real picker and search
+// controls so there is only one code path for source selection and searching.
+function installManaSearchQuickStart() {
+    const guide = document.getElementById('quick-start-guide');
+    if (!guide || guide.dataset.installed === 'true') return;
+    guide.dataset.installed = 'true';
+
+    const steps = document.getElementById('quick-start-steps');
+    const toggle = document.getElementById('quick-start-toggle');
+    const summary = document.getElementById('quick-start-summary');
+    const sourceDetail = document.getElementById('quick-start-source-detail');
+    const highlightDetail = document.getElementById('quick-start-highlight-detail');
+    const searchDetail = document.getElementById('quick-start-search-detail');
+    const feedback = document.getElementById('quick-start-feedback');
+    const chooseSource = document.getElementById('quick-start-choose-source');
+    const showHighlight = document.getElementById('quick-start-show-highlight');
+    const quickSearch = document.getElementById('quick-start-search');
+    const sourceLoaded = document.getElementById('source-card-loaded');
+    const sourceName = document.getElementById('source-card-name');
+    const oracle = document.getElementById('source-card-oracle');
+    const highlightChips = document.getElementById('highlight-chips-list');
+    const mainSearch = document.getElementById('find-similar-btn');
+    const loadingIndicatorEl = document.getElementById('loading-indicator');
+    const staticStatusText = document.getElementById('static-search-status-text');
+    const sourceStep = document.getElementById('quick-start-step-source');
+    const highlightStep = document.getElementById('quick-start-step-highlight');
+    const searchStep = document.getElementById('quick-start-step-search');
+
+    let isSearching = false;
+    let hasCompletedSearch = false;
+    let lastResultCount = null;
+    let isCollapsed = false;
+    const hasSource = () => Boolean(sourceLoaded && !sourceLoaded.classList.contains('hidden') && sourceName?.textContent.trim());
+    const hasOracleRules = () => {
+        const text = String(oracle?.textContent || '').trim();
+        return Boolean(text && !/^no rules text\.?$/i.test(text));
+    };
+    const getHighlightCount = () => highlightChips?.querySelectorAll('.highlight-chip').length || 0;
+    const markStep = (node, { complete = false, current = false } = {}) => {
+        if (!node) return;
+        node.classList.toggle('is-complete', complete);
+        node.classList.toggle('is-current', current);
+        if (current) node.setAttribute('aria-current', 'step');
+        else node.removeAttribute('aria-current');
+    };
+    const safeStoreCollapsed = value => {
+        try { localStorage.setItem('manaSearchQuickStartCollapsedV61', value ? 'collapsed' : 'expanded'); } catch (_) {}
+    };
+    const applyCollapsed = value => {
+        isCollapsed = Boolean(value);
+        steps?.classList.toggle('hidden', isCollapsed);
+        feedback?.classList.toggle('hidden', isCollapsed || !feedback.textContent.trim());
+        guide.classList.toggle('is-collapsed', isCollapsed);
+        if (toggle) {
+            toggle.textContent = isCollapsed ? 'Show guide' : 'Hide guide';
+            toggle.setAttribute('aria-expanded', String(!isCollapsed));
+        }
+    };
+
+    try {
+        const savedGuideState = localStorage.getItem('manaSearchQuickStartCollapsedV61');
+        // Keep the guide expanded for the first session, then start compact on later visits
+        // unless the user explicitly chose to keep it expanded.
+        isCollapsed = savedGuideState !== null
+            ? savedGuideState === 'collapsed'
+            : localStorage.getItem('manaSearchQuickStartCompletedV61') === 'completed';
+    } catch (_) {}
+    applyCollapsed(isCollapsed);
+
+    const sync = () => {
+        const selected = hasSource();
+        const name = String(sourceName?.textContent || '').trim();
+        const count = getHighlightCount();
+        const busy = isSearching || Boolean(loadingIndicatorEl && !loadingIndicatorEl.classList.contains('hidden'));
+        const mainReady = Boolean(mainSearch && !mainSearch.disabled && !busy);
+
+        markStep(sourceStep, { complete: selected, current: !selected });
+        markStep(highlightStep, { complete: selected && count > 0, current: false });
+        markStep(searchStep, { complete: hasCompletedSearch && !busy, current: selected && !busy && !hasCompletedSearch });
+
+        if (chooseSource) {
+            chooseSource.classList.toggle('hidden', selected);
+            chooseSource.disabled = false;
+        }
+        if (showHighlight) showHighlight.disabled = !selected || busy;
+        if (quickSearch) {
+            quickSearch.disabled = !selected || !mainReady;
+            quickSearch.textContent = busy ? 'Searching…' : 'Find Similar Cards';
+        }
+
+        if (sourceDetail) {
+            sourceDetail.textContent = selected
+                ? `Selected: ${name}. This is the card ManaSearch will search from.`
+                : 'Pick the card you want to find alternatives for.';
+        }
+        if (highlightDetail) {
+            if (!selected) {
+                highlightDetail.textContent = 'This step is optional. Choose a card first, then select a short phrase in its Oracle Text.';
+            } else if (!hasOracleRules()) {
+                highlightDetail.textContent = 'This card face has no rules text to highlight. That is fine—you can search without highlights.';
+            } else if (count > 0) {
+                highlightDetail.textContent = `${count} highlight${count === 1 ? '' : 's'} selected. Each can stay = Exact or be changed to ≈ Flexible for different wording.`;
+            } else {
+                highlightDetail.textContent = 'Select a short, meaningful phrase in Oracle Text. Exact keeps wording close; Flexible allows different wording. You can skip this step.';
+            }
+        }
+        if (searchDetail) {
+            if (!selected) {
+                searchDetail.textContent = 'Start with the default settings. Methods, Order, and Constraints can be explored later.';
+            } else if (busy) {
+                searchDetail.textContent = 'Your search is running. Initial results appear as they are found.';
+            } else if (hasCompletedSearch && lastResultCount === 0) {
+                searchDetail.textContent = 'No results passed the current criteria. Consider clearing Constraints or adjusting a highlight.';
+            } else if (hasCompletedSearch && Number.isFinite(lastResultCount)) {
+                searchDetail.textContent = `Search complete: ${lastResultCount.toLocaleString()} result${lastResultCount === 1 ? '' : 's'}. Open a result to inspect its similarity details.`;
+            } else if (!mainReady && staticStatusText?.textContent.trim()) {
+                searchDetail.textContent = staticStatusText.textContent.trim();
+            } else {
+                searchDetail.textContent = 'Run with the defaults first. Methods changes discovery, Order changes ranking, and Constraints limits results.';
+            }
+        }
+
+        let message;
+        if (busy) {
+            message = `Searching${name ? ` for cards similar to ${name}` : ''}… Results will appear as they are found.`;
+        } else if (!selected) {
+            message = 'No tour needed: choose a source card, optionally highlight an ability, and search with the defaults.';
+        } else if (hasCompletedSearch && lastResultCount === 0) {
+            message = 'Search finished, but no cards matched the current criteria. Try clearing constraints or changing a highlight; you can keep all other features.';
+        } else if (hasCompletedSearch && Number.isFinite(lastResultCount)) {
+            message = `Search complete: ${lastResultCount.toLocaleString()} result${lastResultCount === 1 ? '' : 's'}. The quick guide will stay here if you need it again.`;
+        } else {
+            message = `You're ready to search${name ? ` from ${name}` : ''}. Highlight a phrase first if useful, or search now.`;
+        }
+        if (summary && summary.textContent !== message) summary.textContent = message;
+        if (feedback && !isCollapsed && !feedback.textContent.trim() && hasCompletedSearch) {
+            feedback.textContent = lastResultCount === 0
+                ? 'Tip: constraints are strict—every active constraint must match a result.'
+                : 'Tip: select a result to compare mechanics, use Favorite to save cards, or export the results when you are ready.';
+            feedback.classList.remove('hidden');
+        }
+    };
+
+    chooseSource?.addEventListener('click', () => {
+        const pickerButton = document.getElementById('source-card-add-btn');
+        if (pickerButton) pickerButton.click();
+    });
+
+    showHighlight?.addEventListener('click', () => {
+        if (!hasSource()) return;
+        const target = document.querySelector('#source-card-loaded .oracle-container');
+        if (!target) return;
+        if (!hasOracleRules()) {
+            if (feedback) {
+                feedback.textContent = 'There is no rules text on this card face to highlight. Try Flip on a double-faced card, or search without a highlight.';
+                feedback.classList.remove('hidden');
+            }
+        } else if (feedback) {
+            feedback.textContent = 'Select a short phrase in Oracle Text, such as “draw a card.” A highlight chip will appear below the text. You can search without doing this.';
+            feedback.classList.remove('hidden');
+        }
+        target.classList.remove('quick-start-highlight-target');
+        // Reflow allows repeated presses to replay the short, non-blocking focus cue.
+        void target.offsetWidth;
+        target.classList.add('quick-start-highlight-target');
+        target.addEventListener('animationend', () => target.classList.remove('quick-start-highlight-target'), { once: true });
+        const reduceMotion = (() => {
+            try { return window.matchMedia('(prefers-reduced-motion: reduce)').matches; } catch (_) { return false; }
+        })();
+        target.scrollIntoView({ behavior: reduceMotion ? 'auto' : 'smooth', block: 'center' });
+    });
+
+    quickSearch?.addEventListener('click', () => {
+        if (!hasSource()) {
+            if (feedback) feedback.textContent = 'Choose a source card before starting a search.';
+            return;
+        }
+        if (!mainSearch || mainSearch.disabled || isSearching) {
+            if (feedback) {
+                feedback.textContent = staticStatusText?.textContent.trim() || 'Search is preparing. The search action will activate when required data is ready.';
+                feedback.classList.remove('hidden');
+            }
+            return;
+        }
+        mainSearch.click();
+    });
+
+    toggle?.addEventListener('click', () => {
+        applyCollapsed(!isCollapsed);
+        safeStoreCollapsed(isCollapsed);
+        if (!isCollapsed) sync();
+    });
+
+    window.addEventListener('manasearch:source-selected', () => {
+        hasCompletedSearch = false;
+        lastResultCount = null;
+        if (feedback) { feedback.textContent = ''; feedback.classList.add('hidden'); }
+        sync();
+    });
+    window.addEventListener('manasearch:source-highlights-changed', () => {
+        if (feedback) { feedback.textContent = ''; feedback.classList.add('hidden'); }
+        sync();
+    });
+    window.addEventListener('manasearch:search-started', () => {
+        isSearching = true;
+        hasCompletedSearch = false;
+        if (feedback) { feedback.textContent = ''; feedback.classList.add('hidden'); }
+        sync();
+    });
+    window.addEventListener('manasearch:search-finished', event => {
+        isSearching = false;
+        hasCompletedSearch = true;
+        const value = Number(event.detail?.resultCount);
+        lastResultCount = Number.isFinite(value) ? value : 0;
+        try { localStorage.setItem('manaSearchQuickStartCompletedV61', 'completed'); } catch (_) {}
+        sync();
+    });
+
+    // The actual availability of the main search button is authoritative. Observing its
+    // disabled state and the source/highlight containers keeps this guide accurate whether the
+    // user clicks normally, uses the tour, or restores a saved source card.
+    if (typeof MutationObserver === 'function') {
+        const sourceObserver = new MutationObserver(sync);
+        if (sourceLoaded) sourceObserver.observe(sourceLoaded, { attributes: true, attributeFilter: ['class'] });
+        if (sourceName) sourceObserver.observe(sourceName, { childList: true, characterData: true, subtree: true });
+        if (highlightChips) sourceObserver.observe(highlightChips, { childList: true, subtree: true });
+        if (mainSearch) sourceObserver.observe(mainSearch, { attributes: true, attributeFilter: ['disabled'] });
+        if (loadingIndicatorEl) sourceObserver.observe(loadingIndicatorEl, { attributes: true, attributeFilter: ['class'] });
+        if (staticStatusText) sourceObserver.observe(staticStatusText, { childList: true, characterData: true, subtree: true });
+    }
+    sync();
+}
+
+// v62 usability layer: mobile search dock, deliberate touch highlighting, and reliable modal dismissal.
+function installManaSearchUsabilityPolish() {
+    if (window.__manaSearchUsabilityPolishInstalled) return;
+    window.__manaSearchUsabilityPolishInstalled = true;
+
+    const sourceLoaded = document.getElementById('source-card-loaded');
+    const sourceName = document.getElementById('source-card-name');
+    const primarySearch = document.getElementById('find-similar-btn');
+    const relatedBar = document.getElementById('related-cards-bar');
+    const staticStatus = document.getElementById('static-search-status-text');
+
+    // A thumb-reachable mobile dock keeps the active source and main search action available
+    // while users browse long rules text or hundreds of results. It proxies the existing button;
+    // there is still only one real search handler/pipeline.
+    let dock = document.getElementById('mobile-search-dock');
+    if (!dock) {
+        dock = document.createElement('aside');
+        dock.id = 'mobile-search-dock';
+        dock.className = 'mobile-search-dock hidden';
+        dock.setAttribute('aria-label', 'Current source and search controls');
+        dock.innerHTML = `
+            <div class="mobile-search-dock-source">
+                <div class="mobile-search-dock-source-copy"><span>Searching from</span><strong id="mobile-search-source-name"></strong></div>
+                <button type="button" id="mobile-change-source-btn" class="mobile-change-source-btn">Change</button>
+            </div>
+            <button type="button" id="mobile-find-similar-btn" class="mobile-find-similar-btn" aria-controls="results-section loading-indicator" aria-describedby="static-search-status-text">Find Similar Cards</button>
+            <p id="mobile-search-dock-status" class="mobile-search-dock-status" role="status" aria-live="polite"></p>`;
+        document.body.appendChild(dock);
+    }
+    const dockSourceName = document.getElementById('mobile-search-source-name');
+    const dockChangeSource = document.getElementById('mobile-change-source-btn');
+    const dockSearch = document.getElementById('mobile-find-similar-btn');
+    const dockStatus = document.getElementById('mobile-search-dock-status');
+    const touchMedia = (() => { try { return window.matchMedia('(hover: none), (pointer: coarse)'); } catch (_) { return null; } })();
+
+    const syncDock = () => {
+        const hasSource = Boolean(sourceLoaded && !sourceLoaded.classList.contains('hidden') && String(sourceName?.textContent || '').trim());
+        const mobile = window.matchMedia('(max-width: 760px)').matches;
+        dock.classList.toggle('hidden', !(hasSource && mobile));
+        document.body.classList.toggle('has-mobile-search-dock', hasSource && mobile);
+        if (dockSourceName) dockSourceName.textContent = String(sourceName?.textContent || '').trim();
+        if (dockSearch && primarySearch) {
+            dockSearch.disabled = primarySearch.disabled;
+            dockSearch.classList.toggle('is-searching', primarySearch.getAttribute('aria-busy') === 'true' || /searching|scanning|scoring/i.test(primarySearch.textContent || ''));
+            dockSearch.textContent = dockSearch.classList.contains('is-searching') ? 'Searching…' : 'Find Similar Cards';
+            dockSearch.title = primarySearch.disabled
+                ? (staticStatus?.textContent || 'Search is not ready yet.')
+                : 'Find similar cards using the current source and settings.';
+        }
+        if (dockStatus) {
+            const ready = !primarySearch?.disabled;
+            dockStatus.textContent = ready ? 'Your current settings are ready.' : (staticStatus?.textContent || 'Preparing search data…');
+            dockStatus.classList.toggle('is-blocked', !ready);
+        }
+    };
+    dockChangeSource?.addEventListener('click', () => {
+        const pickerTrigger = document.getElementById('add-source-card-btn') || document.getElementById('source-card-add-btn');
+        pickerTrigger?.click();
+    });
+    dockSearch?.addEventListener('click', () => {
+        if (!primarySearch || primarySearch.disabled) return;
+        primarySearch.click();
+        window.setTimeout(() => {
+            const loading = document.getElementById('loading-indicator');
+            const results = document.getElementById('results-section');
+            const status = document.getElementById('static-search-status');
+            const target = loading && !loading.classList.contains('hidden') ? loading
+                : results && !results.classList.contains('hidden') ? results : status;
+            target?.scrollIntoView({ block: 'start', behavior: document.body.classList.contains('reduce-motion') ? 'auto' : 'smooth' });
+        }, 60);
+    });
+    const syncDockObserver = typeof MutationObserver === 'function' ? new MutationObserver(syncDock) : null;
+    if (syncDockObserver) {
+        if (sourceLoaded) syncDockObserver.observe(sourceLoaded, { attributes: true, attributeFilter: ['class'] });
+        if (sourceName) syncDockObserver.observe(sourceName, { childList: true, characterData: true, subtree: true });
+        if (primarySearch) syncDockObserver.observe(primarySearch, { attributes: true, attributeFilter: ['disabled', 'aria-busy'], childList: true, characterData: true, subtree: true });
+        if (staticStatus) syncDockObserver.observe(staticStatus, { childList: true, characterData: true, subtree: true });
+        if (relatedBar) syncDockObserver.observe(relatedBar, { attributes: true, attributeFilter: ['class'] });
+    }
+    window.addEventListener('resize', syncDock, { passive: true });
+    touchMedia?.addEventListener?.('change', syncDock);
+    syncDock();
+
+    // Touch-specific selected-text actions. The helper appears only for touch/coarse-pointer
+    // devices, preserves the browser's native selection handles, and lets the existing offset-aware
+    // highlighter handle the actual highlight state/chips.
+    const touchActions = document.getElementById('touch-highlight-actions');
+    const oracle = document.getElementById('source-card-oracle');
+    const typeLine = document.getElementById('source-card-type');
+    const oracleButton = document.getElementById('highlight-selected-oracle-btn');
+    const typeButton = document.getElementById('highlight-selected-type-btn');
+    const isTouchLayout = () => {
+        try { return window.matchMedia('(hover: none), (pointer: coarse)').matches; }
+        catch (_) { return false; }
+    };
+    const isSelectionWithin = root => {
+        const selection = window.getSelection?.();
+        if (!root || !selection || selection.isCollapsed || !selection.rangeCount || !String(selection.toString() || '').trim()) return false;
+        return root.contains(selection.getRangeAt(0).commonAncestorContainer);
+    };
+    const syncHighlightActions = () => {
+        if (touchActions) touchActions.hidden = !isTouchLayout();
+        if (oracleButton) oracleButton.disabled = !isSelectionWithin(oracle);
+        if (typeButton) typeButton.disabled = !isSelectionWithin(typeLine);
+    };
+    const preserveNativeSelection = event => {
+        if (event.pointerType === 'touch' || isTouchLayout()) event.preventDefault();
+    };
+    oracleButton?.addEventListener('pointerdown', preserveNativeSelection);
+    typeButton?.addEventListener('pointerdown', preserveNativeSelection);
+    oracleButton?.addEventListener('click', () => {
+        if (!isSelectionWithin(oracle)) return;
+        handleSourceTextSelection(oracle, 'oracle');
+        syncHighlightActions();
+    });
+    typeButton?.addEventListener('click', () => {
+        if (!isSelectionWithin(typeLine)) return;
+        handleSourceTextSelection(typeLine, 'type');
+        syncHighlightActions();
+    });
+    document.addEventListener('selectionchange', syncHighlightActions);
+    window.addEventListener('resize', syncHighlightActions, { passive: true });
+    window.addEventListener('orientationchange', syncHighlightActions, { passive: true });
+    syncHighlightActions();
+
+    // Dialog behavior is consistent across existing modals: Escape closes the top-most dialog,
+    // tapping the backdrop dismisses it, Tab stays inside a true modal while open, and focus
+    // returns to the invoking control. All closing routes click the original close button where
+    // possible so each feature retains its own cleanup/synchronization handler.
+    // Limit generic modal behavior to the application's actual feature dialogs. The onboarding
+    // tour and card-preview overlays also use dialog semantics, but have their own lifecycle and
+    // must not steal Escape, focus, or backdrop events from a settings dialog.
+    const dialogSelector = '#source-card-picker-modal, #search-methods-modal, #order-modal, #card-constraints-modal, #preferences-modal, #selected-related-modal, #compare-modal, #format-legality-modal';
+    const activeDialogs = () => Array.from(document.querySelectorAll(dialogSelector)).filter(dialog => {
+        let node = dialog;
+        while (node && node !== document.documentElement) {
+            if (node.classList?.contains('hidden')) return false;
+            const style = window.getComputedStyle(node);
+            if (style.display === 'none' || style.visibility === 'hidden') return false;
+            node = node.parentElement;
+        }
+        const rect = dialog.getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0;
+    });
+    const closeButtonFor = dialog => {
+        const map = {
+            'source-card-picker-modal': '#close-source-card-picker',
+            'search-methods-modal': '#close-methods-modal',
+            'order-modal': '#close-order-modal',
+            'card-constraints-modal': '#close-card-constraints-modal',
+            'preferences-modal': '#close-preferences-modal',
+            'selected-related-modal': '#selected-related-modal-close',
+            'compare-modal': '#close-modal',
+            'format-legality-modal': '#close-format-legality-modal'
+        };
+        const selector = map[dialog.id];
+        return (selector && dialog.querySelector(selector)) || dialog.querySelector('button[aria-label*="Close"], .close-btn, .format-legality-close');
+    };
+    const dialogTriggers = new WeakMap();
+    const wasVisible = new WeakMap();
+    let lastInvoker = null;
+    document.addEventListener('click', event => {
+        const target = event.target?.closest?.('button, a, input, select, [role="button"]');
+        if (target && !target.closest(dialogSelector)) lastInvoker = target;
+    }, true);
+    const dismissDialog = dialog => {
+        const close = closeButtonFor(dialog);
+        if (close) close.click();
+        else dialog.classList.add('hidden');
+        window.setTimeout(() => {
+            const invoker = dialogTriggers.get(dialog) || lastInvoker;
+            if (invoker?.isConnected && !invoker.disabled) invoker.focus({ preventScroll: true });
+        }, 0);
+    };
+    document.addEventListener('keydown', event => {
+        const dialogs = activeDialogs();
+        const dialog = dialogs[dialogs.length - 1];
+        if (!dialog) return;
+        if (event.key === 'Escape') {
+            event.preventDefault();
+            event.stopImmediatePropagation();
+            dismissDialog(dialog);
+            return;
+        }
+        if (event.key !== 'Tab') return;
+        const focusables = Array.from(dialog.querySelectorAll('a[href], button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex="-1"])'))
+            .filter(el => el.getAttribute('aria-hidden') !== 'true' && el.getClientRects().length > 0);
+        if (!focusables.length) {
+            event.preventDefault();
+            dialog.setAttribute('tabindex', '-1');
+            dialog.focus({ preventScroll: true });
+            return;
+        }
+        const first = focusables[0], last = focusables[focusables.length - 1];
+        if (event.shiftKey && (document.activeElement === first || !dialog.contains(document.activeElement))) {
+            event.preventDefault(); last.focus();
+        } else if (!event.shiftKey && (document.activeElement === last || !dialog.contains(document.activeElement))) {
+            event.preventDefault(); first.focus();
+        }
+    }, true);
+    document.querySelectorAll(dialogSelector).forEach(dialog => {
+        dialog.addEventListener('click', event => {
+            if (event.target !== dialog || dialog.classList.contains('hidden')) return;
+            event.preventDefault();
+            event.stopImmediatePropagation();
+            dismissDialog(dialog);
+        });
+    });
+    if (typeof MutationObserver === 'function') {
+        const dialogObserver = new MutationObserver(records => {
+            for (const record of records) {
+                const dialog = record.target;
+                const visible = activeDialogs().includes(dialog);
+                const previous = wasVisible.get(dialog) || false;
+                if (visible && !previous) {
+                    dialogTriggers.set(dialog, lastInvoker || document.activeElement);
+                    if (!dialog.contains(document.activeElement)) {
+                        const first = closeButtonFor(dialog) || dialog.querySelector('button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled)');
+                        if (first) first.focus({ preventScroll: true });
+                        else { dialog.setAttribute('tabindex', '-1'); dialog.focus({ preventScroll: true }); }
+                    }
+                } else if (!visible && previous) {
+                    const invoker = dialogTriggers.get(dialog);
+                    window.setTimeout(() => {
+                        if (invoker?.isConnected && !invoker.disabled) invoker.focus({ preventScroll: true });
+                        dialogTriggers.delete(dialog);
+                    }, 0);
+                }
+                wasVisible.set(dialog, visible);
+            }
+        });
+        document.querySelectorAll(dialogSelector).forEach(dialog => {
+            wasVisible.set(dialog, !dialog.classList.contains('hidden'));
+            dialogObserver.observe(dialog, { attributes: true, attributeFilter: ['class', 'style'] });
+        });
+    }
+}
+
 // Start static-data loading independently of the lengthy UI initialization. On mobile, one
 // unrelated control setup can throw before initApp reaches its final statements; in that case
 // the previous arrangement never called loadStaticSearchResources() and the status stayed at
 // 'Search data is preparing…' forever. Starting the asset promises first guarantees the real
 // loader runs regardless of later UI wiring, and initApp immediately reflects its loading state.
 function startManaSearchApp() {
+    try { installManaSearchUsabilityPolish(); }
+    catch (error) { console.error('[ManaSearch] Usability polish setup failed:', error?.stack || error); }
     installFirstUseHintDismissal();
+    try { installManaSearchQuickStart(); }
+    catch (error) { console.error('[ManaSearch] Quick-start guide setup failed:', error?.stack || error); }
     // Install help/tour separately from the rest of the UI. A failure while binding an unrelated
     // control must not leave tutorial entry points inert. Both installers are idempotent.
     try { installFeatureHelpPopovers(); }
@@ -18576,6 +19285,9 @@ async function scoreCardBatch({
     targetVectors = null,
     sourceFunctionVector: suppliedSourceFunctionVector = null,
     isCancelled = null,
+    // Optional, throttled stage telemetry. This changes UI status only; it never changes scores,
+    // candidate selection, weights, or ranking order.
+    onProgress = null,
     extractor,
     weights = {},
     tags = [],
@@ -18590,6 +19302,20 @@ async function scoreCardBatch({
         semanticPassMs: 0, calibrationMs: 0, finalBlendMs: 0, totalMs: 0, unattributedMs: 0
     };
     const __scoreNow = () => (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+    let __lastProgressAt = 0;
+    let __lastProgressStage = '';
+    const __emitScoreProgress = (stage, processed = 0, total = cards.length, force = false) => {
+        if (typeof onProgress !== 'function') return;
+        const now = __scoreNow();
+        // Avoid making score progress itself a source of UI churn. Stage transitions paint
+        // immediately; within a stage, updates are capped to roughly 3 per second.
+        if (!force && stage === __lastProgressStage && now - __lastProgressAt < 350 && processed < total) return;
+        __lastProgressStage = stage;
+        __lastProgressAt = now;
+        try { onProgress({ stage, processed: Math.max(0, processed), total: Math.max(0, total), elapsedMs: now - __scoreBatchStartedAt }); }
+        catch (progressError) { console.debug('[ManaSearch] Progress listener skipped:', progressError?.message || progressError); }
+    };
+    __emitScoreProgress('setup', 0, cards.length, true);
     const __pairCacheStatsAtStart = { ...mechanicalPairCacheStats };
     const rawWM = weights.mechanical ?? 45;
     const rawWS = weights.synergy ?? 10;
@@ -18896,10 +19622,13 @@ async function scoreCardBatch({
         // lets input, paints, and modal interaction run during long searches without changing score math.
         const structuralNow = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
         if (structuralNow - structuralYieldStartedAt >= getManaSearchSliceBudgetMs()) {
+            throwIfSearchCancelled(isCancelled);
             await yieldForManaSearchResponsiveness();
             structuralYieldStartedAt = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
         }
+        if ((i & 15) === 15 || i === cards.length - 1) __emitScoreProgress('mechanics', i + 1, cards.length);
     }
+    __emitScoreProgress('mechanics', cards.length, cards.length, true);
 
     __scoreStageTimings.structuralMs = __scoreNow() - __structuralPassStartedAt;
     __scoreStageTimings.structuralDetails = { ...__structuralDetailTimings };
@@ -18982,7 +19711,11 @@ async function scoreCardBatch({
             await yieldForManaSearchResponsiveness();
             triageSliceStartedAt = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
         }
+        if ((triageDetails.length & 63) === 0 || triageDetails.length === cards.length) {
+            __emitScoreProgress('triage', triageDetails.length, cards.length);
+        }
     }
+    __emitScoreProgress('triage', cards.length, cards.length, true);
 
     if (cards.length > MIN_SEMANTIC_SCORING_CANDIDATES) {
         const budget = Math.min(MAX_SEMANTIC_SCORING_CANDIDATES, cards.length);
@@ -19080,8 +19813,9 @@ async function scoreCardBatch({
             }
         }
         __scoreStageTimings.embeddingTextPreparationMs = __scoreNow() - __embeddingTextPrepStartedAt;
+        __emitScoreProgress('embeddings', 0, cards.length, true);
         const __embeddingWarmStartedAt = __scoreNow();
-        await warmEmbeddingCache(textsToEmbed, extractor, embeddingDiagnostics);
+        await warmEmbeddingCache(textsToEmbed, extractor, embeddingDiagnostics, 32, isCancelled);
         __scoreStageTimings.embeddingWarmCacheMs = __scoreNow() - __embeddingWarmStartedAt;
     }
 
@@ -19146,7 +19880,9 @@ async function scoreCardBatch({
             await yieldForManaSearchResponsiveness();
             semanticYieldStartedAt = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
         }
+        if ((i & 15) === 15 || i === cards.length - 1) __emitScoreProgress('semantic', i + 1, cards.length);
     }
+    __emitScoreProgress('semantic', cards.length, cards.length, true);
 
     __scoreStageTimings.semanticPassMs = __scoreNow() - __semanticPassStartedAt;
     const __calibrationStartedAt = __scoreNow();
@@ -19188,6 +19924,7 @@ async function scoreCardBatch({
     const __finalBlendStartedAt = __scoreNow();
     let finalRankYieldStartedAt = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
     for (let i = 0; i < cards.length; i++) {
+        throwIfSearchCancelled(isCancelled);
         const card = cards[i];
         const cardText = card.oracle_text || (card.card_faces ? card.card_faces.map(f => f.oracle_text || '').join(' ') : '');
         // Reuse the parsed candidate profile created during the structural scoring pass. The old
@@ -19313,7 +20050,9 @@ async function scoreCardBatch({
             await yieldForManaSearchResponsiveness();
             finalRankYieldStartedAt = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
         }
+        if ((i & 15) === 15 || i === cards.length - 1) __emitScoreProgress('ranking', i + 1, cards.length);
     }
+    __emitScoreProgress('ranking', cards.length, cards.length, true);
 
     __scoreStageTimings.finalBlendMs = __scoreNow() - __finalBlendStartedAt;
     __scoreStageTimings.totalMs = __scoreNow() - __scoreBatchStartedAt;
@@ -20647,8 +21386,11 @@ async function findSimilarCards() {
     // Match chip. Any unexpected label is still shown so a genuinely new stream can never remain
     // invisible; the normal A/B/C/E labels below use the same names here, avoiding the duplicate
     // gray chips that used to appear as "Search A (Exact Phrase)" alongside the completed chip.
-    activeSearchStreamProgressReporter = ({ label, message, kind = 'progress' } = {}) => {
-        if (requestId !== searchRequestId || !label) return;
+    activeSearchStreamProgressReporter = ({ label, message, kind = 'progress', ownerRequestId = requestId } = {}) => {
+        // The reporter is global because the stream broker is shared. Always validate the stream's
+        // originating request and the view that currently owns the result area.
+        if (requestId !== searchRequestId || ownerRequestId !== requestId ||
+            activeResultView.mode !== 'main' || activeResultView.requestId !== requestId || !label) return;
         const displayLabel = /^Search F #\d+ \(Functional Match\)$/.test(label)
             ? 'Functional Match'
             : label;
@@ -20673,8 +21415,13 @@ async function findSimilarCards() {
                 ? `Done • ${coverage.pagesFetched}/${coverage.maxPages} pages • ${coverage.retrievedCount} cards`
                 : 'Done';
             streamChecklistDetail.set(label, detail);
-            renderStreamChecklist();
-            updateProgress(1, totalSteps, `Retrieval in progress — ${streamsSettled}/${totalTrackedStreams} search streams finished; ${label} finished.`);
+            // Stream completions can arrive while a Related Search owns the result view. Update
+            // the hidden main-search bookkeeping, but don't repaint or replace the active view's
+            // progress text for a background request.
+            if (activeResultView.mode === 'main' && activeResultView.requestId === requestId) {
+                renderStreamChecklist();
+                updateProgress(1, totalSteps, `Retrieval in progress — ${streamsSettled}/${totalTrackedStreams} search streams finished; ${label} finished.`);
+            }
             return r;
         });
     };
@@ -20687,7 +21434,12 @@ async function findSimilarCards() {
     const previousLocalCorpusBatchContext = activeLocalCorpusBatchContext;
     if (!benchmarkUseLocalOracleCorpus) {
         const localCorpus = staticCardCorpusMemory || await loadStaticCardCorpus();
-        activeLocalCorpusBatchContext = localCorpus?.cards?.length ? createLocalCorpusBatchContext(localCorpus) : null;
+        // A source/search change may happen while the shared corpus load is resolving. Do not let
+        // that older request replace the newer request's one-pass local retrieval context.
+        if (requestId !== searchRequestId) return;
+        activeLocalCorpusBatchContext = localCorpus?.cards?.length
+            ? createLocalCorpusBatchContext(localCorpus, () => requestId !== searchRequestId)
+            : null;
         if (activeLocalCorpusBatchContext) {
             const depth = activeLocalCorpusBatchContext.depthPercent;
             updateProgress(1, totalSteps, `Local corpus ready — one-pass retrieval across ${localCorpus.total.toLocaleString()} cards at ${depth}% depth.`);
@@ -20902,6 +21654,7 @@ async function findSimilarCards() {
                 filters,
                 broadFallbackFilters,
                 highlights: manualHighlights,
+                isCancelled: () => requestId !== searchRequestId,
                 limit: isBroadSearch ? 260 : 180
             });
         })(),
@@ -21236,6 +21989,9 @@ async function findSimilarCards() {
             semanticRetrievalPromise,
             Promise.all(methodStreamPromises.map(entry => entry.promise))
         ]);
+        // Every retrieval source cooperatively cancels where possible. This final boundary is a
+        // safety net: superseded searches must stop before entering the authoritative scoring pass.
+        if (requestId !== searchRequestId) return;
         const methodResults = Object.fromEntries(methodStreamPromises.map((entry, index) => [entry.key, resolvedMethodStreams[index] || []]));
         updateProgress(2, totalSteps, 'Scoring in progress — combining retrieved candidates and calculating similarity signals...');
         const resultsF = resultsFSets.flat();
@@ -21447,6 +22203,8 @@ if (candidates.length > 0) {
     
     const scoringStartedAt = Date.now();
 
+    let lastUserFacingScoreProgressAt = 0;
+    let lastUserFacingScoreProgressStage = '';
     const { embeddingDiagnostics, semanticCalibration } = await scoreCardBatch({
         cards: candidates,
         sourceCard: currentSourceCard,
@@ -21456,6 +22214,24 @@ if (candidates.length > 0) {
         targetVectors,
         sourceFunctionVector,
         isCancelled: () => requestId !== searchRequestId,
+        onProgress: ({ stage, processed, total }) => {
+            if (requestId !== searchRequestId || activeResultView.mode !== 'main' || activeResultView.requestId !== requestId) return;
+            const now = getManaResponsivenessNow();
+            const stageChanged = stage !== lastUserFacingScoreProgressStage;
+            if (!stageChanged && stage !== 'setup' && now - lastUserFacingScoreProgressAt < 350 && processed < total) return;
+            lastUserFacingScoreProgressAt = now;
+            lastUserFacingScoreProgressStage = stage;
+            const count = `${Math.min(processed, total).toLocaleString()} / ${total.toLocaleString()} candidates`;
+            const messages = {
+                setup: `Preparing scoring context for ${total.toLocaleString()} candidates…`,
+                mechanics: `Evaluating card mechanics and strategic roles — ${count} processed…`,
+                triage: `Selecting the semantic scoring pool — ${count} reviewed…`,
+                embeddings: `Preparing semantic embeddings for the strongest candidates…`,
+                semantic: `Calculating semantic and functional similarity — ${count} processed…`,
+                ranking: `Combining scores and refining relevance — ${count} finalized…`
+            };
+            updateProgress(2, totalSteps, messages[stage] || `Scoring candidates — ${count} processed…`);
+        },
         extractor,
         weights: { mechanical: wM, synergy: wS, context: wC, exactness: wE, category: wCa },
         tags: activeTags,
@@ -21464,6 +22240,7 @@ if (candidates.length > 0) {
         activeFilters: filters
     });
     timings.scoringMs = Date.now() - scoringStartedAt;
+    if (requestId !== searchRequestId) return;
 
     // Feed this search's results (and its source card) into the session semantic corpus so a
     // LATER search - on this or any other source card, this session - can find them via Search G
@@ -21474,6 +22251,7 @@ if (candidates.length > 0) {
         recordInSessionSemanticCorpus(currentSourceCard, sourceFunctionVector, sourceOracleVector);
         let semanticCorpusSliceStartedAt = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
         for (let candidateIndex = 0; candidateIndex < candidates.length; candidateIndex++) {
+            if (requestId !== searchRequestId) return;
             const card = candidates[candidateIndex];
             const cardText = card.oracle_text || (card.card_faces ? card.card_faces.map(f => f.oracle_text || '').join(' ') : '');
             const candidateFunctionText = card._parsedEffects ? canonicalFunctionToText(getCanonicalFunctions(card._parsedEffects)) : null;
@@ -21484,6 +22262,7 @@ if (candidates.length > 0) {
                 const now = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
                 if (now - semanticCorpusSliceStartedAt >= getManaSearchSliceBudgetMs()) {
                     await yieldForManaSearchResponsiveness();
+                    if (requestId !== searchRequestId) return;
                     semanticCorpusSliceStartedAt = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
                 }
             }
@@ -21509,6 +22288,7 @@ if (candidates.length > 0) {
     // those secondary channels into hard eligibility tests.
     const scoreKey = 'similarityScore';
     candidates = await sortManaArrayResponsively(candidates, (a, b) => (b[scoreKey] || 0) - (a[scoreKey] || 0));
+    if (requestId !== searchRequestId) return;
 
     // Stage 5: Relevance Floor.
     //
@@ -21565,6 +22345,7 @@ if (candidates.length > 0) {
         candidates.filter(c => passesAbsoluteFloor(c) && (passesRelativeFloor(c) || hasStrongDirectEvidence(c))),
         (a, b) => (b[scoreKey] || 0) - (a[scoreKey] || 0)
     );
+    if (requestId !== searchRequestId) return;
 
     // Catastrophic-empty guard. A relevance floor must control noisy results, not make a valid
     // search disappear completely. This can happen when semantic calibration lowers the absolute
@@ -21602,6 +22383,7 @@ if (candidates.length > 0) {
         const rescueOrder = evidenceBearing.length > 0
             ? evidenceBearing
             : await sortManaArrayResponsively(candidates, (a, b) => (b[scoreKey] || 0) - (a[scoreKey] || 0));
+        if (requestId !== searchRequestId) return;
         qualified = rescueOrder.slice(0, Math.min(CATASTROPHIC_EMPTY_RESCUE_CAP, candidates.length));
 
         qualified.forEach(c => { c._catastrophicEmptyRescue = true; });
@@ -22979,8 +23761,21 @@ function renderResults(cards, internalOptions = {}) {
             favoriteBtn.setAttribute('aria-label', favoriteBtn.title);
             favoriteBtn.setAttribute('aria-pressed', isFav ? 'true' : 'false');
         }
+        const compareBtn = cardElement.querySelector('.compare-btn');
+        if (compareBtn) {
+            const isComparing = compareQueue.length > 1 && String(compareQueue[1]?.id || '') === String(card.id || '');
+            compareBtn.textContent = isComparing ? 'Compared' : 'Compare';
+            compareBtn.classList.toggle('is-comparing', isComparing);
+            compareBtn.setAttribute('aria-pressed', isComparing ? 'true' : 'false');
+            compareBtn.setAttribute('aria-label', isComparing ? `Currently comparing ${card.name} with the source card` : `Compare ${card.name} with the source card`);
+        }
         const checkbox = cardElement.querySelector('.related-checkbox');
-        if (checkbox) checkbox.checked = isSelected;
+        if (checkbox) {
+            checkbox.checked = isSelected;
+            checkbox.setAttribute('aria-checked', isSelected ? 'true' : 'false');
+            const selectText = checkbox.closest('.result-select-label')?.querySelector('.result-select-text');
+            if (selectText) selectText.textContent = isSelected ? 'Selected' : 'Select';
+        }
     };
 
     const createResultCard = card => {
@@ -24268,11 +25063,26 @@ function buildCompareExplanation(cardA, cardB) {
 }
 
 // --- COMPARISON & EXPORT LOGIC ---
+function syncCompareButtonFeedback() {
+    const comparedId = compareQueue.length > 1 ? String(compareQueue[1]?.id || '') : '';
+    document.querySelectorAll('.card-item .compare-btn').forEach(button => {
+        const card = button.closest('.card-item')?._resultCardData;
+        const isComparing = Boolean(comparedId && String(card?.id || '') === comparedId);
+        button.textContent = isComparing ? 'Compared' : 'Compare';
+        button.classList.toggle('is-comparing', isComparing);
+        button.setAttribute('aria-pressed', isComparing ? 'true' : 'false');
+        if (card?.name) button.setAttribute('aria-label', isComparing
+            ? `Currently comparing ${card.name} with the source card`
+            : `Compare ${card.name} with the source card`);
+    });
+}
+
 function addToCompare(card) {
     if (!currentSourceCard || !card || card.id === currentSourceCard.id) return;
     // Every Compare button is a direct comparison against the current source card.
     // Reusing the previous compareQueue made later Compare clicks appear to do nothing.
     compareQueue = [currentSourceCard, card];
+    syncCompareButtonFeedback();
     renderComparison();
 }
 
@@ -24369,6 +25179,7 @@ function buildCompareInsightModel(cardA, cardB, explanation) {
 function renderComparison() {
     if (!compareModal || !compareContainer) return;
     ensureComparePresentationStyles();
+    syncCompareButtonFeedback();
     compareModal.classList.remove('hidden');
     compareContainer.innerHTML = '';
     compareStatus.textContent = compareQueue.length === 1 ? 'Select one more card from the results to compare.' : '';

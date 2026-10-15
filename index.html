@@ -5,7 +5,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>ManaSearch</title>
-    <link rel="stylesheet" href="style.css?v=20261014-60">
+    <link rel="stylesheet" href="style.css?v=20261014-62">
 </head>
 <body>
     <header class="site-header">
@@ -23,12 +23,12 @@
             <input type="text" id="card-search-input" autocomplete="off">
             <button type="button" id="search-btn">Load Card</button>
         </div>
-        <p class="search-hint">Choose a source card below to begin, then highlight the part that matters most.</p>
+        <p class="search-hint">Choose a source card to begin. Highlighting is optional, and the default search settings are ready to use.</p>
     <aside id="first-use-help-hint" class="first-use-help-hint hidden" role="note" aria-label="Quick tip for new users">
         <div class="first-use-help-hint-copy">
             <strong>New to ManaSearch?</strong>
             <span>Hover over dotted-underlined names on desktop, or tap the small ? icons on your phone, to open visual help panels.</span>
-            <span><b>Highlight example:</b> select <mark>draw a card</mark> in a source card’s rules text. Select it again to remove the highlight.</span>
+            <span><b>Optional tip:</b> select a short phrase like <mark>draw a card</mark> in Oracle Text to focus results. You can search without a highlight.</span>
         </div>
         <div class="first-use-help-actions">
             <button type="button" id="replay-onboarding-tour-btn" class="first-use-help-dismiss">Take tour</button>
@@ -52,6 +52,45 @@
 
         <!-- Main Content Area -->
         <div class="main-content">
+            <!-- A persistent, skippable-tour-friendly guide to the everyday search flow. -->
+            <section id="quick-start-guide" class="quick-start-guide" aria-labelledby="quick-start-title">
+                <div class="quick-start-guide-header">
+                    <div class="quick-start-guide-heading">
+                        <span class="section-kicker">QUICK START</span>
+                        <h2 id="quick-start-title">Your first search, without the tour</h2>
+                        <p id="quick-start-summary" aria-live="polite">Choose a card, optionally highlight an ability, then search. You can leave the advanced settings as they are.</p>
+                    </div>
+                    <button type="button" id="quick-start-toggle" class="quick-start-toggle" aria-expanded="true" aria-controls="quick-start-steps">Hide guide</button>
+                </div>
+                <div id="quick-start-steps" class="quick-start-steps">
+                    <div id="quick-start-step-source" class="quick-start-step" data-step="source">
+                        <span class="quick-start-step-number" aria-hidden="true">1</span>
+                        <div class="quick-start-step-copy">
+                            <strong>Choose a source card</strong>
+                            <span id="quick-start-source-detail">Pick the card you want to find alternatives for.</span>
+                        </div>
+                        <button type="button" id="quick-start-choose-source" class="quick-start-action">Choose card</button>
+                    </div>
+                    <div id="quick-start-step-highlight" class="quick-start-step is-optional" data-step="highlight">
+                        <span class="quick-start-step-number" aria-hidden="true">2</span>
+                        <div class="quick-start-step-copy">
+                            <strong>Highlight an ability <em>optional</em></strong>
+                            <span id="quick-start-highlight-detail">After choosing a card, select a short phrase in its Oracle Text to focus the search. No highlight is required.</span>
+                        </div>
+                        <button type="button" id="quick-start-show-highlight" class="quick-start-action quick-start-action-secondary" disabled>Show Oracle Text</button>
+                    </div>
+                    <div id="quick-start-step-search" class="quick-start-step" data-step="search">
+                        <span class="quick-start-step-number" aria-hidden="true">3</span>
+                        <div class="quick-start-step-copy">
+                            <strong>Find similar cards</strong>
+                            <span id="quick-start-search-detail">Start with the default settings. Explore Methods, Order, and Constraints later if needed.</span>
+                        </div>
+                        <button type="button" id="quick-start-search" class="quick-start-action quick-start-action-primary" disabled>Find Similar Cards</button>
+                    </div>
+                </div>
+                <p id="quick-start-feedback" class="quick-start-feedback" role="status" aria-live="polite"></p>
+            </section>
+
             <!-- Source Card Inspection -->
             <section id="source-card-section" class="source-card-section">
                 <div class="section-heading">
@@ -59,13 +98,13 @@
                         <span class="section-kicker">SOURCE</span>
                         <h2>Source Card</h2>
                     </div>
-                    <span class="section-note">Choose a card, then highlight its type line or rules text to focus the search</span>
+                    <span class="section-note">Choose any card. Highlight a type line or rules phrase only when you want to focus the search.</span>
                 </div>
 
                 <div id="source-card-empty" class="source-card-empty-state">
                     <button type="button" id="source-card-add-btn" class="source-card-add-btn" aria-label="Choose source card" data-feature-tip="Choose the card whose mechanics you want to search from." data-feature-preview="Select a card → highlight relevant text">+</button>
                     <h3>Choose a source card</h3>
-                    <p>Search for a card to use as the starting point for ManaSearch.</p>
+                    <p>Pick a card you want alternatives for. You can search right away; highlighting a specific ability is optional.</p>
                 </div>
 
                 <div id="source-card-loaded" class="hidden">
@@ -89,8 +128,15 @@
                             <div class="oracle-container">
                                 <strong>Oracle Text</strong>
                                 <span class="oracle-help">Select text in either the type line or rules text to highlight it. Select an existing highlight again to remove it.</span>
-                                <div id="source-card-oracle" class="selectable-text"></div>
-                                <div id="highlight-chips-list" class="highlight-chip-panel"></div>
+                                <div id="source-card-oracle" class="selectable-text" aria-label="Card rules text"></div>
+                                <div id="touch-highlight-actions" class="touch-highlight-actions" hidden>
+                                    <p>On a phone, press and hold a short phrase to select it, then add the selection as a highlight.</p>
+                                    <div class="touch-highlight-buttons">
+                                        <button type="button" id="highlight-selected-oracle-btn" disabled>Highlight selected rules text</button>
+                                        <button type="button" id="highlight-selected-type-btn" class="touch-highlight-secondary" disabled>Highlight selected type line</button>
+                                    </div>
+                                </div>
+                                <div id="highlight-chips-list" class="highlight-chip-panel" aria-live="polite"></div>
                             </div>
                         </div>
                         <div id="card-tags-container" class="source-tags">
@@ -130,9 +176,9 @@
                     <div class="section-heading">
                         <div>
                             <span class="section-kicker">SEARCH WORKSPACE</span>
-                            <h2>Configure Search</h2>
+                            <h2>Search Options</h2>
                         </div>
-                        <p class="section-description">Use retrieval methods to change how cards are found, then choose how the scored results are ordered.</p>
+                        <p class="section-description">The defaults are a good place to start. Methods changes discovery, Order changes ranking, and Constraints limits which cards can appear.</p>
                     </div>
                     <div class="trigger-buttons-group">
                         <button type="button" id="toggle-search-methods-btn" class="methods-trigger-btn" data-feature-tip="Choose how ManaSearch discovers candidates." data-feature-preview="Search streams widen the candidate pool">
@@ -804,6 +850,6 @@
         window.transformers = transformers;
     </script>
     <script src="pako.min.js?v=20261012-57"></script>
-    <script type="module" src="app.js?v=20261014-60"></script>
+    <script type="module" src="app.js?v=20261015-64"></script>
 </body>
 </html>
