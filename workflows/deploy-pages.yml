@@ -1,0 +1,87 @@
+name: Deploy ManaSearch to GitHub Pages
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Do not cancel active deploys: cancellation can leave an orphaned Pages
+# deployment that blocks subsequent creates. New pushes wait for the current run.
+concurrency:
+  group: github-pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Assemble and verify the static site (no Node build required)
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf _site
+          mkdir -p _site/tests/fixtures
+
+          # ManaSearch runs entirely in each visitor's browser. This step only
+          # assembles the static assets that GitHub Pages serves.
+          cp index.html app.js style.css _site/
+          for f in pako.min.js cards.bin semantic-index.bin static-data-meta.json; do
+            test -s "$f" || { echo "Required static asset missing: $f" >&2; exit 1; }
+            cp "$f" _site/
+          done
+
+          test -s tests/fixtures/mtg-mechanical-benchmark.json
+          cp tests/fixtures/mtg-mechanical-benchmark.json _site/tests/fixtures/
+          if [ -s CNAME ]; then cp CNAME _site/; fi
+          touch _site/.nojekyll
+
+          for f in index.html app.js style.css pako.min.js cards.bin semantic-index.bin static-data-meta.json tests/fixtures/mtg-mechanical-benchmark.json; do
+            test -s "_site/$f" || { echo "Publish artifact missing: $f" >&2; exit 1; }
+          done
+          # Derive the release tag from the app source instead of hard-coding it
+          # in this workflow. Keep the strict consistency checks, but allow a new
+          # build tag without also editing the workflow file.
+          BUILD_TAG="$(sed -n "s/^[[:space:]]*const MANASEARCH_APP_BUILD = ['\"]\([^'\"]*\)[ '\"]*;[[:space:]]*$/\1/p" app.js | head -n 1)"
+          if [ -z "$BUILD_TAG" ]; then
+            echo 'Could not determine MANASEARCH_APP_BUILD from app.js' >&2
+            exit 1
+          fi
+          case "$BUILD_TAG" in
+            *[!A-Za-z0-9._-]*) echo "Invalid MANASEARCH_APP_BUILD tag: $BUILD_TAG" >&2; exit 1 ;;
+          esac
+          echo "Verifying asset references for ManaSearch build: $BUILD_TAG"
+          grep -Fq "app.js?v=${BUILD_TAG}" _site/index.html || { echo 'index.html app.js version does not match app.js build tag' >&2; exit 1; }
+          grep -Fq "pako.min.js?v=${BUILD_TAG}" _site/index.html || { echo 'index.html pako version does not match app.js build tag' >&2; exit 1; }
+          grep -Fq "style.css?v=${BUILD_TAG}" _site/index.html || { echo 'index.html stylesheet version does not match app.js build tag' >&2; exit 1; }
+          grep -Fq "const MANASEARCH_APP_BUILD = '${BUILD_TAG}'" _site/app.js || { echo 'Published app.js build tag differs from source build tag' >&2; exit 1; }
+
+          echo 'Verified static Pages artifact:'
+          ls -lh _site _site/tests/fixtures
+
+      - name: Configure GitHub Pages
+        uses: actions/configure-pages@v6
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v5
+        with:
+          path: _site
+
+  deploy:
+    runs-on: ubuntu-latest
+    needs: build
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages using Node 24-compatible action
+        id: deployment
+        uses: actions/deploy-pages@v5.0.1
