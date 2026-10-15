@@ -24683,11 +24683,39 @@ function compareMatchScore(af, bf) {
     return score;
 }
 
+// A draw-related trigger is not itself a card-draw effect. For example,
+// "Whenever you draw a card, this creature gets +2/+2" reacts to a draw performed
+// elsewhere; it does not draw a card. The canonical parser can otherwise mistake
+// the event condition for the clause's outcome, which creates false Compare matches.
+function isDrawEventTriggerOnlyEffect(effect) {
+    if (String(effect?.function || '') !== 'card_draw') return false;
+    const p = effect?.params || {};
+    const raw = String(p.raw || effect?.raw || p.clause || p.sourceText || '').replace(/\s+/g, ' ').trim();
+    if (!raw) return false;
+    const lower = raw.toLowerCase();
+    const reactsToDraw = /\b(?:whenever|when|each time|every time)\b[^.;:]*\byou draw (?:a|one|two|three|four|five|\d+|cards?)\b/i.test(raw)
+        || /\b(?:whenever|when|each time|every time)\b[^.;:]*\bdraw a card\b/i.test(raw);
+    if (!reactsToDraw) return false;
+
+    // If the clause contains an actual draw instruction after the trigger comma,
+    // retain it as a draw effect. Otherwise, the draw is merely the triggering event.
+    const triggerAt = lower.search(/\b(?:whenever|when|each time|every time)\b/);
+    const comma = triggerAt >= 0 ? lower.indexOf(',', triggerAt) : -1;
+    const outcome = comma >= 0 ? lower.slice(comma + 1) : lower;
+    const explicitlyDrawsAsOutcome = /\b(?:draw|draws)\s+(?:a|an|one|two|three|four|five|\d+|x|that many|cards?)\s+cards?\b/i.test(outcome)
+        || /\bdraw a card\b/i.test(outcome);
+    const reactsThenDoesSomethingElse = /\b(?:gets?|get|gains?|gain|loses?|lose|deals?|deal|creates?|create|puts?|put|becomes?|become|has|have|is|are|enters?|exiles?|sacrifices?|sacrifice|taps?|tap|untaps?|untap)\b/i.test(outcome);
+    return !explicitlyDrawsAsOutcome && reactsThenDoesSomethingElse;
+}
+
 function compareCompoundEffects(cardA, cardB, a, b) {
     const matches = [];
     const usedB = new Set();
-    const aEffects = a.canonical || [];
-    const bEffects = b.canonical || [];
+    // Keep trigger events distinct from their outcomes: "whenever you draw" is not
+    // equivalent to "draw a card". Filter only the false-positive comparison node;
+    // the original parsed records and search-ranking pipeline remain untouched.
+    const aEffects = (a.canonical || []).filter(effect => !isDrawEventTriggerOnlyEffect(effect));
+    const bEffects = (b.canonical || []).filter(effect => !isDrawEventTriggerOnlyEffect(effect));
 
     // Match every meaningful effect independently. This is deliberately one-to-one so a card with
     // three effects cannot make the same candidate effect appear to match all three.
