@@ -1,6 +1,6 @@
-/* ManaSearch build 20261015-73 */
+/* ManaSearch build 20261015-74 */
 // ManaSearch deployment build marker. Bump this whenever app.js changes so cached-module issues are easy to diagnose.
-const MANASEARCH_APP_BUILD = '20261015-73';
+const MANASEARCH_APP_BUILD = '20261015-74';
 console.info(`[ManaSearch] app.js build ${MANASEARCH_APP_BUILD}`);
 
 // State Management
@@ -7286,7 +7286,15 @@ function inferStrategicRoleProfile(card, parsedEffects = [], intentText = '') {
         strategicRoleAdd(roles, 'mill_engine', repeatableMill ? 0.72 : 0.63, ['mill', repeatableMill ? 'repeated mill' : null]);
     }
     if (functions.has('gain_life') && /\b(?:gain|gains)\s+(?:\d+|life)\s+life\b/.test(lower)) strategicRoleAdd(roles, 'life_gain_engine', repeatableLifeGain ? 0.72 : 0.63, ['life gain']);
-    if (functions.has('lose_life') && /\b(?:you|target|each opponent|opponent)\s+(?:lose|loses)\s+(?:\d+|life)\s+life\b/.test(lower)) strategicRoleAdd(roles, 'life_loss_engine', repeatableLifeLoss ? 0.72 : 0.63, ['life loss']);
+    const directLifeLoss = /\b(?:you|target|each opponent|opponent)\s+(?:lose|loses)\s+(?:\d+|life)\s+life\b/.test(lower);
+    // Standard Oracle wording for opponent-turn taxes often names the affected player as "that
+    // player", not "each opponent". Preserve the opponent-upkeep context so this is recognized as
+    // a recurring life-loss engine without broadly treating every "that player loses life" clause
+    // as an opponent-facing engine.
+    const opponentUpkeepLifeLoss = /\beach opponent(?:'s|’s) upkeep\b[^.]{0,180}\bthat player loses?\s+(?:\d+|x|life)\s+life\b/i.test(lower);
+    if (functions.has('lose_life') && (directLifeLoss || opponentUpkeepLifeLoss)) {
+        strategicRoleAdd(roles, 'life_loss_engine', repeatableLifeLoss ? 0.72 : 0.63, ['life loss', opponentUpkeepLifeLoss ? 'opponent upkeep trigger' : null]);
+    }
 
     roles.sort((a, b) => b.score - a.score);
     return roles.slice(0, 4);
@@ -10948,6 +10956,22 @@ function getSinglePrimaryEffectSignature(text) {
     return [...found][0];
 }
 
+// Read the destination of graveyard recovery independently from secondary text. A real card
+// such as Reanimate also makes its controller lose life, and Animate Dead has attachment/leaves-play
+// text; those secondary clauses must not hide the primary battlefield-vs-hand distinction. If a
+// card performs both kinds of recovery, return null rather than over-classifying a compound card.
+function getGraveyardReturnDestinationSignature(text) {
+    const input = String(text || '').toLowerCase().replace(/[’]/g, "'");
+    if (!/\bgraveyard\b/.test(input)) return null;
+    const hasReturnVerb = /\b(?:return|put|move|place)\b/.test(input);
+    if (!hasReturnVerb) return null;
+    const toBattlefield = /\b(?:to|onto)\s+the battlefield\b/.test(input);
+    const toHand = /\b(?:to|into)\s+(?:(?:your|its owner's|their owner's|the owner's|that player's|a player's)\s+)?hand\b/.test(input);
+    if (toBattlefield && !toHand) return 'reanimate';
+    if (toHand && !toBattlefield) return 'recursion';
+    return null;
+}
+
 function mechanicalEffectFamily(signature) {
     if (['destroy', 'exile', 'sacrifice'].includes(signature)) return 'removal';
     if (signature === 'reanimate' || signature === 'recursion') return 'recursion';
@@ -11017,6 +11041,19 @@ function inferExplicitMechanicalContrast(parsedA = [], parsedB = []) {
             kind: 'token-multiplier-vs-token-creation',
             signatures: [tokenA, tokenB],
             reason: 'replacement multiplier changes another effect instead of independently creating tokens'
+        };
+    }
+
+    // Use the unique graveyard return destination even when a card has a secondary life-loss,
+    // Aura-attachment, or sacrifice clause. Those clauses should not erase the primary destination
+    // difference between battlefield reanimation and returning a card to hand.
+    const graveyardDestinationA = getGraveyardReturnDestinationSignature(textA);
+    const graveyardDestinationB = getGraveyardReturnDestinationSignature(textB);
+    if (graveyardDestinationA && graveyardDestinationB && graveyardDestinationA !== graveyardDestinationB) {
+        return {
+            kind: 'reanimation-vs-graveyard-recursion',
+            signatures: [graveyardDestinationA, graveyardDestinationB],
+            reason: 'graveyard card returns to different destination zones'
         };
     }
 
@@ -11552,7 +11589,7 @@ function runManaSearchMechanicalRegressionSuite({ log = true } = {}) {
 // Available for development/benchmark diagnostics without changing the public UI.
 try { window.runManaSearchMechanicalRegressionSuite = runManaSearchMechanicalRegressionSuite; } catch (_) {}
 
-// V72: curated real-card benchmark. The fixture corpus lives in tests/fixtures/ so card additions
+// V74: curated real-card benchmark. The fixture corpus lives in tests/fixtures/ so card additions
 // do not require editing production logic. CI passes that offline fixture into this diagnostic and
 // exercises the same parser, repeatability annotator, profile builder, and scorer used by searches.
 // The benchmark is opt-in and has no cost during normal site usage.
@@ -11687,12 +11724,15 @@ try { window.runManaSearchRealCardBenchmarkSuite = runManaSearchRealCardBenchmar
 async function runManaSearchRealCardBenchmarkFromConsole({ log = true, benchmark = null } = {}) {
     let fixture = benchmark;
     if (!fixture) {
-        const fixtureUrl = new URL('tests/fixtures/mtg-mechanical-benchmark.json', window.location.href);
-        const response = await fetch(fixtureUrl.toString(), { cache: 'no-store' });
-        if (!response.ok) {
-            throw new Error(`Could not load the benchmark fixture (${response.status}). Confirm the Pages workflow deployed tests/fixtures/mtg-mechanical-benchmark.json.`);
+        const fixtureUrl = new URL('tests/fixtures/mtg-mechanical-benchmark.json', import.meta.url);
+        try {
+            const { value } = await fetchStaticAsset(fixtureUrl.toString(), { cache: 'no-store' }, {
+                label: 'Real-card mechanical benchmark fixture', timeoutMs: 20000, responseType: 'json'
+            });
+            fixture = value;
+        } catch (error) {
+            throw new Error(`Could not load the benchmark fixture. Confirm the Pages workflow deployed tests/fixtures/mtg-mechanical-benchmark.json. ${error?.message || error}`);
         }
-        fixture = await response.json();
     }
     const report = runManaSearchRealCardBenchmarkSuite({ benchmark: fixture, log });
     if (log) {
@@ -13460,8 +13500,43 @@ let semanticCosineBaselineReady = false;
 const STATIC_CARD_CORPUS_FILENAME = 'cards.bin';
 const STATIC_CARD_CORPUS_VERSION = 1;
 const STATIC_CARD_CORPUS_MAGIC = 'MSCARD1G';
-const STATIC_CARD_CORPUS_CACHE_VERSION = '20261011-49';
+const STATIC_CARD_CORPUS_CACHE_VERSION = '20261015-74';
 const STATIC_DATA_META_FILENAME = 'static-data-meta.json';
+
+// A failed/stalled static asset request must not leave the initial search status spinning forever.
+// The deadline covers both response headers and consuming the response body (including the large
+// cards.bin / semantic-index.bin downloads). This is only a timeout/retry wrapper; assets still come
+// from the static site and are parsed locally in the visitor's browser.
+async function fetchStaticAsset(url, options = {}, {
+    label = 'Static search asset',
+    timeoutMs = 60000,
+    responseType = 'arrayBuffer'
+} = {}) {
+    if (typeof AbortController !== 'function') {
+        const response = await fetch(url, options);
+        if (!response.ok) throw new Error(`${label} download failed (${response.status}).`);
+        const value = responseType === 'json' ? await response.json() : await response.arrayBuffer();
+        return { response, value };
+    }
+
+    const controller = new AbortController();
+    let timedOut = false;
+    const timeoutId = setTimeout(() => {
+        timedOut = true;
+        try { controller.abort(); } catch (_) {}
+    }, Math.max(1000, Number(timeoutMs) || 60000));
+    try {
+        const response = await fetch(url, { ...options, signal: controller.signal });
+        if (!response.ok) throw new Error(`${label} download failed (${response.status}).`);
+        const value = responseType === 'json' ? await response.json() : await response.arrayBuffer();
+        return { response, value };
+    } catch (error) {
+        if (timedOut) throw new Error(`${label} request timed out after ${Math.round(timeoutMs / 1000)} seconds.`);
+        throw error;
+    } finally {
+        clearTimeout(timeoutId);
+    }
+}
 let staticDataMetaPromise = null;
 let staticDataBuildId = null;
 let staticDataBuildCacheKey = null;
@@ -13704,13 +13779,11 @@ async function loadStaticDataMetadata() {
     if (staticDataMetaPromise) return staticDataMetaPromise;
     staticDataMetaPromise = (async () => {
         try {
-            const response = await fetch(getStaticDataMetaUrl(), {
+            const { value: metadata } = await fetchStaticAsset(getStaticDataMetaUrl(), {
                 method: 'GET',
                 cache: 'no-store',
                 headers: { 'Accept': 'application/json,*/*;q=0.8' }
-            });
-            if (!response.ok) throw new Error(`Static data metadata download failed (${response.status}).`);
-            const metadata = await response.json();
+            }, { label: 'Static data metadata', timeoutMs: 20000, responseType: 'json' });
             const key = String(metadata?.build_id || '').trim();
             if (!key) throw new Error('Static data metadata does not contain a build_id.');
             staticDataBuildId = key;
@@ -14054,13 +14127,11 @@ async function loadStaticCardCorpus({ retryAttempt = 1 } = {}) {
         // Without this await, a newly generated cards.bin could be requested under the
         // old compatibility cache key while semantic-index.bin correctly used the new one.
         await loadStaticDataMetadata();
-        const response = await fetch(getStaticCardCorpusUrl(retryAttempt), {
+        const { value: buffer } = await fetchStaticAsset(getStaticCardCorpusUrl(retryAttempt), {
             method: 'GET',
             cache: retryAttempt > 1 ? 'no-store' : 'force-cache',
             headers: { 'Accept': 'application/octet-stream,*/*;q=0.8' }
-        });
-        if (!response.ok) throw new Error(`Static card corpus download failed (${response.status}).`);
-        const buffer = await response.arrayBuffer();
+        }, { label: 'Static card corpus (cards.bin)', timeoutMs: 60000, responseType: 'arrayBuffer' });
         const corpus = await runWhenIdle(() => parseStaticCardCorpusBinary(buffer), { timeout: 3500 });
         staticCardCorpusMemory = corpus;
         console.info(`Precomputed card corpus loaded: ${corpus.total.toLocaleString()} cards.`);
@@ -14531,7 +14602,7 @@ const FULL_SEMANTIC_INDEX_SEARCH_LIMIT = 96;
 const STATIC_SEMANTIC_INDEX_FILENAME = 'semantic-index.bin';
 const STATIC_SEMANTIC_INDEX_VERSION = 1;
 const STATIC_SEMANTIC_INDEX_MAGIC = 'MSIDX1';
-const STATIC_SEMANTIC_INDEX_CACHE_VERSION = '20261011-49';
+const STATIC_SEMANTIC_INDEX_CACHE_VERSION = '20261015-74';
 let staticSemanticIndexPromise = null;
 let staticSemanticIndexAttempted = false;
 let staticSemanticIndexLoadError = null;
@@ -14633,15 +14704,11 @@ async function loadStaticSemanticIndex({ retryAttempt = 1 } = {}) {
     staticSemanticIndexPromise = (async () => {
         await loadStaticDataMetadata();
         const url = getStaticSemanticIndexUrl(retryAttempt);
-        const response = await fetch(url, {
+        const { value: buffer } = await fetchStaticAsset(url, {
             method: 'GET',
             cache: retryAttempt > 1 ? 'no-store' : 'force-cache',
             headers: { 'Accept': 'application/octet-stream,*/*;q=0.8' }
-        });
-        if (!response.ok) {
-            throw new Error(`Static semantic index download failed (${response.status}).`);
-        }
-        const buffer = await response.arrayBuffer();
+        }, { label: 'Static semantic index (semantic-index.bin)', timeoutMs: 60000, responseType: 'arrayBuffer' });
         const index = await runWhenIdle(() => parseStaticSemanticIndexBinary(buffer), { timeout: 3500 });
         index.staticUrl = url;
         index.byteLength = buffer.byteLength;
