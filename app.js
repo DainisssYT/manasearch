@@ -1,6 +1,6 @@
-/* ManaSearch build 20261015-72 */
+/* ManaSearch build 20261015-73 */
 // ManaSearch deployment build marker. Bump this whenever app.js changes so cached-module issues are easy to diagnose.
-const MANASEARCH_APP_BUILD = '20261015-72';
+const MANASEARCH_APP_BUILD = '20261015-73';
 console.info(`[ManaSearch] app.js build ${MANASEARCH_APP_BUILD}`);
 
 // State Management
@@ -11681,6 +11681,31 @@ function runManaSearchRealCardBenchmarkSuite({ benchmark = null, log = true } = 
 }
 try { window.runManaSearchRealCardBenchmarkSuite = runManaSearchRealCardBenchmarkSuite; } catch (_) {}
 
+// No-argument browser-console entry point for the offline, real-card benchmark. The fixture is
+// deployed as a static JSON file alongside ManaSearch, so this runs entirely in the visitor's
+// browser and needs no custom backend, paid API, or Scryfall requests.
+async function runManaSearchRealCardBenchmarkFromConsole({ log = true, benchmark = null } = {}) {
+    let fixture = benchmark;
+    if (!fixture) {
+        const fixtureUrl = new URL('tests/fixtures/mtg-mechanical-benchmark.json', window.location.href);
+        const response = await fetch(fixtureUrl.toString(), { cache: 'no-store' });
+        if (!response.ok) {
+            throw new Error(`Could not load the benchmark fixture (${response.status}). Confirm the Pages workflow deployed tests/fixtures/mtg-mechanical-benchmark.json.`);
+        }
+        fixture = await response.json();
+    }
+    const report = runManaSearchRealCardBenchmarkSuite({ benchmark: fixture, log });
+    if (log) {
+        console.info('[ManaSearch] Run complete. Inspect the returned report for cardChecks, pairChecks, score expectations and failures.', {
+            pass: report.pass, passed: report.passed, total: report.total,
+            cardCount: report.cardCount, pairCount: report.pairCount,
+            categories: report.categories, failures: report.failures
+        });
+    }
+    return report;
+}
+try { window.runManaSearchRealCardBenchmark = runManaSearchRealCardBenchmarkFromConsole; } catch (_) {}
+
 // Reproducible microbenchmark over the real production parser, repeatability annotator, universal
 // mechanic profiles, and mechanical pair scorer. It intentionally does not launch a network search
 // or mutate UI state, so CI can measure scorer regressions deterministically without Scryfall.
@@ -19812,10 +19837,7 @@ function displaySourceCard(card) {
     updateStaticSearchAvailability();
 }
 
-// 1. Batch NLP embedding calculations and chunk thread yields
-// NOTE: takes a single options object (not positional args) specifically to prevent
-// the class of argument-order bug that previously broke related-card search scoring.
-async // A one-time card-draw effect should remain discoverable, but it should not outrank true
+// A one-time card-draw effect should remain discoverable, but it should not outrank true
 // recurring draw engines just because several non-mechanical channels happen to be high.
 const SOURCE_ACQUISITION_CADENCE_RANKING_PENALTY = 0.55;
 function sourceAcquisitionCadenceRankFactor(mismatch) {
@@ -19823,7 +19845,10 @@ function sourceAcquisitionCadenceRankFactor(mismatch) {
     return Math.max(0, Math.min(1, 1 - SOURCE_ACQUISITION_CADENCE_RANKING_PENALTY * severity));
 }
 
-function scoreCardBatch({
+// 1. Batch NLP embedding calculations and chunk thread yields
+// NOTE: takes a single options object (not positional args) specifically to prevent
+// the class of argument-order bug that previously broke related-card search scoring.
+async function scoreCardBatch({
     cards,
     sourceCard,
     targetText,

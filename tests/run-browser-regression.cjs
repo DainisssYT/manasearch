@@ -7,7 +7,6 @@ const http = require('node:http');
 const fs = require('node:fs');
 const path = require('node:path');
 const assert = require('node:assert/strict');
-const benchmark = JSON.parse(fs.readFileSync(path.join(__dirname, 'fixtures', 'mtg-mechanical-benchmark.json'), 'utf8'));
 const { chromium } = require('playwright');
 
 const root = path.resolve(__dirname, '..');
@@ -51,17 +50,20 @@ async function main() {
       typeof window.runManaSearchRepeatabilityRegressionSuite === 'function' &&
       typeof window.runManaSearchHighlightIsolationSuite === 'function' &&
       typeof window.runManaSearchPerformanceSuite === 'function' &&
-      typeof window.runManaSearchRealCardBenchmarkSuite === 'function',
+      typeof window.runManaSearchRealCardBenchmarkSuite === 'function' &&
+      typeof window.runManaSearchRealCardBenchmark === 'function',
       null, { timeout: 60000 }
     );
-    const report = await page.evaluate((benchmark) => ({
+    const report = await page.evaluate(async () => ({
       base: window.runMechanicalRegressionSuite(),
       mechanical: window.runManaSearchMechanicalRegressionSuite({ log: false }),
       repeatability: window.runManaSearchRepeatabilityRegressionSuite({ log: false }),
       highlights: window.runManaSearchHighlightIsolationSuite({ log: false }),
       performance: window.runManaSearchPerformanceSuite({ iterations: 12, maxDurationMs: 15000, log: false }),
-      realCardBenchmark: window.runManaSearchRealCardBenchmarkSuite({ benchmark: benchmark, log: false })
-    }), benchmark);
+      // Exercise the same no-argument helper users call from DevTools. It fetches only the static
+      // JSON fixture on this same test server; scoring remains local and deterministic.
+      realCardBenchmark: await window.runManaSearchRealCardBenchmark({ log: false })
+    }));
     const summarize = (label, suite) => {
       if (suite?.checks) {
         const failed = suite.checks.filter(x => !x.pass);

@@ -77,7 +77,7 @@ test('production contrast classifier separates reanimation from graveyard-to-han
 
 test('production cadence rank factor strongly downranks one-shot substitutes without excluding them', () => {
   const penaltyStart = app.indexOf('const SOURCE_ACQUISITION_CADENCE_RANKING_PENALTY');
-  const scoreBatch = app.indexOf('function scoreCardBatch(', penaltyStart);
+  const scoreBatch = app.indexOf('async function scoreCardBatch(', penaltyStart);
   assert.ok(penaltyStart >= 0 && scoreBatch > penaltyStart);
   const block = app.slice(penaltyStart, scoreBatch);
   const sandbox = {};

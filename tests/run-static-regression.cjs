@@ -23,7 +23,7 @@ function check(name, fn) {
   catch (error) { checks.push({ name, pass: false, error: error.message }); }
 }
 
-check('app.js parses as valid JavaScript', () => execFileSync(process.execPath, ['--check', appPath], { stdio: 'pipe' }));
+check('app.js parses as a valid browser ES module (including reserved-word rules)', () => execFileSync(process.execPath, ['--check', '--input-type=module'], { input: app, stdio: ['pipe', 'pipe', 'pipe'] }));
 check('HTML references the current cache-busted app.js', () => {
   const match = html.match(/app\.js\?v=([^"']+)/);
   assert.ok(match, 'missing app.js script reference');
@@ -38,6 +38,13 @@ check('HTML stylesheet cache version matches the current app build', () => {
   assert.ok(build, 'missing MANASEARCH_APP_BUILD marker');
   assert.equal(cssMatch[1], build[1], `build marker and stylesheet asset version drifted: asset=${cssMatch[1]}, app=${build[1]}`);
 });
+check('HTML pako asset cache version matches current app build', () => {
+  const pakoMatch = html.match(/pako\.min\.js\?v=([^"']+)/);
+  const build = app.match(/const MANASEARCH_APP_BUILD = ['"]([^'"]+)['"]/);
+  assert.ok(pakoMatch, 'missing cache-busted pako.min.js reference');
+  assert.ok(build, 'missing MANASEARCH_APP_BUILD marker');
+  assert.equal(pakoMatch[1], build[1], `build marker and pako asset version drifted: asset=${pakoMatch[1]}, app=${build[1]}`);
+});
 check('regression and performance suites are available in the production app', () => {
   for (const name of [
     'runMechanicalRegressionSuite',
@@ -45,7 +52,8 @@ check('regression and performance suites are available in the production app', (
     'runManaSearchRepeatabilityRegressionSuite',
     'runManaSearchHighlightIsolationSuite',
     'runManaSearchPerformanceSuite',
-    'runManaSearchRealCardBenchmarkSuite'
+    'runManaSearchRealCardBenchmarkSuite',
+    'runManaSearchRealCardBenchmarkFromConsole'
   ]) assert.ok(app.includes(`function ${name}(`), `missing ${name}`);
 });
 check('mechanical suite contains blink, token-multiplier, and cadence guards', () => {
@@ -101,9 +109,17 @@ check('CSS braces are balanced', () => {
   }
   assert.equal(depth, 0, 'unclosed CSS block');
 });
+check('browser console benchmark entry point loads the deployed static fixture', () => {
+  assert.match(app, /window\.runManaSearchRealCardBenchmark\s*=\s*runManaSearchRealCardBenchmarkFromConsole/);
+  assert.match(app, /tests\/fixtures\/mtg-mechanical-benchmark\.json/);
+});
 check('test automation files exist', () => {
   assert.ok(fs.existsSync(path.join(root, 'tests', 'run-browser-regression.cjs')));
   assert.ok(fs.existsSync(path.join(root, '.github', 'workflows', 'manasearch-regression-tests.yml')));
+  assert.ok(fs.existsSync(path.join(root, '.github', 'workflows', 'deploy-pages.yml')));
+  const deploy = fs.readFileSync(path.join(root, '.github', 'workflows', 'deploy-pages.yml'), 'utf8');
+  assert.match(deploy, /cp\s+pako\.min\.js\s+_site\//);
+  assert.match(deploy, /cp\s+tests\/fixtures\/mtg-mechanical-benchmark\.json\s+_site\/tests\/fixtures\//);
   assert.ok(fs.existsSync(path.join(root, 'tests', 'fixtures', 'mtg-mechanical-benchmark.json')));
 });
 

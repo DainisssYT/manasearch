@@ -7,7 +7,7 @@ These checks exercise the **production** `app.js` parsing, ranking, repeatabilit
 Run from the repository root:
 
 ```sh
-node --check app.js
+node --check --input-type=module < app.js
 node tests/run-static-regression.cjs
 node tests/run-core-unit-regression.cjs
 node tests/run-card-benchmark-data.cjs
@@ -56,3 +56,26 @@ node tests/run-card-benchmark-data.cjs
 ```
 
 The browser runner loads the JSON fixture and passes it to `runManaSearchRealCardBenchmarkSuite`, which uses production parsing, repeatability annotation, profile construction, and scoring. Fixture card pages are provenance links only; the tests are deterministic/offline and do not fetch card data during runs. When modifying a card Oracle-text fixture, recheck its linked reference page and retain the card source URL.
+
+
+## 4. Run the real-card benchmark from the deployed browser console
+
+After the fixed v73 build has deployed, open ManaSearch, open DevTools, and run:
+
+```js
+await runManaSearchRealCardBenchmark()
+```
+
+This no-argument console helper downloads the small JSON benchmark fixture from the same GitHub Pages deployment, then runs the production parser/profile/mechanical scorer in the current browser tab. It makes no Scryfall requests and requires no backend, paid service, or additional hosting. The returned report includes `pass`, `passed`, `total`, `cardChecks`, `pairChecks`, `categories`, and `failures`.
+
+To run the other local suites individually in the console:
+
+```js
+runMechanicalRegressionSuite()
+runManaSearchMechanicalRegressionSuite()
+runManaSearchRepeatabilityRegressionSuite()
+runManaSearchHighlightIsolationSuite()
+runManaSearchPerformanceSuite()
+```
+
+The console helper requires the Pages artifact to include `tests/fixtures/mtg-mechanical-benchmark.json`; the deployment workflow now copies that fixture and `pako.min.js` to the published site. The repo remains a static GitHub Pages site: the benchmark uses a same-origin static JSON download, and all parsing/scoring happens locally in the browser.
