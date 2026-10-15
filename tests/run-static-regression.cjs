@@ -116,12 +116,19 @@ check('static data downloads have deadlines and report a useful failure instead 
   assert.match(app, /request timed out after/);
   assert.match(app, /staticSearchResourceState\.lastError = errors\.join/);
 });
-check('asset cache-bust uses v75 and the app module declaration remains async', () => {
-  assert.match(app, /const MANASEARCH_APP_BUILD = ['\"]20261015-75['\"]/);
+check('asset cache-busts match the app build marker and the app module declaration remains async', () => {
+  const build = app.match(/const MANASEARCH_APP_BUILD = ['\"]([^'\"]+)['\"]/);
+  assert.ok(build, 'missing MANASEARCH_APP_BUILD marker');
+  for (const asset of ['app.js', 'pako.min.js', 'style.css']) {
+    const escaped = asset.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const match = html.match(new RegExp(escaped + '\\?v=([^\"\']+)'));
+    assert.ok(match, `missing versioned ${asset} reference`);
+    assert.equal(match[1], build[1], `${asset} version does not match app build tag`);
+  }
   assert.match(app, /async function scoreCardBatch\(/);
-  assert.match(html, /app\.js\?v=20261015-75/);
-  assert.match(html, /pako\.min\.js\?v=20261015-75/);
-  assert.match(html, /style\.css\?v=20261015-75/);
+  const deploy = fs.readFileSync(path.join(root, '.github', 'workflows', 'deploy-pages.yml'), 'utf8');
+  assert.match(deploy, /BUILD_TAG=.*MANASEARCH_APP_BUILD/);
+  assert.doesNotMatch(deploy, /grep -Fq ['\"](?:app\.js|pako\.min\.js|style\.css)\?v=20261015-\d+['\"]/);
 });
 
 check('browser console benchmark entry point loads the deployed static fixture', () => {

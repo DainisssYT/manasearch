@@ -60,7 +60,7 @@ The browser runner loads the JSON fixture and passes it to `runManaSearchRealCar
 
 ## 4. Run the real-card benchmark from the deployed browser console
 
-After the v75 build has deployed, open ManaSearch, open DevTools, and run:
+After the v76 build has deployed, open ManaSearch, open DevTools, and run:
 
 ```js
 await runManaSearchRealCardBenchmark()
