@@ -110,6 +110,42 @@ test('the production scorer applies the new contrast score caps', () => {
   assert.match(scorer, /reanimation-vs-graveyard-recursion'\)\s*score\s*=\s*Math\.min\(score,\s*0\.72\)/);
 });
 
+test('highlighting only the draw outcome retains native clause context', () => {
+  const helperNames = [
+    'extractHighlightClauseContext', 'isSearchIntentTriggerPhrase', 'isLikelyEffectOutcomeText',
+    'getResolutionAfterTrigger', 'composeHighlightIntentOverride', 'annotateHighlightGroups',
+    'buildHighlightScoringText'
+  ];
+  const blocks = helperNames.map(name => extractFunction(name)).join('\n');
+  const sourceText = 'Whenever an opponent casts a spell, you may draw a card unless that player pays {1}.';
+  const start = sourceText.indexOf('draw a card');
+  const hs = [{ text: 'draw a card', field: 'oracle', mode: 'variable', origin: 'source', start, end: start + 'draw a card'.length, attachedTo: null }];
+  const sandbox = { output: null };
+  vm.runInNewContext(`${blocks}\nthis.output = buildHighlightScoringText(${JSON.stringify(hs)}, ${JSON.stringify(sourceText)});`, sandbox);
+  assert.match(sandbox.output, /Whenever an opponent casts a spell/i);
+  assert.match(sandbox.output, /draw a card/i);
+});
+
+test('an unattached user trigger plus selected draw outcome composes the requested trigger and drops unrelated rider', () => {
+  const helperNames = [
+    'extractHighlightClauseContext', 'isSearchIntentTriggerPhrase', 'isLikelyEffectOutcomeText',
+    'getResolutionAfterTrigger', 'composeHighlightIntentOverride', 'annotateHighlightGroups',
+    'buildHighlightScoringText'
+  ];
+  const blocks = helperNames.map(name => extractFunction(name)).join('\n');
+  const sourceText = 'Whenever an opponent casts a spell, you may draw a card unless that player pays {1}.';
+  const start = sourceText.indexOf('draw a card');
+  // Match the UI case where the user-authored detail exists first, then the user highlights the outcome.
+  const hs = [
+    { text: 'Whenever an opponent draws a card', field: 'oracle', mode: 'exact', origin: 'user', start: null, end: null, attachedTo: null, intentConnection: 'auto' },
+    { text: 'draw a card', field: 'oracle', mode: 'variable', origin: 'source', start, end: start + 'draw a card'.length, attachedTo: null }
+  ];
+  const sandbox = { output: null };
+  vm.runInNewContext(`${blocks}\nthis.output = buildHighlightScoringText(${JSON.stringify(hs)}, ${JSON.stringify(sourceText)});`, sandbox);
+  assert.match(sandbox.output, /^Whenever an opponent draws a card, you may draw a card\.?$/i);
+  assert.doesNotMatch(sandbox.output, /opponent casts a spell|unless that player pays/i);
+});
+
 const failed = cases.filter(c => !c.pass);
 for (const c of cases) console.log(`${c.pass ? 'PASS' : 'FAIL'} ${c.name}${c.error ? ` — ${c.error}` : ''}`);
 console.log(`\nCore mechanical unit checks: ${cases.length - failed.length}/${cases.length} passed.`);

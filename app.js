@@ -1,6 +1,6 @@
-/* ManaSearch build 20261015-79 */
+/* ManaSearch build 20261015-80 */
 // ManaSearch deployment build marker. Bump this whenever app.js changes so cached-module issues are easy to diagnose.
-const MANASEARCH_APP_BUILD = '20261015-79';
+const MANASEARCH_APP_BUILD = '20261015-81';
 console.info(`[ManaSearch] app.js build ${MANASEARCH_APP_BUILD}`);
 
 // State Management
@@ -4432,6 +4432,7 @@ function renderHighlightEditor(idx) {
         target.text = nextText;
         target.mode = selectedMode;
         target.attachedTo = Number.isInteger(nextAttachedTo) && nextAttachedTo !== idx ? nextAttachedTo : null;
+        target.intentConnection = Number.isInteger(target.attachedTo) ? 'attached' : 'independent';
 
         // Keep source-backed highlights visually anchored to a real occurrence. If the user
         // intentionally edits one into new wording, convert it to a search-only detail rather than
@@ -4650,6 +4651,8 @@ function renderHighlightChips() {
         const connectSelect = document.createElement('select');
         connectSelect.className = 'highlight-edit-select';
         connectSelect.setAttribute('aria-label', 'Connect added search detail to a highlight');
+        let connectionChoiceMade = false;
+        connectSelect.addEventListener('change', () => { connectionChoiceMade = true; });
         const independent = document.createElement('option');
         independent.value = '';
         independent.textContent = 'Independent';
@@ -4692,6 +4695,20 @@ function renderHighlightChips() {
                 h.mode === selectedMode && h.attachedTo === (connectSelect.value === '' ? null : Number(connectSelect.value))
             );
             if (!duplicate) {
+                let attachedTo = /^\d+$/.test(connectSelect.value) ? Number(connectSelect.value) : null;
+                // If the user adds an explicit trigger condition while exactly one Oracle effect is
+                // highlighted, connect it automatically unless they intentionally changed the
+                // connection control to Independent. This turns the natural action "highlight the
+                // outcome, then describe when it happens" into a coherent mechanical intent.
+                if (attachedTo === null && !connectionChoiceMade && isSearchIntentTriggerPhrase(text)) {
+                    const plausibleParents = highlightParentOptions(null).filter(({ h }) => {
+                        if (h.field === 'type' || !Number.isFinite(h.start) || !Number.isFinite(h.end)) return false;
+                        const clause = extractHighlightClauseContext(getCurrentSourceOracleText(), h.start, h.end);
+                        const resolution = getResolutionAfterTrigger(clause);
+                        return Boolean(resolution && isLikelyEffectOutcomeText(resolution) && resolution.toLowerCase().includes(String(h.text || '').trim().toLowerCase()));
+                    });
+                    if (plausibleParents.length === 1) attachedTo = plausibleParents[0].idx;
+                }
                 manualHighlights.push({
                     text,
                     mode: selectedMode,
@@ -4699,7 +4716,8 @@ function renderHighlightChips() {
                     colorIndex: nextHighlightColorIndex++ % 4,
                     start: null,
                     end: null,
-                    attachedTo: /^\d+$/.test(connectSelect.value) ? Number(connectSelect.value) : null
+                    attachedTo,
+                    intentConnection: attachedTo !== null ? 'attached' : (connectionChoiceMade ? 'independent' : 'auto')
                 });
             }
             input.value = '';
@@ -6914,7 +6932,9 @@ function inferEffectRepeatabilityProfile(card, effect, fullText = '') {
     if (!effect || effect.isCostEffect) return { kind: 'unknown', group: 'unknown', strength: null, confidence: 0 };
     const raw = String(effect.raw || effect.canonical?.params?.raw || '').trim();
     const contextSeed = String(effect.contextClause || effect.parentClauseRaw || raw).trim();
-    const context = findRepeatabilityContextClause(contextSeed, fullText || strategicRoleCardText(card));
+    const context = effect.searchIntentContextOverride
+        ? contextSeed
+        : findRepeatabilityContextClause(contextSeed, fullText || strategicRoleCardText(card));
     const combined = `${context} ${raw}`.trim();
     const lower = combined.toLowerCase();
     const typeLine = String(card?.type_line || '').toLowerCase();
@@ -7768,11 +7788,13 @@ function buildHighlightScoringText(highlights, sourceText = getCurrentSourceOrac
     if (!groups.length) return '';
 
     return groups.map(group => {
-        const sourceContext = String(group.contextText || '').trim();
-        const intentHints = (group.connectedIntentTexts || []).filter(Boolean).map(v => String(v).trim());
+        const sourceContext = String(group.parseText || group.sourceClauseText || group.contextText || '').trim();
+        const intentHints = (group.connectedIntentTexts || [])
+            .filter(value => Boolean(value) && (!group.triggerIntentOverride || String(value).trim() !== group.triggerIntentOverrideText))
+            .map(v => String(v).trim());
         return [sourceContext, ...intentHints]
             .filter(Boolean)
-            .join(' ');
+            .join('. ');
     }).filter(Boolean).join('. ');
 }
 
@@ -7979,6 +8001,81 @@ function maxOneToOneHighlightAssignment(sourceEffects, candidateEffects, mode) {
     return { score: score / maxPossible, matches };
 }
 
+// Return the complete Oracle sentence/clause governing a selected span. Parsing only the
+// selected words (for example, "draw a card") loses the trigger condition that makes the effect
+// mechanically distinctive. The selection remains the literal constraint; this expanded context
+// is for mechanic parsing, cadence, intent explanation, and semantic retrieval.
+function extractHighlightClauseContext(sourceText, start, end) {
+    const text = String(sourceText || '');
+    if (!Number.isFinite(start) || !Number.isFinite(end) || start < 0 || end <= start || end > text.length) return '';
+    let left = 0;
+    for (let i = start - 1; i >= 0; i--) {
+        if (/[.!?;\n]/.test(text[i])) { left = i + 1; break; }
+    }
+    let right = text.length;
+    for (let i = end; i < text.length; i++) {
+        if (/[.!?;\n]/.test(text[i])) { right = i + 1; break; }
+    }
+    return text.slice(left, right).trim();
+}
+
+function isSearchIntentTriggerPhrase(value) {
+    const text = String(value || '').trim();
+    return /^(?:when|whenever)\b/i.test(text) ||
+        /^(?:at\s+(?:(?:the\s+)?(?:beginning|start|end)\s+of|your|each|every|each opponent's|each player's)\b|during\s+|each\s+(?:opponent's|player's)\s+(?:upkeep|end step|draw step|combat|turn)\b)/i.test(text);
+}
+
+function isLikelyEffectOutcomeText(value) {
+    return /\b(?:draw|create|produce|add|deal|destroy|exile|return|put|move|gain|lose|discard|mill|search|counter|untap|tap|sacrifice|gets?|get|put|place|prevent|double|copy|reveal|shuffle|scry|surveil|transform|fight)\b/i.test(String(value || ''));
+}
+
+function getResolutionAfterTrigger(sourceClause) {
+    const text = String(sourceClause || '').trim();
+    if (!text) return '';
+    const comma = text.indexOf(',');
+    if (comma > 0) {
+        const lead = text.slice(0, comma).trim();
+        const rest = text.slice(comma + 1).trim();
+        if (isSearchIntentTriggerPhrase(lead) && rest) return rest;
+    }
+    // If the selected source clause is itself the effect ("Draw a card."), it can be paired
+    // with an explicitly supplied trigger detail. Do not use a trigger-only source sentence as an
+    // outcome: it contains no resolution to compose.
+    if (!isSearchIntentTriggerPhrase(text) && isLikelyEffectOutcomeText(text)) return text;
+    return '';
+}
+
+function composeHighlightIntentOverride(sourceClause, triggerDetail, selectedEffectText = '') {
+    const detail = String(triggerDetail || '').trim().replace(/[\s,;.!?]+$/g, '');
+    const source = String(sourceClause || '').trim();
+    if (!detail || !isSearchIntentTriggerPhrase(detail)) return null;
+
+    // A user may supply the whole intended rule, e.g. "Whenever an opponent draws a card, draw
+    // a card." In that case use it directly rather than adding a duplicate resolution.
+    const comma = detail.indexOf(',');
+    if (comma > 0 && isLikelyEffectOutcomeText(detail.slice(comma + 1))) return detail;
+
+    const resolution = getResolutionAfterTrigger(source);
+    const selected = String(selectedEffectText || '').trim();
+    if (!resolution || !isLikelyEffectOutcomeText(resolution)) return null;
+    if (selected && !resolution.toLowerCase().includes(selected.toLowerCase())) return null;
+
+    // When the user focuses specifically on "draw a card", don't carry over the tail of a
+    // different source trigger such as "unless that player pays {1}". That restriction belongs
+    // to Rhystic Study's original cast trigger, not the user's replacement trigger. Keep a simple
+    // optional/subject prefix ("you may draw a card"), but stop at the selected draw outcome.
+    let intendedResolution = resolution;
+    if (/\bdraw\s+(?:(?:a|one|two|three|four|five|six|seven|eight|nine|ten|\d+)\s+)?cards?\b/i.test(selected)) {
+        const selectedAt = resolution.toLowerCase().indexOf(selected.toLowerCase());
+        if (selectedAt >= 0) {
+            const prefix = resolution.slice(0, selectedAt).trim();
+            const safePrefix = /^(?:(?:you|that player|each player|target player|the controller|its controller|that opponent)(?:\s+|$))?(?:(?:may|must|can|also|then)(?:\s+|$))*$/i.test(prefix);
+            if (safePrefix) intendedResolution = [prefix, selected].filter(Boolean).join(' ');
+        }
+    }
+    return `${detail}, ${intendedResolution}`;
+}
+
 // Group multiple UI selections that belong to one grammatical effect. The source text between
 // the selections is preserved, because the connective words often carry the actual rules syntax.
 function annotateHighlightGroups(highlights, sourceText = getCurrentSourceOracleText()) {
@@ -8024,6 +8121,27 @@ function annotateHighlightGroups(highlights, sourceText = getCurrentSourceOracle
     // colorless mana". The attached intent belongs to that effect even though it does not exist
     // literally in the source Oracle text.
     const indexByOriginal = new Map(hs.map((h, i) => [h._highlightIndex, i]));
+
+    // Older/manual search details may not have an explicit attachment yet. If exactly one
+    // trigger-shaped search detail and one source-backed effect selection exist, infer that
+    // unambiguous relationship unless the user explicitly saved it as Independent. This is what
+    // makes adding "Whenever an opponent draws a card" beside a selected "draw a card" phrase work
+    // without requiring a hidden connection-setting step.
+    const validSourceEffectHighlights = hs.filter(h => {
+        if (!h || h.origin === 'user' || h.field === 'type' || !Number.isFinite(h.start) || !Number.isFinite(h.end) || h.end <= h.start) return false;
+        return String(sourceText || '').slice(h.start, h.end).toLowerCase() === String(h.text || '').trim().toLowerCase();
+    });
+    const unconnectedTriggerDetails = hs.filter(h => h?.origin === 'user' && !Number.isInteger(h.attachedTo) && h.intentConnection !== 'independent' && isSearchIntentTriggerPhrase(h.text));
+    if (validSourceEffectHighlights.length === 1 && unconnectedTriggerDetails.length === 1) {
+        const onlySource = validSourceEffectHighlights[0];
+        const sourceClause = extractHighlightClauseContext(sourceText, onlySource.start, onlySource.end);
+        const resolution = getResolutionAfterTrigger(sourceClause);
+        if (resolution && isLikelyEffectOutcomeText(resolution) && resolution.toLowerCase().includes(String(onlySource.text || '').trim().toLowerCase())) {
+            unconnectedTriggerDetails[0].attachedTo = onlySource._highlightIndex;
+            unconnectedTriggerDetails[0].intentConnection = 'inferred';
+        }
+    }
+
     hs.forEach((h, localIndex) => {
         const targetOriginalIndex = Number.isInteger(h.attachedTo) ? h.attachedTo : null;
         if (targetOriginalIndex === null || targetOriginalIndex === h._highlightIndex) return;
@@ -8061,10 +8179,25 @@ function annotateHighlightGroups(highlights, sourceText = getCurrentSourceOracle
         const contextText = start !== null && end !== null
             ? String(sourceText || '').slice(start, end).trim()
             : '';
+        const sourceClauseText = start !== null && end !== null
+            ? extractHighlightClauseContext(sourceText, start, end)
+            : '';
         const connectedIntentTexts = group
             .filter(h => h.origin === 'user' || h.field === 'type' || !Number.isFinite(h.start) || !Number.isFinite(h.end))
             .map(h => h.field === 'type' ? `Card type line: ${String(h.text || '').trim()}` : String(h.text || '').trim())
             .filter(Boolean);
+        const positionedEffectSelections = group.filter(h => h.origin !== 'user' && h.field !== 'type' && Number.isFinite(h.start) && Number.isFinite(h.end));
+        const triggerIntentText = connectedIntentTexts.find(isSearchIntentTriggerPhrase) || '';
+        const selectedEffectText = positionedEffectSelections.map(h => String(h.text || '').trim()).filter(Boolean).join(' ');
+        const triggerOverrideClause = triggerIntentText && positionedEffectSelections.length
+            ? composeHighlightIntentOverride(sourceClauseText || contextText, triggerIntentText, selectedEffectText)
+            : null;
+        // Parse the full source clause to retain the real trigger/condition around a selected
+        // action fragment. If a trigger-shaped Search detail is connected (or unambiguously inferred)
+        // to that effect, compose the detail with the selected effect outcome so both intent and
+        // scoring use the intended trigger rather than the source card's unrelated native trigger.
+        const parseText = triggerOverrideClause || sourceClauseText || contextText || group.map(h => h.text).filter(Boolean).join(' ');
+        const remainingIntentTexts = connectedIntentTexts.filter(value => !triggerOverrideClause || value !== triggerIntentText);
         const hasExact = group.some(h => h.mode !== 'variable');
         const hasVariable = group.some(h => h.mode === 'variable');
         const groupMode = hasExact && hasVariable ? 'mixed' : (hasVariable ? 'variable' : 'exact');
@@ -8073,8 +8206,12 @@ function annotateHighlightGroups(highlights, sourceText = getCurrentSourceOracle
         const variableTexts = group.filter(h => h.mode === 'variable').map(h => h.text.trim());
         const modes = group.map(h => h.mode === 'variable' ? 'variable' : 'exact');
         group.contextText = contextText || group.filter(h => Number.isFinite(h.start)).map(h => h.text.trim()).join(' ');
+        group.sourceClauseText = sourceClauseText || group.contextText;
+        group.parseText = parseText;
+        group.triggerIntentOverrideText = triggerOverrideClause ? triggerIntentText : '';
+        group.triggerIntentOverride = Boolean(triggerOverrideClause);
         group.connectedIntentTexts = connectedIntentTexts;
-        group.searchIntentText = [group.contextText, ...connectedIntentTexts].filter(Boolean).join(' ');
+        group.searchIntentText = [parseText, ...remainingIntentTexts].filter(Boolean).join('. ');
         group.sourceStart = start;
         group.sourceEnd = end;
         group.mode = groupMode;
@@ -8102,7 +8239,7 @@ function annotateHighlightGroups(highlights, sourceText = getCurrentSourceOracle
     return groups;
 }
 
-function buildHighlightIntentProfiles(highlights) {
+function buildHighlightIntentProfiles(highlights, sourceCard = currentSourceCard, sourceText = getCurrentSourceOracleText(sourceCard)) {
     const allHighlights = Array.isArray(highlights) ? highlights : [];
     const effectEntries = allHighlights.map((highlight, originalIndex) => ({ highlight, originalIndex }))
         .filter(entry => entry.highlight?.field !== 'type');
@@ -8111,18 +8248,19 @@ function buildHighlightIntentProfiles(highlights) {
         ...highlight,
         attachedTo: Number.isInteger(highlight.attachedTo) ? (remappedIndex.get(highlight.attachedTo) ?? null) : null
     }));
-    const groups = annotateHighlightGroups(effectHighlights, getCurrentSourceOracleText());
+    const groups = annotateHighlightGroups(effectHighlights, sourceText);
     return groups.map((group, index) => {
-        // Parse only text that actually exists on the source card. Attached search details are
-        // intentionally NOT injected into the rules parser because phrases like "produces 3
-        // colorless mana" can be useful search intent but are not necessarily valid Oracle grammar.
-        // They are carried separately as semantic/retrieval hints below.
-        let parsedEffects = parseMTGEffect(group.contextText || group.map(h => h.text).filter(Boolean).join(' '));
-        if (group.length && Number.isFinite(group.sourceStart) && Number.isFinite(group.sourceEnd)) {
-            const sourceText = getCurrentSourceOracleText();
-            const contextual = String(sourceText || '').slice(group.sourceStart, group.sourceEnd).trim();
-            if (contextual) parsedEffects = parseMTGEffect(contextual);
-        }
+        // Source-selected text is parsed in its full clause context so trigger conditions survive
+        // selection of only the outcome phrase. A connected trigger-shaped Search detail is a
+        // deliberate override and is composed with that outcome in group.parseText; ordinary
+        // Search details (e.g. "produces three colorless mana") remain semantic hints only.
+        let parsedEffects = parseMTGEffect(group.parseText || group.sourceClauseText || group.contextText || group.map(h => h.text).filter(Boolean).join(' '));
+        parsedEffects.forEach(effect => {
+            if (effect && typeof effect === 'object') {
+                effect.contextClause = String(group.parseText || group.sourceClauseText || group.contextText || effect.raw || '').trim();
+                effect.searchIntentContextOverride = Boolean(group.triggerIntentOverride);
+            }
+        });
         let canonicalFunctions = getCanonicalFunctions(parsedEffects);
         let recognizedEffects = parsedEffects.filter(e => e.action && e.action !== 'generic');
 
@@ -8150,7 +8288,11 @@ function buildHighlightIntentProfiles(highlights) {
             text: group.contextText,
             contextText: group.contextText,
             searchIntentText: group.searchIntentText,
-            connectedIntentTexts: group.connectedIntentTexts || [],
+            sourceClauseText: group.sourceClauseText || '',
+            parseText: group.parseText || '',
+            triggerIntentOverrideText: group.triggerIntentOverrideText || '',
+            triggerIntentOverride: Boolean(group.triggerIntentOverride),
+            connectedIntentTexts: (group.connectedIntentTexts || []).filter(value => !group.triggerIntentOverride || String(value).trim() !== group.triggerIntentOverrideText),
             selections: group.selections,
             modes: group.modes,
             mode: group.mode,
@@ -21619,6 +21761,7 @@ function getSearchIntent(sourceCard, highlights = []) {
         typeStart: Number.isInteger(h?.typeStart) ? h.typeStart : null,
         typeEnd: Number.isInteger(h?.typeEnd) ? h.typeEnd : null,
         attachedTo: Number.isInteger(h?.attachedTo) ? h.attachedTo : null,
+        intentConnection: h?.intentConnection || '',
         intent: String(h?.intent || ''),
         benchmarkIntentOnly: Boolean(h?.benchmarkIntentOnly)
     })));
@@ -21640,9 +21783,11 @@ function getSearchIntent(sourceCard, highlights = []) {
 
     let parsedEffects;
     if (hasHighlight) {
-        // Parse only the source-card Oracle excerpts, never the attached search-only wording.
-        // The latter is semantic/retrieval intent and may not be valid MTG grammar.
-        const profiles = buildHighlightIntentProfiles(highlights);
+        // Parse source Oracle clauses for their complete trigger/outcome context. A trigger-shaped
+        // user Search detail explicitly connected (or unambiguously inferred) to a selected outcome
+        // is composed into the effective clause so ranking uses that intended trigger, not the
+        // source card's unrelated original trigger. Other user details remain semantic hints only.
+        const profiles = buildHighlightIntentProfiles(highlights, sourceCard, sourceText);
         parsedEffects = profiles.flatMap(p => p.recognizedEffects?.length ? p.recognizedEffects : (p.parsedEffects || []));
         if (!parsedEffects.length) {
             const sourceOnlyText = (profiles.map(p => p.contextText).filter(Boolean).join('. ') || sourceText);
@@ -21985,7 +22130,54 @@ function runManaSearchIntentRegressionSuite() {
         check('exact-highlight-is-described-in-live-intent', exact?.hasHighlight && exact.highlightsView.some(h => h.text === 'draw a card' && h.mode === 'Exact') && /Exact highlights require matching text/i.test(exact.summary), exact?.summary || '');
         manualHighlights = [{ text: 'draw a card', field: 'oracle', mode: 'variable', origin: 'source', start, end: start + 'draw a card'.length, colorIndex: 0, attachedTo: null }];
         const flexible = buildSearchIntentPresentationModel(rhystic, manualHighlights);
-        check('flexible-highlight-changes-match-guidance', flexible?.hasHighlight && flexible.highlightsView.some(h => h.mode === 'Flexible') && /Flexible highlights allow/i.test(flexible.summary), flexible?.summary || '');
+        check('flexible-highlight-changes-match-guidance', flexible?.hasHighlight && flexible.highlightsView.some(h => h.mode === 'Flexible') && /Flexible highlights focus on matching mechanics even when wording differs/i.test(flexible.summary) && exact?.summary !== flexible?.summary && /Flexible spans allow the wording or numeric values to differ/i.test(flexible?.focusExplanation || ''), flexible?.summary || '');
+
+        // Selecting only the action phrase must keep its governing clause, so a card-draw
+        // highlight on Rhystic Study still understands the native opponent-casts trigger.
+        const selectedStart = rhystic.oracle_text.toLowerCase().indexOf('draw a card');
+        manualHighlights = [{ text: 'draw a card', field: 'oracle', mode: 'variable', origin: 'source', start: selectedStart, end: selectedStart + 'draw a card'.length, colorIndex: 0, attachedTo: null }];
+        const selectedOnlyIntent = getSearchIntent(rhystic, manualHighlights);
+        const selectedOnlyDraw = (selectedOnlyIntent.parsedEffects || []).find(effect => effect?.canonical?.function === 'card_draw');
+        check('selected-draw-phrase-retains-native-trigger-context', Boolean(selectedOnlyDraw?.triggerProfile?.event === 'casts_spell') && /Whenever an opponent casts a spell/i.test(selectedOnlyIntent.targetText), JSON.stringify({ summary: buildSearchIntentPresentationModel(rhystic, manualHighlights)?.summary, trigger: selectedOnlyDraw?.triggerProfile }));
+
+        // A trigger-shaped Search detail connected to a selected result changes the effective
+        // intent and the actual parsed scoring effects, not only the panel's descriptive wording.
+        manualHighlights = [
+            { text: 'draw a card', field: 'oracle', mode: 'variable', origin: 'source', start: selectedStart, end: selectedStart + 'draw a card'.length, colorIndex: 0, attachedTo: null },
+            { text: 'Whenever an opponent draws a card', field: 'oracle', mode: 'exact', origin: 'user', start: null, end: null, colorIndex: 1, attachedTo: 0, intentConnection: 'attached' }
+        ];
+        const customTriggerIntent = getSearchIntent(rhystic, manualHighlights);
+        const customTriggerDraw = (customTriggerIntent.parsedEffects || []).find(effect => effect?.canonical?.function === 'card_draw');
+        const customTriggerModel = buildSearchIntentPresentationModel(rhystic, manualHighlights);
+        check('connected-trigger-detail-overrides-native-trigger-in-scorer-profile', customTriggerDraw?.triggerProfile?.event === 'draw_card' && customTriggerDraw?.searchIntentContextOverride === true && /Whenever an opponent draws a card, you may draw a card/i.test(customTriggerIntent.targetText), JSON.stringify({ trigger: customTriggerDraw?.triggerProfile, targetText: customTriggerIntent.targetText }));
+        check('search-intent-summary-reflects-connected-trigger-detail', /opponent draws a card/i.test(customTriggerModel?.summary || '') && !/opponent casts a spell/i.test(customTriggerModel?.summary || '') && customTriggerModel?.effectViews?.some(effect => effect.fn === 'card_draw' && /Repeatable triggered ability/i.test(effect.cadence.label)), customTriggerModel?.summary || '');
+        check('trigger-override-drops-unrelated-native-trigger-restrictions', /Whenever an opponent draws a card, you may draw a card\.?/i.test(customTriggerIntent.targetText) && !/unless that player pays/i.test(customTriggerIntent.targetText) && !/opponent casts a spell/i.test(customTriggerIntent.targetText), customTriggerIntent.targetText || '');
+
+        // Reproduce the UI state from the reported issue: a user-added Exact trigger detail can
+        // predate the source selection, so it may have no attachment index yet. In that unambiguous
+        // one-detail/one-outcome case, inference must attach it regardless of chip order.
+        manualHighlights = [
+            { text: 'Whenever an opponent draws a card', field: 'oracle', mode: 'exact', origin: 'user', start: null, end: null, colorIndex: 1, attachedTo: null, intentConnection: 'auto' },
+            { text: 'draw a card', field: 'oracle', mode: 'variable', origin: 'source', start: selectedStart, end: selectedStart + 'draw a card'.length, colorIndex: 0, attachedTo: null }
+        ];
+        const inferredTriggerIntent = getSearchIntent(rhystic, manualHighlights);
+        const inferredTriggerDraw = (inferredTriggerIntent.parsedEffects || []).find(effect => effect?.canonical?.function === 'card_draw');
+        const inferredTriggerModel = buildSearchIntentPresentationModel(rhystic, manualHighlights);
+        check('unattached-search-trigger-infers-connection-to-single-highlighted-outcome', inferredTriggerDraw?.triggerProfile?.event === 'draw_card' && inferredTriggerDraw?.searchIntentContextOverride === true && /Whenever an opponent draws a card, you may draw a card/i.test(inferredTriggerIntent.targetText), JSON.stringify({ trigger: inferredTriggerDraw?.triggerProfile, targetText: inferredTriggerIntent.targetText }));
+        check('inferred-intent-summary-uses-user-selected-trigger', /opponent draws a card/i.test(inferredTriggerModel?.summary || '') && !/opponent casts a spell/i.test(inferredTriggerModel?.summary || ''), inferredTriggerModel?.summary || '');
+
+        // The corrected intent must affect the production mechanical scorer: cards that actually
+        // draw when an opponent draws should beat cards that draw when an opponent casts a spell.
+        const intendedTriggerCard = { name: 'Draw on Opponent Draw', type_line: 'Enchantment', oracle_text: 'Whenever an opponent draws a card, draw a card.' };
+        const castTriggerCard = { name: 'Draw on Opponent Cast', type_line: 'Enchantment', oracle_text: 'Whenever an opponent casts a spell, draw a card.' };
+        const intendedTriggerEffects = parseMTGEffect(intendedTriggerCard.oracle_text);
+        const castTriggerEffects = parseMTGEffect(castTriggerCard.oracle_text);
+        annotateEffectRepeatability(intendedTriggerCard, intendedTriggerEffects, intendedTriggerCard.oracle_text);
+        annotateEffectRepeatability(castTriggerCard, castTriggerEffects, castTriggerCard.oracle_text);
+        const intendedTriggerScore = calculateMechanicalSimilarityDetailed(inferredTriggerIntent.parsedEffects, intendedTriggerEffects).score;
+        const castTriggerScore = calculateMechanicalSimilarityDetailed(inferredTriggerIntent.parsedEffects, castTriggerEffects).score;
+        check('mechanical-score-prefers-matching-opponent-draw-trigger', intendedTriggerScore > castTriggerScore + 0.05, JSON.stringify({ intendedTriggerScore, castTriggerScore }));
+
         const chronicler = { name: 'Chronicler of Heroes', type_line: 'Creature — Centaur Wizard', oracle_text: 'When Chronicler of Heroes enters the battlefield, draw a card if you control a creature with a +1/+1 counter on it.' };
         currentSourceCard = chronicler;
         manualHighlights = [];

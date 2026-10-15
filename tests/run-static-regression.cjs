@@ -143,6 +143,12 @@ check('optional live Search intent preference is off by default and exposed in P
   assert.match(html, /id="preference-show-search-intent"/);
   assert.match(html, /id="search-intent-panel"[^>]*class="search-intent-panel hidden"/);
 });
+check('Search intent Exact/Flexible regression matches the user-facing guidance', () => {
+  assert.match(app, /Flexible highlights focus on matching mechanics even when wording differs/i);
+  assert.match(app, /exact\?\.summary !== flexible\?\.summary/);
+  assert.match(app, /Flexible spans allow the wording or numeric values to differ/i);
+  assert.doesNotMatch(app, /Flexible highlights allow\/i\.test\(flexible\.summary\)/);
+});
 check('Search intent refreshes from the production source/highlight model and is generation-safe', () => {
   assert.match(app, /buildSearchIntentPresentationModel\(sourceCard = currentSourceCard, highlights = manualHighlights\)/);
   assert.match(app, /getSearchIntent\(sourceCard, activeHighlights\)/);
@@ -153,6 +159,15 @@ check('Search intent refreshes from the production source/highlight model and is
   assert.match(app, /notifyManaSearchHighlightsChanged\(\);[\s\S]{0,120}highlight/i);
   assert.match(app, /manaSearchIntentRenderGeneration/);
   assert.match(app, /requestAnimationFrame\(\(\) =>/);
+});
+check('selected outcome plus a custom trigger feeds the same context into retrieval and scoring', () => {
+  assert.match(app, /function extractHighlightClauseContext\(/);
+  assert.match(app, /function composeHighlightIntentOverride\(/);
+  assert.match(app, /const profiles = buildHighlightIntentProfiles\(highlights, sourceCard, sourceText\)/);
+  assert.match(app, /mechanical-score-prefers-matching-opponent-draw-trigger/);
+  assert.match(app, /unattached-search-trigger-infers-connection-to-single-highlighted-outcome/);
+  assert.match(app, /trigger-override-drops-unrelated-native-trigger-restrictions/);
+  assert.match(app, /sourceTextToParse = \(hasEffectHighlight && targetText\) \? \(buildHighlightScoringText\(effectHighlights, sourceText\)/);
 });
 check('test automation files exist', () => {
   assert.ok(fs.existsSync(path.join(root, 'tests', 'run-browser-regression.cjs')));
