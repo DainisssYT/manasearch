@@ -5,7 +5,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>ManaSearch</title>
-    <link rel="stylesheet" href="style.css?v=20261015-66">
+    <link rel="stylesheet" href="style.css?v=20261015-67">
 </head>
 <body>
     <header class="site-header">
@@ -752,6 +752,17 @@
                     </label>
                 </div>
 
+                <div class="preference-setting preference-toggle-setting">
+                    <div class="preference-setting-copy">
+                        <label for="preference-show-edhrec-button"><strong>Show EDHREC buttons on candidate cards</strong></label>
+                        <span>Add a link to each candidate. Commander-eligible cards open their EDHREC budget commander page; other cards open their EDHREC card page. Opens in a new tab.</span>
+                    </div>
+                    <label class="preference-switch">
+                        <input type="checkbox" id="preference-show-edhrec-button" checked>
+                        <span class="preference-switch-track" aria-hidden="true"></span>
+                    </label>
+                </div>
+
                 <div class="preference-setting">
                     <div class="preference-setting-copy">
                         <label for="preference-result-density"><strong>Result card density</strong></label>
@@ -850,6 +861,6 @@
         window.transformers = transformers;
     </script>
     <script src="pako.min.js?v=20261012-57"></script>
-    <script type="module" src="app.js?v=20261015-66"></script>
+    <script type="module" src="app.js?v=20261015-67"></script>
 </body>
 </html>

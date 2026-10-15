@@ -6705,3 +6705,59 @@ body.compact-results .result-score-breakdown .card-price-label { font-size: 10px
     .touch-highlight-buttons { gap: 8px; }
     .touch-highlight-buttons button { min-height: 44px; }
 }
+
+
+/* Candidate-card EDHREC shortcut: a full-width second action row, styled using the active theme. */
+.card-actions .edhrec-link-btn {
+    grid-column: 1 / -1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    box-sizing: border-box;
+    width: 100%;
+    min-width: 0;
+    min-height: 38px;
+    padding: 8px 12px;
+    border: 1px solid color-mix(in srgb, var(--accent-color) 62%, var(--border-color));
+    border-radius: 8px;
+    background: color-mix(in srgb, var(--accent-color) 9%, var(--bg-primary));
+    color: var(--text-main);
+    font-size: 12px;
+    font-weight: 800;
+    line-height: 1.2;
+    text-align: center;
+    text-decoration: none;
+    cursor: pointer;
+    transition: background-color .14s ease, border-color .14s ease, transform .14s ease;
+}
+.card-actions .edhrec-link-btn:hover {
+    background: color-mix(in srgb, var(--accent-color) 17%, var(--bg-primary));
+    border-color: var(--accent-color);
+    color: var(--text-main);
+}
+.card-actions .edhrec-link-btn:focus-visible {
+    outline: 2px solid var(--accent-color);
+    outline-offset: 2px;
+}
+.card-actions .edhrec-link-btn[hidden] {
+    display: none !important;
+}
+body.compact-results .card-actions .edhrec-link-btn {
+    min-height: 34px;
+    padding: 6px 8px;
+    font-size: 11px;
+}
+body.light-theme .card-actions .edhrec-link-btn {
+    background: color-mix(in srgb, var(--accent-color) 7%, #fff);
+    border-color: color-mix(in srgb, var(--accent-color) 48%, var(--border-color));
+}
+body.light-theme .card-actions .edhrec-link-btn:hover {
+    background: color-mix(in srgb, var(--accent-color) 13%, #fff);
+}
+@media (max-width: 760px) {
+    .card-actions .edhrec-link-btn { min-height: 44px; font-size: 13px; }
+    body.compact-results .card-actions .edhrec-link-btn { min-height: 42px; font-size: 12px; }
+}
+@media (hover: none), (pointer: coarse) {
+    .card-actions .edhrec-link-btn:hover { transform: none; }
+}

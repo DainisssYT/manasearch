@@ -1,6 +1,6 @@
-/* ManaSearch build 20261015-64 */
+/* ManaSearch build 20261015-67 */
 // ManaSearch deployment build marker. Bump this whenever app.js changes so cached-module issues are easy to diagnose.
-const MANASEARCH_APP_BUILD = '20261015-64';
+const MANASEARCH_APP_BUILD = '20261015-67';
 console.info(`[ManaSearch] app.js build ${MANASEARCH_APP_BUILD}`);
 
 // State Management
@@ -481,9 +481,46 @@ const DEFAULT_DISPLAY_PREFERENCES = Object.freeze({
     reduceMotion: false,
     showStreamProgress: true,
     includeDigitalCards: false,
-    includeTokenEmblemFunnyCards: false
+    includeTokenEmblemFunnyCards: false,
+    showEdhrecButton: true
 });
 let displayPreferences = { ...DEFAULT_DISPLAY_PREFERENCES };
+
+// EDHREC links are generated from the card's display name rather than a user-supplied URL.
+// Commander-eligible cards use the budget commander edge (matching EDHREC's commander URL pattern);
+// other candidates open their individual card page. This remains a normal external link so the
+// browser handles opening a new tab and users can inspect/copy the destination before navigating.
+function slugifyEdhrecCardName(name) {
+    return String(name || '')
+        .normalize('NFKD')
+        .replace(/[\u0300-\u036f]/g, '')
+        .toLowerCase()
+        .replace(/&/g, ' and ')
+        .replace(/[’‘'`]/g, '')
+        .replace(/[^a-z0-9]+/g, '-')
+        .replace(/^-+|-+$/g, '')
+        .replace(/-{2,}/g, '-');
+}
+
+function getEdhrecUrlForCard(card) {
+    const name = String(card?.name || '').trim();
+    const slug = slugifyEdhrecCardName(name);
+    if (!slug) return 'https://edhrec.com';
+
+    const faceTypes = Array.isArray(card?.card_faces)
+        ? card.card_faces.map(face => String(face?.type_line || '')).join(' ')
+        : '';
+    const typeLine = `${String(card?.type_line || '')} ${faceTypes}`;
+    const oracleText = [card?.oracle_text, ...(Array.isArray(card?.card_faces) ? card.card_faces.map(face => face?.oracle_text) : [])]
+        .filter(Boolean).join(' ');
+    const commanderEligible =
+        (/\blegendary\b/i.test(typeLine) && /\bcreature\b/i.test(typeLine)) ||
+        /\bcan be your commander\b/i.test(oracleText);
+    const path = commanderEligible
+        ? `/commanders/${slug}/budget`
+        : `/cards/${slug}`;
+    return `https://edhrec.com${path}`;
+}
 
 function clampDisplayResultLimit(value) {
     const parsed = Number(value);
@@ -515,7 +552,9 @@ function loadDisplayPreferences() {
         reduceMotion: Boolean(stored?.reduceMotion),
         showStreamProgress: stored?.showStreamProgress !== false,
         includeDigitalCards: stored?.includeDigitalCards === true,
-        includeTokenEmblemFunnyCards: stored?.includeTokenEmblemFunnyCards === true
+        includeTokenEmblemFunnyCards: stored?.includeTokenEmblemFunnyCards === true,
+        // New preference defaults ON for existing users whose saved settings predate this option.
+        showEdhrecButton: stored?.showEdhrecButton !== false
     };
     return displayPreferences;
 }
@@ -15810,6 +15849,7 @@ function initApp() {
     const resetPreferencesBtn = document.getElementById('reset-preferences-btn');
     const preferenceResultLimit = document.getElementById('preference-result-limit');
     const preferenceScoreBreakdown = document.getElementById('preference-score-breakdown');
+    const preferenceShowEdhrecButton = document.getElementById('preference-show-edhrec-button');
     const preferenceTheme = document.getElementById('preference-theme');
     const preferenceDensity = document.getElementById('preference-result-density');
     const preferenceReduceMotion = document.getElementById('preference-reduce-motion');
@@ -15820,6 +15860,7 @@ function initApp() {
     function syncPreferencesControls() {
         if (preferenceResultLimit) preferenceResultLimit.value = String(getDisplayedResultLimit());
         if (preferenceScoreBreakdown) preferenceScoreBreakdown.checked = Boolean(displayPreferences.showScoreBreakdown);
+        if (preferenceShowEdhrecButton) preferenceShowEdhrecButton.checked = displayPreferences.showEdhrecButton !== false;
         if (preferenceTheme) preferenceTheme.value = (displayPreferences.theme === 'light' || displayPreferences.theme === 'dark') ? displayPreferences.theme : 'dark';
         if (preferenceDensity) preferenceDensity.value = displayPreferences.resultDensity || 'comfortable';
         if (preferenceReduceMotion) preferenceReduceMotion.checked = Boolean(displayPreferences.reduceMotion);
@@ -15833,6 +15874,7 @@ function initApp() {
         displayPreferences.maxResults = clampDisplayResultLimit(preferenceResultLimit?.value);
         if (displayPreferences.maxResults !== previousPageSize) currentResultsPage = 1;
         displayPreferences.showScoreBreakdown = preferenceScoreBreakdown?.checked !== false;
+        displayPreferences.showEdhrecButton = preferenceShowEdhrecButton?.checked !== false;
         displayPreferences.theme = ['dark', 'light'].includes(preferenceTheme?.value) ? preferenceTheme.value : DEFAULT_DISPLAY_PREFERENCES.theme;
         displayPreferences.resultDensity = ['comfortable', 'compact'].includes(preferenceDensity?.value) ? preferenceDensity.value : DEFAULT_DISPLAY_PREFERENCES.resultDensity;
         displayPreferences.reduceMotion = Boolean(preferenceReduceMotion?.checked);
@@ -23713,7 +23755,8 @@ function renderResults(cards, internalOptions = {}) {
             valueAsPercent(card.quantitySimilarityScore), valueAsPercent(card.relatedConsensusScore),
             card.prices?.usd ?? '', card.prices?.eur ?? '', Boolean(card._weakBackfillMatch),
             selectedRelatedCards.has(card.id), favoriteNameSet.has(String(card.name || '').toLowerCase()),
-            displayPreferences.showScoreBreakdown !== false
+            displayPreferences.showScoreBreakdown !== false,
+            displayPreferences.showEdhrecButton !== false
         ]);
     };
 
@@ -23849,6 +23892,14 @@ function renderResults(cards, internalOptions = {}) {
             legalityToggle.removeAttribute('aria-expanded');
         }
 
+        const edhrecLink = cardElement.querySelector('.edhrec-link-btn');
+        if (edhrecLink) {
+            edhrecLink.href = getEdhrecUrlForCard(card);
+            edhrecLink.hidden = displayPreferences.showEdhrecButton === false;
+            edhrecLink.title = `Open ${card.name} on EDHREC in a new tab`;
+            edhrecLink.setAttribute('aria-label', `View ${card.name} on EDHREC`);
+        }
+
         const favoriteBtn = cardElement.querySelector('.result-favorite-btn');
         if (favoriteBtn) {
             // updateFavoriteButtons uses this shared identity to refresh visible result buttons
@@ -23973,6 +24024,17 @@ function renderResults(cards, internalOptions = {}) {
         selectText.textContent = 'Select';
         selectLabel.append(checkbox, selectText);
         actions.append(favoriteBtn, compareBtn, selectLabel);
+
+        const edhrecLink = document.createElement('a');
+        edhrecLink.className = 'edhrec-link-btn';
+        edhrecLink.textContent = 'View on EDHREC ↗';
+        edhrecLink.target = '_blank';
+        edhrecLink.rel = 'noopener noreferrer external';
+        edhrecLink.href = getEdhrecUrlForCard(card);
+        edhrecLink.title = `Open ${card.name} on EDHREC in a new tab`;
+        edhrecLink.setAttribute('aria-label', `View ${card.name} on EDHREC`);
+        edhrecLink.hidden = displayPreferences.showEdhrecButton === false;
+        actions.appendChild(edhrecLink);
 
         const legalityToggle = document.createElement('button');
         legalityToggle.type = 'button';
