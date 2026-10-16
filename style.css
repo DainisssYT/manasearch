@@ -7264,3 +7264,153 @@ body.light-theme .card-actions .edhrec-link-btn:hover {
 #source-card-loaded .search-intent-panel .search-intent-ranking-list {
     gap: 5px;
 }
+
+
+/* v88 source-summary correction: restore a substantial card preview and compact editable metadata. */
+#source-card-loaded > .card-inspector {
+    grid-template-columns: minmax(215px, 240px) minmax(0, 1fr) !important;
+    column-gap: 18px !important;
+    row-gap: 10px !important;
+}
+#source-card-loaded .source-card-art-wrap {
+    width: 240px !important;
+    max-width: 100%;
+}
+#source-card-loaded .source-card-art-wrap > img {
+    width: 100%;
+    aspect-ratio: 63 / 88;
+    height: auto;
+}
+#source-card-loaded .source-card-meta-rows {
+    display: grid;
+    gap: 4px;
+    min-width: 0;
+    margin: 3px 0 5px;
+}
+#source-card-loaded .source-card-meta-row {
+    display: flex;
+    align-items: flex-start;
+    flex-wrap: wrap;
+    gap: 4px 14px;
+    min-width: 0;
+}
+#source-card-loaded .source-card-meta-static,
+#source-card-loaded .source-card-meta-line {
+    display: inline-flex;
+    align-items: baseline;
+    flex-wrap: wrap;
+    gap: 4px;
+    margin: 2px 0;
+    font-size: 13px;
+    line-height: 1.4;
+}
+#source-card-loaded .source-meta-field {
+    display: flex;
+    align-items: baseline;
+    flex-wrap: wrap;
+    gap: 3px 5px;
+    min-width: 0;
+    max-width: 100%;
+}
+#source-card-loaded .source-meta-field-type {
+    flex: 1 1 220px;
+}
+#source-card-loaded .source-type-row {
+    flex-wrap: wrap;
+}
+#source-card-loaded .source-meta-editor {
+    flex: 1 0 100%;
+    width: 100%;
+    min-width: min(100%, 280px);
+    box-sizing: border-box;
+    margin: 4px 0 7px;
+    padding: 10px;
+    border: 1px solid var(--border-color, #41414a);
+    border-radius: 8px;
+    background: var(--panel-bg, #202026);
+}
+#source-card-loaded .source-meta-editor label {
+    display: block;
+    margin: 0 0 5px;
+    font-size: 12px;
+    font-weight: 700;
+}
+#source-card-loaded .source-meta-editor input,
+#source-card-loaded .source-meta-editor select {
+    display: block;
+    width: 100%;
+    min-height: 34px;
+    box-sizing: border-box;
+    padding: 7px 9px;
+    border: 1px solid var(--border-color, #41414a);
+    border-radius: 7px;
+    background: var(--input-bg, #111114);
+    color: var(--text-color, #f3f3f7);
+    font: inherit;
+    font-size: 13px;
+}
+#source-card-loaded .source-meta-editor .source-type-editor-actions { margin-top: 8px; }
+#source-card-loaded .source-card-price-row {
+    display: block;
+    margin: 6px 0 0;
+}
+#source-card-loaded .source-quick-constraints {
+    grid-template-columns: minmax(0, 1fr) !important;
+    gap: 2px 0 !important;
+    margin-top: 5px !important;
+}
+#source-card-loaded .source-quick-constraint-advanced { display: none !important; }
+#source-card-loaded .source-quick-constraint-row:not(.source-quick-constraint-advanced) {
+    grid-column: 1 / -1;
+    grid-template-columns: minmax(125px, 1fr) auto auto minmax(110px, 125px);
+}
+#source-card-loaded .source-quick-constraints-heading,
+#source-card-loaded .source-quick-constraints-footnote { display: none !important; }
+@media (max-width: 980px) {
+    #source-card-loaded > .card-inspector {
+        grid-template-columns: minmax(175px, 31%) minmax(0, 1fr) !important;
+        column-gap: 14px !important;
+    }
+    #source-card-loaded .source-card-art-wrap { width: 100% !important; }
+    #source-card-loaded .source-card-meta-row { gap: 4px 10px; }
+}
+@media (max-width: 700px) {
+    #source-card-loaded > .card-inspector {
+        grid-template-columns: minmax(145px, 38%) minmax(0, 1fr) !important;
+        column-gap: 10px !important;
+    }
+    #source-card-loaded .source-card-art-wrap { width: 100% !important; }
+    #source-card-loaded .source-card-actions { flex-wrap: wrap; }
+    #source-card-loaded .source-card-meta-row { gap: 4px 8px; }
+    #source-card-loaded .source-card-type-components-row { align-items: flex-start; flex-direction: column; gap: 2px; }
+    #source-card-loaded .source-quick-constraint-row:not(.source-quick-constraint-advanced) {
+        grid-template-columns: minmax(92px, 1fr) auto auto minmax(90px, 112px);
+        gap: 4px;
+    }
+    #source-card-loaded .source-quick-mode-label { display: none; }
+    #source-card-loaded .source-quick-mode { grid-column: 4; }
+}
+@media (max-width: 480px) {
+    #source-card-loaded > .card-inspector {
+        grid-template-columns: minmax(128px, 40%) minmax(0, 1fr) !important;
+        column-gap: 8px !important;
+    }
+    #source-card-loaded .card-header { display: block; }
+    #source-card-loaded .card-header h3 { font-size: 16px; }
+    #source-card-loaded .source-card-actions { gap: 4px; }
+    #source-card-loaded .source-card-actions button { padding: 4px 5px; font-size: 10px; }
+    #source-card-loaded .source-card-meta-row { flex-direction: column; gap: 2px; }
+    #source-card-loaded .source-card-meta-static,
+    #source-card-loaded .source-card-meta-line { font-size: 12px; }
+    #source-card-loaded .source-quick-constraint-row:not(.source-quick-constraint-advanced) {
+        grid-template-columns: minmax(0, 1fr) auto;
+    }
+    #source-card-loaded .source-quick-constraint-row:not(.source-quick-constraint-advanced) .source-quick-mode {
+        grid-column: 1 / -1;
+        max-width: 100%;
+    }
+}
+@media (max-width: 700px) {
+    /* In a vertical metadata row, do not let the type editor's desktop flex-basis become height. */
+    #source-card-loaded .source-meta-field-type { flex: 0 1 auto; }
+}

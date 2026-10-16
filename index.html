@@ -5,7 +5,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>ManaSearch</title>
-    <link rel="stylesheet" href="style.css?v=20261016-87">
+    <link rel="stylesheet" href="style.css?v=20261016-88">
 </head>
 <body>
     <header class="site-header">
@@ -122,50 +122,69 @@
                                     <button type="button" id="discard-source-card-btn" class="discard-source-card-btn" aria-label="Remove source card">Remove</button>
                                 </div>
                             </div>
-                            <p><strong>Mana Cost:</strong> <span id="source-card-mana"></span></p>
-                            
-                            <p class="source-card-meta-line source-type-row"><strong>Type:</strong> <span id="source-card-type" class="selectable-text type-line-selectable" title="Select a type-line phrase to highlight it"></span> <button type="button" id="edit-source-type-btn" class="source-type-edit-btn" aria-expanded="false" aria-controls="source-type-editor">Edit</button></p><div id="source-type-editor" class="source-type-editor hidden"><label for="source-type-input">Edit type line</label><input id="source-type-input" type="text" autocomplete="off" spellcheck="true" aria-describedby="source-type-help" placeholder="e.g. Legendary Creature — Elf Druid"><div id="source-type-suggestions" class="source-type-suggestions hidden" role="listbox" aria-label="Suggested MTG types"></div><p id="source-type-help" class="source-type-help">Suggestions appear as you type. Press Tab or → to accept a completion; common misspellings are corrected when you apply.</p><div class="source-type-editor-actions"><button type="button" id="apply-source-type-btn">Apply type line</button><button type="button" id="cancel-source-type-btn" class="secondary-preference-btn">Cancel</button></div></div>
+                            <div class="source-card-meta-rows">
+                                <div class="source-card-meta-row">
+                                    <p class="source-card-meta-static"><strong>Mana Cost:</strong> <span id="source-card-mana"></span></p>
+                                    <div class="source-meta-field source-meta-field-mana-value">
+                                        <p class="source-card-meta-line"><strong>Mana Value:</strong> <span id="source-card-mana-value">0</span> <button type="button" id="edit-source-mana-value-btn" class="source-type-edit-btn" aria-expanded="false" aria-controls="source-mana-value-editor">Edit</button></p>
+                                        <div id="source-mana-value-editor" class="source-meta-editor hidden">
+                                            <label for="source-mana-value-input">Edit mana value</label>
+                                            <input id="source-mana-value-input" type="number" min="0" max="999" step="any" inputmode="decimal" required aria-label="Source card mana value">
+                                            <div class="source-type-editor-actions"><button type="button" id="apply-source-mana-value-btn">Apply</button><button type="button" id="cancel-source-mana-value-btn" class="secondary-preference-btn">Cancel</button></div>
+                                        </div>
+                                    </div>
+                                </div>
+                                <div class="source-card-meta-row source-card-type-components-row">
+                                    <div class="source-meta-field">
+                                        <p class="source-card-meta-line"><strong>Supertype:</strong> <span id="source-card-supertype">None</span> <button type="button" id="edit-source-supertype-btn" class="source-type-edit-btn" aria-expanded="false" aria-controls="source-supertype-editor">Edit</button></p>
+                                        <div id="source-supertype-editor" class="source-meta-editor hidden">
+                                            <label for="source-supertype-input">Edit supertype</label>
+                                            <input id="source-supertype-input" type="text" autocomplete="off" placeholder="e.g. Legendary, Snow (blank for none)" aria-label="Source card supertype">
+                                            <div class="source-type-editor-actions"><button type="button" id="apply-source-supertype-btn">Apply</button><button type="button" id="cancel-source-supertype-btn" class="secondary-preference-btn">Cancel</button></div>
+                                        </div>
+                                    </div>
+                                    <div class="source-meta-field source-meta-field-type">
+                                        <p class="source-card-meta-line source-type-row"><strong>Type:</strong> <span id="source-card-type" class="selectable-text type-line-selectable" title="Select a type-line phrase to highlight it"></span> <button type="button" id="edit-source-type-btn" class="source-type-edit-btn" aria-expanded="false" aria-controls="source-type-editor">Edit</button></p>
+                                        <div id="source-type-editor" class="source-type-editor hidden"><label for="source-type-input">Edit type line</label><input id="source-type-input" type="text" autocomplete="off" spellcheck="true" aria-describedby="source-type-help" placeholder="e.g. Legendary Creature — Elf Druid"><div id="source-type-suggestions" class="source-type-suggestions hidden" role="listbox" aria-label="Suggested MTG types"></div><p id="source-type-help" class="source-type-help">Suggestions appear as you type. Press Tab or → to accept a completion; common misspellings are corrected when you apply.</p><div class="source-type-editor-actions"><button type="button" id="apply-source-type-btn">Apply type line</button><button type="button" id="cancel-source-type-btn" class="secondary-preference-btn">Cancel</button></div></div>
+                                    </div>
+                                    <div class="source-meta-field">
+                                        <p class="source-card-meta-line"><strong>Subtype:</strong> <span id="source-card-subtype">None</span> <button type="button" id="edit-source-subtype-btn" class="source-type-edit-btn" aria-expanded="false" aria-controls="source-subtype-editor">Edit</button></p>
+                                        <div id="source-subtype-editor" class="source-meta-editor hidden">
+                                            <label for="source-subtype-input">Edit subtype</label>
+                                            <input id="source-subtype-input" type="text" autocomplete="off" placeholder="e.g. Elf Druid (blank for none)" aria-label="Source card subtype">
+                                            <div class="source-type-editor-actions"><button type="button" id="apply-source-subtype-btn">Apply</button><button type="button" id="cancel-source-subtype-btn" class="secondary-preference-btn">Cancel</button></div>
+                                        </div>
+                                    </div>
+                                </div>
+                                <div class="source-card-meta-row source-card-rarity-row">
+                                    <div class="source-meta-field">
+                                        <p class="source-card-meta-line"><strong>Rarity:</strong> <span id="source-card-rarity">Unknown</span> <button type="button" id="edit-source-rarity-btn" class="source-type-edit-btn" aria-expanded="false" aria-controls="source-rarity-editor">Edit</button></p>
+                                        <div id="source-rarity-editor" class="source-meta-editor hidden">
+                                            <label for="source-rarity-input">Edit rarity</label>
+                                            <select id="source-rarity-input" aria-label="Source card rarity"><option value="common">Common</option><option value="uncommon">Uncommon</option><option value="rare">Rare</option><option value="mythic">Mythic</option><option value="special">Special</option><option value="bonus">Bonus</option><option value="unknown">Unknown</option></select>
+                                            <div class="source-type-editor-actions"><button type="button" id="apply-source-rarity-btn">Apply</button><button type="button" id="cancel-source-rarity-btn" class="secondary-preference-btn">Cancel</button></div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
                             <section class="source-quick-constraints" aria-labelledby="source-quick-constraints-title">
-                                    <div class="source-quick-constraints-heading"><strong id="source-quick-constraints-title">Quick constraints</strong><span>Set these here without opening the advanced panel.</span></div>
-                                    <div class="source-quick-constraint-row">
-                                        <div class="source-quick-constraint-label"><strong>Color identity</strong><span>Colors allowed in a deck</span></div>
-                                        <div class="color-pip-group source-inline-color-pips" data-target="filter-identity" aria-label="Preferred color identity">
-                                            <button type="button" class="color-pip pip-w" data-color="w" title="White">W</button><button type="button" class="color-pip pip-u" data-color="u" title="Blue">U</button><button type="button" class="color-pip pip-b" data-color="b" title="Black">B</button><button type="button" class="color-pip pip-r" data-color="r" title="Red">R</button><button type="button" class="color-pip pip-g" data-color="g" title="Green">G</button><button type="button" class="color-pip pip-c" data-color="c" title="Colorless">C</button>
-                                        </div>
-                                        <label class="source-quick-mode-label" for="constraint-mode-identity">Apply as</label><select id="constraint-mode-identity" class="source-quick-mode" data-constraint-mode="identity"><option value="hard">Hard filter</option><option value="prefer">Prefer in ranking</option></select>
+                                <div class="source-quick-constraints-heading"><strong id="source-quick-constraints-title">Quick constraints</strong><span>Color filters for this search</span></div>
+                                <div class="source-quick-constraint-row">
+                                    <div class="source-quick-constraint-label"><strong>Color identity</strong><span>Colors allowed in a deck</span></div>
+                                    <div class="color-pip-group source-inline-color-pips" data-target="filter-identity" aria-label="Preferred color identity">
+                                        <button type="button" class="color-pip pip-w" data-color="w" title="White">W</button><button type="button" class="color-pip pip-u" data-color="u" title="Blue">U</button><button type="button" class="color-pip pip-b" data-color="b" title="Black">B</button><button type="button" class="color-pip pip-r" data-color="r" title="Red">R</button><button type="button" class="color-pip pip-g" data-color="g" title="Green">G</button><button type="button" class="color-pip pip-c" data-color="c" title="Colorless">C</button>
                                     </div>
-                                    <div class="source-quick-constraint-row">
-                                        <div class="source-quick-constraint-label"><strong>Exact colors</strong><span>Match the card's colors exactly</span></div>
-                                        <div class="color-pip-group source-inline-color-pips" data-target="filter-colors" aria-label="Exact card colors">
-                                            <button type="button" class="color-pip pip-w" data-color="w" title="White">W</button><button type="button" class="color-pip pip-u" data-color="u" title="Blue">U</button><button type="button" class="color-pip pip-b" data-color="b" title="Black">B</button><button type="button" class="color-pip pip-r" data-color="r" title="Red">R</button><button type="button" class="color-pip pip-g" data-color="g" title="Green">G</button><button type="button" class="color-pip pip-c" data-color="c" title="Colorless">C</button>
-                                        </div>
-                                        <label class="source-quick-mode-label" for="constraint-mode-colors">Apply as</label><select id="constraint-mode-colors" class="source-quick-mode" data-constraint-mode="colors"><option value="hard">Hard filter</option><option value="prefer">Prefer in ranking</option></select>
+                                    <label class="source-quick-mode-label" for="constraint-mode-identity">Apply as</label><select id="constraint-mode-identity" class="source-quick-mode" data-constraint-mode="identity"><option value="hard">Hard filter</option><option value="prefer">Prefer in ranking</option></select>
+                                </div>
+                                <div class="source-quick-constraint-row">
+                                    <div class="source-quick-constraint-label"><strong>Exact colors</strong><span>Match the card's colors exactly</span></div>
+                                    <div class="color-pip-group source-inline-color-pips" data-target="filter-colors" aria-label="Exact card colors">
+                                        <button type="button" class="color-pip pip-w" data-color="w" title="White">W</button><button type="button" class="color-pip pip-u" data-color="u" title="Blue">U</button><button type="button" class="color-pip pip-b" data-color="b" title="Black">B</button><button type="button" class="color-pip pip-r" data-color="r" title="Red">R</button><button type="button" class="color-pip pip-g" data-color="g" title="Green">G</button><button type="button" class="color-pip pip-c" data-color="c" title="Colorless">C</button>
                                     </div>
-                                    <div class="source-quick-constraint-row source-quick-constraint-advanced">
-                                        <div class="source-quick-constraint-label"><strong>Card type</strong><span>Limit or favor card types</span></div>
-                                        <select id="source-quick-type" aria-label="Quick card type"><option value="">Any type</option><option>Artifact</option><option>Battle</option><option>Creature</option><option>Enchantment</option><option>Instant</option><option>Kindred</option><option>Land</option><option>Planeswalker</option><option>Sorcery</option></select>
-                                        <label class="source-quick-mode-label" for="constraint-mode-types">Apply as</label><select id="constraint-mode-types" class="source-quick-mode" data-constraint-mode="types"><option value="hard">Hard filter</option><option value="prefer">Prefer in ranking</option></select>
-                                    </div>
-                                    <div class="source-quick-constraint-row source-quick-constraint-advanced">
-                                        <div class="source-quick-constraint-label"><strong>Supertype</strong><span>Legendary, Basic, Snow, World</span></div>
-                                        <select id="source-quick-supertype" aria-label="Quick supertype"><option value="">Any supertype</option><option value="basic">Basic</option><option value="legendary">Legendary</option><option value="ongoing">Ongoing</option><option value="snow">Snow</option><option value="world">World</option></select>
-                                    </div>
-                                    <div class="source-quick-constraint-row source-quick-constraint-advanced">
-                                        <div class="source-quick-constraint-label"><strong>Subtype</strong><span>Creature, land, and other subtypes</span></div>
-                                        <div class="source-quick-subtype-entry"><input id="source-quick-subtype" type="text" placeholder="e.g. Elf" autocomplete="off" aria-label="Quick subtype"><button type="button" id="source-quick-subtype-add">Add</button></div>
-                                    </div>
-                                    <div class="source-quick-constraint-row source-quick-constraint-advanced">
-                                        <div class="source-quick-constraint-label"><strong>Rarity</strong><span>Limit by printing rarity</span></div>
-                                        <select id="source-quick-rarity" aria-label="Quick rarity"><option value="">Any rarity</option><option value="common">Common</option><option value="uncommon">Uncommon</option><option value="rare">Rare</option><option value="mythic">Mythic</option></select>
-                                    </div>
-                                    <div class="source-quick-constraint-row source-quick-constraint-advanced">
-                                        <div class="source-quick-constraint-label"><strong>Mana value</strong><span>Example: ≤ 3 or = 2</span></div>
-                                        <input id="source-quick-cmc" type="text" inputmode="text" placeholder="Any mana value" aria-label="Quick mana value constraint">
-                                        <label class="source-quick-mode-label" for="constraint-mode-cmc">Apply as</label><select id="constraint-mode-cmc" class="source-quick-mode" data-constraint-mode="cmc"><option value="hard">Hard filter</option><option value="prefer">Prefer in ranking</option></select>
-                                    </div>
-                                    <p class="source-quick-constraints-footnote">Hard filters exclude cards that do not match. Ranking preferences keep those cards eligible but favor matches. More options remain in Constraints below.</p>
-                                </section>
-                            <p class="source-card-meta-line"><strong>Price:</strong> <span id="source-card-price">Unavailable</span></p>
+                                    <label class="source-quick-mode-label" for="constraint-mode-colors">Apply as</label><select id="constraint-mode-colors" class="source-quick-mode" data-constraint-mode="colors"><option value="hard">Hard filter</option><option value="prefer">Prefer in ranking</option></select>
+                                </div>
+                            </section>
+                            <p class="source-card-meta-line source-card-price-row"><strong>Price:</strong> <span id="source-card-price">Unavailable</span></p>
                         
                             
                         </div>
@@ -933,7 +952,7 @@
         import * as transformers from "https://cdn.jsdelivr.net/npm/@xenova/transformers@2.16.0";
         window.transformers = transformers;
     </script>
-    <script src="pako.min.js?v=20261016-87"></script>
-    <script type="module" src="app.js?v=20261016-87"></script>
+    <script src="pako.min.js?v=20261016-88"></script>
+    <script type="module" src="app.js?v=20261016-88"></script>
 </body>
 </html>

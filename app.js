@@ -1,6 +1,6 @@
 /* ManaSearch build 20261016-84 */
 // ManaSearch deployment build marker. Bump this whenever app.js changes so cached-module issues are easy to diagnose.
-const MANASEARCH_APP_BUILD = '20261016-87';
+const MANASEARCH_APP_BUILD = '20261016-88';
 console.info(`[ManaSearch] app.js build ${MANASEARCH_APP_BUILD}`);
 
 // State Management
@@ -20507,6 +20507,151 @@ function flipCurrentSourceCardFace() {
     updateSourceCardFaceDisplay(currentSourceCard, true);
 }
 
+// Source-card metadata helpers: keep the visible supertype/subtype fields in sync with the
+// underlying editable Scryfall type line without touching Oracle text or the card corpus.
+const SOURCE_CARD_SUPERTYPES = new Set(['basic', 'legendary', 'ongoing', 'snow', 'world']);
+function getSourceCardTypeLine(card = currentSourceCard) {
+    return String(card?.type_line || card?.card_faces?.[currentSourceCardFaceIndex]?.type_line || card?.card_faces?.[0]?.type_line || sourceCardType?.dataset.originalText || sourceCardType?.textContent || '').trim();
+}
+function splitSourceCardTypeLine(typeLine) {
+    const raw = String(typeLine || '').trim();
+    const pieces = raw.split(/\s+[—–]\s+/);
+    const left = (pieces.shift() || '').trim();
+    const subtypes = pieces.join(' — ').trim();
+    const tokens = left ? left.split(/\s+/).filter(Boolean) : [];
+    const supertypes = tokens.filter(token => SOURCE_CARD_SUPERTYPES.has(token.toLowerCase()));
+    const types = tokens.filter(token => !SOURCE_CARD_SUPERTYPES.has(token.toLowerCase()));
+    return { supertypes, types, subtypes };
+}
+function syncSourceCardMetadataDisplays(card = currentSourceCard, typeLine = getSourceCardTypeLine(card)) {
+    const parsed = splitSourceCardTypeLine(typeLine);
+    const supertypeDisplay = document.getElementById('source-card-supertype');
+    const subtypeDisplay = document.getElementById('source-card-subtype');
+    const manaValueDisplay = document.getElementById('source-card-mana-value');
+    const rarityDisplay = document.getElementById('source-card-rarity');
+    if (supertypeDisplay) supertypeDisplay.textContent = parsed.supertypes.join(' ') || 'None';
+    if (subtypeDisplay) subtypeDisplay.textContent = parsed.subtypes || 'None';
+    if (manaValueDisplay) {
+        const raw = card?.cmc ?? card?.mana_value ?? 0;
+        const numeric = Number(raw);
+        manaValueDisplay.textContent = Number.isFinite(numeric) ? String(Number.isInteger(numeric) ? numeric : Number(numeric.toFixed(4))) : String(raw || '0');
+    }
+    if (rarityDisplay) {
+        const rarity = String(card?.rarity || 'unknown').toLowerCase();
+        rarityDisplay.textContent = rarity === 'mythic' ? 'Mythic' : rarity === 'uncommon' ? 'Uncommon' : rarity === 'rare' ? 'Rare' : rarity === 'common' ? 'Common' : rarity === 'special' ? 'Special' : rarity === 'bonus' ? 'Bonus' : 'Unknown';
+    }
+}
+function applySourceCardTypeLine(typeLine, { clearTypeHighlights = true } = {}) {
+    const normalized = String(typeLine || '').trim().replace(/\s+/g, ' ');
+    if (!normalized || !currentSourceCard) return false;
+    currentSourceCard.type_line = normalized;
+    if (Array.isArray(currentSourceCard.card_faces) && currentSourceCard.card_faces[currentSourceCardFaceIndex]) {
+        currentSourceCard.card_faces[currentSourceCardFaceIndex].type_line = normalized;
+    }
+    if (sourceCardType) {
+        sourceCardType.dataset.originalText = normalized;
+        sourceCardType.textContent = normalized;
+    }
+    if (clearTypeHighlights) manualHighlights = manualHighlights.filter(h => h?.field !== 'type');
+    syncSourceCardMetadataDisplays(currentSourceCard, normalized);
+    reapplyTypeLineHighlights();
+    renderHighlightChips();
+    notifyManaSearchHighlightsChanged();
+    window.dispatchEvent(new CustomEvent('manasearch:source-type-changed', { detail: { typeLine: normalized } }));
+    return true;
+}
+function composeSourceCardTypeLine({ supertypes, types, subtypes }) {
+    const left = [...(supertypes || []), ...(types || [])].map(value => String(value || '').trim()).filter(Boolean).join(' ').replace(/\s+/g, ' ');
+    const right = String(subtypes || '').trim().replace(/\s+/g, ' ');
+    return `${left}${right ? ` — ${right}` : ''}`.trim();
+}
+function cleanSourceSupertypeInput(value) {
+    const raw = String(value || '').trim();
+    if (!raw || /^none$/i.test(raw)) return [];
+    const canonical = new Map(['Basic', 'Legendary', 'Ongoing', 'Snow', 'World'].map(value => [value.toLowerCase(), value]));
+    return [...new Set(raw.replace(/[,;/]+/g, ' ').split(/\s+/).filter(Boolean).map(token => canonical.get(token.toLowerCase()) || token))];
+}
+function initSourceMetadataEditors() {
+    const byId = id => document.getElementById(id);
+    const bindEditor = ({ buttonId, editorId, inputId, applyId, cancelId, readValue, saveValue, allowBlank = true }) => {
+        const button = byId(buttonId), editor = byId(editorId), input = byId(inputId), apply = byId(applyId), cancel = byId(cancelId);
+        if (!button || !editor || !input || !apply || !cancel || button.dataset.bound) return;
+        button.dataset.bound = 'true';
+        const close = () => { editor.classList.add('hidden'); button.setAttribute('aria-expanded', 'false'); };
+        const open = () => {
+            input.value = readValue();
+            editor.classList.remove('hidden'); button.setAttribute('aria-expanded', 'true');
+            input.focus?.();
+            if (typeof input.setSelectionRange === 'function') {
+                const end = input.value.length;
+                try { input.setSelectionRange(end, end); } catch (_) { /* number/select inputs do not support a text selection */ }
+            }
+        };
+        const commit = () => {
+            const raw = input.value;
+            if (!allowBlank && !String(raw).trim()) { input.focus(); return; }
+            if (saveValue(raw) !== false) close();
+        };
+        button.addEventListener('click', () => editor.classList.contains('hidden') ? open() : close());
+        apply.addEventListener('click', commit);
+        cancel.addEventListener('click', close);
+        input.addEventListener('keydown', event => {
+            if (event.key === 'Enter') { event.preventDefault(); commit(); }
+            else if (event.key === 'Escape') { event.preventDefault(); close(); }
+        });
+    };
+    bindEditor({
+        buttonId: 'edit-source-mana-value-btn', editorId: 'source-mana-value-editor', inputId: 'source-mana-value-input',
+        applyId: 'apply-source-mana-value-btn', cancelId: 'cancel-source-mana-value-btn', allowBlank: false,
+        readValue: () => String(currentSourceCard?.cmc ?? currentSourceCard?.mana_value ?? 0),
+        saveValue: raw => {
+            const value = Number(raw);
+            if (!Number.isFinite(value) || value < 0 || value > 999) return false;
+            if (currentSourceCard) {
+                currentSourceCard.cmc = value;
+                currentSourceCard.mana_value = value;
+            }
+            syncSourceCardMetadataDisplays();
+            window.dispatchEvent(new CustomEvent('manasearch:source-metadata-changed', { detail: { field: 'manaValue', value } }));
+            return true;
+        }
+    });
+    bindEditor({
+        buttonId: 'edit-source-supertype-btn', editorId: 'source-supertype-editor', inputId: 'source-supertype-input',
+        applyId: 'apply-source-supertype-btn', cancelId: 'cancel-source-supertype-btn',
+        readValue: () => splitSourceCardTypeLine(getSourceCardTypeLine()).supertypes.join(' '),
+        saveValue: raw => {
+            const parsed = splitSourceCardTypeLine(getSourceCardTypeLine());
+            const next = composeSourceCardTypeLine({ supertypes: cleanSourceSupertypeInput(raw), types: parsed.types, subtypes: parsed.subtypes });
+            return applySourceCardTypeLine(next);
+        }
+    });
+    bindEditor({
+        buttonId: 'edit-source-subtype-btn', editorId: 'source-subtype-editor', inputId: 'source-subtype-input',
+        applyId: 'apply-source-subtype-btn', cancelId: 'cancel-source-subtype-btn',
+        readValue: () => splitSourceCardTypeLine(getSourceCardTypeLine()).subtypes,
+        saveValue: raw => {
+            const parsed = splitSourceCardTypeLine(getSourceCardTypeLine());
+            const value = /^none$/i.test(String(raw || '').trim()) ? '' : String(raw || '').trim().replace(/\s+/g, ' ');
+            const next = composeSourceCardTypeLine({ supertypes: parsed.supertypes, types: parsed.types, subtypes: value });
+            return applySourceCardTypeLine(next);
+        }
+    });
+    bindEditor({
+        buttonId: 'edit-source-rarity-btn', editorId: 'source-rarity-editor', inputId: 'source-rarity-input',
+        applyId: 'apply-source-rarity-btn', cancelId: 'cancel-source-rarity-btn',
+        readValue: () => String(currentSourceCard?.rarity || 'unknown').toLowerCase(),
+        saveValue: raw => {
+            if (!currentSourceCard) return false;
+            currentSourceCard.rarity = String(raw || 'unknown').toLowerCase();
+            syncSourceCardMetadataDisplays();
+            window.dispatchEvent(new CustomEvent('manasearch:source-metadata-changed', { detail: { field: 'rarity', value: currentSourceCard.rarity } }));
+            return true;
+        }
+    });
+}
+if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', initSourceMetadataEditors, { once: true }); else initSourceMetadataEditors();
+
 // Lightweight MTG type-line editor. This edits only the local source-card search context; it does
 // not alter the card database or Oracle rules text. Suggestions are intentionally curated and
 // typo correction is conservative so unusual subtypes remain editable.
@@ -20579,17 +20724,9 @@ function initSourceTypeEditor() {
         const corrected = autocorrect(input.value.trim().replace(/\s+/g,' '));
         if (!corrected) return;
         input.value = corrected;
-        if (currentSourceCard) {
-            currentSourceCard.type_line = corrected;
-            if (Array.isArray(currentSourceCard.card_faces) && currentSourceCard.card_faces[currentSourceCardFaceIndex]) currentSourceCard.card_faces[currentSourceCardFaceIndex].type_line = corrected;
-        }
-        display.dataset.originalText = corrected;
-        display.textContent = corrected;
-        // Type offsets are no longer reliable after an edit. Remove only type-line highlights;
-        // Oracle highlights and their scoring priority remain untouched.
-        manualHighlights = manualHighlights.filter(h => h?.field !== 'type');
-        reapplyTypeLineHighlights(); renderHighlightChips(); notifyManaSearchHighlightsChanged();
-        window.dispatchEvent(new CustomEvent('manasearch:source-type-changed',{detail:{typeLine:corrected}}));
+        // Type offsets are no longer reliable after a type-line edit. The shared updater removes
+        // only type-line highlights, preserves Oracle highlights, and refreshes the companion fields.
+        applySourceCardTypeLine(corrected);
         closeEditor();
     };
     openBtn.addEventListener('click', () => editor.classList.contains('hidden') ? showEditor() : closeEditor());
@@ -20613,6 +20750,7 @@ function displaySourceCard(card) {
         const typeText = card.type_line || card.card_faces?.[0]?.type_line || '';
         sourceCardType.textContent = typeText;
         sourceCardType.dataset.originalText = typeText;
+        syncSourceCardMetadataDisplays(card, typeText);
     }
     
     // Keep the displayed Oracle text in exactly the same coordinate space used by the scoring
