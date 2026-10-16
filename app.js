@@ -1,6 +1,6 @@
-/* ManaSearch build 20261016-92 */
+/* ManaSearch build 20261016-93 */
 // ManaSearch deployment build marker. Bump this whenever app.js changes so cached-module issues are easy to diagnose.
-const MANASEARCH_APP_BUILD = '20261016-92';
+const MANASEARCH_APP_BUILD = '20261016-93';
 console.info(`[ManaSearch] app.js build ${MANASEARCH_APP_BUILD}`);
 
 // State Management
@@ -12760,6 +12760,15 @@ function getComparableCardField(card, field) {
     return Number.isFinite(num) ? num : undefined;
 }
 
+// Default modes for Highlight-area metadata constraints. These defaults are reflected in
+// index.html and restored when the user clears all constraints.
+const DEFAULT_CONSTRAINT_MODES = Object.freeze({
+    supertype: 'prefer',
+    types: 'prefer',
+    subtype: 'prefer',
+    set: 'prefer'
+});
+
 function normalizeConstraintList(value) {
     if (Array.isArray(value)) {
         return [...new Set(value.map(v => String(v || '').trim().toLowerCase()).filter(Boolean))];
@@ -17509,7 +17518,7 @@ function initApp() {
                 syncConstraintChipField(id, `${id}-chips`);
             }
         }
-        document.querySelectorAll('[data-constraint-mode]').forEach(mode => { mode.value = 'hard'; mode.dispatchEvent(new Event('change', { bubbles: true })); });
+        document.querySelectorAll('[data-constraint-mode]').forEach(mode => { mode.value = DEFAULT_CONSTRAINT_MODES[mode.dataset.constraintMode] || 'hard'; mode.dispatchEvent(new Event('change', { bubbles: true })); });
         document.querySelectorAll('#card-constraints-modal .color-pip.active, #source-card-loaded .color-pip.active').forEach(pip => pip.classList.remove('active'));
         document.querySelectorAll('#card-constraints-modal .constraint-chips').forEach(chips => chips.replaceChildren());
         const autofillStatus = document.getElementById('constraint-autofill-status');

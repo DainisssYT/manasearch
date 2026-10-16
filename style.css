@@ -7562,3 +7562,27 @@ body.light-theme .card-actions .edhrec-link-btn:hover {
         font-size: 12px !important;
     }
 }
+
+
+/* v93: increase source action label size to better balance their generous tap targets. */
+#source-card-loaded .source-card-actions #favorite-btn,
+#source-card-loaded .source-card-actions #add-source-card-btn,
+#source-card-loaded .source-card-actions #discard-source-card-btn {
+    font-size: 16px !important;
+    font-weight: 600;
+    letter-spacing: 0;
+}
+@media (max-width: 700px) {
+    #source-card-loaded .source-card-actions #favorite-btn,
+    #source-card-loaded .source-card-actions #add-source-card-btn,
+    #source-card-loaded .source-card-actions #discard-source-card-btn {
+        font-size: 15px !important;
+    }
+}
+@media (max-width: 480px) {
+    #source-card-loaded .source-card-actions #favorite-btn,
+    #source-card-loaded .source-card-actions #add-source-card-btn,
+    #source-card-loaded .source-card-actions #discard-source-card-btn {
+        font-size: 14px !important;
+    }
+}
