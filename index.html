@@ -5,7 +5,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>ManaSearch</title>
-    <link rel="stylesheet" href="style.css?v=20261016-86">
+    <link rel="stylesheet" href="style.css?v=20261016-87">
 </head>
 <body>
     <header class="site-header">
@@ -123,21 +123,9 @@
                                 </div>
                             </div>
                             <p><strong>Mana Cost:</strong> <span id="source-card-mana"></span></p>
-                            <p class="source-card-meta-line"><strong>Price:</strong> <span id="source-card-price">Unavailable</span></p>
+                            
                             <p class="source-card-meta-line source-type-row"><strong>Type:</strong> <span id="source-card-type" class="selectable-text type-line-selectable" title="Select a type-line phrase to highlight it"></span> <button type="button" id="edit-source-type-btn" class="source-type-edit-btn" aria-expanded="false" aria-controls="source-type-editor">Edit</button></p><div id="source-type-editor" class="source-type-editor hidden"><label for="source-type-input">Edit type line</label><input id="source-type-input" type="text" autocomplete="off" spellcheck="true" aria-describedby="source-type-help" placeholder="e.g. Legendary Creature — Elf Druid"><div id="source-type-suggestions" class="source-type-suggestions hidden" role="listbox" aria-label="Suggested MTG types"></div><p id="source-type-help" class="source-type-help">Suggestions appear as you type. Press Tab or → to accept a completion; common misspellings are corrected when you apply.</p><div class="source-type-editor-actions"><button type="button" id="apply-source-type-btn">Apply type line</button><button type="button" id="cancel-source-type-btn" class="secondary-preference-btn">Cancel</button></div></div>
-                            <div class="oracle-container">
-                                <strong>Oracle Text</strong>
-                                <span class="oracle-help">Select text in either the type line or rules text to highlight it. Select an existing highlight again to remove it.</span>
-                                <div id="source-card-oracle" class="selectable-text" aria-label="Card rules text"></div>
-                                <div id="touch-highlight-actions" class="touch-highlight-actions" hidden>
-                                    <p>On a phone, press and hold a short phrase to select it, then add the selection as a highlight.</p>
-                                    <div class="touch-highlight-buttons">
-                                        <button type="button" id="highlight-selected-oracle-btn" disabled>Highlight selected rules text</button>
-                                        <button type="button" id="highlight-selected-type-btn" class="touch-highlight-secondary" disabled>Highlight selected type line</button>
-                                    </div>
-                                </div>
-                                <div id="highlight-chips-list" class="highlight-chip-panel" aria-live="polite"></div>
-                                <section class="source-quick-constraints" aria-labelledby="source-quick-constraints-title">
+                            <section class="source-quick-constraints" aria-labelledby="source-quick-constraints-title">
                                     <div class="source-quick-constraints-heading"><strong id="source-quick-constraints-title">Quick constraints</strong><span>Set these here without opening the advanced panel.</span></div>
                                     <div class="source-quick-constraint-row">
                                         <div class="source-quick-constraint-label"><strong>Color identity</strong><span>Colors allowed in a deck</span></div>
@@ -177,9 +165,27 @@
                                     </div>
                                     <p class="source-quick-constraints-footnote">Hard filters exclude cards that do not match. Ranking preferences keep those cards eligible but favor matches. More options remain in Constraints below.</p>
                                 </section>
-                            </div>
+                            <p class="source-card-meta-line"><strong>Price:</strong> <span id="source-card-price">Unavailable</span></p>
+                        
+                            
                         </div>
-                        <div id="card-tags-container" class="source-tags">
+                        
+                    </div>
+                    <div class="oracle-container">
+                                <strong>Oracle Text</strong>
+                                <span class="oracle-help">Select text in either the type line or rules text to highlight it. Select an existing highlight again to remove it.</span>
+                                <div id="source-card-oracle" class="selectable-text" aria-label="Card rules text"></div>
+                                <div id="touch-highlight-actions" class="touch-highlight-actions" hidden>
+                                    <p>On a phone, press and hold a short phrase to select it, then add the selection as a highlight.</p>
+                                    <div class="touch-highlight-buttons">
+                                        <button type="button" id="highlight-selected-oracle-btn" disabled>Highlight selected rules text</button>
+                                        <button type="button" id="highlight-selected-type-btn" class="touch-highlight-secondary" disabled>Highlight selected type line</button>
+                                    </div>
+                                </div>
+                                <div id="highlight-chips-list" class="highlight-chip-panel" aria-live="polite"></div>
+                                
+                            </div>
+                    <div id="card-tags-container" class="source-tags">
                             <div class="source-tags-heading">
                                 <strong>Tags</strong>
                                 <span>Optional custom labels</span>
@@ -187,7 +193,7 @@
                             <div id="card-tags-list" class="chips-list source-tag-list"></div>
                             <input type="text" id="add-tag-input" placeholder="Add a custom tag… press Enter" aria-label="Add custom tag">
                         </div>
-                    </div>
+                    
                     <div id="search-intent-panel" class="search-intent-panel hidden" aria-labelledby="search-intent-title" aria-live="polite" aria-busy="false">
                         <div class="search-intent-heading">
                             <div>
@@ -927,7 +933,7 @@
         import * as transformers from "https://cdn.jsdelivr.net/npm/@xenova/transformers@2.16.0";
         window.transformers = transformers;
     </script>
-    <script src="pako.min.js?v=20261016-86"></script>
-    <script type="module" src="app.js?v=20261016-86"></script>
+    <script src="pako.min.js?v=20261016-87"></script>
+    <script type="module" src="app.js?v=20261016-87"></script>
 </body>
 </html>
