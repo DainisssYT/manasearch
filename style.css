@@ -7445,3 +7445,72 @@ body.light-theme .card-actions .edhrec-link-btn:hover {
         gap: 2px;
     }
 }
+
+/* v90: separate source metadata, type/subtype completion, and the larger source actions. */
+#source-card-loaded .source-card-actions button {
+    min-height: 34px;
+    padding: 8px 12px;
+    font-size: 12px;
+    line-height: 1.2;
+    border-radius: 8px;
+}
+#source-card-loaded .source-card-extra-meta-row {
+    align-items: baseline;
+    gap: 5px 18px;
+}
+#source-card-loaded .source-card-extra-meta-row .source-meta-field {
+    flex: 0 1 auto;
+}
+#source-card-loaded .source-meta-action-btn {
+    min-height: 24px;
+}
+#source-card-loaded .source-card-stats-row {
+    gap: 5px 18px;
+}
+#source-card-loaded .source-card-stats-row .source-card-meta-line {
+    display: inline-flex;
+    gap: 5px;
+}
+#source-card-loaded .source-meta-editor-secondary-label {
+    display: block;
+    margin-top: 10px;
+}
+#source-card-loaded .source-meta-editor .source-type-suggestions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 5px;
+    padding: 7px 0 2px;
+}
+#source-card-loaded .source-meta-editor .source-type-suggestions button {
+    max-width: 100%;
+    padding: 5px 9px;
+    border-radius: 999px;
+    font-size: 12px;
+}
+#source-card-loaded .source-meta-editor .source-type-help {
+    margin: 7px 0 2px;
+}
+#source-card-loaded #source-card-type,
+#source-card-loaded #source-card-supertype,
+#source-card-loaded #source-card-subtype {
+    white-space: normal;
+    overflow-wrap: anywhere;
+}
+@media (max-width: 700px) {
+    #source-card-loaded .source-card-actions button {
+        min-height: 31px;
+        padding: 7px 9px;
+        font-size: 11px;
+    }
+    #source-card-loaded .source-card-extra-meta-row,
+    #source-card-loaded .source-card-stats-row {
+        gap: 3px 10px;
+    }
+}
+@media (max-width: 480px) {
+    #source-card-loaded .source-card-actions button {
+        min-height: 29px;
+        padding: 6px 7px;
+        font-size: 10.5px;
+    }
+}

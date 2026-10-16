@@ -1,6 +1,6 @@
 /* ManaSearch build 20261016-89 */
 // ManaSearch deployment build marker. Bump this whenever app.js changes so cached-module issues are easy to diagnose.
-const MANASEARCH_APP_BUILD = '20261016-89';
+const MANASEARCH_APP_BUILD = '20261016-90';
 console.info(`[ManaSearch] app.js build ${MANASEARCH_APP_BUILD}`);
 
 // State Management
@@ -4212,32 +4212,31 @@ function handleSourceTextSelection(root = sourceCardOracle, field = 'oracle') {
     const selectedText = selection.toString().trim();
     if (!selectedText) return;
 
-    const originalText = field === 'type'
-        ? (root.dataset.originalText ?? root.textContent ?? '')
-        : (root.dataset.originalText ?? root.textContent ?? '');
-    if (!root.dataset.originalText) {
-        root.dataset.originalText = originalText;
-        root.dataset.originalHtml = root.innerHTML;
-    }
+    const segment = ['supertype', 'type', 'subtype'].includes(field) ? field : null;
+    const canonicalField = segment ? 'type' : 'oracle';
+    const originalText = root.dataset.originalText ?? (root.textContent === 'None' ? '' : root.textContent) ?? '';
+    if (!originalText) return;
+    if (!root.dataset.originalText) root.dataset.originalText = originalText;
     const offsets = normalizeHighlightSelectionOffsets(root, range);
     const trimmed = offsets
         ? trimHighlightRangeText(selectedText, offsets.start, offsets.end)
         : { text: selectedText, start: null, end: null };
     if (!trimmed.text) return;
 
-    const existingIndex = manualHighlights.findIndex(h => h.field === field &&
+    const existingIndex = manualHighlights.findIndex(h => h.field === canonicalField &&
         String(h.text || '').toLowerCase() === trimmed.text.toLowerCase() &&
-        (field === 'type'
-            ? Number.isFinite(h.typeStart) && h.typeStart === trimmed.start && h.typeEnd === trimmed.end
+        (canonicalField === 'type'
+            ? (h.typeSegment || 'type') === segment && Number.isFinite(h.typeStart) && h.typeStart === trimmed.start && h.typeEnd === trimmed.end
             : Number.isFinite(h.start) && h.start === trimmed.start && h.end === trimmed.end));
     if (existingIndex >= 0) {
         removeHighlight(existingIndex);
     } else {
         const highlight = {
-            text: trimmed.text, mode: 'exact', origin: 'source', field,
+            text: trimmed.text, mode: 'exact', origin: 'source', field: canonicalField,
             colorIndex: nextHighlightColorIndex++ % 4, attachedTo: null
         };
-        if (field === 'type') {
+        if (canonicalField === 'type') {
+            highlight.typeSegment = segment || 'type';
             highlight.typeStart = trimmed.start;
             highlight.typeEnd = trimmed.end;
         } else {
@@ -4258,24 +4257,33 @@ function handleOracleTextSelection() {
 }
 
 function reapplyTypeLineHighlights() {
-    if (!sourceCardType) return;
-    const text = sourceCardType.dataset.originalText ?? sourceCardType.textContent ?? '';
-    const ranges = manualHighlights
-        .filter(h => h?.field === 'type' && Number.isFinite(h.typeStart) && Number.isFinite(h.typeEnd) && h.typeEnd > h.typeStart)
-        .map(h => ({ start: h.typeStart, end: h.typeEnd, colorIndex: Number.isInteger(h.colorIndex) ? h.colorIndex % 4 : 0 }))
-        .filter(r => text.slice(r.start, r.end));
-    ranges.sort((a, b) => (b.end - b.start) - (a.end - a.start) || a.start - b.start);
-    const claimed = [];
-    for (const range of ranges) if (!claimed.some(r => range.start < r.end && range.end > r.start)) claimed.push(range);
-    claimed.sort((a, b) => a.start - b.start);
-    let cursor = 0, html = '';
-    for (const r of claimed) {
-        html += escapeHtmlText(text.slice(cursor, r.start));
-        html += `<strong class="highlight-active highlight-type highlight-color-${r.colorIndex}">${escapeHtmlText(text.slice(r.start, r.end))}</strong>`;
-        cursor = r.end;
+    const parts = [
+        { id: 'source-card-supertype', key: 'supertype' },
+        { id: 'source-card-type', key: 'type' },
+        { id: 'source-card-subtype', key: 'subtype' }
+    ];
+    for (const part of parts) {
+        const root = document.getElementById(part.id);
+        if (!root) continue;
+        const text = root.dataset.originalText ?? (root.textContent === 'None' ? '' : root.textContent) ?? '';
+        if (!text) { root.textContent = 'None'; continue; }
+        const ranges = manualHighlights
+            .filter(h => h?.field === 'type' && (h.typeSegment || 'type') === part.key && Number.isFinite(h.typeStart) && Number.isFinite(h.typeEnd) && h.typeEnd > h.typeStart)
+            .map(h => ({ start: h.typeStart, end: h.typeEnd, colorIndex: Number.isInteger(h.colorIndex) ? h.colorIndex % 4 : 0 }))
+            .filter(range => text.slice(range.start, range.end));
+        ranges.sort((a, b) => (b.end - b.start) - (a.end - a.start) || a.start - b.start);
+        const claimed = [];
+        for (const range of ranges) if (!claimed.some(existing => range.start < existing.end && range.end > existing.start)) claimed.push(range);
+        claimed.sort((a, b) => a.start - b.start);
+        let cursor = 0, html = '';
+        for (const range of claimed) {
+            html += escapeHtmlText(text.slice(cursor, range.start));
+            html += `<strong class="highlight-active highlight-type highlight-color-${range.colorIndex}">${escapeHtmlText(text.slice(range.start, range.end))}</strong>`;
+            cursor = range.end;
+        }
+        html += escapeHtmlText(text.slice(cursor));
+        root.innerHTML = html;
     }
-    html += escapeHtmlText(text.slice(cursor));
-    sourceCardType.innerHTML = html;
 }
 
 
@@ -17277,7 +17285,9 @@ function initApp() {
         root.addEventListener('keyup', event => { if (event.shiftKey || event.key.startsWith('Arrow')) handler(); });
     };
     bindHighlightSelection(sourceCardOracle, 'oracle');
+    bindHighlightSelection(document.getElementById('source-card-supertype'), 'supertype');
     bindHighlightSelection(sourceCardType, 'type');
+    bindHighlightSelection(document.getElementById('source-card-subtype'), 'subtype');
     sourceCardFlipBtn?.addEventListener('click', flipCurrentSourceCardFace);
     document.getElementById('related-use-highlights')?.addEventListener('change', event => {
         includeSourceHighlightsInRelatedSearch = Boolean(event.target.checked);
@@ -17941,10 +17951,18 @@ function installManaSearchUsabilityPolish() {
         if (!root || !selection || selection.isCollapsed || !selection.rangeCount || !String(selection.toString() || '').trim()) return false;
         return root.contains(selection.getRangeAt(0).commonAncestorContainer);
     };
+    const getSelectedTypeRoot = () => {
+        const candidates = [
+            { root: document.getElementById('source-card-supertype'), field: 'supertype' },
+            { root: typeLine, field: 'type' },
+            { root: document.getElementById('source-card-subtype'), field: 'subtype' }
+        ];
+        return candidates.find(item => isSelectionWithin(item.root)) || null;
+    };
     const syncHighlightActions = () => {
         if (touchActions) touchActions.hidden = !isTouchLayout();
         if (oracleButton) oracleButton.disabled = !isSelectionWithin(oracle);
-        if (typeButton) typeButton.disabled = !isSelectionWithin(typeLine);
+        if (typeButton) typeButton.disabled = !getSelectedTypeRoot();
     };
     const preserveNativeSelection = event => {
         if (event.pointerType === 'touch' || isTouchLayout()) event.preventDefault();
@@ -17957,8 +17975,9 @@ function installManaSearchUsabilityPolish() {
         syncHighlightActions();
     });
     typeButton?.addEventListener('click', () => {
-        if (!isSelectionWithin(typeLine)) return;
-        handleSourceTextSelection(typeLine, 'type');
+        const selectedTypeRoot = getSelectedTypeRoot();
+        if (!selectedTypeRoot) return;
+        handleSourceTextSelection(selectedTypeRoot.root, selectedTypeRoot.field);
         syncHighlightActions();
     });
     document.addEventListener('selectionchange', syncHighlightActions);
@@ -18635,7 +18654,7 @@ function installFeatureHelpPopovers() {
         }
         const typeLabel = document.querySelector('#source-card-type')?.parentElement?.querySelector('strong');
         const typeDescription = 'You can highlight a type-line phrase as well as rules text to focus on a card type or subtype.';
-        const typeHowTo = 'Select a phrase such as “Creature — Elf” in the source card type line.';
+        const typeHowTo = 'Select the visible Supertype, Type, or Subtype text. Each value is shown separately, and selecting any of them can focus the search.';
         if (typeLabel) {
             setHelp(typeLabel, 'Highlight the type line', typeDescription, 'highlight', typeHowTo, true);
             addInlineHelpMarker(typeLabel, 'Highlight the type line', typeDescription, 'highlight', typeHowTo);
@@ -20510,8 +20529,10 @@ function flipCurrentSourceCardFace() {
 // Source-card metadata helpers: keep the visible supertype/subtype fields in sync with the
 // underlying editable Scryfall type line without touching Oracle text or the card corpus.
 const SOURCE_CARD_SUPERTYPES = new Set(['basic', 'legendary', 'ongoing', 'snow', 'world']);
+const SOURCE_CARD_SUPERTYPE_WORDS = ['Basic', 'Legendary', 'Ongoing', 'Snow', 'World'];
 function getSourceCardTypeLine(card = currentSourceCard) {
-    return String(card?.type_line || card?.card_faces?.[currentSourceCardFaceIndex]?.type_line || card?.card_faces?.[0]?.type_line || sourceCardType?.dataset.originalText || sourceCardType?.textContent || '').trim();
+    const faceIndex = card === currentSourceCard ? currentSourceCardFaceIndex : 0;
+    return String(card?.card_faces?.[faceIndex]?.type_line || card?.type_line || card?.card_faces?.[0]?.type_line || sourceCardType?.dataset.originalTypeLine || sourceCardType?.dataset.originalText || sourceCardType?.textContent || '').trim();
 }
 function splitSourceCardTypeLine(typeLine) {
     const raw = String(typeLine || '').trim();
@@ -20525,22 +20546,50 @@ function splitSourceCardTypeLine(typeLine) {
 }
 function syncSourceCardMetadataDisplays(card = currentSourceCard, typeLine = getSourceCardTypeLine(card)) {
     const parsed = splitSourceCardTypeLine(typeLine);
-    const supertypeDisplay = document.getElementById('source-card-supertype');
-    const subtypeDisplay = document.getElementById('source-card-subtype');
+    const writeMetaText = (element, value, fallback = 'None') => {
+        if (!element) return;
+        const normalized = String(value ?? '').trim();
+        element.dataset.originalText = normalized;
+        element.textContent = normalized || fallback;
+    };
+    const supertypeValue = parsed.supertypes.join(' ');
+    const typeValue = parsed.types.join(' ');
+    const subtypeValue = parsed.subtypes;
+    writeMetaText(document.getElementById('source-card-supertype'), supertypeValue);
+    writeMetaText(document.getElementById('source-card-type'), typeValue);
+    writeMetaText(document.getElementById('source-card-subtype'), subtypeValue);
+    const typeDisplay = document.getElementById('source-card-type');
+    if (typeDisplay) typeDisplay.dataset.originalTypeLine = String(typeLine || '').trim();
+
     const manaValueDisplay = document.getElementById('source-card-mana-value');
-    const rarityDisplay = document.getElementById('source-card-rarity');
-    if (supertypeDisplay) supertypeDisplay.textContent = parsed.supertypes.join(' ') || 'None';
-    if (subtypeDisplay) subtypeDisplay.textContent = parsed.subtypes || 'None';
     if (manaValueDisplay) {
         const raw = card?.cmc ?? card?.mana_value ?? 0;
         const numeric = Number(raw);
         manaValueDisplay.textContent = Number.isFinite(numeric) ? String(Number.isInteger(numeric) ? numeric : Number(numeric.toFixed(4))) : String(raw || '0');
     }
+    const rarityDisplay = document.getElementById('source-card-rarity');
     if (rarityDisplay) {
         const rarity = String(card?.rarity || 'unknown').toLowerCase();
-        rarityDisplay.textContent = rarity === 'mythic' ? 'Mythic' : rarity === 'uncommon' ? 'Uncommon' : rarity === 'rare' ? 'Rare' : rarity === 'common' ? 'Common' : rarity === 'special' ? 'Special' : rarity === 'bonus' ? 'Bonus' : 'Unknown';
+        rarityDisplay.textContent = rarity === 'mythic' ? 'Mythic' : rarity === 'uncommon' ? 'Uncommon' : rarity === 'rare' ? 'Rare' : rarity === 'common' ? 'Common' : rarity === 'special' ? 'Special' : rarity === 'bonus' ? 'Bonus' : 'None';
     }
+    const setCodeDisplay = document.getElementById('source-card-set-code');
+    if (setCodeDisplay) {
+        const setCode = String(card?.set || card?.set_code || '').trim();
+        setCodeDisplay.textContent = setCode ? setCode.toUpperCase() : 'None';
+        setCodeDisplay.title = String(card?.set_name || '').trim();
+    }
+
+    const face = card?.card_faces?.[currentSourceCardFaceIndex] || card?.card_faces?.[0] || null;
+    const isCreature = parsed.types.some(type => type.toLowerCase() === 'creature');
+    const statsRow = document.getElementById('source-card-stats-row');
+    const powerDisplay = document.getElementById('source-card-power');
+    const toughnessDisplay = document.getElementById('source-card-toughness');
+    if (statsRow) statsRow.classList.toggle('hidden', !isCreature);
+    const displayStat = value => value === undefined || value === null || String(value).trim() === '' ? '—' : String(value);
+    if (powerDisplay) powerDisplay.textContent = displayStat(face?.power ?? card?.power);
+    if (toughnessDisplay) toughnessDisplay.textContent = displayStat(face?.toughness ?? card?.toughness);
 }
+
 function applySourceCardTypeLine(typeLine, { clearTypeHighlights = true } = {}) {
     const normalized = String(typeLine || '').trim().replace(/\s+/g, ' ');
     if (!normalized || !currentSourceCard) return false;
@@ -20549,8 +20598,9 @@ function applySourceCardTypeLine(typeLine, { clearTypeHighlights = true } = {}) 
         currentSourceCard.card_faces[currentSourceCardFaceIndex].type_line = normalized;
     }
     if (sourceCardType) {
-        sourceCardType.dataset.originalText = normalized;
-        sourceCardType.textContent = normalized;
+        sourceCardType.dataset.originalTypeLine = normalized;
+        sourceCardType.dataset.originalText = splitSourceCardTypeLine(normalized).types.join(' ');
+        sourceCardType.textContent = splitSourceCardTypeLine(normalized).types.join(' ') || 'None';
     }
     if (clearTypeHighlights) manualHighlights = manualHighlights.filter(h => h?.field !== 'type');
     syncSourceCardMetadataDisplays(currentSourceCard, normalized);
@@ -20568,34 +20618,129 @@ function composeSourceCardTypeLine({ supertypes, types, subtypes }) {
 function cleanSourceSupertypeInput(value) {
     const raw = String(value || '').trim();
     if (!raw || /^none$/i.test(raw)) return [];
-    const canonical = new Map(['Basic', 'Legendary', 'Ongoing', 'Snow', 'World'].map(value => [value.toLowerCase(), value]));
-    return [...new Set(raw.replace(/[,;/]+/g, ' ').split(/\s+/).filter(Boolean).map(token => canonical.get(token.toLowerCase()) || token))];
+    const canonical = new Map(SOURCE_CARD_SUPERTYPE_WORDS.map(value => [value.toLowerCase(), value]));
+    // Only actual MTG supertypes belong here. Unknown words are not allowed to leak into the
+    // visible Type field; common typos are already corrected before this normalizer runs.
+    return [...new Set(raw.replace(/[,;/]+/g, ' ').split(/\s+/).filter(Boolean).map(token => canonical.get(token.toLowerCase())).filter(Boolean))];
 }
+function getSourceSubtypeVocabulary() {
+    const excluded = new Set([
+        'artifact', 'battle', 'creature', 'enchantment', 'instant', 'kindred', 'land', 'planeswalker',
+        'sorcery', 'tribal', 'basic', 'legendary', 'ongoing', 'snow', 'world', 'token', 'conspiracy',
+        'dungeon', 'plane', 'phenomenon', 'scheme', 'vanguard'
+    ]);
+    // A getter is deliberate: MANA_TYPE_WORDS is declared later in the module, but these words
+    // are only requested in response to a user opening or typing into an editor.
+    return [...new Set(MANA_TYPE_WORDS.filter(word => !excluded.has(String(word).toLowerCase())))];
+}
+function correctSourceMetadataWords(value, vocabulary) {
+    const canonicalWords = [...new Set((vocabulary || []).flatMap(item => String(item).split(/\s+/)).filter(Boolean))];
+    const canonical = new Map(canonicalWords.map(word => [word.toLowerCase(), word]));
+    const distance = (left, right) => {
+        const a = left.toLowerCase(), b = right.toLowerCase();
+        let previous = Array.from({ length: b.length + 1 }, (_, index) => index);
+        for (let i = 1; i <= a.length; i++) {
+            const row = [i];
+            for (let j = 1; j <= b.length; j++) {
+                row[j] = Math.min(row[j - 1] + 1, previous[j] + 1, previous[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+            }
+            previous = row;
+        }
+        return previous[b.length];
+    };
+    return String(value || '').trim().replace(/\s+/g, ' ').replace(/[A-Za-z][A-Za-z'’\-]*/g, word => {
+        const existing = canonical.get(word.toLowerCase());
+        if (existing) return existing;
+        if (word.length < 4 || !canonicalWords.length) return word;
+        let best = null, bestDistance = Infinity;
+        for (const candidate of canonicalWords) {
+            const nextDistance = distance(word, candidate);
+            if (nextDistance < bestDistance) { bestDistance = nextDistance; best = candidate; }
+            if (bestDistance === 0) break;
+        }
+        const threshold = word.length >= 8 ? 2 : 1;
+        return best && bestDistance <= threshold ? best : word;
+    });
+}
+
 function initSourceMetadataEditors() {
     const byId = id => document.getElementById(id);
-    const bindEditor = ({ buttonId, editorId, inputId, applyId, cancelId, readValue, saveValue, allowBlank = true }) => {
+    const bindEditor = ({ buttonId, editorId, inputId, applyId, cancelId, readValue, saveValue, allowBlank = true,
+        suggestionsId = null, getWords = null, normalizeBeforeSave = null, onOpen = null }) => {
         const button = byId(buttonId), editor = byId(editorId), input = byId(inputId), apply = byId(applyId), cancel = byId(cancelId);
+        const suggestions = suggestionsId ? byId(suggestionsId) : null;
         if (!button || !editor || !input || !apply || !cancel || button.dataset.bound) return;
         button.dataset.bound = 'true';
-        const close = () => { editor.classList.add('hidden'); button.setAttribute('aria-expanded', 'false'); };
+        const getVocabulary = () => {
+            try { return typeof getWords === 'function' ? getWords().filter(Boolean) : []; }
+            catch (_) { return []; }
+        };
+        const activeToken = value => {
+            const match = /([A-Za-z][A-Za-z'’\-]*)\s*$/.exec(String(value || ''));
+            return match ? { word: match[1], start: match.index, end: match.index + match[1].length } : null;
+        };
+        const replaceActiveToken = (replacement, token) => {
+            input.value = input.value.slice(0, token.start) + replacement + input.value.slice(token.end);
+            input.focus();
+            updateSuggestions();
+        };
+        const updateSuggestions = () => {
+            if (!suggestions) return;
+            suggestions.replaceChildren();
+            const token = activeToken(input.value);
+            if (!token || token.word.length < 2) { suggestions.classList.add('hidden'); return; }
+            const q = token.word.toLowerCase();
+            const words = getVocabulary();
+            const matches = [...new Set(words)].filter(word => {
+                const lower = String(word).toLowerCase();
+                return lower.startsWith(q) && lower !== q;
+            }).slice(0, 8);
+            if (!matches.length) { suggestions.classList.add('hidden'); return; }
+            for (const word of matches) {
+                const choice = document.createElement('button');
+                choice.type = 'button';
+                choice.textContent = word;
+                choice.setAttribute('role', 'option');
+                choice.addEventListener('pointerdown', event => event.preventDefault());
+                choice.addEventListener('click', () => replaceActiveToken(word, token));
+                suggestions.appendChild(choice);
+            }
+            suggestions.classList.remove('hidden');
+        };
+        const close = () => {
+            editor.classList.add('hidden');
+            button.setAttribute('aria-expanded', 'false');
+            suggestions?.classList.add('hidden');
+        };
         const open = () => {
             input.value = readValue();
-            editor.classList.remove('hidden'); button.setAttribute('aria-expanded', 'true');
+            editor.classList.remove('hidden');
+            button.setAttribute('aria-expanded', 'true');
+            if (typeof onOpen === 'function') onOpen();
+            updateSuggestions();
             input.focus?.();
             if (typeof input.setSelectionRange === 'function') {
                 const end = input.value.length;
-                try { input.setSelectionRange(end, end); } catch (_) { /* number/select inputs do not support a text selection */ }
+                try { input.setSelectionRange(end, end); } catch (_) { /* number/select inputs do not support text selection */ }
             }
         };
         const commit = () => {
-            const raw = input.value;
+            let raw = input.value;
+            if (typeof normalizeBeforeSave === 'function') raw = normalizeBeforeSave(raw);
             if (!allowBlank && !String(raw).trim()) { input.focus(); return; }
             if (saveValue(raw) !== false) close();
         };
         button.addEventListener('click', () => editor.classList.contains('hidden') ? open() : close());
         apply.addEventListener('click', commit);
         cancel.addEventListener('click', close);
+        input.addEventListener('input', updateSuggestions);
         input.addEventListener('keydown', event => {
+            if ((event.key === 'Tab' || event.key === 'ArrowRight') && suggestions && !suggestions.classList.contains('hidden')) {
+                const first = suggestions.querySelector('button');
+                const token = activeToken(input.value);
+                if (first && token) { event.preventDefault(); replaceActiveToken(first.textContent || '', token); }
+                return;
+            }
             if (event.key === 'Enter') { event.preventDefault(); commit(); }
             else if (event.key === 'Escape') { event.preventDefault(); close(); }
         });
@@ -20603,6 +20748,12 @@ function initSourceMetadataEditors() {
     bindEditor({
         buttonId: 'edit-source-mana-value-btn', editorId: 'source-mana-value-editor', inputId: 'source-mana-value-input',
         applyId: 'apply-source-mana-value-btn', cancelId: 'cancel-source-mana-value-btn', allowBlank: false,
+        onOpen: () => {
+            const compare = byId('source-mana-value-comparison');
+            const filterValue = byId('filter-cmc')?.value || '';
+            const parsed = typeof parseComparisonFilter === 'function' ? parseComparisonFilter(filterValue) : null;
+            if (compare) compare.value = parsed?.operator || 'none';
+        },
         readValue: () => String(currentSourceCard?.cmc ?? currentSourceCard?.mana_value ?? 0),
         saveValue: raw => {
             const value = Number(raw);
@@ -20611,14 +20762,25 @@ function initSourceMetadataEditors() {
                 currentSourceCard.cmc = value;
                 currentSourceCard.mana_value = value;
             }
+            // The comparison is optional and writes into ManaSearch's existing CMC constraint,
+            // so Scryfall retrieval, hard filtering, and ranking preferences keep using one state.
+            const comparator = byId('source-mana-value-comparison')?.value || 'none';
+            const filterCmc = byId('filter-cmc');
+            if (filterCmc) {
+                filterCmc.value = comparator === 'none' ? '' : `${comparator}${value}`;
+                filterCmc.dispatchEvent(new Event('input', { bubbles: true }));
+            }
             syncSourceCardMetadataDisplays();
-            window.dispatchEvent(new CustomEvent('manasearch:source-metadata-changed', { detail: { field: 'manaValue', value } }));
+            reapplyTypeLineHighlights();
+            window.dispatchEvent(new CustomEvent('manasearch:source-metadata-changed', { detail: { field: 'manaValue', value, comparator } }));
             return true;
         }
     });
     bindEditor({
         buttonId: 'edit-source-supertype-btn', editorId: 'source-supertype-editor', inputId: 'source-supertype-input',
         applyId: 'apply-source-supertype-btn', cancelId: 'cancel-source-supertype-btn',
+        suggestionsId: 'source-supertype-suggestions', getWords: () => SOURCE_CARD_SUPERTYPE_WORDS,
+        normalizeBeforeSave: raw => correctSourceMetadataWords(raw, SOURCE_CARD_SUPERTYPE_WORDS),
         readValue: () => splitSourceCardTypeLine(getSourceCardTypeLine()).supertypes.join(' '),
         saveValue: raw => {
             const parsed = splitSourceCardTypeLine(getSourceCardTypeLine());
@@ -20629,6 +20791,8 @@ function initSourceMetadataEditors() {
     bindEditor({
         buttonId: 'edit-source-subtype-btn', editorId: 'source-subtype-editor', inputId: 'source-subtype-input',
         applyId: 'apply-source-subtype-btn', cancelId: 'cancel-source-subtype-btn',
+        suggestionsId: 'source-subtype-suggestions', getWords: () => getSourceSubtypeVocabulary(),
+        normalizeBeforeSave: raw => correctSourceMetadataWords(raw, getSourceSubtypeVocabulary()),
         readValue: () => splitSourceCardTypeLine(getSourceCardTypeLine()).subtypes,
         saveValue: raw => {
             const parsed = splitSourceCardTypeLine(getSourceCardTypeLine());
@@ -20640,16 +20804,28 @@ function initSourceMetadataEditors() {
     bindEditor({
         buttonId: 'edit-source-rarity-btn', editorId: 'source-rarity-editor', inputId: 'source-rarity-input',
         applyId: 'apply-source-rarity-btn', cancelId: 'cancel-source-rarity-btn',
-        readValue: () => String(currentSourceCard?.rarity || 'unknown').toLowerCase(),
+        readValue: () => {
+            const rarity = String(currentSourceCard?.rarity || 'unknown').toLowerCase();
+            return rarity === 'unknown' ? 'unknown' : rarity;
+        },
         saveValue: raw => {
             if (!currentSourceCard) return false;
             currentSourceCard.rarity = String(raw || 'unknown').toLowerCase();
             syncSourceCardMetadataDisplays();
+            reapplyTypeLineHighlights();
             window.dispatchEvent(new CustomEvent('manasearch:source-metadata-changed', { detail: { field: 'rarity', value: currentSourceCard.rarity } }));
             return true;
         }
     });
+    const sourceLegalityButton = byId('source-card-legality-btn');
+    if (sourceLegalityButton && !sourceLegalityButton.dataset.bound) {
+        sourceLegalityButton.dataset.bound = 'true';
+        sourceLegalityButton.addEventListener('click', event => {
+            if (currentSourceCard) openCardLegalityModal(currentSourceCard, event.currentTarget);
+        });
+    }
 }
+
 if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', initSourceMetadataEditors, { once: true }); else initSourceMetadataEditors();
 
 // Lightweight MTG type-line editor. This edits only the local source-card search context; it does
@@ -20658,6 +20834,7 @@ if (document.readyState === 'loading') document.addEventListener('DOMContentLoad
 const MANA_TYPE_WORDS = [
     'Artifact','Battle','Creature','Enchantment','Instant','Kindred','Land','Planeswalker','Sorcery','Tribal',
     'Basic','Legendary','Snow','World','Ongoing','Token','Conspiracy','Dungeon','Plane','Phenomenon','Scheme','Vanguard',
+    'Arcane','Aura','Background','Blood','Cartouche','Case','Class','Clue','Contraption','Cave','Desert','Equipment','Food','Fortification','Fungus','Gold','Incubator','Island','Junk','Lesson','Map','Mountain','Omen','Plains','Powerstone','Role','Room','Rune','Saga','Shard','Shrine','Sphere','Swamp','Treasure','Vehicle','Forest',
     'Advisor','Aetherborn','Alien','Angel','Antelope','Ape','Archer','Archon','Army','Artificer','Assassin','Assembly-Worker','Atog','Aurochs','Avatar',
     'Badger','Barbarian','Bard','Basilisk','Bat','Bear','Beast','Beeble','Berserker','Bird','Blinkmoth','Boar','Bringer','Brushwagg',
     'Camarid','Camel','Capybara','Caribou','Carrier','Cat','Centaur','Child','Chimera','Citizen','Cleric','Clown','Cockatrice','Construct','Coward','Coyote','Crab','Crocodile','Cyclops',
@@ -20684,7 +20861,7 @@ function initSourceTypeEditor() {
     if (!display || !openBtn || !editor || !input || !suggestions || openBtn.dataset.bound) return;
     openBtn.dataset.bound = 'true';
     const showEditor = () => {
-        input.value = display.dataset.originalText || display.textContent || '';
+        input.value = getSourceCardTypeLine() || display.dataset.originalTypeLine || display.textContent || '';
         editor.classList.remove('hidden'); openBtn.setAttribute('aria-expanded','true');
         updateSuggestions(); input.focus(); input.setSelectionRange(input.value.length,input.value.length);
     };
@@ -20747,9 +20924,10 @@ function displaySourceCard(card) {
     document.getElementById('source-card-name').textContent = card.name;
     document.getElementById('source-card-mana').textContent = card.mana_cost || 'None';
     if (sourceCardType) {
-        const typeText = card.type_line || card.card_faces?.[0]?.type_line || '';
+        const typeText = card.card_faces?.[0]?.type_line || card.type_line || '';
         sourceCardType.textContent = typeText;
         sourceCardType.dataset.originalText = typeText;
+        sourceCardType.dataset.originalTypeLine = typeText;
         syncSourceCardMetadataDisplays(card, typeText);
     }
     

@@ -5,7 +5,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>ManaSearch</title>
-    <link rel="stylesheet" href="style.css?v=20261016-89">
+    <link rel="stylesheet" href="style.css?v=20261016-90">
 </head>
 <body>
     <header class="site-header">
@@ -130,6 +130,16 @@
                                         <div id="source-mana-value-editor" class="source-meta-editor hidden">
                                             <label for="source-mana-value-input">Edit mana value</label>
                                             <input id="source-mana-value-input" type="number" min="0" max="999" step="any" inputmode="decimal" required aria-label="Source card mana value">
+                                            <label for="source-mana-value-comparison" class="source-meta-editor-secondary-label">Find cards with mana value</label>
+                                            <select id="source-mana-value-comparison" aria-label="Mana value comparison">
+                                                <option value="none">Don't filter by mana value</option>
+                                                <option value="&lt;">Less than</option>
+                                                <option value="=">Equal to</option>
+                                                <option value="&gt;">More than</option>
+                                                <option value="&lt;=">Less than or equal to</option>
+                                                <option value="&gt;=">More than or equal to</option>
+                                            </select>
+                                            <p class="source-type-help">Choosing a comparison applies the same rule to search results. Leave it unfiltered to keep all mana values.</p>
                                             <div class="source-type-editor-actions"><button type="button" id="apply-source-mana-value-btn">Apply</button><button type="button" id="cancel-source-mana-value-btn" class="secondary-preference-btn">Cancel</button></div>
                                         </div>
                                     </div>
@@ -139,32 +149,48 @@
                                         <p class="source-card-meta-line"><strong>Supertype:</strong> <span id="source-card-supertype">None</span> <button type="button" id="edit-source-supertype-btn" class="source-type-edit-btn" aria-expanded="false" aria-controls="source-supertype-editor">Edit</button></p>
                                         <div id="source-supertype-editor" class="source-meta-editor hidden">
                                             <label for="source-supertype-input">Edit supertype</label>
-                                            <input id="source-supertype-input" type="text" autocomplete="off" placeholder="e.g. Legendary, Snow (blank for none)" aria-label="Source card supertype">
+                                            <input id="source-supertype-input" type="text" autocomplete="off" spellcheck="true" aria-describedby="source-supertype-help" placeholder="e.g. Legendary, Snow (blank for none)" aria-label="Source card supertype">
+                                            <div id="source-supertype-suggestions" class="source-type-suggestions hidden" role="listbox" aria-label="Suggested MTG supertypes"></div>
+                                            <p id="source-supertype-help" class="source-type-help">Suggestions appear as you type; common misspellings are corrected when you apply.</p>
                                             <div class="source-type-editor-actions"><button type="button" id="apply-source-supertype-btn">Apply</button><button type="button" id="cancel-source-supertype-btn" class="secondary-preference-btn">Cancel</button></div>
                                         </div>
                                     </div>
                                     <div class="source-meta-field source-meta-field-type">
-                                        <p class="source-card-meta-line source-type-row"><strong>Type:</strong> <span id="source-card-type" class="selectable-text type-line-selectable" title="Select a type-line phrase to highlight it"></span> <button type="button" id="edit-source-type-btn" class="source-type-edit-btn" aria-expanded="false" aria-controls="source-type-editor">Edit</button></p>
+                                        <p class="source-card-meta-line source-type-row"><strong>Type:</strong> <span id="source-card-type" class="selectable-text type-line-selectable" title="Select a card type to highlight it"></span> <button type="button" id="edit-source-type-btn" class="source-type-edit-btn" aria-expanded="false" aria-controls="source-type-editor">Edit</button></p>
                                         <div id="source-type-editor" class="source-type-editor hidden"><label for="source-type-input">Edit type line</label><input id="source-type-input" type="text" autocomplete="off" spellcheck="true" aria-describedby="source-type-help" placeholder="e.g. Legendary Creature — Elf Druid"><div id="source-type-suggestions" class="source-type-suggestions hidden" role="listbox" aria-label="Suggested MTG types"></div><p id="source-type-help" class="source-type-help">Suggestions appear as you type. Press Tab or → to accept a completion; common misspellings are corrected when you apply.</p><div class="source-type-editor-actions"><button type="button" id="apply-source-type-btn">Apply type line</button><button type="button" id="cancel-source-type-btn" class="secondary-preference-btn">Cancel</button></div></div>
                                     </div>
                                     <div class="source-meta-field">
                                         <p class="source-card-meta-line"><strong>Subtype:</strong> <span id="source-card-subtype">None</span> <button type="button" id="edit-source-subtype-btn" class="source-type-edit-btn" aria-expanded="false" aria-controls="source-subtype-editor">Edit</button></p>
                                         <div id="source-subtype-editor" class="source-meta-editor hidden">
                                             <label for="source-subtype-input">Edit subtype</label>
-                                            <input id="source-subtype-input" type="text" autocomplete="off" placeholder="e.g. Elf Druid (blank for none)" aria-label="Source card subtype">
+                                            <input id="source-subtype-input" type="text" autocomplete="off" spellcheck="true" aria-describedby="source-subtype-help" placeholder="e.g. Elf Druid (blank for none)" aria-label="Source card subtype">
+                                            <div id="source-subtype-suggestions" class="source-type-suggestions hidden" role="listbox" aria-label="Suggested MTG subtypes"></div>
+                                            <p id="source-subtype-help" class="source-type-help">Suggestions appear as you type; known subtype misspellings are corrected when you apply.</p>
                                             <div class="source-type-editor-actions"><button type="button" id="apply-source-subtype-btn">Apply</button><button type="button" id="cancel-source-subtype-btn" class="secondary-preference-btn">Cancel</button></div>
                                         </div>
                                     </div>
                                 </div>
                                 <div class="source-card-meta-row source-card-rarity-row">
                                     <div class="source-meta-field">
-                                        <p class="source-card-meta-line"><strong>Rarity:</strong> <span id="source-card-rarity">Unknown</span> <button type="button" id="edit-source-rarity-btn" class="source-type-edit-btn" aria-expanded="false" aria-controls="source-rarity-editor">Edit</button></p>
+                                        <p class="source-card-meta-line"><strong>Rarity:</strong> <span id="source-card-rarity">None</span> <button type="button" id="edit-source-rarity-btn" class="source-type-edit-btn" aria-expanded="false" aria-controls="source-rarity-editor">Edit</button></p>
                                         <div id="source-rarity-editor" class="source-meta-editor hidden">
                                             <label for="source-rarity-input">Edit rarity</label>
-                                            <select id="source-rarity-input" aria-label="Source card rarity"><option value="common">Common</option><option value="uncommon">Uncommon</option><option value="rare">Rare</option><option value="mythic">Mythic</option><option value="special">Special</option><option value="bonus">Bonus</option><option value="unknown">Unknown</option></select>
+                                            <select id="source-rarity-input" aria-label="Source card rarity"><option value="common">Common</option><option value="uncommon">Uncommon</option><option value="rare">Rare</option><option value="mythic">Mythic</option><option value="special">Special</option><option value="bonus">Bonus</option><option value="unknown">None</option></select>
                                             <div class="source-type-editor-actions"><button type="button" id="apply-source-rarity-btn">Apply</button><button type="button" id="cancel-source-rarity-btn" class="secondary-preference-btn">Cancel</button></div>
                                         </div>
                                     </div>
+                                </div>
+                                <div class="source-card-meta-row source-card-extra-meta-row">
+                                    <div class="source-meta-field">
+                                        <p class="source-card-meta-line"><strong>Format Legality:</strong> <button type="button" id="source-card-legality-btn" class="source-type-edit-btn source-meta-action-btn" aria-haspopup="dialog">View</button></p>
+                                    </div>
+                                    <div class="source-meta-field">
+                                        <p class="source-card-meta-line"><strong>Set Code:</strong> <span id="source-card-set-code">None</span></p>
+                                    </div>
+                                </div>
+                                <div id="source-card-stats-row" class="source-card-meta-row source-card-stats-row hidden" aria-label="Creature power and toughness">
+                                    <p class="source-card-meta-line"><strong>Power:</strong> <span id="source-card-power">—</span></p>
+                                    <p class="source-card-meta-line"><strong>Toughness:</strong> <span id="source-card-toughness">—</span></p>
                                 </div>
                             </div>
                             <section class="source-quick-constraints" aria-labelledby="source-quick-constraints-title">
@@ -952,7 +978,7 @@
         import * as transformers from "https://cdn.jsdelivr.net/npm/@xenova/transformers@2.16.0";
         window.transformers = transformers;
     </script>
-    <script src="pako.min.js?v=20261016-89"></script>
-    <script type="module" src="app.js?v=20261016-89"></script>
+    <script src="pako.min.js?v=20261016-90"></script>
+    <script type="module" src="app.js?v=20261016-90"></script>
 </body>
 </html>
