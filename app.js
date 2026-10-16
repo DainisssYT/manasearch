@@ -1,6 +1,6 @@
-/* ManaSearch build 20261015-80 */
+/* ManaSearch build 20261016-84 */
 // ManaSearch deployment build marker. Bump this whenever app.js changes so cached-module issues are easy to diagnose.
-const MANASEARCH_APP_BUILD = '20261015-81';
+const MANASEARCH_APP_BUILD = '20261016-86';
 console.info(`[ManaSearch] app.js build ${MANASEARCH_APP_BUILD}`);
 
 // State Management
@@ -4309,7 +4309,7 @@ function findHighlightRangeInSource(text, preferredStart = null) {
 function highlightParentOptions(excludeIndex = null) {
     return manualHighlights
         .map((h, idx) => ({ h, idx }))
-        .filter(({ h, idx }) => idx !== excludeIndex && h && h.origin !== 'user' && typeof h.text === 'string' && h.text.trim());
+        .filter(({ h, idx }) => idx !== excludeIndex && h && (h.origin !== 'user' || Boolean(h.editedFrom)) && typeof h.text === 'string' && h.text.trim());
 }
 
 function getHighlightParentLabel(index) {
@@ -4427,8 +4427,14 @@ function renderHighlightEditor(idx) {
         if (!target) return;
         const parentValue = connectSelect.value;
         const nextAttachedTo = /^\d+$/.test(parentValue) ? Number(parentValue) : null;
+        const sourceOracleBeforeEdit = getCurrentSourceOracleText();
+        const previousText = String(target.text || '').trim();
+        const priorAnchor = target.editedFrom || (target.origin !== 'user' && Number.isInteger(target.start) && Number.isInteger(target.end)
+            && sourceOracleBeforeEdit.slice(target.start, target.end).trim().toLocaleLowerCase() === previousText.toLocaleLowerCase()
+            ? { text: previousText, start: target.start, end: target.end, clauseText: extractHighlightClauseContext(sourceOracleBeforeEdit, target.start, target.end) }
+            : null);
 
-        const textChanged = nextText.toLowerCase() !== String(target.text || '').trim().toLowerCase();
+        const textChanged = nextText.toLowerCase() !== previousText.toLowerCase();
         target.text = nextText;
         target.mode = selectedMode;
         target.attachedTo = Number.isInteger(nextAttachedTo) && nextAttachedTo !== idx ? nextAttachedTo : null;
@@ -4437,13 +4443,24 @@ function renderHighlightEditor(idx) {
         // Keep source-backed highlights visually anchored to a real occurrence. If the user
         // intentionally edits one into new wording, convert it to a search-only detail rather than
         // rendering a fake highlight that does not exist on the card.
-        if (target.origin !== 'user' && (textChanged || !Number.isFinite(target.start) || !Number.isFinite(target.end))) {
+        // Re-edited search-only chips keep their source anchor. Re-evaluate them as well so a
+        // user can change an edited phrase back to literal source text and restore the visual span.
+        if ((target.origin !== 'user' || target.editedFrom) && (textChanged || !Number.isFinite(target.start) || !Number.isFinite(target.end))) {
             const found = findHighlightRangeInSource(nextText, target.start);
             if (found) {
                 target.start = found.start;
                 target.end = found.end;
                 target.origin = target.origin === 'benchmark' ? 'benchmark' : 'source';
+                delete target.editedFrom;
             } else {
+                if (priorAnchor && Number.isInteger(priorAnchor.start) && Number.isInteger(priorAnchor.end)) {
+                    target.editedFrom = {
+                        text: String(priorAnchor.text || previousText).trim(),
+                        start: priorAnchor.start,
+                        end: priorAnchor.end,
+                        clauseText: priorAnchor.clauseText || extractHighlightClauseContext(sourceOracleBeforeEdit, priorAnchor.start, priorAnchor.end)
+                    };
+                }
                 target.start = null;
                 target.end = null;
                 target.origin = 'user';
@@ -4701,11 +4718,14 @@ function renderHighlightChips() {
                 // connection control to Independent. This turns the natural action "highlight the
                 // outcome, then describe when it happens" into a coherent mechanical intent.
                 if (attachedTo === null && !connectionChoiceMade && isSearchIntentTriggerPhrase(text)) {
+                    const currentOracle = getCurrentSourceOracleText();
                     const plausibleParents = highlightParentOptions(null).filter(({ h }) => {
-                        if (h.field === 'type' || !Number.isFinite(h.start) || !Number.isFinite(h.end)) return false;
-                        const clause = extractHighlightClauseContext(getCurrentSourceOracleText(), h.start, h.end);
+                        if (h.field === 'type') return false;
+                        const anchor = getHighlightSourceAnchor(h, currentOracle);
+                        if (!anchor) return false;
+                        const clause = extractHighlightClauseContext(currentOracle, anchor.start, anchor.end);
                         const resolution = getResolutionAfterTrigger(clause);
-                        return Boolean(resolution && isLikelyEffectOutcomeText(resolution) && resolution.toLowerCase().includes(String(h.text || '').trim().toLowerCase()));
+                        return Boolean(resolution && isLikelyEffectOutcomeText(resolution) && resolution.toLowerCase().includes(String(anchor.text || '').trim().toLowerCase()));
                     });
                     if (plausibleParents.length === 1) attachedTo = plausibleParents[0].idx;
                 }
@@ -7789,8 +7809,9 @@ function buildHighlightScoringText(highlights, sourceText = getCurrentSourceOrac
 
     return groups.map(group => {
         const sourceContext = String(group.parseText || group.sourceClauseText || group.contextText || '').trim();
+        const overrideTexts = new Set((group.intentOverrideTexts || (group.triggerIntentOverrideText ? [group.triggerIntentOverrideText] : [])).map(value => String(value).trim()));
         const intentHints = (group.connectedIntentTexts || [])
-            .filter(value => Boolean(value) && (!group.triggerIntentOverride || String(value).trim() !== group.triggerIntentOverrideText))
+            .filter(value => Boolean(value) && !overrideTexts.has(String(value).trim()))
             .map(v => String(v).trim());
         return [sourceContext, ...intentHints]
             .filter(Boolean)
@@ -8019,6 +8040,112 @@ function extractHighlightClauseContext(sourceText, start, end) {
     return text.slice(left, right).trim();
 }
 
+// Resolve a highlight's original Oracle-text anchor. Edited wording keeps a nonvisual anchor
+// so the scorer can retain trigger/condition context without reverting to the old outcome.
+function getHighlightSourceAnchor(highlight, sourceText = getCurrentSourceOracleText()) {
+    const oracle = String(sourceText || '');
+    const matchesAt = candidate => {
+        const start = Number(candidate?.start), end = Number(candidate?.end);
+        const expected = String(candidate?.text || '').trim();
+        if (!expected || !Number.isInteger(start) || !Number.isInteger(end) || start < 0 || end <= start || end > oracle.length) return null;
+        const actual = oracle.slice(start, end).trim();
+        if (actual.toLocaleLowerCase() !== expected.toLocaleLowerCase()) return null;
+        return { text: expected, start, end };
+    };
+    const editedAnchor = matchesAt(highlight?.editedFrom);
+    if (editedAnchor) return { ...editedAnchor, edited: true };
+    if (highlight?.origin === 'user' || highlight?.field === 'type') return null;
+    const sourceAnchor = matchesAt(highlight);
+    return sourceAnchor ? { ...sourceAnchor, edited: false } : null;
+}
+
+// Locate the original rules clause and the selected span's role inside it. The anchor is
+// deliberately nonvisual for edited highlights: it preserves grammatical context while the
+// current user text remains the actual search intent.
+function getHighlightSourceClauseInfo(highlight, sourceText = getCurrentSourceOracleText()) {
+    const source = String(sourceText || '');
+    const anchor = getHighlightSourceAnchor(highlight, source);
+    if (!anchor) return null;
+    let left = 0;
+    for (let i = anchor.start - 1; i >= 0; i--) {
+        if (/[.!?;\n]/.test(source[i])) { left = i + 1; break; }
+    }
+    let right = source.length;
+    for (let i = anchor.end; i < source.length; i++) {
+        if (/[.!?;\n]/.test(source[i])) { right = i + 1; break; }
+    }
+    const raw = source.slice(left, right);
+    const leading = raw.match(/^\s*/)?.[0].length || 0;
+    const trailing = raw.match(/\s*$/)?.[0].length || 0;
+    const start = left + leading;
+    const end = Math.max(start, right - trailing);
+    const clauseText = source.slice(start, end).trim();
+    const comma = clauseText.indexOf(',');
+    const triggerLead = comma > 0 && isSearchIntentTriggerPhrase(clauseText.slice(0, comma))
+        ? clauseText.slice(0, comma).trim() : '';
+    const anchorLocalStart = anchor.start - start;
+    const anchorLocalEnd = anchor.end - start;
+    const anchorRole = triggerLead && anchorLocalStart < comma && anchorLocalEnd <= comma
+        ? 'trigger'
+        : (triggerLead ? 'outcome' : 'clause');
+    return { anchor, start, end, clauseText, triggerLead, resolutionText: triggerLead ? clauseText.slice(comma + 1).trim() : '', comma, anchorLocalStart, anchorLocalEnd, anchorRole };
+}
+
+function isCompleteTriggerOutcomeText(value) {
+    const text = String(value || '').trim();
+    const comma = text.indexOf(',');
+    // The user's complete authored rule is authoritative even when its outcome uses a verb the
+    // canonical parser does not yet recognize (for example, a win-the-game or extra-turn effect).
+    return comma > 0 && isSearchIntentTriggerPhrase(text.slice(0, comma)) && Boolean(text.slice(comma + 1).trim());
+}
+
+// When a source selection was inside the trigger condition, editing it must replace the trigger,
+// not append a trigger to an unchanged source trigger or treat it as an outcome. Full trigger
+// phrases replace the lead; shorter replacements substitute only the anchored source fragment.
+function composeEditedHighlightTriggerOverride(sourceClause, editedTriggerText, sourceAnchorText = '') {
+    const source = String(sourceClause || '').trim();
+    const comma = source.indexOf(',');
+    if (comma <= 0) return null;
+    const oldTrigger = source.slice(0, comma).trim();
+    if (!isSearchIntentTriggerPhrase(oldTrigger)) return null;
+    const resolution = source.slice(comma + 1).trim();
+    const replacement = String(editedTriggerText || '').trim().replace(/[\s,;.!?]+$/g, '');
+    if (!replacement || !resolution) return null;
+    let nextTrigger = replacement;
+    if (!isSearchIntentTriggerPhrase(replacement)) {
+        const anchor = String(sourceAnchorText || '').trim();
+        if (!anchor) return null;
+        const at = oldTrigger.toLocaleLowerCase().indexOf(anchor.toLocaleLowerCase());
+        if (at < 0) return null;
+        nextTrigger = `${oldTrigger.slice(0, at)}${replacement}${oldTrigger.slice(at + anchor.length)}`.replace(/\s+/g, ' ').trim();
+    }
+    if (!isSearchIntentTriggerPhrase(nextTrigger)) return null;
+    return `${nextTrigger}, ${resolution}`;
+}
+
+// Replace only the selected result/outcome while retaining its original trigger and safe modal
+// prefix (for example, “you may”). The user-authored outcome replaces the prior printed outcome.
+function composeEditedHighlightOutcomeOverride(sourceClause, editedOutcomeText, previousSelectedText = '') {
+    const outcome = String(editedOutcomeText || '').trim().replace(/[\s,;.!?]+$/g, '');
+    if (!outcome) return null;
+    if (isCompleteTriggerOutcomeText(outcome)) return outcome;
+    const source = String(sourceClause || '').trim();
+    const comma = source.indexOf(',');
+    const triggerPrefix = comma > 0 && isSearchIntentTriggerPhrase(source.slice(0, comma)) ? source.slice(0, comma).trim() : '';
+    const resolution = getResolutionAfterTrigger(source);
+    let safePrefix = '';
+    const selected = String(previousSelectedText || '').trim();
+    if (resolution && selected) {
+        const at = resolution.toLocaleLowerCase().indexOf(selected.toLocaleLowerCase());
+        if (at >= 0) {
+            const prefix = resolution.slice(0, at).trim();
+            if (/^(?:(?:you|that player|each player|target player|the controller|its controller|that opponent)(?:\s+|$))?(?:(?:may|must|can|also|then)(?:\s+|$))*$/i.test(prefix)) safePrefix = prefix;
+        }
+    }
+    const replacement = [safePrefix, outcome].filter(Boolean).join(' ');
+    return triggerPrefix ? `${triggerPrefix}, ${replacement}` : (replacement || outcome);
+}
+
 function isSearchIntentTriggerPhrase(value) {
     const text = String(value || '').trim();
     return /^(?:when|whenever)\b/i.test(text) ||
@@ -8105,14 +8232,15 @@ function annotateHighlightGroups(highlights, sourceText = getCurrentSourceOracle
     };
 
     const positioned = hs
-        .filter(h => Number.isFinite(h.start) && Number.isFinite(h.end) && h.end > h.start)
-        .sort((a, b) => a.start - b.start || a._highlightIndex - b._highlightIndex);
+        .map(h => ({ highlight: h, anchor: getHighlightSourceAnchor(h, sourceText) }))
+        .filter(item => item.anchor)
+        .sort((a, b) => a.anchor.start - b.anchor.start || a.highlight._highlightIndex - b.highlight._highlightIndex);
     for (let i = 1; i < positioned.length; i++) {
         const prev = positioned[i - 1];
         const next = positioned[i];
-        const gap = String(sourceText || '').slice(prev.end, next.start);
+        const gap = String(sourceText || '').slice(prev.anchor.end, next.anchor.start);
         if (!/[.!?\n]/.test(gap) && gap.length <= 96) {
-            union(hs.indexOf(prev), hs.indexOf(next));
+            union(hs.indexOf(prev.highlight), hs.indexOf(next.highlight));
         }
     }
 
@@ -8127,17 +8255,23 @@ function annotateHighlightGroups(highlights, sourceText = getCurrentSourceOracle
     // unambiguous relationship unless the user explicitly saved it as Independent. This is what
     // makes adding "Whenever an opponent draws a card" beside a selected "draw a card" phrase work
     // without requiring a hidden connection-setting step.
-    const validSourceEffectHighlights = hs.filter(h => {
-        if (!h || h.origin === 'user' || h.field === 'type' || !Number.isFinite(h.start) || !Number.isFinite(h.end) || h.end <= h.start) return false;
-        return String(sourceText || '').slice(h.start, h.end).toLowerCase() === String(h.text || '').trim().toLowerCase();
-    });
-    const unconnectedTriggerDetails = hs.filter(h => h?.origin === 'user' && !Number.isInteger(h.attachedTo) && h.intentConnection !== 'independent' && isSearchIntentTriggerPhrase(h.text));
-    if (validSourceEffectHighlights.length === 1 && unconnectedTriggerDetails.length === 1) {
-        const onlySource = validSourceEffectHighlights[0];
-        const sourceClause = extractHighlightClauseContext(sourceText, onlySource.start, onlySource.end);
-        const resolution = getResolutionAfterTrigger(sourceClause);
-        if (resolution && isLikelyEffectOutcomeText(resolution) && resolution.toLowerCase().includes(String(onlySource.text || '').trim().toLowerCase())) {
-            unconnectedTriggerDetails[0].attachedTo = onlySource._highlightIndex;
+    const validSourceEffectHighlights = hs.filter(h => h && (h.origin !== 'user' || Boolean(h.editedFrom)) && h.field !== 'type' && getHighlightSourceAnchor(h, sourceText));
+    const unconnectedTriggerDetails = hs.filter(h => h?.origin === 'user' && !h.editedFrom && !Number.isInteger(h.attachedTo) && h.intentConnection !== 'independent' && isSearchIntentTriggerPhrase(h.text));
+    if (validSourceEffectHighlights.length && unconnectedTriggerDetails.length === 1) {
+        // Multiple highlight chips can belong to the same Oracle clause. Count distinct clauses,
+        // not chips, so one custom trigger can still connect when the user selected two spans.
+        const candidateClauses = new Map();
+        for (const candidate of validSourceEffectHighlights) {
+            const anchor = getHighlightSourceAnchor(candidate, sourceText);
+            if (!anchor) continue;
+            const sourceClause = extractHighlightClauseContext(sourceText, anchor.start, anchor.end);
+            const resolution = getResolutionAfterTrigger(sourceClause);
+            if (!resolution || !isLikelyEffectOutcomeText(resolution) || !resolution.toLowerCase().includes(String(anchor.text || '').trim().toLowerCase())) continue;
+            const key = sourceClause.toLocaleLowerCase();
+            if (!candidateClauses.has(key)) candidateClauses.set(key, candidate);
+        }
+        if (candidateClauses.size === 1) {
+            unconnectedTriggerDetails[0].attachedTo = [...candidateClauses.values()][0]._highlightIndex;
             unconnectedTriggerDetails[0].intentConnection = 'inferred';
         }
     }
@@ -8170,34 +8304,116 @@ function annotateHighlightGroups(highlights, sourceText = getCurrentSourceOracle
         });
 
     groups.forEach((group, groupId) => {
-        const positionedMembers = group.filter(h => Number.isFinite(h.start) && Number.isFinite(h.end) && h.end > h.start);
-        const start = positionedMembers.length ? Math.min(...positionedMembers.map(h => h.start)) : null;
-        const end = positionedMembers.length ? Math.max(...positionedMembers.map(h => h.end)) : null;
-        // Only text that actually occurs in the source card belongs in the parser context.
-        // User-added/attached text is kept separately as search intent so it cannot corrupt the
-        // MTG rule parser while still influencing retrieval and ranking.
-        const contextText = start !== null && end !== null
-            ? String(sourceText || '').slice(start, end).trim()
-            : '';
-        const sourceClauseText = start !== null && end !== null
-            ? extractHighlightClauseContext(sourceText, start, end)
-            : '';
+        const positionedMembers = group.map(h => ({ highlight: h, anchor: getHighlightSourceAnchor(h, sourceText) })).filter(item => item.anchor);
+        const start = positionedMembers.length ? Math.min(...positionedMembers.map(item => item.anchor.start)) : null;
+        const end = positionedMembers.length ? Math.max(...positionedMembers.map(item => item.anchor.end)) : null;
+        // Keep original Oracle context for parsing, but always use the current edited text as intent.
+        const contextText = start !== null && end !== null ? String(sourceText || '').slice(start, end).trim() : '';
+        const sourceClauseText = start !== null && end !== null ? extractHighlightClauseContext(sourceText, start, end) : '';
         const connectedIntentTexts = group
-            .filter(h => h.origin === 'user' || h.field === 'type' || !Number.isFinite(h.start) || !Number.isFinite(h.end))
+            .filter(h => h.origin === 'user' || h.field === 'type' || !getHighlightSourceAnchor(h, sourceText))
             .map(h => h.field === 'type' ? `Card type line: ${String(h.text || '').trim()}` : String(h.text || '').trim())
             .filter(Boolean);
-        const positionedEffectSelections = group.filter(h => h.origin !== 'user' && h.field !== 'type' && Number.isFinite(h.start) && Number.isFinite(h.end));
+        const positionedEffectSelections = group.filter(h => h.field !== 'type' && (
+            (h.origin !== 'user' && getHighlightSourceAnchor(h, sourceText)) ||
+            (h.origin === 'user' && h.editedFrom && getHighlightSourceAnchor(h, sourceText))
+        ));
         const triggerIntentText = connectedIntentTexts.find(isSearchIntentTriggerPhrase) || '';
-        const selectedEffectText = positionedEffectSelections.map(h => String(h.text || '').trim()).filter(Boolean).join(' ');
-        const triggerOverrideClause = triggerIntentText && positionedEffectSelections.length
-            ? composeHighlightIntentOverride(sourceClauseText || contextText, triggerIntentText, selectedEffectText)
-            : null;
-        // Parse the full source clause to retain the real trigger/condition around a selected
-        // action fragment. If a trigger-shaped Search detail is connected (or unambiguously inferred)
-        // to that effect, compose the detail with the selected effect outcome so both intent and
-        // scoring use the intended trigger rather than the source card's unrelated native trigger.
+        const selectedOutcomeTexts = positionedEffectSelections
+            .map(h => String(h.origin === 'user' && h.editedFrom ? h.editedFrom.text : h.text || '').trim())
+            .filter(text => text && isLikelyEffectOutcomeText(text));
+        const selectedEffectText = selectedOutcomeTexts[0] || positionedEffectSelections
+            .map(h => String(h.origin === 'user' && h.editedFrom ? h.editedFrom.text : h.text || '').trim()).filter(Boolean).join(' ');
+
+        // A user-edited selection keeps its original source anchor only for grammar. Its current
+        // wording is authoritative and must not be filtered through a small list of recognized verbs:
+        // valid custom effects such as "take an extra turn" or "win the game" must still reach the
+        // parser, semantic retrieval, and ranking even when the canonical parser does not know them.
+        const editedSourceSelections = group.filter(h => h.origin === 'user' && h.editedFrom && h.field !== 'type');
+        const editedSourceRecords = editedSourceSelections.map(highlight => ({
+            highlight,
+            info: getHighlightSourceClauseInfo(highlight, sourceText)
+        })).filter(record => record.info);
+        const editedTriggerRecord = editedSourceRecords.find(record => record.info.anchorRole === 'trigger') || null;
+        const editedOutcomeRecord = editedSourceRecords.find(record => record.info.anchorRole !== 'trigger') || null;
+        const editedOutcomeSelection = editedOutcomeRecord?.highlight || null;
+        const completeCustomRule = connectedIntentTexts.find(isCompleteTriggerOutcomeText)
+            || editedSourceSelections.map(h => String(h.text || '').trim()).find(isCompleteTriggerOutcomeText)
+            || '';
+        let triggerOverrideClause = null;
+        const intentOverrideTexts = [];
+
+        if (completeCustomRule) {
+            triggerOverrideClause = String(completeCustomRule).trim();
+            intentOverrideTexts.push(completeCustomRule);
+        } else if (editedTriggerRecord && editedOutcomeRecord) {
+            const triggerInfo = editedTriggerRecord.info;
+            const outcomeInfo = editedOutcomeRecord.info;
+            const triggerClause = composeEditedHighlightTriggerOverride(
+                triggerInfo.clauseText, editedTriggerRecord.highlight.text, triggerInfo.anchor?.text || editedTriggerRecord.highlight.editedFrom?.text
+            ) || triggerInfo.clauseText;
+            triggerOverrideClause = composeEditedHighlightOutcomeOverride(
+                triggerClause || outcomeInfo.clauseText,
+                editedOutcomeRecord.highlight.text,
+                outcomeInfo.anchor?.text || editedOutcomeRecord.highlight.editedFrom?.text
+            );
+            if (!triggerOverrideClause) {
+                const triggerText = String(editedTriggerRecord.highlight.text || '').trim().replace(/[\s,;.!?]+$/g, '');
+                const outcomeText = String(editedOutcomeRecord.highlight.text || '').trim().replace(/[\s,;.!?]+$/g, '');
+                triggerOverrideClause = isSearchIntentTriggerPhrase(triggerText) ? `${triggerText}, ${outcomeText}` : null;
+            }
+            if (triggerOverrideClause) intentOverrideTexts.push(editedTriggerRecord.highlight.text, editedOutcomeRecord.highlight.text);
+        } else if (editedTriggerRecord) {
+            const info = editedTriggerRecord.info;
+            triggerOverrideClause = composeEditedHighlightTriggerOverride(
+                info.clauseText, editedTriggerRecord.highlight.text, info.anchor?.text || editedTriggerRecord.highlight.editedFrom?.text
+            );
+            if (triggerOverrideClause) intentOverrideTexts.push(editedTriggerRecord.highlight.text);
+        } else if (editedOutcomeSelection && triggerIntentText) {
+            // Combine the explicitly requested trigger with the user's current outcome text. The
+            // anchor's old wording is only used to retain safe grammatical prefixes such as "you may".
+            const info = editedOutcomeRecord.info;
+            const selectedAnchorText = info.anchor?.text || editedOutcomeSelection.editedFrom?.text || '';
+            const triggerClause = composeHighlightIntentOverride(
+                info.clauseText || sourceClauseText || contextText, triggerIntentText, selectedAnchorText
+            );
+            triggerOverrideClause = composeEditedHighlightOutcomeOverride(
+                triggerClause || info.clauseText || sourceClauseText || contextText,
+                editedOutcomeSelection.text,
+                selectedAnchorText
+            );
+            if (!triggerOverrideClause) {
+                const triggerText = String(triggerIntentText).trim().replace(/[\s,;.!?]+$/g, '');
+                const outcomeText = String(editedOutcomeSelection.text).trim().replace(/[\s,;.!?]+$/g, '');
+                if (isSearchIntentTriggerPhrase(triggerText) && outcomeText) triggerOverrideClause = `${triggerText}, ${outcomeText}`;
+            }
+            if (triggerOverrideClause) intentOverrideTexts.push(triggerIntentText, editedOutcomeSelection.text);
+        } else if (editedOutcomeSelection) {
+            const info = editedOutcomeRecord.info;
+            const selectedAnchorText = info.anchor?.text || editedOutcomeSelection.editedFrom?.text || '';
+            triggerOverrideClause = composeEditedHighlightOutcomeOverride(
+                info.clauseText || sourceClauseText || contextText,
+                editedOutcomeSelection.text,
+                selectedAnchorText
+            );
+            // If the original clause is not parseable, do not silently discard the user's revised
+            // text. The plain custom text remains available to semantic and lexical fallback paths.
+            if (!triggerOverrideClause) triggerOverrideClause = String(editedOutcomeSelection.text || '').trim();
+            if (triggerOverrideClause) intentOverrideTexts.push(editedOutcomeSelection.text);
+        } else if (triggerIntentText && positionedEffectSelections.length) {
+            triggerOverrideClause = composeHighlightIntentOverride(sourceClauseText || contextText, triggerIntentText, selectedEffectText);
+            if (triggerOverrideClause) intentOverrideTexts.push(triggerIntentText);
+        } else if (editedSourceSelections.length) {
+            // Last-resort safety path: even if no trigger/outcome grammar could be composed, retain
+            // the current authored text rather than reverting all the way to the old printed clause.
+            triggerOverrideClause = editedSourceSelections.map(h => String(h.text || '').trim()).filter(Boolean).join('. ');
+            if (triggerOverrideClause) intentOverrideTexts.push(...editedSourceSelections.map(h => String(h.text || '').trim()));
+        }
+        // Parse the full source clause for natural highlights, but when users edit a selected
+        // outcome/trigger, compose their current wording into the effective parser/scorer clause.
         const parseText = triggerOverrideClause || sourceClauseText || contextText || group.map(h => h.text).filter(Boolean).join(' ');
-        const remainingIntentTexts = connectedIntentTexts.filter(value => !triggerOverrideClause || value !== triggerIntentText);
+        const overrideSet = new Set(intentOverrideTexts.map(value => String(value).trim()));
+        const remainingIntentTexts = connectedIntentTexts.filter(value => !overrideSet.has(String(value).trim()));
         const hasExact = group.some(h => h.mode !== 'variable');
         const hasVariable = group.some(h => h.mode === 'variable');
         const groupMode = hasExact && hasVariable ? 'mixed' : (hasVariable ? 'variable' : 'exact');
@@ -8208,8 +8424,10 @@ function annotateHighlightGroups(highlights, sourceText = getCurrentSourceOracle
         group.contextText = contextText || group.filter(h => Number.isFinite(h.start)).map(h => h.text.trim()).join(' ');
         group.sourceClauseText = sourceClauseText || group.contextText;
         group.parseText = parseText;
-        group.triggerIntentOverrideText = triggerOverrideClause ? triggerIntentText : '';
+        group.triggerIntentOverrideText = triggerOverrideClause ? (intentOverrideTexts[0] || triggerIntentText) : '';
         group.triggerIntentOverride = Boolean(triggerOverrideClause);
+        group.intentOverrideTexts = [...new Set(intentOverrideTexts.map(value => String(value || '').trim()).filter(Boolean))];
+        group.editedFromSource = group.some(h => Boolean(h.editedFrom));
         group.connectedIntentTexts = connectedIntentTexts;
         group.searchIntentText = [parseText, ...remainingIntentTexts].filter(Boolean).join('. ');
         group.sourceStart = start;
@@ -8268,8 +8486,10 @@ function buildHighlightIntentProfiles(highlights, sourceCard = currentSourceCard
         // useful for numeric/custom tokens that would otherwise interrupt a parser pattern while
         // keeping the surrounding grammar intact.
         if (!recognizedEffects.length && group.some(h => h.mode === 'variable')) {
-            let normalized = group.map(h => h.text).join(' ');
-            for (const h of group.filter(x => x.mode === 'variable')) {
+            let normalized = String(group.parseText || group.sourceClauseText || group.contextText || group.map(h => h.text).join(' '));
+            // Only mask literal variable spans that come from the printed source text. A user-edited
+            // phrase is the intended replacement, not a variable token to erase from the query.
+            for (const h of group.filter(x => x.mode === 'variable' && !(x.origin === 'user' && x.editedFrom))) {
                 const escaped = h.text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
                 normalized = normalized.replace(new RegExp(escaped, 'g'), 'N');
             }
@@ -8292,7 +8512,15 @@ function buildHighlightIntentProfiles(highlights, sourceCard = currentSourceCard
             parseText: group.parseText || '',
             triggerIntentOverrideText: group.triggerIntentOverrideText || '',
             triggerIntentOverride: Boolean(group.triggerIntentOverride),
-            connectedIntentTexts: (group.connectedIntentTexts || []).filter(value => !group.triggerIntentOverride || String(value).trim() !== group.triggerIntentOverrideText),
+            userAuthoredOverride: Boolean(group.triggerIntentOverride && group.some(h => h.origin === 'user')),
+            editedFromSource: Boolean(group.editedFromSource),
+            // Any active highlight is a deliberate user focus. For edited/custom text, parseText is
+            // the authoritative composed rule; this text is also the lexical fallback when a new
+            // phrase is not yet covered by the canonical MTG action parser.
+            explicitUserIntent: Boolean(group.length && !group.some(h => h.origin === 'benchmark')),
+            explicitIntentText: String(group.parseText || group.searchIntentText || group.contextText || group.map(h => h.text).filter(Boolean).join('. ')).trim(),
+            intentOverrideTexts: group.intentOverrideTexts || [],
+            connectedIntentTexts: (group.connectedIntentTexts || []).filter(value => !(group.intentOverrideTexts || [group.triggerIntentOverrideText]).includes(String(value).trim())),
             selections: group.selections,
             modes: group.modes,
             mode: group.mode,
@@ -8310,29 +8538,93 @@ function buildHighlightIntentProfiles(highlights, sourceCard = currentSourceCard
 }
 
 function calculateHighlightIntentMatch(profiles, candidateEffects, candidateCard = null) {
-    if (!profiles?.length || !candidateEffects?.length) return 0;
+    if (!profiles?.length) return 0;
+    const safeEffects = Array.isArray(candidateEffects) ? candidateEffects : [];
+    const candidateOracle = candidateCard ? getCardOracleText(candidateCard) : '';
+    const clamp01 = value => Math.max(0, Math.min(1, Number(value) || 0));
     const profileScores = profiles.map(profile => {
-        const sourceEffects = profile.recognizedEffects.length ? profile.recognizedEffects : profile.parsedEffects;
-        const matchingMode = profile.mode === 'mixed' ? 'variable' : profile.mode;
-        const assignment = maxOneToOneHighlightAssignment(sourceEffects, candidateEffects, matchingMode);
-        const coverage = sourceEffects.length ? assignment.matches.length / sourceEffects.length : 0;
-        const confidence = 0.55 + 0.45 * (profile.parserConfidence || 0);
-        let lexicalSupport = 0;
-        if (candidateCard && profile.exactTexts?.length) {
-            const oracle = getCardOracleText(candidateCard).toLowerCase();
-            lexicalSupport = profile.exactTexts.filter(t => oracle.includes(String(t).toLowerCase())).length / profile.exactTexts.length;
+        const sourceEffects = profile.recognizedEffects?.length ? profile.recognizedEffects : (profile.parsedEffects || []);
+        let structuralScore = 0;
+        let coverage = 0;
+        if (sourceEffects.length && safeEffects.length) {
+            const matchingMode = profile.mode === 'mixed' ? 'variable' : profile.mode;
+            const assignment = maxOneToOneHighlightAssignment(sourceEffects, safeEffects, matchingMode);
+            coverage = sourceEffects.length ? assignment.matches.length / sourceEffects.length : 0;
+            const lexicalWeight = profile.benchmarkIntentOnly ? 0.05 : 0.12;
+            const structuralWeight = profile.benchmarkIntentOnly ? 0.78 : 0.76;
+            const coverageWeight = profile.benchmarkIntentOnly ? 0.17 : 0.12;
+            let lexicalSupport = 0;
+            if (candidateOracle && profile.exactTexts?.length) {
+                const oracle = candidateOracle.toLocaleLowerCase();
+                lexicalSupport = profile.exactTexts.filter(t => oracle.includes(String(t).toLocaleLowerCase())).length / profile.exactTexts.length;
+            }
+            structuralScore = clamp01(assignment.score * structuralWeight + coverage * coverageWeight + lexicalSupport * lexicalWeight);
         }
-        // In mixed benchmark groups the parsed whole-effect is the main signal. Literal wording is
-        // only a small bonus because the point is to permit a changed qualifier/amount while still
-        // preserving the highlighted effect's structure.
-        const lexicalWeight = profile.benchmarkIntentOnly ? 0.05 : 0.12;
-        const structuralWeight = profile.benchmarkIntentOnly ? 0.78 : 0.76;
-        const coverageWeight = profile.benchmarkIntentOnly ? 0.17 : 0.12;
-        return Math.min(1, assignment.score * structuralWeight + coverage * coverageWeight + lexicalSupport * lexicalWeight) * confidence;
+
+        // Strong text fallback for explicit user intent. This is intentionally independent of parser
+        // recognition: custom wording such as "take an extra turn" must still steer retrieval/ranking
+        // even if the current rules parser returns only a generic effect for it.
+        const explicitQuery = String(profile.explicitIntentText || profile.parseText || profile.searchIntentText || '').trim();
+        let textSupport = 0;
+        if (profile.explicitUserIntent && explicitQuery && candidateOracle) {
+            const simple = clamp01(calculateSimpleSimilarity(explicitQuery, candidateOracle));
+            const fuzzy = clamp01(calculateFuzzyTextMatch(explicitQuery, candidateOracle));
+            const coverageText = clamp01(lexicalTokenCoverage(explicitQuery, candidateOracle));
+            // Preserve phrase/trigger identity over unordered word overlap; lexical coverage is only
+            // a supplement, not enough on its own to call two mechanically different rules equal.
+            textSupport = clamp01(simple * 0.42 + fuzzy * 0.43 + coverageText * 0.15);
+        }
+
+        const hasRecognizedStructure = sourceEffects.some(effect => effect?.canonical || (effect?.action && effect.action !== 'generic'));
+        const strongUserIntent = Boolean(profile.userAuthoredOverride || profile.editedFromSource || (profile.connectedIntentTexts || []).length);
+        let score = structuralScore;
+        if (profile.explicitUserIntent) {
+            // For user-authored edits, the words they wrote get greater say even when the canonical
+            // parser cannot fully classify the effect. When structure is known it remains the
+            // majority signal; when it is unknown, text intent becomes the safe fallback.
+            score = hasRecognizedStructure
+                ? structuralScore * (strongUserIntent ? 0.62 : 0.72) + textSupport * (strongUserIntent ? 0.38 : 0.28)
+                : textSupport * (strongUserIntent ? 0.92 : 0.88) + structuralScore * (strongUserIntent ? 0.08 : 0.12);
+        }
+
+        let confidence = 0.55 + 0.45 * (profile.parserConfidence || 0);
+        if (strongUserIntent && hasRecognizedStructure) confidence = Math.max(confidence, 0.90);
+        else if (strongUserIntent) confidence = Math.max(confidence, 0.84);
+        else if (profile.explicitUserIntent) confidence = Math.max(confidence, 0.78);
+        const explicitIntentPriority = profile.userAuthoredOverride ? 1.12 : (strongUserIntent ? 1.08 : (profile.explicitUserIntent ? 1.06 : 1));
+        // Do not punish a usable text-only intent because parsing returned no candidate effects.
+        return clamp01(score * explicitIntentPriority * confidence);
     });
     const average = profileScores.reduce((a,b) => a+b,0) / profileScores.length;
     const fullCoverage = profileScores.filter(v => v >= 0.55).length / profileScores.length;
-    return Math.min(1, average * 0.80 + fullCoverage * 0.20);
+    return clamp01(average * 0.80 + fullCoverage * 0.20);
+}
+
+
+function getHighlightRankingWeight(profiles = [], { hasHighlight = false, hasEffectHighlight = false, hasTypeHighlight = false } = {}) {
+    if (!hasHighlight) return 0;
+    if (!hasEffectHighlight) return hasTypeHighlight ? 0.18 : 0;
+    const strongIntent = (profiles || []).some(profile =>
+        profile?.userAuthoredOverride || profile?.editedFromSource ||
+        (profile?.connectedIntentTexts || []).length > 0
+    );
+    // The selected/edited text is an explicit user instruction, not a weak side channel. It gets
+    // 30% of the normalized rank for ordinary selections and 42% when the user edits/composes a
+    // search intent. The remaining score still preserves mechanical, semantic, and role evidence.
+    return strongIntent ? 0.42 : 0.30;
+}
+
+function blendHighlightIntentScore(baseScore, highlightScore, profiles = [], options = {}) {
+    const clamp01 = value => Math.max(0, Math.min(1, Number(value) || 0));
+    const base = clamp01(baseScore);
+    const highlight = clamp01(highlightScore);
+    const weight = getHighlightRankingWeight(profiles, options);
+    return {
+        score: clamp01(base * (1 - weight) + highlight * weight),
+        weight,
+        highlightScore: highlight,
+        explicitUserIntent: Boolean(weight >= 0.42)
+    };
 }
 
 function calculateHighlightIntentRetrievalText(profiles) {
@@ -11235,6 +11527,43 @@ function inferExplicitMechanicalContrast(parsedA = [], parsedB = []) {
     return { kind: 'none', signatures: [a, b].filter(Boolean) };
 }
 
+// Relationship-aware penalty: the same action word is not enough when the trigger, affected
+// object, or controller differs. This is intentionally conservative: it only compares effects with
+// the same canonical function, and only applies strong penalties to explicit contradictions.
+function calculateEffectRelationshipMismatch(parsedA = [], parsedB = []) {
+    const unwrap = effect => {
+        const canonical = effect?.canonical || effect;
+        const params = canonical?.params || effect?.params || {};
+        return {
+            fn: String(canonical?.function || effect?.function || ''),
+            trigger: params.triggerProfile || effect?.triggerProfile || null,
+            target: params.targetProfile || effect?.targetProfile || null,
+            scope: params.controllerScope || effect?.controllerScope || params.targetProfile?.scope || effect?.targetProfile?.scope || null,
+            condition: String(params.condition || effect?.condition || '').toLowerCase().replace(/\s+/g, ' ').trim(),
+            raw: String(params.raw || canonical?.raw || effect?.raw || '')
+        };
+    };
+    const a = (Array.isArray(parsedA) ? parsedA : []).map(unwrap).filter(x => x.fn);
+    const b = (Array.isArray(parsedB) ? parsedB : []).map(unwrap).filter(x => x.fn);
+    let maxMismatch = 0;
+    for (const left of a) for (const right of b) {
+        if (left.fn !== right.fn) continue;
+        let mismatch = 0;
+        const le = left.trigger?.event || null, re = right.trigger?.event || null;
+        if (le && re && le !== re) mismatch = Math.max(mismatch, 0.82);
+        else if (!!le !== !!re) mismatch = Math.max(mismatch, 0.28);
+        const lo = left.target?.object || null, ro = right.target?.object || null;
+        if (lo && ro && lo !== ro) mismatch = Math.max(mismatch, 0.48);
+        const ls = left.scope, rs = right.scope;
+        if (ls && rs && ((ls === 'you_control' && rs === 'opponent_control') || (ls === 'opponent_control' && rs === 'you_control') || (ls === 'you' && rs === 'opponent') || (ls === 'opponent' && rs === 'you'))) {
+            mismatch = Math.max(mismatch, 0.82);
+        }
+        if (left.condition && right.condition && left.condition !== right.condition) mismatch = Math.max(mismatch, 0.22);
+        maxMismatch = Math.max(maxMismatch, mismatch);
+    }
+    return maxMismatch;
+}
+
 function calculateMechanicalSimilarityDetailed(parsedA, parsedB, profileA = null, profileB = null) {
     const safeA = Array.isArray(parsedA) ? parsedA : [];
     const safeB = Array.isArray(parsedB) ? parsedB : [];
@@ -11286,8 +11615,13 @@ function calculateMechanicalSimilarityDetailed(parsedA, parsedB, profileA = null
     // being a one-shot resolution. Card-acquisition cadence receives explicit coverage because
     // this is a common false match: repeatable draw engines vs. one-time ETB cantrips.
     const repeatabilityFactor = 1 - (0.52 * repeatabilityMismatch);
+    const relationshipMismatch = calculateEffectRelationshipMismatch(safeA, safeB);
+    // Trigger/controller/target contradictions should reduce rank even when both cards share a
+    // broad action such as draw, damage, or move a card. Keep some residual similarity for useful
+    // near-matches; the penalty is not a hard exclusion.
+    const relationshipFactor = 1 - (0.42 * relationshipMismatch);
     const explicitContrast = inferExplicitMechanicalContrast(safeA, safeB);
-    let score = rawScore * repeatabilityFactor;
+    let score = rawScore * repeatabilityFactor * relationshipFactor;
     if (explicitContrast.kind === 'opposite') score = Math.min(score, 0.55);
     else if (explicitContrast.kind === 'different-primary-effects') score = Math.min(score, 0.38);
     else if (explicitContrast.kind === 'mana-choice-vs-simultaneous') score = Math.min(0.89, score * 0.94);
@@ -11303,6 +11637,8 @@ function calculateMechanicalSimilarityDetailed(parsedA, parsedB, profileA = null
         graphScore: graph.score * repeatabilityFactor,
         repeatabilityMismatch,
         repeatabilityFactor,
+        relationshipMismatch,
+        relationshipFactor,
         graphSourceCoverage: graph.sourceCoverage,
         graphCandidateCoverage: graph.candidateCoverage,
         graphBalancedCoverage: graph.balancedCoverage,
@@ -12426,7 +12762,8 @@ function readConstraintFilters() {
         power: (document.getElementById('filter-power')?.value || '').trim(),
         toughness: (document.getElementById('filter-toughness')?.value || '').trim(),
         set: (document.getElementById('filter-set')?.value || '').trim(),
-        extraOracle: (document.getElementById('filter-extra-oracle')?.value || '').trim()
+        extraOracle: (document.getElementById('filter-extra-oracle')?.value || '').trim(),
+        constraintModes: Object.fromEntries(Array.from(document.querySelectorAll('[data-constraint-mode]')).map(el => [el.dataset.constraintMode, el.value === 'prefer' ? 'prefer' : 'hard']))
     };
 }
 
@@ -12545,16 +12882,17 @@ function escapeScryfallValue(value) {
 
 function buildScryfallConstraintParts(filters) {
     const parts = [];
-    (filters?.types || []).forEach(type => parts.push(`type:${escapeScryfallValue(type)}`));
+    const hard = key => filters?.constraintModes?.[key] !== 'prefer';
+    if (hard('types')) (filters?.types || []).forEach(type => parts.push(`type:${escapeScryfallValue(type)}`));
     // Supertypes such as legendary are searchable through Scryfall's type: syntax.
     (filters?.supertypes || []).forEach(supertype => parts.push(`type:${escapeScryfallValue(supertype)}`));
     (filters?.subtypes || []).forEach(subtype => parts.push(`subtype:"${escapeScryfallValue(subtype)}"`));
     (filters?.keywords || []).forEach(keyword => parts.push(`keyword:"${escapeScryfallValue(keyword)}"`));
     if (filters?.format) parts.push(`f:${filters.format}`);
     if (filters?.rarity) parts.push(`r:${filters.rarity}`);
-    if (filters?.identity) parts.push(`identity:${filters.identity}`);
-    if (filters?.colors) parts.push(`c:${filters.colors}`);
-    const cmcQuery = comparisonFilterToScryfallQuery('cmc', parseComparisonFilter(filters?.cmc));
+    if (filters?.identity && hard('identity')) parts.push(`identity:${filters.identity}`);
+    if (filters?.colors && hard('colors')) parts.push(`c:${filters.colors}`);
+    const cmcQuery = hard('cmc') ? comparisonFilterToScryfallQuery('cmc', parseComparisonFilter(filters?.cmc)) : null;
     if (cmcQuery) parts.push(cmcQuery);
     const powerQuery = comparisonFilterToScryfallQuery('pow', parseComparisonFilter(filters?.power));
     if (powerQuery) parts.push(powerQuery);
@@ -12665,7 +13003,7 @@ function explainFilterFailures(card, filters, broadFallbackFilters) {
     if (filters.rarity && (card.rarity || '').toLowerCase() !== filters.rarity.toLowerCase()) {
         failures.push({ field: 'rarity', expected: filters.rarity, actual: card.rarity || '(none)' });
     }
-    if (filters.identity) {
+    if (filters.identity && hard('identity')) {
         const allowed = filters.identity.toLowerCase().replace(/[^wubrgc]/g, '').split('');
         const cardIdentity = (card.color_identity || []).map(c => c.toLowerCase());
         const offenders = cardIdentity.filter(c => !allowed.includes(c));
@@ -12673,13 +13011,13 @@ function explainFilterFailures(card, filters, broadFallbackFilters) {
             failures.push({ field: 'identity', expected: `within {${allowed.join('')}}`, actual: `{${cardIdentity.join('')}}` });
         }
     }
-    if (filters.colors) {
+    if (filters.colors && hard('colors')) {
         const required = filters.colors.toLowerCase().replace(/[^wubrgc]/g, '').split('').sort().join('');
         const actual = (card.colors || []).map(c => c.toLowerCase()).sort().join('');
         const exactColorlessMatch = required === 'c' && actual === '';
         if (!exactColorlessMatch && actual !== required) failures.push({ field: 'colors', expected: `{${required}}`, actual: actual ? `{${actual}}` : '{colorless}' });
     }
-    if (filters.cmc) {
+    if (filters.cmc && hard('cmc')) {
         const cmcFilter = parseComparisonFilter(filters.cmc);
         if (!cmcFilter) {
             failures.push({ field: 'cmc', expected: `a valid comparison (e.g. "3", "<=2", ">4")`, actual: filters.cmc });
@@ -12730,7 +13068,8 @@ function matchesActiveFilters(card, filters, broadFallbackFilters) {
     if (!card) return false;
 
     const typeLineParts = getTypeLineParts(card);
-    if ((filters.types || []).some(type => !hasTypeLineToken(typeLineParts.left, type))) return false;
+    const hard = key => filters?.constraintModes?.[key] !== 'prefer';
+    if (hard('types') && (filters.types || []).some(type => !hasTypeLineToken(typeLineParts.left, type))) return false;
     if ((filters.supertypes || []).some(supertype => !hasTypeLineToken(typeLineParts.left, supertype))) return false;
     if ((filters.subtypes || []).some(subtype => !hasTypeLineToken(typeLineParts.subtypes, subtype))) return false;
     if ((filters.keywords || []).some(keyword => !cardHasKeyword(card, keyword))) return false;
@@ -12805,6 +13144,33 @@ function matchesActiveFilters(card, filters, broadFallbackFilters) {
     }
 
     return true;
+}
+
+function calculateConstraintPreferenceBonus(card, filters) {
+    const modes = filters?.constraintModes || {};
+    const checks = [];
+    if (modes.types === 'prefer' && (filters.types || []).length) {
+        const left = getTypeLineParts(card).left;
+        checks.push((filters.types || []).every(type => hasTypeLineToken(left, type)));
+    }
+    if (modes.identity === 'prefer' && filters.identity) {
+        const allowed = String(filters.identity).toLowerCase().replace(/[^wubrgc]/g, '').split('');
+        const identity = (card.color_identity || []).map(c => String(c).toLowerCase());
+        checks.push(identity.every(c => allowed.includes(c)));
+    }
+    if (modes.colors === 'prefer' && filters.colors) {
+        const wanted = String(filters.colors).toLowerCase().replace(/[^wubrgc]/g, '').split('').sort().join('');
+        const actual = (card.colors || []).map(c => String(c).toLowerCase()).sort().join('');
+        checks.push(wanted === 'c' ? actual === '' : actual === wanted);
+    }
+    if (modes.cmc === 'prefer' && filters.cmc) {
+        const parsed = parseComparisonFilter(filters.cmc);
+        checks.push(Boolean(parsed && matchesComparisonFilter(card.cmc, parsed)));
+    }
+    if (!checks.length) return 0;
+    // Preferences never exclude results. Each satisfied preference contributes a small bounded
+    // bonus (up to +0.06 overall) so mechanics remain the primary ranking signal.
+    return Math.min(0.06, checks.filter(Boolean).length * 0.015);
 }
 
 // Simple bound on cache growth: an unbounded Map here would leak memory across a long
@@ -17064,6 +17430,122 @@ function initApp() {
 
     initColorPips();
 
+    // Source-card quick constraints reuse the existing constraint fields as the single source of
+    // truth. They mirror the advanced panel instead of creating a second, conflicting state store.
+    let previousQuickType = '';
+    const quickType = document.getElementById('source-quick-type');
+    const typeConstraintField = document.getElementById('filter-type');
+    if (quickType && typeConstraintField) {
+        const initialTypes = normalizeConstraintList(typeConstraintField.value);
+        previousQuickType = initialTypes[0] || '';
+        quickType.value = previousQuickType ? previousQuickType[0].toUpperCase() + previousQuickType.slice(1) : '';
+        typeConstraintField.addEventListener('input', () => {
+            const activeTypes = normalizeConstraintList(typeConstraintField.value);
+            const selected = activeTypes[0] || '';
+            if (document.activeElement !== quickType) quickType.value = selected ? selected[0].toUpperCase() + selected.slice(1) : '';
+            previousQuickType = selected;
+        });
+        quickType.addEventListener('change', () => {
+            const current = normalizeConstraintList(document.getElementById('filter-type')?.value || '');
+            const next = current.filter(type => type !== previousQuickType.toLowerCase());
+            if (quickType.value) next.push(quickType.value.toLowerCase());
+            const field = document.getElementById('filter-type');
+            if (field) { field.value = [...new Set(next)].join('|'); field.dispatchEvent(new Event('input', { bubbles: true })); }
+            previousQuickType = quickType.value;
+            syncConstraintChipField('filter-type', 'filter-type-chips');
+            updateCardConstraintsBadge();
+        });
+    }
+    // Inline supertype, subtype, and rarity controls reuse the advanced constraint fields as
+    // the single source of truth. This keeps both UI locations synchronized and preserves the
+    // existing filtering implementation.
+    const quickSupertype = document.getElementById('source-quick-supertype');
+    const supertypeField = document.getElementById('filter-supertype');
+    if (quickSupertype && supertypeField) {
+        const syncQuickSupertype = () => {
+            const values = normalizeConstraintList(supertypeField.value);
+            quickSupertype.value = values[0] || '';
+        };
+        syncQuickSupertype();
+        supertypeField.addEventListener('input', () => { if (document.activeElement !== quickSupertype) syncQuickSupertype(); });
+        quickSupertype.addEventListener('change', () => {
+            const values = normalizeConstraintList(supertypeField.value);
+            const previous = quickSupertype.dataset.previous || '';
+            const next = values.filter(v => v !== previous);
+            if (quickSupertype.value) next.push(quickSupertype.value);
+            supertypeField.value = [...new Set(next)].join('|');
+            quickSupertype.dataset.previous = quickSupertype.value;
+            supertypeField.dispatchEvent(new Event('input', { bubbles: true }));
+            syncConstraintChipField('filter-supertype', 'filter-supertype-chips');
+            updateCardConstraintsBadge();
+        });
+        quickSupertype.dataset.previous = quickSupertype.value;
+    }
+    const quickSubtype = document.getElementById('source-quick-subtype');
+    const quickSubtypeAdd = document.getElementById('source-quick-subtype-add');
+    const subtypeField = document.getElementById('filter-subtype');
+    const addQuickSubtype = () => {
+        if (!quickSubtype || !subtypeField) return;
+        const value = quickSubtype.value.trim().replace(/\s+/g, ' ');
+        if (!value) return;
+        const values = normalizeConstraintList(subtypeField.value);
+        if (!values.some(v => v.toLowerCase() === value.toLowerCase())) values.push(value);
+        subtypeField.value = values.join('|');
+        subtypeField.dispatchEvent(new Event('input', { bubbles: true }));
+        syncConstraintChipField('filter-subtype', 'filter-subtype-chips');
+        updateCardConstraintsBadge();
+        quickSubtype.value = '';
+        quickSubtype.focus();
+    };
+    if (quickSubtypeAdd) quickSubtypeAdd.addEventListener('click', addQuickSubtype);
+    if (quickSubtype) quickSubtype.addEventListener('keydown', event => { if (event.key === 'Enter') { event.preventDefault(); addQuickSubtype(); } });
+    if (subtypeField && quickSubtype) {
+        subtypeField.addEventListener('input', () => {
+            const values = normalizeConstraintList(subtypeField.value);
+            quickSubtype.placeholder = values.length ? `Add another (e.g. Elf)` : 'e.g. Elf';
+        });
+    }
+    const quickRarity = document.getElementById('source-quick-rarity');
+    const rarityField = document.getElementById('filter-rarity');
+    if (quickRarity && rarityField) {
+        quickRarity.value = rarityField.value || '';
+        quickRarity.addEventListener('change', () => {
+            rarityField.value = quickRarity.value;
+            rarityField.dispatchEvent(new Event('change', { bubbles: true }));
+            updateCardConstraintsBadge();
+        });
+        rarityField.addEventListener('change', () => { if (document.activeElement !== quickRarity) quickRarity.value = rarityField.value || ''; });
+    }
+
+    const quickCmc = document.getElementById('source-quick-cmc');
+    const cmcField = document.getElementById('filter-cmc');
+    if (quickCmc && cmcField) {
+        quickCmc.value = cmcField.value;
+        quickCmc.addEventListener('input', () => {
+            cmcField.value = quickCmc.value;
+            cmcField.dispatchEvent(new Event('input', { bubbles: true }));
+        });
+        cmcField.addEventListener('input', () => { if (document.activeElement !== quickCmc) quickCmc.value = cmcField.value; });
+    }
+    for (const modeSelect of document.querySelectorAll('[data-constraint-mode]')) {
+        modeSelect.addEventListener('change', () => {
+            // The mode is consumed live by filtering, retrieval query construction, and the final
+            // rank adjustment; changing it does not require a separate save action.
+            updateCardConstraintsBadge();
+            const label = modeSelect.value === 'prefer' ? 'Ranking preference' : 'Hard filter';
+            modeSelect.title = `${label}: ${modeSelect.dataset.constraintMode}`;
+        });
+    }
+    // Keep both the inline color pickers and advanced-panel pickers visually synchronized.
+    for (const target of ['filter-identity', 'filter-colors']) {
+        const field = document.getElementById(target);
+        if (!field) continue;
+        field.addEventListener('input', () => {
+            const active = String(field.value || '').toLowerCase().replace(/[^wubrgc]/g, '').split('');
+            document.querySelectorAll(`.color-pip-group[data-target="${target}"] .color-pip`).forEach(pip => pip.classList.toggle('active', active.includes(pip.dataset.color)));
+        });
+    }
+
     // Fire-and-forget preload of the production static search resources. Find Similar Cards stays
     // disabled until both cards.bin and semantic-index.bin are fully loaded and validated. Each
     // asset receives up to three automatic attempts before the status area offers a manual retry.
@@ -20025,6 +20507,105 @@ function flipCurrentSourceCardFace() {
     updateSourceCardFaceDisplay(currentSourceCard, true);
 }
 
+// Lightweight MTG type-line editor. This edits only the local source-card search context; it does
+// not alter the card database or Oracle rules text. Suggestions are intentionally curated and
+// typo correction is conservative so unusual subtypes remain editable.
+const MANA_TYPE_WORDS = [
+    'Artifact','Battle','Creature','Enchantment','Instant','Kindred','Land','Planeswalker','Sorcery','Tribal',
+    'Basic','Legendary','Snow','World','Ongoing','Token','Conspiracy','Dungeon','Plane','Phenomenon','Scheme','Vanguard',
+    'Advisor','Aetherborn','Alien','Angel','Antelope','Ape','Archer','Archon','Army','Artificer','Assassin','Assembly-Worker','Atog','Aurochs','Avatar',
+    'Badger','Barbarian','Bard','Basilisk','Bat','Bear','Beast','Beeble','Berserker','Bird','Blinkmoth','Boar','Bringer','Brushwagg',
+    'Camarid','Camel','Capybara','Caribou','Carrier','Cat','Centaur','Child','Chimera','Citizen','Cleric','Clown','Cockatrice','Construct','Coward','Coyote','Crab','Crocodile','Cyclops',
+    'Dauthi','Demigod','Demon','Deserter','Detective','Devil','Dinosaur','Djinn','Doctor','Dog','Dragon','Drake','Dreadnought','Drone','Druid','Dryad','Dwarf',
+    'Efreet','Egg','Elder','Eldrazi','Elemental','Elephant','Elf','Elk','Employee','Eye','Faerie','Ferret','Fish','Flagbearer','Fox','Fractal','Frog','Fungus',
+    'Gamer','Gargoyle','Germ','Giant','Gith','Gnoll','Gnome','Goat','Goblin','God','Golem','Gorgon','Graveborn','Gremlin','Griffin','Guest',
+    'Hag','Halfling','Hamster','Harpy','Hellion','Hippo','Hippogriff','Homarid','Homunculus','Horror','Horse','Human','Hydra','Hyena',
+    'Illusion','Imp','Incarnation','Inkling','Inquisitor','Insect','Jackal','Jellyfish','Juggernaut','Kavu','Kirin','Kithkin','Knight','Kobold','Kor','Kraken',
+    'Leech','Lhurgoyf','Licid','Lizard','Manticore','Masticore','Mercenary','Merfolk','Metathran','Minion','Minotaur','Mole','Monger','Mongoose','Monk','Monkey','Moonfolk','Mouse','Mutant','Myr','Mystic',
+    'Naga','Nautilus','Necron','Nephilim','Nightmare','Ninja','Noble','Noggle','Nomad','Nymph','Octopus','Ogre','Ooze','Orb','Orc','Orgg','Otter','Ouphe','Ox','Oyster',
+    'Peasant','Pegasus','Pentavite','Pest','Phoenix','Phyrexian','Pilot','Pincher','Pirate','Plant','Praetor','Prism','Processor','Rabbit','Raccoon','Ranger','Rat','Rebel','Reflection','Rhino','Rigger','Robot','Rogue',
+    'Sable','Salamander','Samurai','Sand','Saproling','Satyr','Scarecrow','Scientist','Scion','Scorpion','Scout','Sculpture','Serf','Serpent','Servo','Shade','Shaman','Shapeshifter','Shark','Sheep','Siren','Skeleton','Slith','Sliver','Slug','Snake','Soldier','Soltari','Spawn','Specter','Spellshaper','Sphinx','Spider','Spike','Spirit','Splinter','Sponge','Squid','Squirrel','Starfish','Survivor','Synth',
+    'Tentacle','Tetravite','Thalakos','Thopter','Thrull','Tiefling','Time Lord','Toy','Treefolk','Trilobite','Triskelavite','Troll','Turtle','Unicorn','Vampire','Vedalken','Villain','Volver','Wall','Walrus','Warlock','Warrior','Weird','Werewolf','Whale','Wizard','Wolf','Wolverine','Wombat','Worm','Wraith','Wurm','Yeti','Zombie','Zubera',
+    'Power-Plant','Tower','Mine','Desert','Gate','Lair','Locus','Sphere','Urza’s','Urza\'s'
+];
+function initSourceTypeEditor() {
+    const display = document.getElementById('source-card-type');
+    const openBtn = document.getElementById('edit-source-type-btn');
+    const editor = document.getElementById('source-type-editor');
+    const input = document.getElementById('source-type-input');
+    const suggestions = document.getElementById('source-type-suggestions');
+    const apply = document.getElementById('apply-source-type-btn');
+    const cancel = document.getElementById('cancel-source-type-btn');
+    if (!display || !openBtn || !editor || !input || !suggestions || openBtn.dataset.bound) return;
+    openBtn.dataset.bound = 'true';
+    const showEditor = () => {
+        input.value = display.dataset.originalText || display.textContent || '';
+        editor.classList.remove('hidden'); openBtn.setAttribute('aria-expanded','true');
+        updateSuggestions(); input.focus(); input.setSelectionRange(input.value.length,input.value.length);
+    };
+    const closeEditor = () => { editor.classList.add('hidden'); openBtn.setAttribute('aria-expanded','false'); suggestions.classList.add('hidden'); };
+    const activeToken = value => {
+        const match = String(value).match(/([A-Za-z][A-Za-z'’-]*)$/);
+        return match ? {word:match[1], start:value.length-match[1].length} : null;
+    };
+    const updateSuggestions = () => {
+        const token = activeToken(input.value);
+        suggestions.replaceChildren();
+        if (!token || token.word.length < 2) { suggestions.classList.add('hidden'); return; }
+        const q = token.word.toLowerCase();
+        const matches = [...new Set(MANA_TYPE_WORDS)].filter(word => word.toLowerCase().startsWith(q) && word.toLowerCase() !== q).slice(0,7);
+        if (!matches.length) { suggestions.classList.add('hidden'); return; }
+        for (const word of matches) {
+            const btn = document.createElement('button'); btn.type='button'; btn.textContent=word; btn.setAttribute('role','option');
+            btn.addEventListener('pointerdown', e => e.preventDefault());
+            btn.addEventListener('click', () => { input.value = input.value.slice(0,token.start)+word+input.value.slice(token.start+token.word.length); input.focus(); updateSuggestions(); });
+            suggestions.appendChild(btn);
+        }
+        suggestions.classList.remove('hidden');
+    };
+    const distance = (a,b) => { a=a.toLowerCase(); b=b.toLowerCase(); let prev=Array.from({length:b.length+1},(_,i)=>i); for(let i=1;i<=a.length;i++){const row=[i];for(let j=1;j<=b.length;j++)row[j]=Math.min(row[j-1]+1,prev[j]+1,prev[j-1]+(a[i-1]===b[j-1]?0:1));prev=row;}return prev[b.length]; };
+    const autocorrect = value => {
+        const allowed = new Map(MANA_TYPE_WORDS.map(w=>[w.toLowerCase(),w]));
+        // Correct known type words only. Preserve punctuation, unknown subtypes and all other words.
+        return String(value).replace(/[A-Za-z][A-Za-z'’-]*/g, word => {
+            if (allowed.has(word.toLowerCase())) return allowed.get(word.toLowerCase());
+            if (word.length < 4) return word;
+            let best=null, score=Infinity;
+            for (const candidate of MANA_TYPE_WORDS) { const d=distance(word,candidate); if(d<score){score=d;best=candidate;} }
+            return score <= (word.length >= 8 ? 2 : 1) ? best : word;
+        });
+    };
+    const applyEdit = () => {
+        const corrected = autocorrect(input.value.trim().replace(/\s+/g,' '));
+        if (!corrected) return;
+        input.value = corrected;
+        if (currentSourceCard) {
+            currentSourceCard.type_line = corrected;
+            if (Array.isArray(currentSourceCard.card_faces) && currentSourceCard.card_faces[currentSourceCardFaceIndex]) currentSourceCard.card_faces[currentSourceCardFaceIndex].type_line = corrected;
+        }
+        display.dataset.originalText = corrected;
+        display.textContent = corrected;
+        // Type offsets are no longer reliable after an edit. Remove only type-line highlights;
+        // Oracle highlights and their scoring priority remain untouched.
+        manualHighlights = manualHighlights.filter(h => h?.field !== 'type');
+        reapplyTypeLineHighlights(); renderHighlightChips(); notifyManaSearchHighlightsChanged();
+        window.dispatchEvent(new CustomEvent('manasearch:source-type-changed',{detail:{typeLine:corrected}}));
+        closeEditor();
+    };
+    openBtn.addEventListener('click', () => editor.classList.contains('hidden') ? showEditor() : closeEditor());
+    input.addEventListener('input', updateSuggestions);
+    input.addEventListener('keydown', e => {
+        if ((e.key==='Tab' || e.key==='ArrowRight') && !suggestions.classList.contains('hidden')) {
+            const first=suggestions.querySelector('button'); if(first && activeToken(input.value)){e.preventDefault();first.click();} return;
+        }
+        if(e.key==='Enter'){e.preventDefault();applyEdit();}
+        if(e.key==='Escape'){e.preventDefault();closeEditor();}
+    });
+    apply.addEventListener('click', applyEdit); cancel.addEventListener('click', closeEditor);
+}
+
+if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', initSourceTypeEditor, { once:true }); else initSourceTypeEditor();
+
 function displaySourceCard(card) {
     document.getElementById('source-card-name').textContent = card.name;
     document.getElementById('source-card-mana').textContent = card.mana_cost || 'None';
@@ -20089,6 +20670,9 @@ async function scoreCardBatch({
     // 0% mechanical score simply because the original source has additional unrelated effects.
     sourceParsedEffectsOverride = null,
     sourceReferenceParsedEffects = [],
+    // Main search passes an immutable snapshot so typing/editing highlights during a long search
+    // cannot silently change the profile used by later scoring batches.
+    highlightsForScoring = null,
     // Related Search supplies a consensus profile so the scorer can distinguish "shares the same
     // mechanic" from "matches the dominant parameter the selected cards agree on".
     relatedIntentProfile = null,
@@ -20140,34 +20724,14 @@ async function scoreCardBatch({
     const rawWC = weights.context ?? 20;
     const rawWE = weights.exactness ?? 15;
     const rawWCa = weights.category ?? 10;
-    const activeHighlights = Array.isArray(manualHighlights) ? manualHighlights : [];
+    const activeHighlights = Array.isArray(highlightsForScoring) ? highlightsForScoring : (Array.isArray(manualHighlights) ? manualHighlights : []);
     const effectHighlights = activeHighlights.filter(h => h?.field !== 'type');
     const typeLineHighlights = activeHighlights.filter(h => h?.field === 'type');
     const hasHighlight = activeHighlights.length > 0;
     const hasEffectHighlight = effectHighlights.length > 0;
 
-    // Strategic role is a NEW ranking dimension, but it is deliberately carved out of the existing
-    // 100-point budget instead of being added on top. That keeps a role match from making every
-    // candidate look better merely because another score was added. Existing user-controlled
-    // weights are proportionally scaled to leave a fixed 14-point role budget (12 with highlights).
-    const roleWeight = hasHighlight ? 12 : 14;
-    const rawExistingWeightTotal = Math.max(1, rawWM + rawWS + rawWC + rawWE + rawWCa);
-    const existingWeightScale = (100 - roleWeight) / rawExistingWeightTotal;
-    const wM = rawWM * existingWeightScale;
-    const wS = rawWS * existingWeightScale;
-    const wC = rawWC * existingWeightScale;
-    const wE = rawWE * existingWeightScale;
-    const wCa = rawWCa * existingWeightScale;
-    const wH = hasHighlight ? Math.min(roleWeight, Math.max(0, wM * 0.20)) : 0;
-    const totalWeight = 100;
-
-    // Highlight intent is an explicit user constraint, so its weight is carved out of the
-    // mechanical budget rather than silently inflating the total score.
-    const effectiveHighlightWeight = Math.min(wH, wM);
-    const effectiveMechanicalBase = wM - effectiveHighlightWeight;
-    const highlightProfiles = hasEffectHighlight ? buildHighlightIntentProfiles(effectHighlights) : [];
-
     const sourceText = sourceCard.oracle_text || (sourceCard.card_faces ? sourceCard.card_faces.map(f => f.oracle_text).join(' ') : '');
+    const highlightProfiles = hasEffectHighlight ? buildHighlightIntentProfiles(effectHighlights, sourceCard, sourceText) : [];
     const sourceTextToParse = (hasEffectHighlight && targetText) ? (buildHighlightScoringText(effectHighlights, sourceText) || sourceText) : sourceText;
     const parsedSourceCard = Array.isArray(sourceParsedEffectsOverride) && sourceParsedEffectsOverride.length > 0
         ? sourceParsedEffectsOverride
@@ -20192,7 +20756,7 @@ async function scoreCardBatch({
     const sourceRoleProfile = inferStrategicRoleProfile(sourceCard, parsedSourceCard, targetText);
     const sourceRoleText = strategicRoleToText(sourceRoleProfile);
     const sourceRoleFingerprint = buildStrategicRoleFingerprint(sourceCard, parsedSourceCard, sourceRoleProfile);
-    const rankingIntent = inferRankingIntent(sourceCard, parsedSourceCard, targetText, sourceRoleProfile, manualHighlights);
+    const rankingIntent = inferRankingIntent(sourceCard, parsedSourceCard, targetText, sourceRoleProfile, activeHighlights);
     sourceCard._strategicRoleFingerprint = sourceRoleFingerprint;
     sourceCard._rankingIntent = rankingIntent;
     // Field-level confidence gives a far better read on whether the structural parse is actually
@@ -20205,7 +20769,12 @@ async function scoreCardBatch({
     // times. The separate parsedSourceCard above remains unchanged for highlight-aware mechanics.
     const sourceSynergyText = strategicRoleCardText(sourceCard);
     const sourceSynergyEffects = getCachedParsedEffects(sourceCard, sourceSynergyText);
-    const sourceAcquisitionCadence = getDirectCardAcquisitionCadence(sourceCard, sourceSynergyEffects);
+    // When the user has narrowed the search with an effect highlight, compare card-acquisition
+    // cadence against that effective highlighted parse rather than unrelated draw abilities elsewhere
+    // on the full source card. This prevents an edited outcome (e.g. replacing Rhystic's draw with an
+    // extra-turn goal) from inheriting the original card-draw cadence penalty.
+    const sourceCadenceEffects = hasEffectHighlight && !relatedIntentProfile ? parsedSourceCard : sourceSynergyEffects;
+    const sourceAcquisitionCadence = getDirectCardAcquisitionCadence(sourceCard, sourceCadenceEffects);
     const sourceSynergyRoleProfile = inferStrategicRoleProfile(sourceCard, sourceSynergyEffects, '');
 
     // Category previously rebuilt these source-side profiles for every candidate using full source
@@ -20522,8 +21091,12 @@ async function scoreCardBatch({
         const exactness = card.exactnessScore || 0;
         const lexical = calculateSimpleSimilarity(targetText, strategicRoleCardText(card));
         const semanticRetrieval = card._semanticRetrievalSimilarity || (card.retrievalEvidence?.includes('Search G') ? 0.58 : 0);
-        const triage = mechanical * 0.35 + role * 0.15 + exactness * 0.12 + lexical * 0.10 + retrievalAgreement * 0.04 + searchFAgreement * 0.04 + semanticRetrieval * 0.20;
-        triageDetails.push({ card, triage, mechanical, role, exactness, lexical, retrievalCount, searchFAgreement, semanticRetrieval, triageIndex: triageDetails.length });
+        const triageBase = mechanical * 0.35 + role * 0.15 + exactness * 0.12 + lexical * 0.10 + retrievalAgreement * 0.04 + searchFAgreement * 0.04 + semanticRetrieval * 0.20;
+        const triageBlend = blendHighlightIntentScore(triageBase, card.highlightIntentScore || 0, highlightProfiles, {
+            hasHighlight, hasEffectHighlight, hasTypeHighlight: typeLineHighlights.length > 0
+        });
+        const triage = triageBlend.score;
+        triageDetails.push({ card, triage, mechanical, role, exactness, lexical, retrievalCount, searchFAgreement, semanticRetrieval, highlightIntent: Number(card.highlightIntentScore) || 0, triageIndex: triageDetails.length });
         const triageNow = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
         if (triageNow - triageSliceStartedAt >= getManaSearchSliceBudgetMs()) {
             throwIfSearchCancelled(isCancelled);
@@ -20769,7 +21342,11 @@ async function scoreCardBatch({
             ? Math.max(roleSemantic, functionSemanticAugmented)
             : Math.max(functionSemanticAugmented * 0.72 + roleSemantic * 0.28, roleSemantic * 0.70);
 
-        const channelScore = (structuralTrusted * structuralW) + (rawSemantic * semanticW) + (functionRole * functionRoleW);
+        const baseChannelScore = (structuralTrusted * structuralW) + (rawSemantic * semanticW) + (functionRole * functionRoleW);
+        const highlightBlend = blendHighlightIntentScore(baseChannelScore, card.highlightIntentScore || 0, highlightProfiles, {
+            hasHighlight, hasEffectHighlight, hasTypeHighlight: typeLineHighlights.length > 0
+        });
+        const channelScore = highlightBlend.score;
 
         // Agreement is only the convergence of the same three channels. It is capped hard so it
         // can never turn three weakly-related signals into a strong match by itself.
@@ -20858,7 +21435,7 @@ async function scoreCardBatch({
             ? (1 - (0.50 * (1 - relatedConsensus.score) * Math.max(0, Math.min(1, relatedIntentProfile.confidence))))
             : 1;
         card.relatedConsensusGate = relatedConsensusGate;
-        card.rankingEvidence = { mechanical: structural, mechanicalTrusted: structuralTrusted, mechanicalConfidence, rawSemantic, functionSemantic: functionSemanticAugmented, roleSemantic, effectCoverage, balancedCoverage, primaryEffectMatch, evidenceAgreement: agreement, retrievalSimilarity: Number(card._semanticRetrievalSimilarity) || 0, rankingIntent: rankingIntent.kind, rankingIntentConfidence: rankingIntent.confidence, relatedConsensus: relatedConsensus ? { score: relatedConsensus.score, functionMatch: relatedConsensus.functionMatch, quantityFit: relatedConsensus.quantityFit, roleFit: relatedConsensus.roleFit, artifactFit: relatedConsensus.artifactFit, dominantFunction: relatedIntentProfile?.dominantFunction || null, targetQuantity: relatedIntentProfile?.numericTarget ?? null, confidence: relatedIntentProfile?.confidence || 0 } : null };
+        card.rankingEvidence = { mechanical: structural, mechanicalTrusted: structuralTrusted, mechanicalConfidence, rawSemantic, functionSemantic: functionSemanticAugmented, roleSemantic, highlightIntent: Number(card.highlightIntentScore) || 0, highlightIntentWeight: highlightBlend.weight, explicitUserIntent: highlightBlend.explicitUserIntent, baseChannelScore, effectCoverage, balancedCoverage, primaryEffectMatch, evidenceAgreement: agreement, retrievalSimilarity: Number(card._semanticRetrievalSimilarity) || 0, rankingIntent: rankingIntent.kind, rankingIntentConfidence: rankingIntent.confidence, relatedConsensus: relatedConsensus ? { score: relatedConsensus.score, functionMatch: relatedConsensus.functionMatch, quantityFit: relatedConsensus.quantityFit, roleFit: relatedConsensus.roleFit, artifactFit: relatedConsensus.artifactFit, dominantFunction: relatedIntentProfile?.dominantFunction || null, targetQuantity: relatedIntentProfile?.numericTarget ?? null, confidence: relatedIntentProfile?.confidence || 0 } : null };
         const preCadenceSimilarityScore = Math.max(0, Math.min(1,
             (channelScore + agreementBonus + rankingRefinement) * evidenceGate * contradictionPenalty * relatedConsensusGate
         ));
@@ -21763,6 +22340,7 @@ function getSearchIntent(sourceCard, highlights = []) {
         attachedTo: Number.isInteger(h?.attachedTo) ? h.attachedTo : null,
         intentConnection: h?.intentConnection || '',
         intent: String(h?.intent || ''),
+        editedFrom: h?.editedFrom ? { text: String(h.editedFrom.text || ''), start: Number.isInteger(h.editedFrom.start) ? h.editedFrom.start : null, end: Number.isInteger(h.editedFrom.end) ? h.editedFrom.end : null } : null,
         benchmarkIntentOnly: Boolean(h?.benchmarkIntentOnly)
     })));
     const key = `${normalizeCardNameForIdentity(sourceCard?.name || '')}|${sourceText}|${signature}`;
@@ -21790,7 +22368,7 @@ function getSearchIntent(sourceCard, highlights = []) {
         const profiles = buildHighlightIntentProfiles(highlights, sourceCard, sourceText);
         parsedEffects = profiles.flatMap(p => p.recognizedEffects?.length ? p.recognizedEffects : (p.parsedEffects || []));
         if (!parsedEffects.length) {
-            const sourceOnlyText = (profiles.map(p => p.contextText).filter(Boolean).join('. ') || sourceText);
+            const sourceOnlyText = (profiles.map(p => p.parseText || p.searchIntentText || p.contextText).filter(Boolean).join('. ') || targetText || sourceText);
             parsedEffects = parseMTGEffect(sourceOnlyText);
         }
     } else {
@@ -21917,9 +22495,9 @@ function buildSearchIntentPresentationModel(sourceCard = currentSourceCard, high
 
     const highlightsView = activeHighlights.filter(h => h && String(h.text || '').trim()).map(h => ({
         text: String(h.text).trim(),
-        field: h.field === 'type' ? 'type line' : 'Oracle text',
+        field: h.field === 'type' ? 'type line' : (h.origin === 'user' ? 'search intent' : 'Oracle text'),
         mode: h.mode === 'variable' ? 'Flexible' : 'Exact',
-        origin: h.origin === 'user' ? 'Search detail' : 'Selected text',
+        origin: h.origin === 'user' ? (h.editedFrom ? 'Edited source selection' : 'Search detail') : 'Selected text',
         attached: Number.isInteger(h.attachedTo)
     }));
     const primary = effectViews[0] || null;
@@ -21943,7 +22521,10 @@ function buildSearchIntentPresentationModel(sourceCard = currentSourceCard, high
             summary = `Look for cards that ${action}, comparing the actual rules outcome and context rather than wording alone.`;
         }
     } else {
-        summary = 'The selected text did not produce a clear canonical action. ManaSearch will still use the active text, semantic context, card type, and other available scoring evidence.';
+        const activeText = String(intent.targetText || '').trim();
+        summary = activeHighlights.length
+            ? `The parser did not recognize a canonical action from this selection, but your current highlighted wording remains an active high-priority search intent. ${activeText ? 'The effective intent is shown below and still guides retrieval and ranking.' : 'Semantic text and other available scoring evidence remain active.'}`
+            : 'The selected text did not produce a clear canonical action. ManaSearch will still use the active text, semantic context, card type, and other available scoring evidence.';
     }
     if (highlightsView.length) {
         const exact = highlightsView.some(h => h.mode === 'Exact');
@@ -21957,10 +22538,18 @@ function buildSearchIntentPresentationModel(sourceCard = currentSourceCard, high
         score: Number(role.score) || 0,
         anchors: Array.isArray(role.anchors) ? role.anchors.filter(Boolean).slice(0, 2) : []
     }));
+    const hasEditedSourceIntent = activeHighlights.some(h => h?.origin === 'user' && h?.editedFrom);
     const focusExplanation = highlightsView.length
-        ? 'The selected spans are the active focus passed to the scorer. Exact spans also participate in literal-match requirements; Flexible spans allow the wording or numeric values to differ.'
+        ? `${hasEditedSourceIntent ? 'Edited highlight wording is an explicit search intent. Its original card-text location is retained only to preserve trigger/condition context; the previous outcome is not silently reused.' : 'The selected spans are the active focus passed to the scorer.'} Exact spans also participate in literal-match requirements; Flexible spans allow the wording or numeric values to differ.`
         : 'No highlight is active, so the scorer uses the source card’s full Oracle text as its target context.';
+    const hasExplicitEdit = activeHighlights.some(h => h?.origin === 'user' && h?.editedFrom);
     const rankingEvidence = [
+        ...(highlightsView.length ? [{
+            title: 'Explicit highlighted intent',
+            detail: hasExplicitEdit
+                ? 'Your edited wording receives a stronger 42% share of the normalized ranking score. The original text location supplies grammar/context only; the prior outcome is not reused as the intended result.'
+                : 'Your selected text and its governing rules clause actively shape parsing, retrieval, and ranking. Exact/Flexible mode controls literal matching versus mechanical flexibility.'
+        }] : []),
         { title: 'Mechanical structure', detail: 'Parsed actions and outcomes, affected objects, targets, quantities, restrictions, conditions, and effect relationships.' },
         { title: 'Repeatability and timing', detail: coverage ? 'Where the parser can identify it, recurring triggers/activations are distinguished from one-time, delayed, and enter-the-battlefield effects.' : 'Cadence will be compared when the source effect can be parsed confidently.' },
         { title: 'Function, role, and semantic context', detail: roleViews.length ? `Recognized role evidence: ${roleViews.map(r => r.role).join(', ')}. These signals supplement rather than replace mechanical similarity.` : 'Broader function, role, card type, and semantic context supplement mechanical similarity.' }
@@ -21989,6 +22578,11 @@ function renderManaSearchIntentModel(model) {
         return;
     }
     appendSearchIntentNode(body, 'p', 'search-intent-summary', model.summary);
+    if (model.hasHighlight && String(model.targetText || '').trim()) {
+        const effectiveSection = appendSearchIntentNode(body, 'div', 'search-intent-effective-section');
+        appendSearchIntentNode(effectiveSection, 'h4', '', 'Effective intent sent to parsing, retrieval, and ranking');
+        appendSearchIntentNode(effectiveSection, 'p', 'search-intent-effective-text', model.targetText);
+    }
     appendSearchIntentNode(body, 'p', 'search-intent-focus-explanation', model.focusExplanation);
 
     if (model.highlightsView.length) {
@@ -22153,6 +22747,41 @@ function runManaSearchIntentRegressionSuite() {
         check('search-intent-summary-reflects-connected-trigger-detail', /opponent draws a card/i.test(customTriggerModel?.summary || '') && !/opponent casts a spell/i.test(customTriggerModel?.summary || '') && customTriggerModel?.effectViews?.some(effect => effect.fn === 'card_draw' && /Repeatable triggered ability/i.test(effect.cadence.label)), customTriggerModel?.summary || '');
         check('trigger-override-drops-unrelated-native-trigger-restrictions', /Whenever an opponent draws a card, you may draw a card\.?/i.test(customTriggerIntent.targetText) && !/unless that player pays/i.test(customTriggerIntent.targetText) && !/opponent casts a spell/i.test(customTriggerIntent.targetText), customTriggerIntent.targetText || '');
 
+        // Edited text must be the actual search target, not merely a UI label. Test a noncanonical
+        // changed outcome so the fallback path is required to preserve it even when action parsing is uncertain.
+        manualHighlights = [{
+            text: 'take an extra turn', field: 'oracle', mode: 'variable', origin: 'user',
+            start: null, end: null, colorIndex: 0, attachedTo: null,
+            editedFrom: { text: 'draw a card', start: selectedStart, end: selectedStart + 'draw a card'.length, clauseText: rhystic.oracle_text }
+        }];
+        const editedOutcomeIntent = getSearchIntent(rhystic, manualHighlights);
+        const editedOutcomeProfiles = buildHighlightIntentProfiles(manualHighlights, rhystic, rhystic.oracle_text);
+        check('edited-highlight-outcome-replaces-printed-outcome-in-search-target', /Whenever an opponent casts a spell, you may take an extra turn/i.test(editedOutcomeIntent.targetText) && !/draw a card|unless that player pays/i.test(editedOutcomeIntent.targetText), editedOutcomeIntent.targetText || '');
+        check('edited-noncanonical-outcome-reaches-explicit-scoring-profile', editedOutcomeProfiles[0]?.explicitUserIntent && editedOutcomeProfiles[0]?.editedFromSource && /take an extra turn/i.test(editedOutcomeProfiles[0]?.explicitIntentText || ''), JSON.stringify({ explicit: editedOutcomeProfiles[0]?.explicitUserIntent, parseText: editedOutcomeProfiles[0]?.parseText }));
+        check('edited-outcome-reaches-semantic-retrieval-text-without-stale-outcome', /take an extra turn/i.test(editedOutcomeIntent.semanticText || '') && !/draw a card/i.test(editedOutcomeIntent.semanticText || ''), editedOutcomeIntent.semanticText || '');
+        check('edited-outcome-is-the-effective-text-parsed-for-mechanics', /take an extra turn/i.test(editedOutcomeProfiles[0]?.parseText || '') && !/draw a card/i.test(editedOutcomeProfiles[0]?.parseText || ''), editedOutcomeProfiles[0]?.parseText || '');
+
+        const extraTurnCandidate = { name: 'Extra Turn on Cast', type_line: 'Enchantment', oracle_text: 'Whenever an opponent casts a spell, you may take an extra turn.' };
+        const oldDrawCandidate = { name: 'Original Draw on Cast', type_line: 'Enchantment', oracle_text: rhystic.oracle_text };
+        const editedMatchScore = calculateHighlightIntentMatch(editedOutcomeProfiles, [], extraTurnCandidate);
+        const staleOutcomeScore = calculateHighlightIntentMatch(editedOutcomeProfiles, [], oldDrawCandidate);
+        check('unrecognized-edited-outcome-still-guides-candidate-match', editedMatchScore > staleOutcomeScore && editedMatchScore > 0.45, JSON.stringify({ editedMatchScore, staleOutcomeScore }));
+
+        const oldTrigger = 'Whenever an opponent casts a spell';
+        const oldTriggerStart = rhystic.oracle_text.indexOf(oldTrigger);
+        manualHighlights = [{
+            text: 'Whenever an opponent draws a card', field: 'oracle', mode: 'variable', origin: 'user',
+            start: null, end: null, colorIndex: 0, attachedTo: null,
+            editedFrom: { text: oldTrigger, start: oldTriggerStart, end: oldTriggerStart + oldTrigger.length, clauseText: rhystic.oracle_text }
+        }];
+        const editedTriggerIntent = getSearchIntent(rhystic, manualHighlights);
+        check('editing-the-highlighted-trigger-replaces-the-original-trigger', /Whenever an opponent draws a card/i.test(editedTriggerIntent.targetText) && !/Whenever an opponent casts a spell/i.test(editedTriggerIntent.targetText) && /draw a card/i.test(editedTriggerIntent.targetText), editedTriggerIntent.targetText || '');
+
+        const baselineBlend = blendHighlightIntentScore(0.50, 0.90, [], { hasHighlight: false, hasEffectHighlight: false });
+        const selectedBlend = blendHighlightIntentScore(0.50, 0.90, [{ explicitUserIntent: true }], { hasHighlight: true, hasEffectHighlight: true });
+        const editedBlend = blendHighlightIntentScore(0.50, 0.90, [{ explicitUserIntent: true, editedFromSource: true }], { hasHighlight: true, hasEffectHighlight: true });
+        check('highlight-score-is-blended-into-final-ranking-with-higher-edited-intent-priority', baselineBlend.weight === 0 && selectedBlend.weight === 0.30 && editedBlend.weight === 0.42 && editedBlend.score > selectedBlend.score && selectedBlend.score > baselineBlend.score, JSON.stringify({ baselineBlend, selectedBlend, editedBlend }));
+
         // Reproduce the UI state from the reported issue: a user-added Exact trigger detail can
         // predate the source selection, so it may have no attachment index yet. In that unambiguous
         // one-detail/one-outcome case, inference must attach it regardless of chip order.
@@ -22298,6 +22927,9 @@ async function findSimilarCards() {
         }
     }
 
+    const searchHighlightsSnapshot = Array.isArray(manualHighlights)
+        ? manualHighlights.map(h => ({ ...h, editedFrom: h?.editedFrom ? { ...h.editedFrom } : undefined }))
+        : [];
     const requestId = ++searchRequestId;
     cancelScheduledProgressiveResultRender();
     activeResultView = { mode: 'main', requestId };
@@ -22317,7 +22949,7 @@ async function findSimilarCards() {
 
     showLoading(true);
     window.dispatchEvent(new CustomEvent('manasearch:search-started', {
-        detail: { sourceName: currentSourceCard?.name || '', highlightCount: manualHighlights.length }
+        detail: { sourceName: currentSourceCard?.name || '', highlightCount: searchHighlightsSnapshot.length }
     }));
     // Keep the Results area visible during the search. The user should be able to see the
     // first-pass candidates as soon as they arrive instead of waiting for the entire pipeline.
@@ -22376,7 +23008,7 @@ async function findSimilarCards() {
         ? "Retrieval in progress — searching multiple source cards and gathering initial candidates..."
         : "Retrieval in progress — gathering initial candidates from the search streams...");
 
-    const hasHighlight = Boolean(manualHighlights && manualHighlights.length > 0);
+    const hasHighlight = Boolean(searchHighlightsSnapshot && searchHighlightsSnapshot.length > 0);
 
     // Initialize before any retrieval/checklist code can touch the binding. `functionalRetrievalPlans`
     // is populated later, but keeping the binding initialized from the start prevents a Temporal
@@ -22390,7 +23022,7 @@ async function findSimilarCards() {
     // clause-splitting (which looks for sentence-ending punctuation) then reads as a single
     // malformed clause instead of two separate effects - corrupting mechanical/semantic parsing
     // for any multi-highlight search. A period restores the boundary the parser relies on.
-    const searchIntent = getSearchIntent(currentSourceCard, manualHighlights);
+    const searchIntent = getSearchIntent(currentSourceCard, searchHighlightsSnapshot);
     const sourceOracleTextForScoring = searchIntent.sourceText ||
         (sourceCardOracle?.textContent ? sourceCardOracle.textContent : '');
     const targetTextForScoring = searchIntent.targetText || sourceOracleTextForScoring;
@@ -22400,12 +23032,12 @@ async function findSimilarCards() {
     // A mixed benchmark highlight on one grammatical effect uses its Exact fragments as structural
     // anchors and its Variable fragments as flexible parameters. Do not turn those anchors into a
     // literal hard query, or semantically equivalent cards are filtered out before scoring.
-    const highlightProfilesForSearch = hasHighlight ? buildHighlightIntentProfiles(manualHighlights) : [];
+    const highlightProfilesForSearch = hasHighlight ? buildHighlightIntentProfiles(searchHighlightsSnapshot) : [];
     const hasBenchmarkMixedHighlightIntent = benchmarkColdMode && highlightProfilesForSearch.some(p => p.benchmarkIntentOnly);
     const exactnessTextForScoring = hasHighlight
         ? (hasBenchmarkMixedHighlightIntent
             ? ''
-            : manualHighlights.filter(h => h.field !== 'type' && h.mode === 'exact' && !h.benchmarkIntentOnly).map(h => h.text).join('. '))
+            : searchHighlightsSnapshot.filter(h => h.field !== 'type' && h.mode === 'exact' && !h.benchmarkIntentOnly).map(h => h.text).join('. '))
         : targetTextForScoring;
 
     const filters = readConstraintFilters();
@@ -22493,7 +23125,7 @@ async function findSimilarCards() {
     const sourceParseConfidence = calculateParseConfidence(sourceParsedEffects);
     const sourceFieldConfidence = calculateCardFieldConfidence(sourceParsedEffects);
     const sourceRoleProfileForFloor = inferStrategicRoleProfile(currentSourceCard, sourceParsedEffects, targetTextForScoring);
-    const sourceRankingIntentForFloor = inferRankingIntent(currentSourceCard, sourceParsedEffects, targetTextForScoring, sourceRoleProfileForFloor, manualHighlights);
+    const sourceRankingIntentForFloor = inferRankingIntent(currentSourceCard, sourceParsedEffects, targetTextForScoring, sourceRoleProfileForFloor, searchHighlightsSnapshot);
 
     const highlightRetrievalText = hasHighlight
         ? calculateHighlightIntentRetrievalText(highlightProfilesForSearch)
@@ -22504,7 +23136,7 @@ async function findSimilarCards() {
     const exactHighlightQueries = [];
     if (hasHighlight) {
         const seenExactQueries = new Set();
-        for (const highlight of manualHighlights.filter(h => h?.mode !== 'variable' && !h.benchmarkIntentOnly && typeof h.text === 'string' && h.text.trim())) {
+        for (const highlight of searchHighlightsSnapshot.filter(h => h?.mode !== 'variable' && !h.benchmarkIntentOnly && typeof h.text === 'string' && h.text.trim())) {
             const literal = highlight.text.trim().replaceAll('\\', '\\\\').replaceAll('"', '\\"');
             const prefix = highlight.field === 'type' ? 'type' : 'oracle';
             const key = `${prefix}:${literal.toLowerCase()}`;
@@ -22689,7 +23321,7 @@ async function findSimilarCards() {
             (searchA_Query
                 ? retrieveLocalFirst(localExactQueries, searchA_Query, {
                     label: 'Exact Phrase', fallbackMaxPages: benchmarkPageCap, limit: isBroadSearch ? 320 : 220,
-                    excludeName: currentSourceCard.name, filters, broadFallbackFilters, highlights: manualHighlights
+                    excludeName: currentSourceCard.name, filters, broadFallbackFilters, highlights: searchHighlightsSnapshot
                 }).catch(() => [])
                 : Promise.resolve([])),
             "Exact Phrase"
@@ -22808,7 +23440,7 @@ async function findSimilarCards() {
             for (const c of newResults) {
                 if (requestId !== searchRequestId) return;
                 if (!c || !c.name || isSameCardName(c.name, currentSourceCard.name) ||
-                    !matchesExactHighlightConstraints(c, manualHighlights) ||
+                    !matchesExactHighlightConstraints(c, searchHighlightsSnapshot) ||
                     !matchesActiveFilters(c, filters, broadFallbackFilters)) continue;
                 const key = c.name.toLowerCase();
                 if (!previewPool.has(key)) {
@@ -22861,7 +23493,7 @@ async function findSimilarCards() {
             (searchB_Query
                 ? retrieveLocalFirst([cleanKeywords.join(' ')], searchB_Query, {
                     label: 'Oracle Terms', fallbackMaxPages: searchBMaxPages, limit: isBroadSearch ? 360 : 240,
-                    excludeName: currentSourceCard.name, filters, broadFallbackFilters, highlights: manualHighlights
+                    excludeName: currentSourceCard.name, filters, broadFallbackFilters, highlights: searchHighlightsSnapshot
                 }).catch(() => [])
                 : Promise.resolve([])),
             "Oracle Terms"
@@ -22872,7 +23504,7 @@ async function findSimilarCards() {
             (searchC_Query
                 ? retrieveLocalFirst(activeTags, searchC_Query, {
                     label: 'Mechanics/Tags', fallbackMaxPages: benchmarkPageCap, limit: isBroadSearch ? 360 : 240,
-                    excludeName: currentSourceCard.name, filters, broadFallbackFilters, highlights: manualHighlights
+                    excludeName: currentSourceCard.name, filters, broadFallbackFilters, highlights: searchHighlightsSnapshot
                 }).catch(() => [])
                 : Promise.resolve([])),
             "Mechanics/Tags"
@@ -22887,7 +23519,7 @@ async function findSimilarCards() {
                 excludeName: currentSourceCard.name,
                 filters,
                 broadFallbackFilters,
-                highlights: manualHighlights,
+                highlights: searchHighlightsSnapshot,
                 isCancelled: () => requestId !== searchRequestId,
                 limit: isBroadSearch ? 260 : 180
             });
@@ -22900,7 +23532,7 @@ async function findSimilarCards() {
             (searchE_Query
                 ? retrieveLocalFirst([primaryType || '', sourceRoleProfileForFloor?.kind || '', ...activeTags], searchE_Query, {
                     label: 'Broader Mechanical', fallbackMaxPages: benchmarkPageCap, limit: isBroadSearch ? 320 : 220,
-                    excludeName: currentSourceCard.name, filters, broadFallbackFilters, highlights: manualHighlights
+                    excludeName: currentSourceCard.name, filters, broadFallbackFilters, highlights: searchHighlightsSnapshot
                 }).catch(() => [])
                 : Promise.resolve([])),
             "Broader Mechanical"
@@ -22916,7 +23548,7 @@ async function findSimilarCards() {
                 (broadOracleQuery
                     ? retrieveLocalFirst([broadSourceText], broadOracleQuery, {
                         label: 'Broad Retrieval', fallbackMaxPages: broadSearchMaxPages, limit: 520,
-                        excludeName: currentSourceCard.name, filters, broadFallbackFilters, highlights: manualHighlights
+                        excludeName: currentSourceCard.name, filters, broadFallbackFilters, highlights: searchHighlightsSnapshot
                     }).catch(() => [])
                     : Promise.resolve([])),
                 "Broad Retrieval"
@@ -22929,7 +23561,7 @@ async function findSimilarCards() {
                 benchmarkUseLocalOracleCorpus ? Promise.resolve([]) :
                 retrieveLocalFirst(sharedLocalQueries, sharedSourceTextQuery, {
                     label: 'Shared Source Text', fallbackMaxPages: benchmarkPageCap, limit: 420,
-                    excludeName: currentSourceCard.name, filters, broadFallbackFilters, highlights: manualHighlights
+                    excludeName: currentSourceCard.name, filters, broadFallbackFilters, highlights: searchHighlightsSnapshot
                 }).catch(() => []),
                 "Shared Source Text"
             )
@@ -22957,7 +23589,7 @@ async function findSimilarCards() {
             const localQueries = extractLocalRetrievalAlternativesFromScryfallQuery(q.query);
             const p = retrieveLocalFirst(localQueries, q.query, {
                 label: streamLabel, fallbackMaxPages: benchmarkPageCap, limit: isBroadSearch ? 320 : 220,
-                excludeName: currentSourceCard.name, filters, broadFallbackFilters, highlights: manualHighlights
+                excludeName: currentSourceCard.name, filters, broadFallbackFilters, highlights: searchHighlightsSnapshot
             }).catch(() => []);
             p.then(r => mergeIntoPreview(r, `functional match ${idx + 1}`)).catch(() => {});
             return p;
@@ -22985,7 +23617,7 @@ async function findSimilarCards() {
             const p = trackStream(
                 retrieveLocalFirst([q.query.match(/\"([^\"]+)\"/)?.[1] || q.query], q.query, {
                     label: streamLabel, fallbackMaxPages: benchmarkPageCap, limit: 260,
-                    excludeName: currentSourceCard.name, filters, broadFallbackFilters, highlights: manualHighlights
+                    excludeName: currentSourceCard.name, filters, broadFallbackFilters, highlights: searchHighlightsSnapshot
                 }).catch(() => []),
                 streamLabel
             );
@@ -22999,7 +23631,7 @@ async function findSimilarCards() {
                 benchmarkUseLocalOracleCorpus ? Promise.resolve([]) :
                 retrieveLocalFirst(extractLocalRetrievalAlternativesFromScryfallQuery(query), query, {
                     label, fallbackMaxPages: benchmarkPageCap, limit: isBroadSearch ? 320 : 220,
-                    excludeName: currentSourceCard.name, filters, broadFallbackFilters, highlights: manualHighlights
+                    excludeName: currentSourceCard.name, filters, broadFallbackFilters, highlights: searchHighlightsSnapshot
                 }).catch(() => []),
                 label
             );
@@ -23073,7 +23705,7 @@ async function findSimilarCards() {
                 }));
                 const matches = Array.from(mergedMatches.values()).sort((a,b)=>(b.similarity||0)-(a.similarity||0)).slice(0, limit);
                 const exactMatches = benchmarkUseLocalOracleCorpus && hasHighlight
-                    ? await findFullSemanticExactMatches(index, manualHighlights, currentSourceCard.name, 1024)
+                    ? await findFullSemanticExactMatches(index, searchHighlightsSnapshot, currentSourceCard.name, 1024)
                     : [];
 
                 const byName = new Map();
@@ -23170,6 +23802,7 @@ async function findSimilarCards() {
                     await scoreCardBatch({
                         cards: batch, sourceCard: currentSourceCard, targetText: targetTextForScoring,
                         exactnessText: exactnessTextForScoring, targetVector, extractor: ex,
+                        highlightsForScoring: searchHighlightsSnapshot,
                         targetVectors: { oracle: targetVector, semanticRetrieval: targetVector },
                         isCancelled: () => requestId !== searchRequestId,
                         weights:{mechanical:45,synergy:10,context:20,exactness:15,category:10},
@@ -23337,9 +23970,9 @@ let hardFilterOps = 0;
 for (const card of rawCandidates) {
     if (card && card.id && card.name && card.id !== currentSourceCard.id && !isSameCardName(card.name, currentSourceCard.name)) {
         // Exact highlight = mandatory text constraint. Semantic retrieval never overrides it.
-        if (!matchesExactHighlightConstraints(card, manualHighlights)) {
+        if (!matchesExactHighlightConstraints(card, searchHighlightsSnapshot)) {
             const nameKey = card.name.toLowerCase();
-            if (!filterFailureReasons.has(nameKey)) filterFailureReasons.set(nameKey, explainExactHighlightFailures(card, manualHighlights));
+            if (!filterFailureReasons.has(nameKey)) filterFailureReasons.set(nameKey, explainExactHighlightFailures(card, searchHighlightsSnapshot));
         } else if (matchesActiveFilters(card, filters, broadFallbackFilters)) {
             filteredCandidates.push(card);
         } else {
@@ -23359,7 +23992,7 @@ for (const card of rawCandidates) {
 // Stage 2: Passed hard filters set
 const passedFilterNames = new Set(filteredCandidates.map(c => (c.name || '').toLowerCase()));
 const countPassedFiltersRaw = filteredCandidates.length;
-const exactHighlightConstraintCount = manualHighlights.filter(h => h?.mode !== 'variable' && !h.benchmarkIntentOnly && typeof h.text === 'string' && h.text.trim()).length;
+const exactHighlightConstraintCount = searchHighlightsSnapshot.filter(h => h?.mode !== 'variable' && !h.benchmarkIntentOnly && typeof h.text === 'string' && h.text.trim()).length;
 
 // Dedupe by card NAME rather than Scryfall's print id - different printings (different set,
 // frame, or art) of the same card have different ids but are the same card for search purposes,
@@ -23444,6 +24077,7 @@ if (candidates.length > 0) {
         sourceCard: currentSourceCard,
         targetText: targetTextForScoring,
         exactnessText: exactnessTextForScoring,
+        highlightsForScoring: searchHighlightsSnapshot,
         targetVector,
         targetVectors,
         sourceFunctionVector,
@@ -23521,6 +24155,8 @@ if (candidates.length > 0) {
     // Overall Match score so selecting e.g. Category or Strategic Role does not accidentally turn
     // those secondary channels into hard eligibility tests.
     const scoreKey = 'similarityScore';
+    // Keep the canonical score untouched until after the relevance floor is decided. Preferences
+    // may reorder eligible results, but must never rescue an otherwise irrelevant candidate.
     candidates = await sortManaArrayResponsively(candidates, (a, b) => (b[scoreKey] || 0) - (a[scoreKey] || 0));
     if (requestId !== searchRequestId) return;
 
@@ -23635,6 +24271,17 @@ if (candidates.length > 0) {
 
     const countAfterRelevanceFloor = candidates.length;
     const relevanceFloorRescued = candidates.filter(c => c._catastrophicEmptyRescue).length;
+    // Apply soft constraint preferences only after eligibility pruning. This makes them genuine
+    // ranking nudges rather than a way to inflate weak cards above the relevance floor.
+    const activeConstraintPreferences = readConstraintFilters();
+    for (const candidate of qualified) {
+        const bonus = calculateConstraintPreferenceBonus(candidate, activeConstraintPreferences);
+        candidate.constraintPreferenceScore = bonus;
+        if (bonus > 0) candidate.similarityScore = Math.min(1, (Number(candidate.similarityScore) || 0) + bonus);
+    }
+    qualified = await sortManaArrayResponsively(qualified, (a, b) => (b[scoreKey] || 0) - (a[scoreKey] || 0));
+    if (requestId !== searchRequestId) return;
+
     // Stage 6: what survived pruning. Matrix Sweep is an Order mode, so it never trims the
     // scored candidate pool.
     const passedRelevanceFloorNames = new Set(candidates.map(c => (c.name || '').toLowerCase()));
@@ -23753,7 +24400,7 @@ if (candidates.length > 0) {
             sourceCard: currentSourceCard, scoreKey, orderCriteria: validOrderCriteriaForOrdering(priorityValue),
             // Snapshot the highlight state so Search Deeper cannot accidentally consult mutated
             // global UI state if the user changes/removes a highlight after the initial search.
-            highlightConstraints: (manualHighlights || []).map(h => ({
+            highlightConstraints: (searchHighlightsSnapshot || []).map(h => ({
                 text: typeof h?.text === 'string' ? h.text : '',
                 mode: h?.mode === 'variable' ? 'variable' : 'exact'
             }))

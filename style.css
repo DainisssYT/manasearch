@@ -6824,6 +6824,13 @@ body.light-theme .card-actions .edhrec-link-btn:hover {
     border: 1px solid var(--border-color); font-size: 14px; line-height: 1.55; font-weight: 650;
 }
 .search-intent-focus-explanation { margin: 8px 0 0; color: var(--text-muted); font-size: 12px; line-height: 1.5; }
+.search-intent-effective-section { margin-top: 10px; }
+.search-intent-effective-section h4 { margin: 0 0 6px; font-size: 12px; font-weight: 800; color: var(--text-main); }
+.search-intent-effective-text {
+    margin: 0; padding: 10px 12px; border: 1px solid var(--border-color); border-left: 3px solid var(--accent-color);
+    border-radius: 7px; background: var(--bg-primary); color: var(--text-main); font-size: 12px; line-height: 1.5;
+    white-space: pre-wrap; overflow-wrap: anywhere;
+}
 .search-intent-subsection { margin-top: 14px; }
 .search-intent-subsection h4 { margin: 0 0 7px; font-size: 12px; font-weight: 800; color: var(--text-main); }
 .search-intent-chips { display: flex; flex-wrap: wrap; gap: 7px; }
@@ -6860,3 +6867,36 @@ body.light-theme .card-actions .edhrec-link-btn:hover {
     .search-intent-cadence { justify-self: start; max-width: 100%; text-align: left; }
 }
 @media (prefers-reduced-motion: reduce) { .search-intent-spinner { animation: none; } }
+
+/* Inline source type-line editor: compact, keyboard- and touch-friendly. */
+.source-type-row { display:flex; align-items:baseline; flex-wrap:wrap; gap:6px; }
+.source-type-edit-btn { padding:2px 7px; font-size:11px; line-height:1.4; opacity:.82; }
+.source-type-editor { margin:6px 0 10px; padding:10px; border:1px solid var(--border-color, #41414a); border-radius:9px; background:var(--panel-bg, #202026); position:relative; }
+.source-type-editor label { display:block; font-size:12px; font-weight:700; margin-bottom:6px; }
+.source-type-editor input { width:100%; box-sizing:border-box; padding:9px 10px; border:1px solid var(--border-color, #41414a); border-radius:7px; background:var(--input-bg, #111114); color:var(--text-color, #f3f3f7); }
+.source-type-suggestions { display:flex; flex-wrap:wrap; gap:5px; padding:7px 0 2px; }
+.source-type-suggestions button { font-size:12px; padding:4px 8px; border-radius:999px; }
+.source-type-help { font-size:11px; opacity:.75; margin:7px 0; }
+.source-type-editor-actions { display:flex; flex-wrap:wrap; gap:7px; justify-content:flex-end; }
+
+/* Source-card quick constraints: keep common filters beside Oracle highlights. */
+.source-quick-constraints{margin-top:12px;padding:12px;border:1px solid var(--border-color,#41414a);border-radius:10px;background:var(--panel-bg,#202026);display:grid;gap:9px}
+.source-quick-constraints-heading{display:flex;align-items:baseline;justify-content:space-between;gap:10px;flex-wrap:wrap}
+.source-quick-constraints-heading strong{font-size:13px}
+.source-quick-constraints-heading span,.source-quick-constraint-label span,.source-quick-constraints-footnote{font-size:11px;color:var(--text-muted,#aaa)}
+.source-quick-constraint-row{display:grid;grid-template-columns:minmax(120px,1fr) auto auto minmax(120px,155px);gap:8px;align-items:center;padding:8px 0;border-top:1px solid var(--border-color,#41414a)}
+.source-quick-constraint-label{display:flex;flex-direction:column;gap:3px;min-width:0}
+.source-quick-constraint-label strong{font-size:12px}
+.source-inline-color-pips{display:flex;gap:4px;flex-wrap:wrap}
+.source-inline-color-pips .color-pip{min-width:27px;min-height:27px;padding:3px}
+.source-quick-mode-label{font-size:10px;color:var(--text-muted,#aaa);white-space:nowrap}
+.source-quick-mode,.source-quick-constraint-row>select:not(.source-quick-mode),.source-quick-constraint-row>input{width:100%;min-width:0;box-sizing:border-box;padding:7px 8px;border:1px solid var(--border-color,#41414a);border-radius:7px;background:var(--input-bg,#111114);color:var(--text-color,#f3f3f7);font-size:12px}
+.source-quick-constraints-footnote{margin:0;line-height:1.45}
+@media(max-width:700px){.source-quick-constraint-row{grid-template-columns:minmax(0,1fr) minmax(100px,1fr);gap:7px}.source-quick-constraint-label{grid-column:1/-1}.source-quick-mode-label{font-size:10px}.source-quick-mode{grid-column:2}.source-inline-color-pips{grid-column:1}.source-quick-constraint-advanced>select:not(.source-quick-mode),.source-quick-constraint-advanced>input{grid-column:1}.source-quick-constraint-advanced>.source-quick-mode-label{grid-column:2;grid-row:2}.source-quick-constraint-advanced>.source-quick-mode{grid-column:2;grid-row:3}}
+
+/* Compact inline subtype control in the source/highlight area. */
+.source-quick-subtype-entry{display:flex;gap:6px;min-width:0}
+.source-quick-subtype-entry input{flex:1;min-width:0;width:100%;box-sizing:border-box;padding:7px 8px;border:1px solid var(--border-color,#41414a);border-radius:7px;background:var(--input-bg,#111114);color:var(--text-color,#f3f3f7);font-size:12px}
+.source-quick-subtype-entry button{padding:7px 10px;border:1px solid var(--border-color,#41414a);border-radius:7px;background:var(--button-bg,var(--panel-bg,#202026));color:var(--text-color,#f3f3f7);font-size:12px;cursor:pointer}
+.source-quick-subtype-entry button:focus-visible,.source-quick-subtype-entry input:focus-visible{outline:2px solid var(--accent-color,#8b5cf6);outline-offset:2px}
+@media(max-width:700px){.source-quick-subtype-entry{grid-column:1/-1}.source-quick-subtype-entry input{font-size:16px}}
