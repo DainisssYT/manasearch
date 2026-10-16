@@ -1,6 +1,6 @@
-/* ManaSearch build 20261016-84 */
+/* ManaSearch build 20261010-40 */
 // ManaSearch deployment build marker. Bump this whenever app.js changes so cached-module issues are easy to diagnose.
-const MANASEARCH_APP_BUILD = '20261016-88';
+const MANASEARCH_APP_BUILD = '20261010-40';
 console.info(`[ManaSearch] app.js build ${MANASEARCH_APP_BUILD}`);
 
 // State Management
@@ -57,9 +57,9 @@ const mechanicalProfileCache = new Map();
 // stable signature rather than only on the individual card object. This does not cache scores or
 // source-dependent comparisons; it only reuses the deterministic graph representation.
 const mechanicalGraphCache = new Map();
-const MECHANICAL_GRAPH_CACHE_MAX = 4600;
+const MECHANICAL_GRAPH_CACHE_MAX = 2400;
 const SEARCH_INTENT_CACHE_MAX = 96;
-const MECHANICAL_PROFILE_CACHE_MAX = 9000;
+const MECHANICAL_PROFILE_CACHE_MAX = 2500;
 // Session semantic corpus: every card this session has actually scored (plus each search's
 // source card) gets its function/oracle embedding vectors kept here, keyed by name. A new
 // retrieval stream (Search G) queries this corpus by cosine similarity against the CURRENT
@@ -83,7 +83,6 @@ const SESSION_SEMANTIC_CORPUS_LIMIT = 4000;
 // the specific value doesn't, so it's excluded from the literal-match requirement and only
 // informs mechanical/semantic parsing.
 let manualHighlights = [];
-let nextHighlightColorIndex = 0;
 let highlightComposerOpen = false;
 let highlightEditIndex = null;
 let sortSelect;
@@ -138,7 +137,6 @@ const MANASEARCH_UI_PANEL_OPEN_SELECTOR = MANASEARCH_UI_PANEL_SELECTOR
 let manaPanelMutationObserver = null;
 let deferredResultRenderPending = false;
 let deferredResultRenderCards = null;
-let deferredResultRenderSearchGeneration = 0;
 let deferredResultRenderFrame = 0;
 
 // Progressive scoring can produce a new ordering several times per second. Painting every batch
@@ -172,17 +170,6 @@ function cancelScheduledProgressiveResultRender() {
     progressiveResultRenderTimer = 0;
     progressiveResultRenderCards = null;
     progressiveResultRenderRequestId = 0;
-}
-
-
-function cancelDeferredResultRender() {
-    if (deferredRenderFlushTimer) clearTimeout(deferredRenderFlushTimer);
-    deferredRenderFlushTimer = 0;
-    if (deferredResultRenderFrame) cancelAnimationFrame(deferredResultRenderFrame);
-    deferredResultRenderFrame = 0;
-    deferredResultRenderPending = false;
-    deferredResultRenderCards = null;
-    deferredResultRenderSearchGeneration = 0;
 }
 
 function scheduleProgressiveResultRender(cards, requestId) {
@@ -231,12 +218,9 @@ function isManaUiInteractionRecentlyActive(windowMs = MANASEARCH_UI_PRIORITY_WIN
 }
 
 function isManaUiInteractionPriorityActive() {
-    // A focused field is not the same as an actively used field. Keeping UI-priority slices
-    // forever merely because a caret remains in a search/preference input can make thousands of
-    // scoring iterations spend more time yielding than calculating. Recent focus/typing/pointer
-    // activity still gets priority; once the interaction settles, idle scoring returns to the
-    // normal 8 ms cooperative slices while continuing to yield to the browser between slices.
-    return isManaUserActivelyEditing() || isManaUiInteractionRecentlyActive();
+    if (typeof document === 'undefined') return false;
+    if (isManaEditableControl(document.activeElement)) return true;
+    return isManaUiInteractionRecentlyActive();
 }
 
 function getManaSearchSliceBudgetMs() {
@@ -429,11 +413,9 @@ function flushDeferredResultRender() {
             return;
         }
         if (!deferredResultRenderPending) return;
-        if (deferredResultRenderSearchGeneration !== searchRequestId) { cancelDeferredResultRender(); return; }
         const cards = deferredResultRenderCards;
         deferredResultRenderCards = null;
         deferredResultRenderPending = false;
-        deferredResultRenderSearchGeneration = 0;
         renderResults(cards);
     });
 }
@@ -467,9 +449,6 @@ let activeSearchStreamProgressReporter = null;
 // Local Storage Keys
 const HISTORY_KEY = 'manamatch_history';
 const HISTORY_CARD_PREVIEWS_KEY = 'manamatch_history_card_previews';
-// Explicitly dismissed recent cards stay out of the sidebar and empty-query picker suggestions,
-// but remain searchable by name and are not removed from Favorites or the in-memory cache.
-const HISTORY_DISMISSED_KEY = 'manamatch_history_dismissed';
 const FAVORITES_KEY = 'manamatch_favorites';
 const THEME_KEY = 'manamatch_theme';
 const DISPLAY_PREFERENCES_KEY = 'manasearch_display_preferences_v1';
@@ -481,47 +460,9 @@ const DEFAULT_DISPLAY_PREFERENCES = Object.freeze({
     reduceMotion: false,
     showStreamProgress: true,
     includeDigitalCards: false,
-    includeTokenEmblemFunnyCards: false,
-    showEdhrecButton: true,
-    showSearchIntent: false
+    includeTokenEmblemFunnyCards: false
 });
 let displayPreferences = { ...DEFAULT_DISPLAY_PREFERENCES };
-
-// EDHREC links are generated from the card's display name rather than a user-supplied URL.
-// Commander-eligible cards use the budget commander edge (matching EDHREC's commander URL pattern);
-// other candidates open their individual card page. This remains a normal external link so the
-// browser handles opening a new tab and users can inspect/copy the destination before navigating.
-function slugifyEdhrecCardName(name) {
-    return String(name || '')
-        .normalize('NFKD')
-        .replace(/[\u0300-\u036f]/g, '')
-        .toLowerCase()
-        .replace(/&/g, ' and ')
-        .replace(/[’‘'`]/g, '')
-        .replace(/[^a-z0-9]+/g, '-')
-        .replace(/^-+|-+$/g, '')
-        .replace(/-{2,}/g, '-');
-}
-
-function getEdhrecUrlForCard(card) {
-    const name = String(card?.name || '').trim();
-    const slug = slugifyEdhrecCardName(name);
-    if (!slug) return 'https://edhrec.com';
-
-    const faceTypes = Array.isArray(card?.card_faces)
-        ? card.card_faces.map(face => String(face?.type_line || '')).join(' ')
-        : '';
-    const typeLine = `${String(card?.type_line || '')} ${faceTypes}`;
-    const oracleText = [card?.oracle_text, ...(Array.isArray(card?.card_faces) ? card.card_faces.map(face => face?.oracle_text) : [])]
-        .filter(Boolean).join(' ');
-    const commanderEligible =
-        (/\blegendary\b/i.test(typeLine) && /\bcreature\b/i.test(typeLine)) ||
-        /\bcan be your commander\b/i.test(oracleText);
-    const path = commanderEligible
-        ? `/commanders/${slug}/budget`
-        : `/cards/${slug}`;
-    return `https://edhrec.com${path}`;
-}
 
 function clampDisplayResultLimit(value) {
     const parsed = Number(value);
@@ -553,11 +494,7 @@ function loadDisplayPreferences() {
         reduceMotion: Boolean(stored?.reduceMotion),
         showStreamProgress: stored?.showStreamProgress !== false,
         includeDigitalCards: stored?.includeDigitalCards === true,
-        includeTokenEmblemFunnyCards: stored?.includeTokenEmblemFunnyCards === true,
-        // New preference defaults ON for existing users whose saved settings predate this option.
-        showEdhrecButton: stored?.showEdhrecButton !== false,
-        // Optional Search intent explanation is off by default, including for users with older saved preferences.
-        showSearchIntent: stored?.showSearchIntent === true
+        includeTokenEmblemFunnyCards: stored?.includeTokenEmblemFunnyCards === true
     };
     return displayPreferences;
 }
@@ -568,25 +505,6 @@ function saveDisplayPreferences() {
     } catch (error) {
         // Persistence is optional; the live preference still applies for this session.
     }
-}
-
-// Apply the EDHREC visibility preference directly to existing result cards before any deferred
-// full render. Result rendering intentionally yields while dialogs are open or the user is active;
-// a presentation-only toggle must not depend on that deferred render eventually flushing.
-function syncEdhrecCandidateButtonVisibility(root = document) {
-    if (!root || typeof root.querySelectorAll !== 'function') return;
-    const shouldShow = displayPreferences?.showEdhrecButton !== false;
-    const selector = root === document ? '#results-grid .card-item .edhrec-link-btn' : '.card-item .edhrec-link-btn';
-    root.querySelectorAll(selector).forEach(link => {
-        link.hidden = !shouldShow;
-        if (shouldShow) {
-            link.removeAttribute('aria-hidden');
-            link.removeAttribute('tabindex');
-        } else {
-            link.setAttribute('aria-hidden', 'true');
-            link.setAttribute('tabindex', '-1');
-        }
-    });
 }
 
 // Candidate inclusion preferences are presentation filters: they are applied after ranking so
@@ -603,78 +521,28 @@ function isDigitalOnlyCard(card) {
 
 const MANA_SEARCH_UN_SET_CODES = new Set(['ugl', 'unh', 'ust', 'und', 'unf']);
 const MANA_SEARCH_KNOWN_LEGALITY_VALUES = new Set(['legal', 'not_legal', 'banned', 'restricted']);
-// Nontraditional layouts are often intentionally not legal in constructed formats, but they are
-// still useful to ManaSearch users who explicitly enable unusual/funny cards. Do not require these
-// entries to have a complete legalities object (tokens, schemes, and planes often do not).
-const MANA_SEARCH_NONTRADITIONAL_LAYOUTS = new Set([
-    'token', 'double_faced_token', 'emblem', 'scheme', 'plane', 'phenomenon', 'vanguard',
-    'conspiracy', 'planar', 'dungeon', 'attraction', 'art_series', 'augment', 'host', 'minigame'
-]);
-
-function getCardMetadataForLegality(card) {
-    // Prefer the full static card record when a result or recent-search preview contains partial
-    // legality metadata. The helper is declared later and is safely hoisted.
-    return card && typeof enrichCardForPreferenceEvaluation === 'function'
-        ? enrichCardForPreferenceEvaluation(card)
-        : card;
-}
-
-function getSupportedLegalityStatuses(card) {
-    const metadata = getCardMetadataForLegality(card);
-    const legalities = metadata?.legalities && typeof metadata.legalities === 'object' ? metadata.legalities : {};
-    return Object.values(legalities)
-        .map(value => String(value || '').trim().toLowerCase())
-        .filter(Boolean);
-}
-
-function isBannedInEveryTrackedFormat(card) {
-    const statuses = getSupportedLegalityStatuses(card);
-    // Require a substantial legality set and at least one explicit ban. 'not_legal' alone means
-    // a card is not part of a format, not that the card itself was banned.
-    return statuses.length >= 8 &&
-        statuses.includes('banned') &&
-        statuses.every(value => value === 'banned' || value === 'not_legal');
-}
-
-function isBannedInCommander(card) {
-    const metadata = getCardMetadataForLegality(card);
-    const legalities = metadata?.legalities && typeof metadata.legalities === 'object' ? metadata.legalities : {};
-    return String(legalities.commander || '').trim().toLowerCase() === 'banned';
-}
-
-function shouldShowBannedCardArtStamp(card) {
-    // Also mark Commander-banned cards to match the EDH-focused reference treatment. The title
-    // and accessible label state the scope so a Commander ban is not misrepresented as a ban in
-    // every format.
-    return isBannedInEveryTrackedFormat(card) || isBannedInCommander(card);
-}
-
-function getBannedCardArtStampDescription(card) {
-    if (isBannedInEveryTrackedFormat(card)) return 'Banned in all tracked formats';
-    if (isBannedInCommander(card)) return 'Banned in Commander';
-    return 'Ban status unavailable';
-}
-
 function isTokenEmblemOrAllFormatBannedCard(card) {
     if (!card || typeof card !== 'object') return false;
-    const metadata = getCardMetadataForLegality(card) || card;
-    const layout = String(metadata.layout || '').trim().toLowerCase();
-    const typeLine = String(metadata.type_line || '').toLowerCase();
-    if (MANA_SEARCH_NONTRADITIONAL_LAYOUTS.has(layout) || layout.includes('token') ||
+    const layout = String(card.layout || '').trim().toLowerCase();
+    const typeLine = String(card.type_line || '').toLowerCase();
+    if (layout === 'token' || layout.includes('token') || layout === 'emblem' ||
         /\bemblem\b/.test(typeLine) || /\btoken\b/.test(typeLine)) return true;
 
-    const setCode = String(metadata.set || '').trim().toLowerCase();
-    const securityStamp = String(metadata.security_stamp || '').trim().toLowerCase();
-    const promoTypes = Array.isArray(metadata.promo_types) ? metadata.promo_types.map(value => String(value || '').toLowerCase()) : [];
+    const legalities = card.legalities && typeof card.legalities === 'object' ? Object.values(card.legalities) : [];
+    const statuses = legalities.map(value => String(value || '').trim().toLowerCase()).filter(value => MANA_SEARCH_KNOWN_LEGALITY_VALUES.has(value));
+    const allFormatsUnavailable = statuses.length >= 8 && statuses.every(value => value === 'not_legal' || value === 'banned');
+    if (!allFormatsUnavailable) return false;
+
+    const setCode = String(card.set || '').trim().toLowerCase();
+    const securityStamp = String(card.security_stamp || '').trim().toLowerCase();
+    const promoTypes = Array.isArray(card.promo_types) ? card.promo_types.map(value => String(value || '').toLowerCase()) : [];
+    const hasAnyExplicitBan = statuses.includes('banned');
+    // Cards marked banned in one or more formats and not_legal in every other format are excluded
+    // as all-format-unavailable. Un-set/playtest cards often use only not_legal (rather than banned),
+    // so those require a known funny/fake marker before they are excluded.
     const knownFunnyOrFake = MANA_SEARCH_UN_SET_CODES.has(setCode) || setCode === 'mb2' ||
         securityStamp === 'acorn' || promoTypes.some(value => /playtest|funny|acorn/.test(value));
-    if (knownFunnyOrFake || isBannedInEveryTrackedFormat(metadata)) return true;
-
-    // Some imported/legacy weird cards have no usable legality records. Explicitly-known
-    // nontraditional layouts are handled above; otherwise avoid treating an unknown record as banned.
-    const statuses = getSupportedLegalityStatuses(metadata);
-    return statuses.length >= 8 && statuses.every(value => value === 'not_legal' || value === 'banned') &&
-        statuses.includes('banned');
+    return hasAnyExplicitBan || knownFunnyOrFake;
 }
 
 function isAllowedByCandidatePreferences(card) {
@@ -738,7 +606,7 @@ function hasCompleteCardPreferenceMetadata(card) {
 function getPreferenceHiddenReason(card) {
     if (!displayPreferences?.includeDigitalCards && isDigitalOnlyCard(card)) return 'digital-only';
     if (!displayPreferences?.includeTokenEmblemFunnyCards && isTokenEmblemOrAllFormatBannedCard(card)) {
-        return 'token, emblem, nontraditional, funny, or all-format-banned card';
+        return 'token, emblem, or all-format-banned funny card';
     }
     return '';
 }
@@ -752,10 +620,7 @@ function runCandidatePreferenceRegressionSuite({ log = true } = {}) {
         digital: { name: 'Digital Test Card', games: ['arena'], layout: 'normal', type_line: 'Creature — Test', legalities: { ...legalities, standard: 'not_legal' }, set: 'digital' },
         token: { name: 'Test Token', games: ['paper'], layout: 'token', type_line: 'Token Creature — Test', legalities: {}, set: 'tst' },
         emblem: { name: 'Test Emblem', games: ['paper'], layout: 'emblem', type_line: 'Emblem', legalities: {}, set: 'tst' },
-        funny: { name: 'Funny Test Card', games: ['paper'], layout: 'normal', type_line: 'Creature — Test', legalities: Object.fromEntries(['standard','future','historic','gladiator','pioneer','modern','legacy','pauper','vintage','penny'].map(format => [format, 'not_legal'])), set: 'unf', promo_types: ['funny'] },
-        scheme: { name: 'Scheme Test Card', games: ['paper'], layout: 'scheme', type_line: 'Scheme', legalities: {}, set: 'oe01' },
-        allBanned: { name: 'All Formats Banned Test', games: ['paper'], layout: 'normal', type_line: 'Creature — Test', legalities: Object.fromEntries(['standard','future','historic','gladiator','pioneer','modern','legacy','pauper','vintage','penny'].map((format, index) => [format, index < 3 ? 'banned' : 'not_legal'])), set: 'tst' },
-        commanderBanned: { name: 'Commander Banned Test', games: ['paper'], layout: 'normal', type_line: 'Legendary Creature — Test', legalities: { standard: 'legal', future: 'legal', historic: 'legal', gladiator: 'legal', pioneer: 'legal', modern: 'legal', legacy: 'legal', pauper: 'not_legal', vintage: 'legal', commander: 'banned' }, set: 'tst' }
+        funny: { name: 'Funny Test Card', games: ['paper'], layout: 'normal', type_line: 'Creature — Test', legalities: Object.fromEntries(['standard','future','historic','gladiator','pioneer','modern','legacy','pauper','vintage','penny'].map(format => [format, 'not_legal'])), set: 'unf', promo_types: ['funny'] }
     };
     const record = (id, pass, details = '') => results.push({ id, pass: Boolean(pass), details });
     try {
@@ -765,14 +630,6 @@ function runCandidatePreferenceRegressionSuite({ log = true } = {}) {
         record('token-hidden-by-default', !isAllowedByCandidatePreferences(cards.token));
         record('emblem-hidden-by-default', !isAllowedByCandidatePreferences(cards.emblem));
         record('all-format-banned-funny-card-hidden', !isAllowedByCandidatePreferences(cards.funny));
-        record('scheme-layout-hidden-by-default', !isAllowedByCandidatePreferences(cards.scheme));
-        record('all-format-banned-card-hidden-by-default', !isAllowedByCandidatePreferences(cards.allBanned));
-        record('all-format-ban-detection', isBannedInEveryTrackedFormat(cards.allBanned));
-        record('all-format-banned-card-gets-art-stamp', shouldShowBannedCardArtStamp(cards.allBanned));
-        record('all-format-ban-stamp-description-is-accurate', getBannedCardArtStampDescription(cards.allBanned) === 'Banned in all tracked formats');
-        record('partial-format-ban-not-misclassified-as-all-format-ban', !isBannedInEveryTrackedFormat(cards.commanderBanned));
-        record('commander-only-ban-does-not-trigger-all-format-filter', isAllowedByCandidatePreferences(cards.commanderBanned));
-        record('commander-ban-gets-art-stamp', shouldShowBannedCardArtStamp(cards.commanderBanned));
         const previewCorpus = { byName: new Map(Object.values(cards).map(card => [normalizeCardNameForIdentity(card.name), card])) };
         record('source-history-digital-preview-hidden', filterSourceCardsByCurrentPreferences([{ name: cards.digital.name }], previewCorpus).length === 0);
         record('source-history-token-preview-hidden', filterSourceCardsByCurrentPreferences([{ name: cards.token.name }], previewCorpus).length === 0);
@@ -783,9 +640,7 @@ function runCandidatePreferenceRegressionSuite({ log = true } = {}) {
         record('token-still-hidden-when-only-digital-enabled', filterSourceCardsByCurrentPreferences([cards.token]).length === 0);
         displayPreferences = { ...displayPreferences, includeTokenEmblemFunnyCards: true };
         record('token-and-emblem-toggle-allows-them', filterSourceCardsByCurrentPreferences([cards.token, cards.emblem]).length === 2);
-        record('special-layout-toggle-allows-scheme', filterSourceCardsByCurrentPreferences([cards.scheme]).length === 1);
         record('funny-card-toggle-allows-it', filterSourceCardsByCurrentPreferences([cards.funny]).length === 1);
-        record('all-format-banned-toggle-allows-card', filterSourceCardsByCurrentPreferences([cards.allBanned]).length === 1);
         if (log) {
             console.groupCollapsed(`ManaSearch candidate/source preference regression: ${results.filter(result => result.pass).length}/${results.length} passed`);
             results.forEach(result => console[result.pass ? 'info' : 'error'](`${result.pass ? 'PASS' : 'FAIL'} ${result.id}${result.details ? ` — ${result.details}` : ''}`));
@@ -797,8 +652,6 @@ function runCandidatePreferenceRegressionSuite({ log = true } = {}) {
     }
 }
 if (typeof window !== 'undefined') window.runCandidatePreferenceRegressionSuite = runCandidatePreferenceRegressionSuite;
-if (typeof window !== 'undefined') window.autofillEmptyConstraintsFromSource = autofillEmptyConstraintsFromSource;
-if (typeof window !== 'undefined') window.removeRecentSearchCard = removeRecentSearchCard;
 
 function getDisplayedResultLimit() {
     return clampDisplayResultLimit(displayPreferences?.maxResults);
@@ -823,12 +676,7 @@ function applyPresentationPreferences() {
 
 
 // UI Elements 
-let cardSearchInput, searchBtn, sourceCardSection, sourceCardOracle, sourceCardType, findSimilarBtn;
-let sourceCardImage, sourceCardFlipBtn, sourceCardPrice;
-let currentSourceCardFaceIndex = 0;
-let sourceCardFlipTimer = 0;
-let sourceCardFlipFinalTimer = 0;
-let includeSourceHighlightsInRelatedSearch = true;
+let cardSearchInput, searchBtn, sourceCardSection, sourceCardOracle, findSimilarBtn;
 let staticSearchStatus, staticSearchStatusText, staticSearchStatusSpinner, staticSearchRetryBtn;
 let loadingIndicator, resultsSection, resultsGrid, themeToggle, historyList;
 let systemThemeMediaQuery = null;
@@ -917,31 +765,8 @@ const workerCode = `
         setTimeout(() => self.postMessage(e.data.id), e.data.ms);
     };
 `;
-// A Blob-backed Worker is an optimization only. Some mobile browsers, embedded browsers, or
-// deployments with restrictive worker policies reject it; that must never abort app.js evaluation
-// before buttons are wired and static card assets begin loading.
-let bgTimerWorker = null;
-try {
-    if (typeof Worker === 'function' && typeof Blob === 'function' && typeof URL !== 'undefined' && typeof URL.createObjectURL === 'function') {
-        const workerBlob = new Blob([workerCode], { type: 'application/javascript' });
-        const workerUrl = URL.createObjectURL(workerBlob);
-        try {
-            const worker = new Worker(workerUrl);
-            bgTimerWorker = worker;
-            worker.addEventListener('error', event => {
-                console.warn('[ManaSearch] Background timer worker unavailable; using timer fallback.', event?.message || 'Worker error');
-                if (bgTimerWorker === worker) bgTimerWorker = null;
-                try { worker.terminate(); } catch (_) {}
-            });
-        } finally {
-            // Revoke the temporary URL after the Worker constructor has captured it.
-            URL.revokeObjectURL(workerUrl);
-        }
-    }
-} catch (error) {
-    bgTimerWorker = null;
-    console.info('[ManaSearch] Background timer worker blocked; using timer fallback.', error?.message || error);
-}
+const workerBlob = new Blob([workerCode], { type: 'application/javascript' });
+const bgTimerWorker = new Worker(URL.createObjectURL(workerBlob));
 
 // Add to State Management at the top
 let activeTags = [];
@@ -2002,7 +1827,6 @@ function resetBenchmarkColdState({ keepSourceCard = false } = {}) {
     lastSearchResults = [];
     lastSearchDiagnostics = null;
     manualHighlights = [];
-    nextHighlightColorIndex = 0;
     highlightComposerOpen = false;
     selectedRelatedCards.clear();
     sourceCards.clear();
@@ -2773,25 +2597,6 @@ async function runBenchmarkSuite(searchFn) {
             if (d.embeddingDiagnostics) {
                 const { cacheHits, computed, failed, skippedForBudget } = d.embeddingDiagnostics;
                 console.log(`  Embedding cache: ${cacheHits} cache hit(s), ${computed} computed, ${failed} failed (fell back to lexical-only)${skippedForBudget ? `, ${skippedForBudget} skipped (semantic-scoring budget, fell back to lexical-only)` : ''}`);
-                if (Number.isFinite(d.embeddingDiagnostics.totalCandidates) && Number.isFinite(d.embeddingDiagnostics.semanticEligibleCount)) {
-                    console.log(`  Semantic-scoring budget: ${d.embeddingDiagnostics.semanticEligibleCount} of ${d.embeddingDiagnostics.totalCandidates} candidates`);
-                }
-                const st = d.embeddingDiagnostics.stageTimings;
-                if (st) {
-                    console.log(`  Scoring breakdown: source/setup ${fmtMs(st.sourceSetupMs)} | structural ${fmtMs(st.structuralMs)} | cache calibration ${fmtMs(st.cacheCalibrationMs)} | candidate triage ${fmtMs(st.triageAndSelectionMs)} | embedding text prep ${fmtMs(st.embeddingTextPreparationMs)} | embedding inference/cache ${fmtMs(st.embeddingWarmCacheMs)} | semantic pass ${fmtMs(st.semanticPassMs)} | calibration ${fmtMs(st.calibrationMs)} | final blend ${fmtMs(st.finalBlendMs)} | other ${fmtMs(st.unattributedMs)} | scorer total ${fmtMs(st.totalMs)}`);
-                    if (st.structuralDetails) {
-                        const sd = st.structuralDetails;
-                        console.log(`  Structural detail: parse ${fmtMs(sd.parseMs)} | exactness ${fmtMs(sd.exactnessMs)} | candidate profiles/graph/synergy ${fmtMs(sd.profileGraphSynergyMs)} | mechanical/effect matching ${fmtMs(sd.mechanicalPairingMs)} | role/highlight/confidence ${fmtMs(sd.roleHighlightConfidenceMs)} | category ${fmtMs(sd.categoryMs)}`);
-                    }
-                    if (st.pairCache) {
-                        const pc = st.pairCache;
-                        console.log(`  Pair-cache reuse: effect pairs ${pc.directionalHits.toLocaleString()} reused / ${pc.directionalComputed.toLocaleString()} computed | graph-node pairs ${pc.graphNodeHits.toLocaleString()} reused / ${pc.graphNodeComputed.toLocaleString()} computed`);
-                    }
-                    if (lastSearchDiagnostics.previewOptimization) {
-                        const pv = lastSearchDiagnostics.previewOptimization;
-                        console.log(`  Progressive preview work: ${pv.lightweightCandidates.toLocaleString()} cheap previews | ${pv.progressiveFullScored.toLocaleString()} full provisional scores (cap ${pv.progressiveFullScoreCap}) | ${pv.remainingQueuedForFinalPass.toLocaleString()} deferred to authoritative pass`);
-                    }
-                }
             }
 
             // Coverage warnings: flag any stream that hit its page cap while a large fraction of
@@ -4148,7 +3953,7 @@ function reapplyOracleHighlights() {
     const ranges = [];
 
     for (const h of manualHighlights) {
-        if (!h || !h.text || h.field === 'type') continue;
+        if (!h || !h.text) continue;
 
         // User-authored additions are search-intent tags, not selections from the source
         // Oracle text. They must participate in search/scoring, but should never be rendered as
@@ -4168,7 +3973,7 @@ function reapplyOracleHighlights() {
 
         start = Math.max(0, Math.min(start, originalText.length));
         end = Math.max(start, Math.min(end, originalText.length));
-        if (end > start) ranges.push({ start, end, mode: h.mode, colorIndex: Number.isInteger(h.colorIndex) ? h.colorIndex % 4 : 0 });
+        if (end > start) ranges.push({ start, end, mode: h.mode });
     }
 
     // Resolve overlaps deterministically.  A user selection's stored position wins; when two
@@ -4186,7 +3991,7 @@ function reapplyOracleHighlights() {
     for (const range of claimed) {
         html += escapeHtmlText(originalText.slice(cursor, range.start));
         const modeClass = range.mode === 'variable' ? 'highlight-variable' : 'highlight-exact';
-        html += `<strong class="highlight-active ${modeClass} highlight-color-${range.colorIndex}">${escapeHtmlText(originalText.slice(range.start, range.end))}</strong>`;
+        html += `<strong class="highlight-active ${modeClass}">${escapeHtmlText(originalText.slice(range.start, range.end))}</strong>`;
         cursor = range.end;
     }
     html += escapeHtmlText(originalText.slice(cursor));
@@ -4197,87 +4002,53 @@ function reapplyOracleHighlights() {
  * Captures a completed Oracle-text selection and records its exact text offsets so the same
  * occurrence can be re-rendered without accidentally highlighting every matching phrase.
  */
-function notifyManaSearchHighlightsChanged() {
-    window.dispatchEvent(new CustomEvent('manasearch:source-highlights-changed', {
-        detail: { highlights: manualHighlights.map(h => ({ text: h.text, mode: h.mode, field: h.field, origin: h.origin })) }
-    }));
-}
-
-function handleSourceTextSelection(root = sourceCardOracle, field = 'oracle') {
-    if (!root) return;
+function handleOracleTextSelection() {
+    if (!sourceCardOracle) return;
     const selection = window.getSelection?.();
     if (!selection || selection.rangeCount === 0) return;
+
     const range = selection.getRangeAt(0);
-    if (!root.contains(range.commonAncestorContainer)) return;
+    const commonAncestor = range.commonAncestorContainer;
+    if (!sourceCardOracle.contains(commonAncestor)) return;
+
     const selectedText = selection.toString().trim();
     if (!selectedText) return;
 
-    const originalText = field === 'type'
-        ? (root.dataset.originalText ?? root.textContent ?? '')
-        : (root.dataset.originalText ?? root.textContent ?? '');
-    if (!root.dataset.originalText) {
-        root.dataset.originalText = originalText;
-        root.dataset.originalHtml = root.innerHTML;
+    if (!sourceCardOracle.dataset.originalText) {
+        sourceCardOracle.dataset.originalText = sourceCardOracle.textContent || '';
+        sourceCardOracle.dataset.originalHtml = sourceCardOracle.innerHTML;
     }
-    const offsets = normalizeHighlightSelectionOffsets(root, range);
-    const trimmed = offsets
+
+    const offsets = normalizeHighlightSelectionOffsets(sourceCardOracle, range);
+    const trimmedSelection = offsets
         ? trimHighlightRangeText(selectedText, offsets.start, offsets.end)
         : { text: selectedText, start: null, end: null };
-    if (!trimmed.text) return;
 
-    const existingIndex = manualHighlights.findIndex(h => h.field === field &&
-        String(h.text || '').toLowerCase() === trimmed.text.toLowerCase() &&
-        (field === 'type'
-            ? Number.isFinite(h.typeStart) && h.typeStart === trimmed.start && h.typeEnd === trimmed.end
-            : Number.isFinite(h.start) && h.start === trimmed.start && h.end === trimmed.end));
-    if (existingIndex >= 0) {
-        removeHighlight(existingIndex);
-    } else {
-        const highlight = {
-            text: trimmed.text, mode: 'exact', origin: 'source', field,
-            colorIndex: nextHighlightColorIndex++ % 4, attachedTo: null
-        };
-        if (field === 'type') {
-            highlight.typeStart = trimmed.start;
-            highlight.typeEnd = trimmed.end;
-        } else {
-            highlight.start = trimmed.start;
-            highlight.end = trimmed.end;
-        }
-        manualHighlights.push(highlight);
+    if (!trimmedSelection.text) return;
+
+    // The same phrase may legitimately be highlighted more than once. Treat an identical
+    // phrase at a different source-text position as a distinct selection.
+    const alreadyHighlighted = manualHighlights.some(h =>
+        h.text.toLowerCase() === trimmedSelection.text.toLowerCase() &&
+        Number.isFinite(h.start) && Number.isFinite(trimmedSelection.start) &&
+        h.start === trimmedSelection.start && h.end === trimmedSelection.end
+    );
+
+    if (!alreadyHighlighted) {
+        manualHighlights.push({
+            text: trimmedSelection.text,
+            mode: 'exact',
+            origin: 'source',
+            start: trimmedSelection.start,
+            end: trimmedSelection.end,
+            attachedTo: null
+        });
         reapplyOracleHighlights();
-        reapplyTypeLineHighlights();
         renderHighlightChips();
     }
+
     selection.removeAllRanges();
-    notifyManaSearchHighlightsChanged();
 }
-
-function handleOracleTextSelection() {
-    return handleSourceTextSelection(sourceCardOracle, 'oracle');
-}
-
-function reapplyTypeLineHighlights() {
-    if (!sourceCardType) return;
-    const text = sourceCardType.dataset.originalText ?? sourceCardType.textContent ?? '';
-    const ranges = manualHighlights
-        .filter(h => h?.field === 'type' && Number.isFinite(h.typeStart) && Number.isFinite(h.typeEnd) && h.typeEnd > h.typeStart)
-        .map(h => ({ start: h.typeStart, end: h.typeEnd, colorIndex: Number.isInteger(h.colorIndex) ? h.colorIndex % 4 : 0 }))
-        .filter(r => text.slice(r.start, r.end));
-    ranges.sort((a, b) => (b.end - b.start) - (a.end - a.start) || a.start - b.start);
-    const claimed = [];
-    for (const range of ranges) if (!claimed.some(r => range.start < r.end && range.end > r.start)) claimed.push(range);
-    claimed.sort((a, b) => a.start - b.start);
-    let cursor = 0, html = '';
-    for (const r of claimed) {
-        html += escapeHtmlText(text.slice(cursor, r.start));
-        html += `<strong class="highlight-active highlight-type highlight-color-${r.colorIndex}">${escapeHtmlText(text.slice(r.start, r.end))}</strong>`;
-        cursor = r.end;
-    }
-    html += escapeHtmlText(text.slice(cursor));
-    sourceCardType.innerHTML = html;
-}
-
 
 /**
  * Renders the highlight chip list beneath the oracle text - one chip per active highlight, each
@@ -4309,7 +4080,7 @@ function findHighlightRangeInSource(text, preferredStart = null) {
 function highlightParentOptions(excludeIndex = null) {
     return manualHighlights
         .map((h, idx) => ({ h, idx }))
-        .filter(({ h, idx }) => idx !== excludeIndex && h && (h.origin !== 'user' || Boolean(h.editedFrom)) && typeof h.text === 'string' && h.text.trim());
+        .filter(({ h, idx }) => idx !== excludeIndex && h && h.origin !== 'user' && typeof h.text === 'string' && h.text.trim());
 }
 
 function getHighlightParentLabel(index) {
@@ -4427,40 +4198,22 @@ function renderHighlightEditor(idx) {
         if (!target) return;
         const parentValue = connectSelect.value;
         const nextAttachedTo = /^\d+$/.test(parentValue) ? Number(parentValue) : null;
-        const sourceOracleBeforeEdit = getCurrentSourceOracleText();
-        const previousText = String(target.text || '').trim();
-        const priorAnchor = target.editedFrom || (target.origin !== 'user' && Number.isInteger(target.start) && Number.isInteger(target.end)
-            && sourceOracleBeforeEdit.slice(target.start, target.end).trim().toLocaleLowerCase() === previousText.toLocaleLowerCase()
-            ? { text: previousText, start: target.start, end: target.end, clauseText: extractHighlightClauseContext(sourceOracleBeforeEdit, target.start, target.end) }
-            : null);
 
-        const textChanged = nextText.toLowerCase() !== previousText.toLowerCase();
+        const textChanged = nextText.toLowerCase() !== String(target.text || '').trim().toLowerCase();
         target.text = nextText;
         target.mode = selectedMode;
         target.attachedTo = Number.isInteger(nextAttachedTo) && nextAttachedTo !== idx ? nextAttachedTo : null;
-        target.intentConnection = Number.isInteger(target.attachedTo) ? 'attached' : 'independent';
 
         // Keep source-backed highlights visually anchored to a real occurrence. If the user
         // intentionally edits one into new wording, convert it to a search-only detail rather than
         // rendering a fake highlight that does not exist on the card.
-        // Re-edited search-only chips keep their source anchor. Re-evaluate them as well so a
-        // user can change an edited phrase back to literal source text and restore the visual span.
-        if ((target.origin !== 'user' || target.editedFrom) && (textChanged || !Number.isFinite(target.start) || !Number.isFinite(target.end))) {
+        if (target.origin !== 'user' && (textChanged || !Number.isFinite(target.start) || !Number.isFinite(target.end))) {
             const found = findHighlightRangeInSource(nextText, target.start);
             if (found) {
                 target.start = found.start;
                 target.end = found.end;
                 target.origin = target.origin === 'benchmark' ? 'benchmark' : 'source';
-                delete target.editedFrom;
             } else {
-                if (priorAnchor && Number.isInteger(priorAnchor.start) && Number.isInteger(priorAnchor.end)) {
-                    target.editedFrom = {
-                        text: String(priorAnchor.text || previousText).trim(),
-                        start: priorAnchor.start,
-                        end: priorAnchor.end,
-                        clauseText: priorAnchor.clauseText || extractHighlightClauseContext(sourceOracleBeforeEdit, priorAnchor.start, priorAnchor.end)
-                    };
-                }
                 target.start = null;
                 target.end = null;
                 target.origin = 'user';
@@ -4469,9 +4222,7 @@ function renderHighlightEditor(idx) {
 
         highlightEditIndex = null;
         reapplyOracleHighlights();
-        reapplyTypeLineHighlights();
         renderHighlightChips();
-        notifyManaSearchHighlightsChanged();
     };
     save.addEventListener('click', commit);
     input.addEventListener('keydown', (event) => {
@@ -4507,7 +4258,7 @@ function renderHighlightChips() {
 
     manualHighlights.forEach((h, idx) => {
         const chip = document.createElement('div');
-        chip.className = `card-chip highlight-chip highlight-color-${Number.isInteger(h.colorIndex) ? h.colorIndex % 4 : 0} ${h.field === 'type' ? 'highlight-type-chip' : ''} ${h.origin === 'user' ? 'highlight-user-chip' : 'highlight-source-chip'} ${Number.isInteger(h.attachedTo) ? 'highlight-linked-chip' : ''}`;
+        chip.className = `card-chip highlight-chip ${h.origin === 'user' ? 'highlight-user-chip' : 'highlight-source-chip'} ${Number.isInteger(h.attachedTo) ? 'highlight-linked-chip' : ''}`;
 
         if (Number.isInteger(h.attachedTo) && manualHighlights[h.attachedTo]) {
             const linked = document.createElement('span');
@@ -4519,10 +4270,10 @@ function renderHighlightChips() {
 
         const origin = document.createElement('span');
         origin.className = 'highlight-origin-label';
-        origin.textContent = h.origin === 'user' ? '+' : (h.field === 'type' ? 'Type' : 'Highlight');
+        origin.textContent = h.origin === 'user' ? '+' : 'Highlight';
         origin.title = h.origin === 'user'
             ? (Number.isInteger(h.attachedTo) ? `User-added search detail connected to: ${getHighlightParentLabel(h.attachedTo)}` : 'Independent user-added search detail')
-            : (h.field === 'type' ? 'Selected from this card\'s type line' : 'Selected from this card\'s Oracle text');
+            : 'Selected from this card\'s Oracle text';
 
         const modeBtn = document.createElement('button');
         modeBtn.type = 'button';
@@ -4573,32 +4324,6 @@ function renderHighlightChips() {
     });
 
     container.appendChild(chipsRow);
-
-    const relatedHighlightsToggle = document.getElementById('related-use-highlights');
-    if (relatedHighlightsToggle) {
-        // Keep the control interactive at all times. With no source highlights enabled, checking
-        // it simply has no additional text to contribute; disabling it made the checkbox feel broken.
-        relatedHighlightsToggle.disabled = false;
-        relatedHighlightsToggle.checked = includeSourceHighlightsInRelatedSearch;
-    }
-
-    if (manualHighlights.length > 0) {
-        const clearAllButton = document.createElement('button');
-        clearAllButton.type = 'button';
-        clearAllButton.className = 'highlight-clear-all-btn';
-        clearAllButton.textContent = 'Clear All Highlights';
-        clearAllButton.addEventListener('click', () => {
-            manualHighlights = [];
-            nextHighlightColorIndex = 0;
-            highlightEditIndex = null;
-            highlightComposerOpen = false;
-            reapplyOracleHighlights();
-            reapplyTypeLineHighlights();
-            renderHighlightChips();
-            notifyManaSearchHighlightsChanged();
-        });
-        container.appendChild(clearAllButton);
-    }
 
     const addButton = document.createElement('button');
     addButton.type = 'button';
@@ -4668,8 +4393,6 @@ function renderHighlightChips() {
         const connectSelect = document.createElement('select');
         connectSelect.className = 'highlight-edit-select';
         connectSelect.setAttribute('aria-label', 'Connect added search detail to a highlight');
-        let connectionChoiceMade = false;
-        connectSelect.addEventListener('change', () => { connectionChoiceMade = true; });
         const independent = document.createElement('option');
         independent.value = '';
         independent.textContent = 'Independent';
@@ -4712,38 +4435,18 @@ function renderHighlightChips() {
                 h.mode === selectedMode && h.attachedTo === (connectSelect.value === '' ? null : Number(connectSelect.value))
             );
             if (!duplicate) {
-                let attachedTo = /^\d+$/.test(connectSelect.value) ? Number(connectSelect.value) : null;
-                // If the user adds an explicit trigger condition while exactly one Oracle effect is
-                // highlighted, connect it automatically unless they intentionally changed the
-                // connection control to Independent. This turns the natural action "highlight the
-                // outcome, then describe when it happens" into a coherent mechanical intent.
-                if (attachedTo === null && !connectionChoiceMade && isSearchIntentTriggerPhrase(text)) {
-                    const currentOracle = getCurrentSourceOracleText();
-                    const plausibleParents = highlightParentOptions(null).filter(({ h }) => {
-                        if (h.field === 'type') return false;
-                        const anchor = getHighlightSourceAnchor(h, currentOracle);
-                        if (!anchor) return false;
-                        const clause = extractHighlightClauseContext(currentOracle, anchor.start, anchor.end);
-                        const resolution = getResolutionAfterTrigger(clause);
-                        return Boolean(resolution && isLikelyEffectOutcomeText(resolution) && resolution.toLowerCase().includes(String(anchor.text || '').trim().toLowerCase()));
-                    });
-                    if (plausibleParents.length === 1) attachedTo = plausibleParents[0].idx;
-                }
                 manualHighlights.push({
                     text,
                     mode: selectedMode,
                     origin: 'user',
-                    colorIndex: nextHighlightColorIndex++ % 4,
                     start: null,
                     end: null,
-                    attachedTo,
-                    intentConnection: attachedTo !== null ? 'attached' : (connectionChoiceMade ? 'independent' : 'auto')
+                    attachedTo: /^\d+$/.test(connectSelect.value) ? Number(connectSelect.value) : null
                 });
             }
             input.value = '';
             highlightComposerOpen = false;
             renderHighlightChips();
-            notifyManaSearchHighlightsChanged();
         };
         addTagBtn.addEventListener('click', submit);
         input.addEventListener('keydown', (event) => {
@@ -4774,8 +4477,6 @@ function toggleHighlightMode(idx) {
     manualHighlights[idx].mode = manualHighlights[idx].mode === 'variable' ? 'exact' : 'variable';
     renderHighlightChips();
     reapplyOracleHighlights();
-    reapplyTypeLineHighlights();
-    notifyManaSearchHighlightsChanged();
 }
 
 function removeHighlight(idx) {
@@ -4791,8 +4492,6 @@ function removeHighlight(idx) {
     else if (Number.isInteger(highlightEditIndex) && highlightEditIndex > idx) highlightEditIndex -= 1;
     renderHighlightChips();
     reapplyOracleHighlights();
-    reapplyTypeLineHighlights();
-    notifyManaSearchHighlightsChanged();
 }
 
 // Configurable tag weights (Primary: 1.0, Secondary: 0.5, Broad Category: 0.2, Default fallback: 0.5)
@@ -5475,19 +5174,6 @@ function parseCounterEffect(clause) {
 }
 
 /**
- * True only when the clause explicitly describes drawing cards. A reference to a player's
- * "draw step" is turn structure, not an instruction to draw cards. This guard is shared by the
- * zone-movement parser and its regression tests to prevent draw-step text from becoming a false
- * card-draw function.
- */
-function hasExplicitCardDrawAction(value) {
-    const text = String(value || '');
-    const quantity = '(?:a|an|one|two|three|four|five|six|seven|eight|nine|ten|x|that many|another|an additional|the top(?:\\s+(?:one|two|three|four|five|\\d+))?|half(?: of)?|up to\\s+(?:one|two|three|four|five|\\d+)|\\d+|one or more)';
-    const re = new RegExp('\\bdraw(?:s|ing)?\\s+(?:' + quantity + '\\s+)?cards?\\b', 'i');
-    return re.test(text);
-}
-
-/**
  * Parses movement between battlefield, hand, graveyard, library, and exile.
  * @param {string} clause 
  * @returns {Object|null}
@@ -5562,7 +5248,7 @@ function parseZoneMovementEffect(clause) {
         effect.object = "card";
         if (!effect.from) effect.from = "library";
         if (!effect.to) effect.to = "graveyard";
-    } else if (hasExplicitCardDrawAction(text)) {
+    } else if (/\bdraws?\b/i.test(text)) {
         effect.action = "draw";
         effect.object = "card";
         if (!effect.from) effect.from = "library";
@@ -6136,7 +5822,6 @@ function extractClauseAtoms(effectText, primaryAction) {
         if (atom && atom.action && !seenActions.has(atom.action)) {
             seenActions.add(atom.action);
             atom.raw = slice.trim();
-            atom.contextClause = String(effectText || '').trim();
             atom.isSecondaryAtom = true;
             atoms.push(atom);
         }
@@ -6200,112 +5885,32 @@ function parseQuantityProfile(text, parsedQuantity = null) {
     return out;
 }
 
-// Turn timing is parsed separately from the effect that follows it. This matters mechanically:
-// "At the beginning of your upkeep, draw a card" is recurring, while
-// "At the beginning of your next upkeep, draw a card" is a one-time delayed trigger.
-// Older Oracle wording used "draw phase"; treat it as the same cadence family as draw step.
-function parseTurnTimingProfile(text) {
-    const t = String(text || '').toLowerCase().replace(/[’]/g, "'").replace(/\s+/g, ' ');
-    const timingNames = '(?:precombat main phase|postcombat main phase|main phase|draw step|draw phase|upkeep|end step|end phase|end of combat|combat phase|combat|turn)';
-    const candidates = [];
-    const addMatches = (regex) => {
-        let match;
-        while ((match = regex.exec(t)) !== null) {
-            const matchedText = match[0].trim();
-            const cleanText = matchedText.replace(/^[.;\n]+\s*/, '').trim();
-            const leadingOffset = Math.max(0, matchedText.indexOf(cleanText));
-            candidates.push({ text: cleanText, index: match.index + leadingOffset, timing: String(match[1] || '').trim() });
-            if (match[0].length === 0) regex.lastIndex++;
-        }
-    };
-    // Full turn-window expressions, including "each opponent's upkeep", "each player's end step",
-    // "combat on your turn", and one-shot "next upkeep/end step" templates.
-    addMatches(new RegExp(`\\bat (?:the )?(?:beginning|start|end) of\\s+[^.;,\\n]{0,80}?\\b(${timingNames})\\b`, 'gi'));
-    // Shorthand / older phrasing that omits "at the beginning of". Require an explicit timing
-    // preposition here; otherwise "Skip your draw step" would look like a recurring trigger.
-    addMatches(new RegExp(`\\b(?:during|at)\\s+(?:(?:each|every|your|each player's|each opponent's|each players'|each opponents')\\s+)?(${timingNames})\\b`, 'gi'));
-    // Standalone clauses like "Each upkeep, ..." are accepted only at a clause boundary.
-    // Do not misread "the first time you cast a spell each turn" as a turn-window trigger.
-    addMatches(new RegExp(`(?:^|[.;\\n]\\s*)\\b(?:each|every)\\s+(?:(?:player|opponent)s?'?s?\\s+|of your\\s+|of each\\s+)?(${timingNames})\\b`, 'gi'));
-    if (!candidates.length) return null;
-
-    candidates.sort((a, b) => a.index - b.index || b.text.length - a.text.length);
-    const candidate = candidates[0];
-    const delayed = /\b(?:next|following)\b/i.test(candidate.text);
-    const normalizedTiming = candidate.timing.toLowerCase().replace(/\s+/g, '_');
-    // Legacy "draw phase" wording refers to the same recurring turn window as the modern draw step.
-    const canonicalTiming = normalizedTiming === 'draw_phase' ? 'draw_step' : normalizedTiming;
-    const prefix = candidate.text;
-    const explicitEnd = /\bat (?:the )?end of\b/i.test(prefix);
-    const explicitBeginning = /\bat (?:the )?(?:beginning|start) of\b/i.test(prefix);
-    // Informal/legacy phrasings like "at your upkeep" or "each upkeep" describe the same
-    // recurring start-of-window cadence as the standard "at the beginning of your upkeep".
-    const shorthandBeginning = /^at\s+(?:your|each|every|each player's|each opponent's)\s+/i.test(prefix) || /^(?:each|every)\s+/i.test(prefix);
-    const duringWindow = /^during\s+/i.test(prefix);
-    const window = explicitEnd
-        ? `end_of_${canonicalTiming}`
-        : (explicitBeginning || shorthandBeginning)
-            ? `beginning_of_${canonicalTiming}`
-            : duringWindow ? `during_${canonicalTiming}` : canonicalTiming;
-    return {
-        cadence: delayed ? 'delayed' : 'periodic',
-        timingText: candidate.text,
-        timing: canonicalTiming.replace(/_/g, ' '),
-        window,
-        confidence: delayed ? 0.86 : 0.96
-    };
-}
-
 function parseTriggerProfile(text) {
-    const t = String(text || '').toLowerCase().replace(/[’]/g, "'");
-    const timing = parseTurnTimingProfile(t);
-    const hasEventTrigger = /\b(?:when|whenever)\b/.test(t);
-    const hasConditional = /\bif\b/.test(t);
-    if (!timing && !hasEventTrigger && !hasConditional) return null;
-    const type = timing ? 'turn_window' : (hasEventTrigger ? 'event' : 'conditional');
+    const t = String(text || '').toLowerCase();
+    if (!/\b(?:when|whenever|at the beginning of|at the end of|at the start of|at the end of|if)\b/.test(t)) return null;
+    let type = 'conditional';
+    if (/\bwhenever\b/.test(t)) type = 'event';
+    else if (/\bwhen\b/.test(t)) type = 'event';
+    else if (/\bat the beginning of\b|\bat the start of\b/.test(t)) type = 'turn_window';
+    else if (/\bat the end of\b/.test(t)) type = 'turn_window';
+    const window = /\bat the beginning of your turn\b|\bat the start of your turn\b/.test(t) ? 'beginning_of_your_turn'
+        : /\bat the end of your turn\b/.test(t) ? 'end_of_your_turn'
+        : /\bat the beginning of each turn\b/.test(t) ? 'beginning_of_each_turn'
+        : null;
     let event = null;
-
-    // Event identity must come from the trigger condition, not from the resolution after the
-    // comma. Otherwise "Whenever you cast a spell, draw a card" is misread as a draw trigger.
-    const eventCondition = (t.match(/\b(?:when|whenever)\b\s+([^,.;]+)/i) || [null, ''])[1];
     const eventPatterns = [
-        [/\benters? (?:the )?battlefield\b|\bcomes into play\b/, 'enter_battlefield'],
-        [/\bdies\b|\bis put into a graveyard\b|\bgoes? to a graveyard\b/, 'dies'],
-        [/\battacks?\b/, 'attacks'],
-        [/\bblocks?\b/, 'blocks'],
-        [/\bcasts?\b|\bcast (?:an? )?(?:instant|sorcery|spell)\b/, 'casts_spell'],
-        [/\bdraws?\b[^,.;]{0,40}\bcards?\b/, 'draw_card'],
-        [/\bdiscards?\b/, 'discard'],
-        [/\bsacrifices?\b/, 'sacrifice'],
-        [/\bdeals? (?:combat )?damage\b/, 'deals_damage'],
-        [/\bgains? life\b/, 'gain_life'],
-        [/\bloses? life\b/, 'lose_life'],
-        [/\b(?:a|one|another|that) (?:token|permanent|creature|artifact|enchantment) is created\b|\bcreates?\b/, 'create'],
-        [/\bleaves? the battlefield\b|\bis put into\b/, 'zone_change']
+        ['enters','enter_battlefield'], ['dies','dies'], ['attacks','attacks'], ['blocks','blocks'],
+        ['casts','casts_spell'], ['cast','casts_spell'], ['draws a card','draw_card'], ['draw a card','draw_card'],
+        ['discards','discard'], ['sacrifices','sacrifice'], ['deals damage','deals_damage'],
+        ['gains life','gain_life'], ['loses life','lose_life'], ['creates','create'], ['is put into','zone_change']
     ];
-    if (hasEventTrigger) {
-        for (const [pattern, value] of eventPatterns) {
-            if (pattern.test(eventCondition)) { event = value; break; }
-        }
-    }
+    for (const [needle, value] of eventPatterns) { if (t.includes(needle)) { event=value; break; } }
     const threshold = (t.match(/\b(?:three|four|five|six|seven|eight|nine|ten|\d+)\+?\b/) || [null])[0];
-    return {
-        type,
-        event,
-        window: timing?.window || null,
-        timingText: timing?.timingText || null,
-        cadence: timing?.cadence || (hasEventTrigger ? 'event' : null),
-        threshold,
-        conditional: hasConditional || type === 'conditional'
-    };
+    return { type, event, window, threshold, conditional: type === 'conditional' };
 }
 
 function annotateEffectRelationships(effect, sourceText) {
     const raw = String(effect.raw || sourceText || '');
-    // Secondary action atoms retain their parent clause. Use that clause for trigger semantics so
-    // "At the beginning of your upkeep, draw a card and lose 1 life" gives both atoms the upkeep
-    // cadence, while keeping the atom's own raw text for action/target/quantity parsing.
-    const relationshipText = String(effect.contextClause || '').trim() || raw;
     const targetProfile = parseStructuredTarget(raw);
     effect.targetProfile = targetProfile;
     if (!effect.target && targetProfile.kind) effect.target = targetProfile.kind;
@@ -6317,9 +5922,9 @@ function annotateEffectRelationships(effect, sourceText) {
         ]));
     }
     effect.quantityProfile = parseQuantityProfile(raw, effect.quantity);
-    effect.triggerProfile = parseTriggerProfile(relationshipText);
-    effect.isTriggered = Boolean(effect.triggerProfile && (effect.triggerProfile.type === 'event' || effect.triggerProfile.type === 'turn_window'));
-    effect.isConditional = Boolean(effect.condition || effect.triggerProfile?.conditional || /\bif\b/i.test(relationshipText));
+    effect.triggerProfile = parseTriggerProfile(raw);
+    effect.isTriggered = Boolean(effect.triggerProfile && effect.triggerProfile.type === 'event');
+    effect.isConditional = Boolean(effect.condition || effect.triggerProfile?.conditional);
     effect.dependencyProfile = {
         hasThen: /\bthen\b/i.test(raw),
         hasIfYouDo: /\bif you do\b/i.test(raw),
@@ -6890,293 +6495,6 @@ function strategicRoleHasTrigger(parsedEffects) {
     return (parsedEffects || []).some(e => e.triggerProfile || e.isTriggered || /\b(?:whenever|at the beginning of|at the end of)\b/i.test(e.raw || ''));
 }
 
-// Repeatability is a distinct mechanical property. Matching "draw a card" or "create a
-// Treasure" is not enough: an upkeep engine and a one-shot sorcery do fundamentally different
-// jobs over the course of a game. These profiles are annotations only; the parsed action,
-// quantity, targets, costs, and all existing mechanic bridges remain intact.
-const REPEATABILITY_PROFILE_META = Object.freeze({
-    periodic_trigger:       { group: 'repeatable_engine', strength: 1.00, label: 'Recurring turn trigger' },
-    repeatable_trigger:     { group: 'repeatable_engine', strength: 0.90, label: 'Repeatable triggered ability' },
-    repeatable_activation:  { group: 'repeatable_engine', strength: 0.86, label: 'Repeatable activated ability' },
-    ongoing_static:         { group: 'repeatable_engine', strength: 0.94, label: 'Ongoing static effect' },
-    repeatable_spell:       { group: 'limited_reuse',     strength: 0.66, label: 'Repeatable spell' },
-    recastable_spell:       { group: 'limited_reuse',     strength: 0.44, label: 'Spell with another cast available' },
-    entry_trigger:          { group: 'single_use',        strength: 0.30, label: 'Entry-triggered effect' },
-    delayed_trigger:        { group: 'single_use',        strength: 0.26, label: 'One-time delayed trigger' },
-    self_event:             { group: 'single_use',        strength: 0.28, label: 'One-time event for this permanent' },
-    single_use_activation:  { group: 'single_use',        strength: 0.18, label: 'Single-use activation' },
-    one_shot:               { group: 'single_use',        strength: 0.05, label: 'One-shot effect' },
-    unknown:                { group: 'unknown',           strength: null, label: 'Repeatability unclear' }
-});
-
-function normalizeRepeatabilityText(value) {
-    return String(value || '').toLowerCase()
-        .replace(/[’']/g, "'")
-        .replace(/[^a-z0-9{}+/'-]+/g, ' ')
-        .replace(/\s+/g, ' ').trim();
-}
-
-function findRepeatabilityContextClause(effectRaw, fullText) {
-    const raw = String(effectRaw || '').trim();
-    const text = String(fullText || '').trim();
-    if (!text) return raw;
-    if (!raw) return text;
-    const rawNorm = normalizeRepeatabilityText(raw);
-    if (!rawNorm) return text;
-    const clauses = text.split(/\n+|(?<=[.!?;])\s+/).map(x => x.trim()).filter(Boolean);
-    let best = null, bestScore = -Infinity;
-    const rawWords = new Set(rawNorm.split(' ').filter(w => w.length > 2));
-    for (let i = 0; i < clauses.length; i++) {
-        const clause = clauses[i];
-        const norm = normalizeRepeatabilityText(clause);
-        if (!norm) continue;
-        let score = 0;
-        if (norm.includes(rawNorm) || rawNorm.includes(norm)) score += 100;
-        // Exact clause alignment beats the small preference for finding a timed trigger. This
-        // avoids assigning a standalone "Draw a card." clause to a different upkeep trigger just
-        // because both clauses contain the same action words.
-        if (norm === rawNorm) score += 40;
-        const words = norm.split(' ').filter(w => w.length > 2);
-        const overlap = words.reduce((n, w) => n + (rawWords.has(w) ? 1 : 0), 0);
-        score += overlap / Math.max(1, Math.min(rawWords.size, words.length)) * 20;
-        // When a selected/highlighted fragment such as "draw a card" appears in multiple
-        // clauses, prefer the clause that carries explicit ability timing/cost context.
-        if (parseTurnTimingProfile(clause) || /\b(?:whenever|when|\{t\}|activate only)\b/i.test(clause)) score += 3;
-        if (norm.includes(rawNorm)) score += Math.min(8, norm.length / 30);
-        if (score > bestScore) { best = clause; bestScore = score; }
-    }
-    return best || raw;
-}
-
-function inferEffectRepeatabilityProfile(card, effect, fullText = '') {
-    if (!effect || effect.isCostEffect) return { kind: 'unknown', group: 'unknown', strength: null, confidence: 0 };
-    const raw = String(effect.raw || effect.canonical?.params?.raw || '').trim();
-    const contextSeed = String(effect.contextClause || effect.parentClauseRaw || raw).trim();
-    const context = effect.searchIntentContextOverride
-        ? contextSeed
-        : findRepeatabilityContextClause(contextSeed, fullText || strategicRoleCardText(card));
-    const combined = `${context} ${raw}`.trim();
-    const lower = combined.toLowerCase();
-    const typeLine = String(card?.type_line || '').toLowerCase();
-    const isPermanent = /\b(?:creature|artifact|enchantment|planeswalker|land|battle)\b/.test(typeLine);
-    const isInstantSorceryOnly = !isPermanent && /\b(?:instant|sorcery)\b/.test(typeLine);
-    const cardName = String(card?.name || '').split(' // ')[0].trim();
-    const escapedName = cardName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    const selfReference = /\bthis(?: creature| artifact| enchantment| permanent| planeswalker| land| card| spell)?\b/i.test(combined) ||
-        Boolean(escapedName && new RegExp(`\\b${escapedName}\\b`, 'i').test(combined));
-    const timingProfile = parseTurnTimingProfile(combined);
-    const periodicTiming = timingProfile?.cadence === 'periodic';
-    const delayedTiming = timingProfile?.cadence === 'delayed';
-    const timingText = timingProfile?.timingText || '';
-    const activation = Boolean(effect.activationCost) || /(?:^|[.;]\s*)[^.;]*:\s*(?:add|draw|create|put|return|exile|search|destroy|tap|untap|gain|deal|discard|mill|counter)\b/i.test(raw);
-    // Replacement effects (for example, doubling tokens or preventing damage) are continuous
-    // rules modifications on permanents, not one-shot actions merely because their text lacks a
-    // conventional "as long as" clause.
-    const replacementEffect = /\bwould\b[^.;]{0,180}\binstead\b/i.test(combined);
-    const staticAbilityText = /\b(?:creatures?|artifacts?|enchantments?|tokens?|spells?|cards?|lands?|permanents?) you control (?:get|have|can't|cannot|enter tapped|cost|produce)\b/i.test(combined) ||
-        /\b(?:creatures?|artifacts?|enchantments?|tokens?|spells?|cards?|lands?|permanents?) you control are (?:indestructible|unblockable|hexproof|shrouded|indestructible|unaffected|exiled|exempt)\b/i.test(combined) ||
-        /\b(?:each|all) (?:creatures?|artifacts?|enchantments?|tokens?|spells?|lands?|permanents?) (?:get|have|enter tapped|cost|produce)\b/i.test(combined);
-    const consumesSource = /\b(?:sacrifice|discard|exile)\s+(?:this(?: creature| artifact| enchantment| permanent| planeswalker| land| card)?|the source|~)\b/i.test(context) ||
-        Boolean(escapedName && new RegExp(`\\b(?:sacrifice|discard|exile)\\s+${escapedName}\\b`, 'i').test(context));
-    const spellReuse = /\b(?:flashback|buyback|retrace|escape|jump-start|rebound|aftermath|disturb|adventure)\b/i.test(strategicRoleCardText(card) || fullText || '');
-    const indefiniteCastReuse = /\b(?:buyback|retrace|escape)\b/i.test(strategicRoleCardText(card) || fullText || '');
-
-    let kind = 'one_shot', confidence = 0.82, eventText = '';
-    if (isInstantSorceryOnly) {
-        kind = indefiniteCastReuse ? 'repeatable_spell' : (spellReuse ? 'recastable_spell' : 'one_shot');
-        confidence = spellReuse ? 0.76 : 0.88;
-    } else if (periodicTiming && (isPermanent || !typeLine)) {
-        // Some benchmark/highlight-only card records omit type_line. Explicit recurring
-        // turn timing is still strong evidence of cadence in that case; do not downgrade it
-        // to one-shot merely because the partial record lacks its card type.
-        kind = 'periodic_trigger';
-        confidence = typeLine ? (timingProfile?.confidence || 0.96) : 0.90;
-    } else if (delayedTiming && (isPermanent || !typeLine)) {
-        // "Next upkeep/end step" creates a one-time delayed trigger, not a recurring engine.
-        kind = 'delayed_trigger';
-        confidence = timingProfile?.confidence || 0.86;
-    } else if (activation && isPermanent) {
-        kind = consumesSource ? 'single_use_activation' : 'repeatable_activation';
-        confidence = 0.88;
-    } else if (isPermanent && (replacementEffect || staticAbilityText || /\b(?:as long as|while)\b/i.test(combined) || effect.isStatic === true)) {
-        kind = 'ongoing_static';
-        confidence = replacementEffect ? 0.93 : 0.84;
-    } else if (/\b(?:when|whenever)\b/i.test(combined) && isPermanent) {
-        const ownEntry = selfReference && /\b(?:enters? the battlefield|comes into play)\b/i.test(combined);
-        const ownOneTimeEvent = selfReference && /\b(?:dies|leaves the battlefield|is sacrificed|is put into a graveyard)\b/i.test(combined);
-        const repeatingCombatEvent = /\b(?:attacks|blocks)\b/i.test(combined) && !ownOneTimeEvent;
-        if (ownEntry) {
-            kind = 'entry_trigger';
-            confidence = 0.88;
-        } else if (ownOneTimeEvent && !repeatingCombatEvent) {
-            kind = 'self_event';
-            confidence = 0.76;
-        } else {
-            kind = 'repeatable_trigger';
-            confidence = 0.84;
-            const eventMatch = combined.match(/\b(?:whenever|when)\s+([^,.;]+)/i);
-            eventText = eventMatch ? eventMatch[0].trim() : '';
-        }
-    } else if (isPermanent && /\b(?:creatures?|artifacts?|enchantments?|permanents?|lands?|spells?) you control (?:get|have|can't|cannot)|\bas long as\b/i.test(combined)) {
-        kind = 'ongoing_static';
-        confidence = 0.74;
-    }
-
-    const meta = REPEATABILITY_PROFILE_META[kind] || REPEATABILITY_PROFILE_META.unknown;
-    return {
-        kind,
-        group: meta.group,
-        strength: meta.strength,
-        confidence,
-        timingText,
-        eventText,
-        context: context.slice(0, 240)
-    };
-}
-
-function annotateEffectRepeatability(card, parsedEffects, textOverride = '') {
-    if (!Array.isArray(parsedEffects) || !card) return parsedEffects || [];
-    const fullText = strategicRoleCardText(card) || String(textOverride || '');
-    const signature = `${String(card.name || '')}|${String(card.type_line || '')}|${fullText}`;
-    if (parsedEffects._repeatabilityContextKey === signature) return parsedEffects;
-    for (const effect of parsedEffects) {
-        if (!effect || typeof effect !== 'object') continue;
-        const profile = inferEffectRepeatabilityProfile(card, effect, fullText);
-        effect.repeatabilityProfile = profile;
-        if (effect.canonical?.params) effect.canonical.params.repeatabilityProfile = profile;
-    }
-    try { Object.defineProperty(parsedEffects, '_repeatabilityContextKey', { value: signature, writable: true, configurable: true }); }
-    catch (_) { parsedEffects._repeatabilityContextKey = signature; }
-    return parsedEffects;
-}
-
-function getEffectRepeatabilityProfile(value) {
-    return value?.repeatabilityProfile || value?.canonical?.params?.repeatabilityProfile || value?.params?.repeatabilityProfile || null;
-}
-
-function repeatabilityProfileSimilarity(profileA, profileB) {
-    if (!profileA || !profileB || !profileA.kind || !profileB.kind || profileA.group === 'unknown' || profileB.group === 'unknown') return 1;
-    let score;
-    if (profileA.kind === profileB.kind) score = 1;
-    else if (profileA.group === 'repeatable_engine' && profileB.group === 'repeatable_engine') {
-        score = (profileA.kind === 'periodic_trigger' || profileB.kind === 'periodic_trigger') ? 0.78 : 0.74;
-    } else if (profileA.group === 'single_use' && profileB.group === 'single_use') {
-        score = (profileA.kind === 'one_shot' || profileB.kind === 'one_shot') ? 0.78 : 0.70;
-    } else if (profileA.group === 'limited_reuse' && profileB.group === 'single_use' || profileB.group === 'limited_reuse' && profileA.group === 'single_use') {
-        score = 0.66;
-    } else if (profileA.group === 'repeatable_engine' && profileB.group === 'limited_reuse' || profileB.group === 'repeatable_engine' && profileA.group === 'limited_reuse') {
-        score = 0.46;
-    } else if (profileA.group === 'repeatable_engine' && profileB.group === 'single_use' || profileB.group === 'repeatable_engine' && profileA.group === 'single_use') {
-        const oneShot = (profileA.kind === 'one_shot' || profileB.kind === 'one_shot');
-        const entryOnly = (profileA.kind === 'entry_trigger' || profileB.kind === 'entry_trigger' || profileA.kind === 'self_event' || profileB.kind === 'self_event');
-        score = oneShot ? 0.10 : (entryOnly ? 0.20 : 0.16);
-    } else score = 0.55;
-    const confidence = Math.min(Number(profileA.confidence ?? 1), Number(profileB.confidence ?? 1));
-    return Math.max(0, Math.min(1, 1 - (1 - score) * Math.max(0, Math.min(1, confidence))));
-}
-
-function calculateRepeatabilityMismatchSeverity(parsedA = [], parsedB = []) {
-    const byFunction = effects => {
-        const map = new Map();
-        for (const effect of (effects || [])) {
-            if (effect?.isCostEffect || effect?.canonical?.params?.isCostEffect) continue;
-            const fn = effect?.canonical?.function;
-            const profile = getEffectRepeatabilityProfile(effect);
-            if (!fn || !profile || profile.group === 'unknown') continue;
-            const list = map.get(fn) || [];
-            list.push({ effect, profile, importance: Math.max(0.05, Number(effect.importance) || 0.5) });
-            map.set(fn, list);
-        }
-        return map;
-    };
-    const aMap = byFunction(parsedA), bMap = byFunction(parsedB);
-    let maxSeverity = 0;
-    for (const [fn, aList] of aMap) {
-        const bList = bMap.get(fn);
-        if (!bList?.length) continue;
-        let bestSimilarity = 0, bestWeight = 0;
-        for (const a of aList) for (const b of bList) {
-            const sim = repeatabilityProfileSimilarity(a.profile, b.profile);
-            const weight = Math.sqrt(a.importance * b.importance);
-            if (sim > bestSimilarity || (sim === bestSimilarity && weight > bestWeight)) {
-                bestSimilarity = sim;
-                bestWeight = weight;
-            }
-        }
-        // Only treat large repeatability gaps as an important mismatch. Small differences such as
-        // periodic upkeep triggers versus other reusable triggers remain reasonably close.
-        if (bestSimilarity < 0.42) {
-            const severity = (1 - bestSimilarity) * Math.min(1, bestWeight / 0.55 + 0.25);
-            maxSeverity = Math.max(maxSeverity, severity);
-        }
-    }
-    return Math.max(0, Math.min(1, maxSeverity));
-}
-
-function hasRepeatableEffectForFunctions(parsedEffects, functionNames) {
-    const wanted = functionNames instanceof Set ? functionNames : new Set(Array.isArray(functionNames) ? functionNames : [functionNames]);
-    return (parsedEffects || []).some(effect => wanted.has(effect?.canonical?.function) &&
-        getEffectRepeatabilityProfile(effect)?.group === 'repeatable_engine');
-}
-
-
-// Card acquisition cadence is important for substitution: a one-time ETB cantrip is not a
-// functional substitute for a permanent that repeatedly draws cards. Keep this classification
-// tied to effects that actually acquire cards; a phrase like "whenever you draw a card" in a
-// creature-buff trigger must not be mistaken for that creature drawing cards itself.
-function isDirectCardDrawOutcome(effect) {
-    if (!effect || effect.isCostEffect || effect.canonical?.params?.isCostEffect) return false;
-    const fn = effect.canonical?.function || effect.function || '';
-    if (!(fn === 'card_draw' || fn === 'draw' || effect.action === 'draw')) return false;
-    // If a clause starts with a draw event, that draw may be the TRIGGER condition rather than
-    // the resolution. Only count a draw after the trigger comma as an outcome (e.g. "Whenever
-    // you draw a card, this gets +2/+2" must not become a card-draw effect).
-    const clause = String(effect.contextClause || effect.parentClauseRaw || effect.raw || effect.canonical?.params?.raw || '').trim();
-    const triggerParts = clause.match(/\b(?:when|whenever)\b[^,;]{1,220},\s*([^.;]+)/i);
-    const resolution = triggerParts ? triggerParts[1] : clause;
-    return /\b(?:draw|draws)\s+(?:a|one|two|three|four|five|\d+|x)\s+cards?\b/i.test(resolution);
-}
-
-function getDirectCardAcquisitionCadence(card, parsedEffects = []) {
-    const effects = Array.isArray(parsedEffects) ? parsedEffects : [];
-    const directDrawEffects = effects.filter(isDirectCardDrawOutcome);
-    const profiles = directDrawEffects.map(effect => getEffectRepeatabilityProfile(effect)).filter(Boolean);
-    const repeatable = profiles.some(profile => profile.group === 'repeatable_engine');
-    const singleUse = profiles.length > 0 && profiles.every(profile => profile.group === 'single_use');
-    const entryOnly = profiles.length > 0 && profiles.every(profile =>
-        profile.kind === 'entry_trigger' || profile.kind === 'delayed_trigger' || profile.kind === 'one_shot' || profile.kind === 'self_event' || profile.kind === 'single_use_activation'
-    );
-    return {
-        hasAcquisition: directDrawEffects.length > 0,
-        repeatable,
-        singleUse,
-        entryOnly,
-        profiles,
-        cardName: String(card?.name || '')
-    };
-}
-
-function calculateCardAcquisitionCadenceMismatch(parsedA = [], parsedB = []) {
-    const a = getDirectCardAcquisitionCadence(null, parsedA);
-    const b = getDirectCardAcquisitionCadence(null, parsedB);
-    if (!a.hasAcquisition || !b.hasAcquisition) return 0;
-    // Only compare cadence when one side provides a genuine repeatable engine and the other
-    // side's matching card-draw effects are all one-use. A repeatable effect on either card is
-    // enough to avoid treating a mixed-cadence card as a pure one-shot substitute.
-    if (a.repeatable && !b.repeatable && b.singleUse) return b.entryOnly ? 0.98 : 0.90;
-    if (b.repeatable && !a.repeatable && a.singleUse) return a.entryOnly ? 0.98 : 0.90;
-    return 0;
-}
-
-function calculateSourceAcquisitionCadenceMismatch(sourceCadence, candidateCard, candidateEffects = []) {
-    if (!sourceCadence?.hasAcquisition || !sourceCadence.repeatable) return 0;
-    const candidate = getDirectCardAcquisitionCadence(candidateCard, candidateEffects);
-    if (!candidate.hasAcquisition || candidate.repeatable || !candidate.singleUse) return 0;
-    // This is deliberately a ranking penalty, not a hard filter: one-shot draw creatures can
-    // still appear as related cards, but they should not outrank genuine recurring draw engines.
-    return candidate.entryOnly ? 0.98 : 0.90;
-}
-
 function strategicRoleMaxNumber(parsedEffects, fn) {
     let max = 0;
     for (const e of (parsedEffects || [])) {
@@ -7216,13 +6534,11 @@ function inferStrategicRoleProfile(card, parsedEffects = [], intentText = '') {
     const text = strategicRoleCardText(card);
     const lower = `${text} ${String(intentText || '')}`.toLowerCase();
     const typeLine = String(card?.type_line || '').toLowerCase();
-    annotateEffectRepeatability(card, parsedEffects, text);
     const roles = [];
     const functions = new Set(strategicRoleFunctions(parsedEffects));
-    const recurring = (parsedEffects || []).some(e => getEffectRepeatabilityProfile(e)?.group === 'repeatable_engine');
-    const activated = (parsedEffects || []).some(e => getEffectRepeatabilityProfile(e)?.kind === 'repeatable_activation') ||
-        /\bpay\b|\{t\}|\b:\s*(?:add|draw|return|exile|search|create)/i.test(text);
-    const permanent = /\b(?:creature|artifact|enchantment|planeswalker|land|battle)\b/.test(typeLine);
+    const recurring = strategicRoleHasTrigger(parsedEffects) || /\b(?:whenever|at the beginning of|at the end of)\b/.test(lower);
+    const activated = /\bpay\b|\{t\}|\b:\s*(?:add|draw|return|exile|search|create)/i.test(text);
+    const permanent = /\b(?:creature|artifact|enchantment|planeswalker)\b/.test(typeLine);
 
     // Fast mana: require an explicit mana-producing ability plus either >1 mana per activation,
     // or a clearly early/efficient nonland permanent. A generic "add one mana" land is not enough.
@@ -7256,29 +6572,20 @@ function inferStrategicRoleProfile(card, parsedEffects = [], intentText = '') {
     const handAcquisition = /\b(?:put|puts|return|returns)\b[^.]{0,90}\b(?:card|cards|that card|those cards)\b[^.]{0,50}\b(?:into|to) your hand\b/.test(lower);
     const topCardAcquisition = /\b(?:reveal|exile)\s+the top card\b[^.]{0,100}\b(?:hand|put it into your hand|cards? exiled)\b/.test(lower);
     const recurringAcquisition = directDraw || handAcquisition || topCardAcquisition;
-    const acquisitionText = /\bdraw(?:s)?\s+(?:a|one|two|three|four|five|\d+|x)\s+cards?\b|\b(?:put|puts|return|returns)\b[^.;]{0,100}\b(?:card|cards|it|them)\b[^.;]{0,60}\b(?:into|to) your hand\b|\b(?:reveal|exile)\s+the top card\b/i;
-    const acquisitionIsRepeatable = (parsedEffects || []).some(e =>
-        getEffectRepeatabilityProfile(e)?.group === 'repeatable_engine' &&
-        (e?.canonical?.function === 'card_draw' || acquisitionText.test(String(e?.raw || e?.canonical?.params?.raw || '')))
-    );
-    // A trigger elsewhere on a card must not turn its unrelated one-shot draw into an engine.
-    // The draw/acquisition effect itself has to live in a repeatable trigger, activation or static
-    // ability. Resource costs alone are not evidence of repeatability.
-    if (recurringAcquisition && acquisitionIsRepeatable) {
-        const timingAnchor = (parsedEffects || []).some(e => getEffectRepeatabilityProfile(e)?.kind === 'periodic_trigger' && acquisitionText.test(String(e?.raw || e?.canonical?.params?.raw || '')));
+    const resourceExchange = /\b(?:pay|lose)\s+\d+\s+life\b|\bpay\s+life\b|\breveal the top card\b|\bskip your draw step\b/.test(lower);
+    if (recurringAcquisition && (recurring || activated || resourceExchange)) {
         strategicRoleAdd(roles, 'card_advantage_engine', 0.84,
-            [directDraw ? 'card draw' : 'card acquisition', timingAnchor ? 'repeat timing' : 'repeatable acquisition', activated ? 'reusable ability' : null]);
+            [directDraw ? 'card draw' : 'card acquisition', recurring ? 'repeat timing' : null, resourceExchange ? 'resource exchange' : null]);
     }
 
-    // Token production is an engine only when the creation effect itself can recur. A permanent
-    // with a one-time enters-the-battlefield token trigger is not equivalent to a repeatable token
-    // maker, and an instant/sorcery that creates tokens is not an engine at all.
+    // Token roles. A multiplier is distinct from a token creator; recurring creation requires a
+    // trigger or permanent-based source rather than a one-shot spell.
     if (functions.has('token_multiplier') || /\b(?:twice|double|two times)\b[^.]{0,70}\b(?:token|tokens)\b/.test(lower)) {
         strategicRoleAdd(roles, 'token_multiplier', 0.90, ['token multiplication']);
     }
-    const repeatableTokenCreation = hasRepeatableEffectForFunctions(parsedEffects, ['token_creation']);
-    if (repeatableTokenCreation) {
-        strategicRoleAdd(roles, 'token_engine', 0.78, ['token creation', 'repeated creation']);
+    if (functions.has('token_creation')) {
+        strategicRoleAdd(roles, 'token_engine', recurring || permanent ? 0.75 : 0.63,
+            ['token creation', recurring ? 'repeated creation' : null]);
     }
 
     // Tribal anthem: subtype-specific team buff is much more discriminating than a generic anthem.
@@ -7322,26 +6629,14 @@ function inferStrategicRoleProfile(card, parsedEffects = [], intentText = '') {
     if (functions.has('tutor') || functions.has('ramp_tutor')) {
         strategicRoleAdd(roles, 'tutor', 0.72, ['search library']);
     }
-    const repeatableDiscard = hasRepeatableEffectForFunctions(parsedEffects, ['discard']);
-    const repeatableMill = hasRepeatableEffectForFunctions(parsedEffects, ['mill']);
-    const repeatableLifeGain = hasRepeatableEffectForFunctions(parsedEffects, ['gain_life']);
-    const repeatableLifeLoss = hasRepeatableEffectForFunctions(parsedEffects, ['lose_life']);
     if (functions.has('discard')) {
-        strategicRoleAdd(roles, 'discard_engine', repeatableDiscard ? 0.72 : 0.63, ['discard', repeatableDiscard ? 'repeated disruption' : null]);
+        strategicRoleAdd(roles, 'discard_engine', recurring ? 0.72 : 0.63, ['discard', recurring ? 'repeated disruption' : null]);
     }
     if (functions.has('mill')) {
-        strategicRoleAdd(roles, 'mill_engine', repeatableMill ? 0.72 : 0.63, ['mill', repeatableMill ? 'repeated mill' : null]);
+        strategicRoleAdd(roles, 'mill_engine', recurring ? 0.72 : 0.63, ['mill', recurring ? 'repeated mill' : null]);
     }
-    if (functions.has('gain_life') && /\b(?:gain|gains)\s+(?:\d+|life)\s+life\b/.test(lower)) strategicRoleAdd(roles, 'life_gain_engine', repeatableLifeGain ? 0.72 : 0.63, ['life gain']);
-    const directLifeLoss = /\b(?:you|target|each opponent|opponent)\s+(?:lose|loses)\s+(?:\d+|life)\s+life\b/.test(lower);
-    // Standard Oracle wording for opponent-turn taxes often names the affected player as "that
-    // player", not "each opponent". Preserve the opponent-upkeep context so this is recognized as
-    // a recurring life-loss engine without broadly treating every "that player loses life" clause
-    // as an opponent-facing engine.
-    const opponentUpkeepLifeLoss = /\beach opponent(?:'s|’s) upkeep\b[^.]{0,180}\bthat player loses?\s+(?:\d+|x|life)\s+life\b/i.test(lower);
-    if (functions.has('lose_life') && (directLifeLoss || opponentUpkeepLifeLoss)) {
-        strategicRoleAdd(roles, 'life_loss_engine', repeatableLifeLoss ? 0.72 : 0.63, ['life loss', opponentUpkeepLifeLoss ? 'opponent upkeep trigger' : null]);
-    }
+    if (functions.has('gain_life') && /\b(?:gain|gains)\s+(?:\d+|life)\s+life\b/.test(lower)) strategicRoleAdd(roles, 'life_gain_engine', recurring ? 0.72 : 0.63, ['life gain']);
+    if (functions.has('lose_life') && /\b(?:you|target|each opponent|opponent)\s+(?:lose|loses)\s+(?:\d+|life)\s+life\b/.test(lower)) strategicRoleAdd(roles, 'life_loss_engine', recurring ? 0.72 : 0.63, ['life loss']);
 
     roles.sort((a, b) => b.score - a.score);
     return roles.slice(0, 4);
@@ -7388,8 +6683,7 @@ function buildStrategicRoleFingerprint(card, parsedEffects = [], profile = []) {
     const text = strategicRoleCardText(card);
     const lower = text.toLowerCase();
     const topRole = profile?.[0]?.role || null;
-    annotateEffectRepeatability(card, parsedEffects, text);
-    const recurring = (parsedEffects || []).some(e => getEffectRepeatabilityProfile(e)?.group === 'repeatable_engine');
+    const recurring = strategicRoleHasTrigger(parsedEffects) || /\b(?:whenever|at the beginning of|at the end of|each upkeep|each turn|every turn)\b/.test(lower);
     const permanent = /\b(?:creature|artifact|enchantment|planeswalker)\b/.test(String(card?.type_line || '').toLowerCase());
     const damageAmounts = [...lower.matchAll(/\b(?:deal|deals)\s+(\d+)\s+damage\b/g)].map(m => Number(m[1])).filter(Number.isFinite);
     const manaEffects = (parsedEffects || []).filter(e => e?.canonical?.function === 'mana_ability');
@@ -7427,7 +6721,7 @@ function buildStrategicRoleFingerprint(card, parsedEffects = [], profile = []) {
         lifePaid,
         lifeLoss: Math.max(...lifeLoss, 0),
         tribe: tribeMatch ? tribeMatch[1] : null,
-        activated: (parsedEffects || []).some(e => getEffectRepeatabilityProfile(e)?.kind === 'repeatable_activation') || /\bpay\b|\{t\}|\bsacrifice\b.*:\s*/i.test(text),
+        activated: /\bpay\b|\{t\}|\bsacrifice\b.*:\s*/i.test(text),
         strength: sourceRole?.score || 0
     };
 }
@@ -7618,132 +6912,98 @@ function manaDiscountSimilarity(a, b) {
     return String(a ?? '').toLowerCase() === String(b ?? '').toLowerCase() ? 1 : 0.45;
 }
 
-// Pair-level directional similarity is pure for a parsed effect pair. The same pair was being
-// evaluated repeatedly by the base directional score, candidate-only-excess penalty, and effect
-// coverage matrix. Cache it by object identity so those scoring channels reuse exactly the same
-// calculation without changing a single score formula. WeakMap keeps this cache self-pruning.
-const directionalMechanicalPairScoreCache = new WeakMap();
-const mechanicalPairCacheStats = {
-    directionalComputed: 0, directionalHits: 0,
-    graphNodeComputed: 0, graphNodeHits: 0
-};
-
-function computeDirectionalMechanicalEffectPairSimilarity(effA, effB) {
-    if (!effA?.canonical || !effB?.canonical) return 0;
-const cfA = effA.canonical || {}, cfB = effB.canonical || {};
-const fnA = cfA.function || null, fnB = cfB.function || null;
-const outcomeA = cfA.outcome || null, outcomeB = cfB.outcome || null;
-const taxA = effA.action ? ACTION_TAXONOMY[effA.action] : null;
-const taxB = effB.action ? ACTION_TAXONOMY[effB.action] : null;
-
-const affinity = getFunctionAffinity(fnA, fnB);
-const sameAction = effA.action && effB.action && effA.action === effB.action;
-const sameOutcome = outcomeA && outcomeB && outcomeA === outcomeB;
-const sameFamily = taxA?.family && taxB?.family && taxA.family === taxB.family;
-const coreAlignment = Math.max(
-    affinity,
-    sameAction ? 0.96 : 0,
-    sameOutcome ? 0.74 : 0,
-    sameFamily ? 0.50 : 0
-);
-if (coreAlignment <= 0) return 0;
-
-const parts = [];
-parts.push(fieldSimilarity(14, cfA.object ?? effA.object, cfB.object ?? effB.object));
-parts.push(fieldSimilarity(10, cfA.target ?? effA.target, cfB.target ?? effB.target));
-if (fnA === 'cost_reduction' || fnB === 'cost_reduction') {
-    parts.push({ weight: 9, value: restrictionSimilarityForMechanical(effA.restriction, effB.restriction) });
-    parts.push(fieldSimilarity(6, effA.controller, effB.controller));
-    parts.push({ weight: 7, value: manaDiscountSimilarity(effA.amount ?? effA.quantity, effB.amount ?? effB.quantity) });
-    parts.push(fieldSimilarity(4, effA.effectMode, effB.effectMode));
-}
-parts.push(fieldSimilarity(9, effA.from, effB.from));
-parts.push(fieldSimilarity(9, effA.to, effB.to));
-parts.push(fieldSimilarity(7, effA.subtype, effB.subtype));
-parts.push(fieldSimilarity(6, effA.controller, effB.controller));
-if (typeof effA.quantity === 'number' || typeof effB.quantity === 'number') {
-    parts.push(fieldSimilarity(7, effA.quantity, effB.quantity,
-        (a,b) => Math.max(0, 1 - Math.abs(a-b) / Math.max(Math.abs(a), Math.abs(b), 1))));
-} else if (effA.quantity != null || effB.quantity != null) {
-    parts.push(fieldSimilarity(5, effA.quantity, effB.quantity));
-}
-
-if (fnA === 'mana_ability' && fnB === 'mana_ability') {
-    const ma = cfA.params || {}, mb = cfB.params || {};
-    const netSim = manaNumericSimilarity(ma.manaNetAmount, mb.manaNetAmount);
-    const outputSim = manaNumericSimilarity(ma.manaOutputAmount, mb.manaOutputAmount);
-    const colorSim = manaColorProfileSimilarity({
-        mode: ma.manaOutputMode,
-        colors: ma.manaOutputColors || []
-    }, {
-        mode: mb.manaOutputMode,
-        colors: mb.manaOutputColors || []
-    });
-    const activationSim = manaActivationSimilarity(ma.activationCost, mb.activationCost);
-    if (netSim != null) parts.push({ weight: 12, value: netSim });
-    if (outputSim != null) parts.push({ weight: 5, value: outputSim });
-    if (colorSim != null) parts.push({ weight: 8, value: colorSim });
-    if (activationSim != null) parts.push({ weight: 5, value: activationSim });
-}
-const tpA = effA.targetProfile || {}, tpB = effB.targetProfile || {};
-parts.push(fieldSimilarity(4, tpA.kind, tpB.kind));
-parts.push(fieldSimilarity(4, tpA.scope, tpB.scope));
-const qpA = effA.quantityProfile || {}, qpB = effB.quantityProfile || {};
-parts.push(fieldSimilarity(4, qpA.relation, qpB.relation));
-parts.push(fieldSimilarity(2, qpA.bound, qpB.bound));
-const trA = effA.triggerProfile || {}, trB = effB.triggerProfile || {};
-parts.push(fieldSimilarity(4, trA.event, trB.event));
-parts.push(fieldSimilarity(3, trA.window, trB.window));
-parts.push({ weight: 18, value: repeatabilityProfileSimilarity(getEffectRepeatabilityProfile(effA), getEffectRepeatabilityProfile(effB)) });
-parts.push(fieldSimilarity(3, effA.durationProfile, effB.durationProfile));
-parts.push(fieldSimilarity(4, effA.effectMode, effB.effectMode));
-parts.push(fieldSimilarity(4, effA.condition, effB.condition));
-parts.push(fieldSimilarity(3, effA.isStatic, effB.isStatic));
-if (effA.action === 'stat_buff' || effB.action === 'stat_buff') {
-    parts.push(fieldSimilarity(4, effA.powerToughness, effB.powerToughness));
-}
-if (effA.action === 'create' || effB.action === 'create') {
-    parts.push(fieldSimilarity(5, effA.stats, effB.stats));
-}
-
-const structuralEvidence = normalizedFieldScore(parts);
-// Core function alignment is multiplicative: structural agreement can refine a real
-// function match, but an action-family coincidence can never create a near-perfect score
-// on its own. When no structural field is available, retain only a conservative floor.
-const fieldFactor = parts.some(Boolean) ? (0.52 + 0.48 * structuralEvidence) : 0.52;
-let score = coreAlignment * fieldFactor;
-score *= (1 - Math.min(0.45, scoreContradictions(effA, effB) / 100));
-    return score;
-}
-
-function getDirectionalMechanicalEffectPairSimilarity(effA, effB) {
-    if (!effA || typeof effA !== 'object' || !effB || typeof effB !== 'object') {
-        return computeDirectionalMechanicalEffectPairSimilarity(effA, effB);
-    }
-    let row = directionalMechanicalPairScoreCache.get(effA);
-    if (row?.has(effB)) {
-        mechanicalPairCacheStats.directionalHits++;
-        return row.get(effB);
-    }
-    if (!row) {
-        row = new WeakMap();
-        directionalMechanicalPairScoreCache.set(effA, row);
-    }
-    mechanicalPairCacheStats.directionalComputed++;
-    const score = computeDirectionalMechanicalEffectPairSimilarity(effA, effB);
-    row.set(effB, score);
-    return score;
-}
-
 function directionalMechanicalSimilarity(parsedA, parsedB) {
     if (!parsedA || !parsedB || parsedA.length === 0 || parsedB.length === 0) return 0;
     let weightedSource = 0, sourceWeight = 0;
+
     for (const effA of parsedA) {
         if (!effA?.canonical) continue;
         let best = 0;
         for (const effB of parsedB) {
             if (!effB?.canonical) continue;
-            best = Math.max(best, getDirectionalMechanicalEffectPairSimilarity(effA, effB));
+            const cfA = effA.canonical || {}, cfB = effB.canonical || {};
+            const fnA = cfA.function || null, fnB = cfB.function || null;
+            const outcomeA = cfA.outcome || null, outcomeB = cfB.outcome || null;
+            const taxA = effA.action ? ACTION_TAXONOMY[effA.action] : null;
+            const taxB = effB.action ? ACTION_TAXONOMY[effB.action] : null;
+
+            const affinity = getFunctionAffinity(fnA, fnB);
+            const sameAction = effA.action && effB.action && effA.action === effB.action;
+            const sameOutcome = outcomeA && outcomeB && outcomeA === outcomeB;
+            const sameFamily = taxA?.family && taxB?.family && taxA.family === taxB.family;
+            const coreAlignment = Math.max(
+                affinity,
+                sameAction ? 0.96 : 0,
+                sameOutcome ? 0.74 : 0,
+                sameFamily ? 0.50 : 0
+            );
+            if (coreAlignment <= 0) continue;
+
+            const parts = [];
+            parts.push(fieldSimilarity(14, cfA.object ?? effA.object, cfB.object ?? effB.object));
+            parts.push(fieldSimilarity(10, cfA.target ?? effA.target, cfB.target ?? effB.target));
+            if (fnA === 'cost_reduction' || fnB === 'cost_reduction') {
+                parts.push({ weight: 9, value: restrictionSimilarityForMechanical(effA.restriction, effB.restriction) });
+                parts.push(fieldSimilarity(6, effA.controller, effB.controller));
+                parts.push({ weight: 7, value: manaDiscountSimilarity(effA.amount ?? effA.quantity, effB.amount ?? effB.quantity) });
+                parts.push(fieldSimilarity(4, effA.effectMode, effB.effectMode));
+            }
+            parts.push(fieldSimilarity(9, effA.from, effB.from));
+            parts.push(fieldSimilarity(9, effA.to, effB.to));
+            parts.push(fieldSimilarity(7, effA.subtype, effB.subtype));
+            parts.push(fieldSimilarity(6, effA.controller, effB.controller));
+            if (typeof effA.quantity === 'number' || typeof effB.quantity === 'number') {
+                parts.push(fieldSimilarity(7, effA.quantity, effB.quantity,
+                    (a,b) => Math.max(0, 1 - Math.abs(a-b) / Math.max(Math.abs(a), Math.abs(b), 1))));
+            } else if (effA.quantity != null || effB.quantity != null) {
+                parts.push(fieldSimilarity(5, effA.quantity, effB.quantity));
+            }
+
+            if (fnA === 'mana_ability' && fnB === 'mana_ability') {
+                const ma = cfA.params || {}, mb = cfB.params || {};
+                const netSim = manaNumericSimilarity(ma.manaNetAmount, mb.manaNetAmount);
+                const outputSim = manaNumericSimilarity(ma.manaOutputAmount, mb.manaOutputAmount);
+                const colorSim = manaColorProfileSimilarity({
+                    mode: ma.manaOutputMode,
+                    colors: ma.manaOutputColors || []
+                }, {
+                    mode: mb.manaOutputMode,
+                    colors: mb.manaOutputColors || []
+                });
+                const activationSim = manaActivationSimilarity(ma.activationCost, mb.activationCost);
+                if (netSim != null) parts.push({ weight: 12, value: netSim });
+                if (outputSim != null) parts.push({ weight: 5, value: outputSim });
+                if (colorSim != null) parts.push({ weight: 8, value: colorSim });
+                if (activationSim != null) parts.push({ weight: 5, value: activationSim });
+            }
+            const tpA = effA.targetProfile || {}, tpB = effB.targetProfile || {};
+            parts.push(fieldSimilarity(4, tpA.kind, tpB.kind));
+            parts.push(fieldSimilarity(4, tpA.scope, tpB.scope));
+            const qpA = effA.quantityProfile || {}, qpB = effB.quantityProfile || {};
+            parts.push(fieldSimilarity(4, qpA.relation, qpB.relation));
+            parts.push(fieldSimilarity(2, qpA.bound, qpB.bound));
+            const trA = effA.triggerProfile || {}, trB = effB.triggerProfile || {};
+            parts.push(fieldSimilarity(4, trA.event, trB.event));
+            parts.push(fieldSimilarity(3, trA.window, trB.window));
+            parts.push(fieldSimilarity(3, effA.durationProfile, effB.durationProfile));
+            parts.push(fieldSimilarity(4, effA.effectMode, effB.effectMode));
+            parts.push(fieldSimilarity(4, effA.condition, effB.condition));
+            parts.push(fieldSimilarity(3, effA.isStatic, effB.isStatic));
+            if (effA.action === 'stat_buff' || effB.action === 'stat_buff') {
+                parts.push(fieldSimilarity(4, effA.powerToughness, effB.powerToughness));
+            }
+            if (effA.action === 'create' || effB.action === 'create') {
+                parts.push(fieldSimilarity(5, effA.stats, effB.stats));
+            }
+
+            const structuralEvidence = normalizedFieldScore(parts);
+            // Core function alignment is multiplicative: structural agreement can refine a real
+            // function match, but an action-family coincidence can never create a near-perfect score
+            // on its own. When no structural field is available, retain only a conservative floor.
+            const fieldFactor = parts.some(Boolean) ? (0.52 + 0.48 * structuralEvidence) : 0.52;
+            let score = coreAlignment * fieldFactor;
+            score *= (1 - Math.min(0.45, scoreContradictions(effA, effB) / 100));
+            best = Math.max(best, score);
         }
         const importance = effA.importance ?? 0.05;
         weightedSource += best * Math.max(0.05, importance);
@@ -7808,14 +7068,11 @@ function buildHighlightScoringText(highlights, sourceText = getCurrentSourceOrac
     if (!groups.length) return '';
 
     return groups.map(group => {
-        const sourceContext = String(group.parseText || group.sourceClauseText || group.contextText || '').trim();
-        const overrideTexts = new Set((group.intentOverrideTexts || (group.triggerIntentOverrideText ? [group.triggerIntentOverrideText] : [])).map(value => String(value).trim()));
-        const intentHints = (group.connectedIntentTexts || [])
-            .filter(value => Boolean(value) && !overrideTexts.has(String(value).trim()))
-            .map(v => String(v).trim());
+        const sourceContext = String(group.contextText || '').trim();
+        const intentHints = (group.connectedIntentTexts || []).filter(Boolean).map(v => String(v).trim());
         return [sourceContext, ...intentHints]
             .filter(Boolean)
-            .join('. ');
+            .join(' ');
     }).filter(Boolean).join('. ');
 }
 
@@ -7915,292 +7172,27 @@ function scoreHighlightEffectMatch(highlightEffect, candidateEffect, mode) {
 function maxOneToOneHighlightAssignment(sourceEffects, candidateEffects, mode) {
     const sources = sourceEffects || [], candidates = candidateEffects || [];
     if (!sources.length || !candidates.length) return { score: 0, matches: [] };
-
-    // Highlight/effect pair similarity is independent of the assignment state. The old recursive
-    // DP recomputed these expensive structural comparisons from many branches; precompute the
-    // score matrix once and reuse it in both assignment and normalization.
-    const pairScores = sources.map(source => candidates.map(candidate =>
-        Math.max(0, Number(scoreHighlightEffectMatch(source, candidate, mode)) || 0)
-    ));
-    const rowMaxima = pairScores.map(row => row.reduce((max, value) => Math.max(max, value), 0));
-    const maxPossible = rowMaxima.reduce((sum, value) => sum + value, 0) || 1;
-    const n = sources.length;
-    const m = candidates.length;
-
-    // Keep the old DP for ordinary card texts so its tie order and exact output remain identical.
-    // Estimate its state count first: with many candidate effects, the used-mask state space grows
-    // combinatorially and can dominate a broad/highlights search even though each pair score is
-    // straightforward. Those pathological cases use an exact maximum-weight assignment instead.
-    let combination = 1;
-    let estimatedStates = 1;
-    for (let k = 1; k <= Math.min(n, m); k++) {
-        combination = combination * (m - k + 1) / k;
-        estimatedStates += combination;
-        if (estimatedStates * Math.max(1, m) > 50000) break;
-    }
-    if (estimatedStates * Math.max(1, m) <= 50000) {
-        const memo = new Map();
-        function solve(i, usedMask) {
-            if (i >= n) return { score: 0, matches: [] };
-            const key = `${i}|${usedMask}`;
-            const cached = memo.get(key);
-            if (cached) return cached;
-            let best = solve(i + 1, usedMask); // Preserve historical tie behavior: unmatched first.
-            for (let j = 0; j < m; j++) {
-                const pair = pairScores[i][j];
-                if (pair <= 0) continue;
-                const bit = 1n << BigInt(j);
-                if (usedMask & bit) continue;
-                const rest = solve(i + 1, usedMask | bit);
-                const candidate = { score: pair + rest.score, matches: [[i, j, pair], ...rest.matches] };
-                if (candidate.score > best.score) best = candidate;
-            }
-            memo.set(key, best);
-            return best;
+    const memo = new Map();
+    function solve(i, usedMask) {
+        if (i >= sources.length) return { score: 0, matches: [] };
+        const key = `${i}|${usedMask}`;
+        if (memo.has(key)) return memo.get(key);
+        let best = solve(i + 1, usedMask); // source effect may remain unmatched
+        for (let j = 0; j < candidates.length; j++) {
+            const bit = (1n << BigInt(j));
+            if (usedMask & bit) continue;
+            const pair = scoreHighlightEffectMatch(sources[i], candidates[j], mode);
+            if (pair <= 0) continue;
+            const rest = solve(i + 1, usedMask | bit);
+            const candidate = { score: pair + rest.score, matches: [[i,j,pair], ...rest.matches] };
+            if (candidate.score > best.score) best = candidate;
         }
-        const result = solve(0, 0n);
-        return { score: result.score / maxPossible, matches: result.matches };
+        memo.set(key, best);
+        return best;
     }
-
-    // Exact polynomial-time maximum-weight bipartite assignment (Hungarian algorithm). Each source
-    // effect receives either one candidate effect or one of n dummy columns (unmatched, zero score).
-    // The objective is the same maximum sum of pair scores as the DP, without enumerating candidate
-    // masks. This changes execution strategy only for unusually long rules texts.
-    const rows = n;
-    const realCols = m;
-    const cols = m + n;
-    const u = new Array(rows + 1).fill(0);
-    const v = new Array(cols + 1).fill(0);
-    const p = new Array(cols + 1).fill(0);
-    const way = new Array(cols + 1).fill(0);
-    const cost = (i, j) => j > realCols ? 0 : -(pairScores[i - 1][j - 1] || 0);
-
-    for (let i = 1; i <= rows; i++) {
-        p[0] = i;
-        let j0 = 0;
-        const minv = new Array(cols + 1).fill(Infinity);
-        const used = new Array(cols + 1).fill(false);
-        do {
-            used[j0] = true;
-            const i0 = p[j0];
-            let delta = Infinity;
-            let j1 = 0;
-            for (let j = 1; j <= cols; j++) {
-                if (used[j]) continue;
-                const cur = cost(i0, j) - u[i0] - v[j];
-                if (cur < minv[j]) { minv[j] = cur; way[j] = j0; }
-                if (minv[j] < delta) { delta = minv[j]; j1 = j; }
-            }
-            for (let j = 0; j <= cols; j++) {
-                if (used[j]) { u[p[j]] += delta; v[j] -= delta; }
-                else minv[j] -= delta;
-            }
-            j0 = j1;
-        } while (p[j0] !== 0);
-        do {
-            const j1 = way[j0];
-            p[j0] = p[j1];
-            j0 = j1;
-        } while (j0 !== 0);
-    }
-
-    const assignedColumn = new Array(rows).fill(-1);
-    for (let j = 1; j <= cols; j++) if (p[j] > 0) assignedColumn[p[j] - 1] = j - 1;
-    const matches = [];
-    let score = 0;
-    for (let i = 0; i < rows; i++) {
-        const j = assignedColumn[i];
-        if (j >= 0 && j < realCols) {
-            const pair = pairScores[i][j];
-            if (pair > 0) {
-                score += pair;
-                matches.push([i, j, pair]);
-            }
-        }
-    }
-    matches.sort((a, b) => a[0] - b[0]);
-    return { score: score / maxPossible, matches };
-}
-
-// Return the complete Oracle sentence/clause governing a selected span. Parsing only the
-// selected words (for example, "draw a card") loses the trigger condition that makes the effect
-// mechanically distinctive. The selection remains the literal constraint; this expanded context
-// is for mechanic parsing, cadence, intent explanation, and semantic retrieval.
-function extractHighlightClauseContext(sourceText, start, end) {
-    const text = String(sourceText || '');
-    if (!Number.isFinite(start) || !Number.isFinite(end) || start < 0 || end <= start || end > text.length) return '';
-    let left = 0;
-    for (let i = start - 1; i >= 0; i--) {
-        if (/[.!?;\n]/.test(text[i])) { left = i + 1; break; }
-    }
-    let right = text.length;
-    for (let i = end; i < text.length; i++) {
-        if (/[.!?;\n]/.test(text[i])) { right = i + 1; break; }
-    }
-    return text.slice(left, right).trim();
-}
-
-// Resolve a highlight's original Oracle-text anchor. Edited wording keeps a nonvisual anchor
-// so the scorer can retain trigger/condition context without reverting to the old outcome.
-function getHighlightSourceAnchor(highlight, sourceText = getCurrentSourceOracleText()) {
-    const oracle = String(sourceText || '');
-    const matchesAt = candidate => {
-        const start = Number(candidate?.start), end = Number(candidate?.end);
-        const expected = String(candidate?.text || '').trim();
-        if (!expected || !Number.isInteger(start) || !Number.isInteger(end) || start < 0 || end <= start || end > oracle.length) return null;
-        const actual = oracle.slice(start, end).trim();
-        if (actual.toLocaleLowerCase() !== expected.toLocaleLowerCase()) return null;
-        return { text: expected, start, end };
-    };
-    const editedAnchor = matchesAt(highlight?.editedFrom);
-    if (editedAnchor) return { ...editedAnchor, edited: true };
-    if (highlight?.origin === 'user' || highlight?.field === 'type') return null;
-    const sourceAnchor = matchesAt(highlight);
-    return sourceAnchor ? { ...sourceAnchor, edited: false } : null;
-}
-
-// Locate the original rules clause and the selected span's role inside it. The anchor is
-// deliberately nonvisual for edited highlights: it preserves grammatical context while the
-// current user text remains the actual search intent.
-function getHighlightSourceClauseInfo(highlight, sourceText = getCurrentSourceOracleText()) {
-    const source = String(sourceText || '');
-    const anchor = getHighlightSourceAnchor(highlight, source);
-    if (!anchor) return null;
-    let left = 0;
-    for (let i = anchor.start - 1; i >= 0; i--) {
-        if (/[.!?;\n]/.test(source[i])) { left = i + 1; break; }
-    }
-    let right = source.length;
-    for (let i = anchor.end; i < source.length; i++) {
-        if (/[.!?;\n]/.test(source[i])) { right = i + 1; break; }
-    }
-    const raw = source.slice(left, right);
-    const leading = raw.match(/^\s*/)?.[0].length || 0;
-    const trailing = raw.match(/\s*$/)?.[0].length || 0;
-    const start = left + leading;
-    const end = Math.max(start, right - trailing);
-    const clauseText = source.slice(start, end).trim();
-    const comma = clauseText.indexOf(',');
-    const triggerLead = comma > 0 && isSearchIntentTriggerPhrase(clauseText.slice(0, comma))
-        ? clauseText.slice(0, comma).trim() : '';
-    const anchorLocalStart = anchor.start - start;
-    const anchorLocalEnd = anchor.end - start;
-    const anchorRole = triggerLead && anchorLocalStart < comma && anchorLocalEnd <= comma
-        ? 'trigger'
-        : (triggerLead ? 'outcome' : 'clause');
-    return { anchor, start, end, clauseText, triggerLead, resolutionText: triggerLead ? clauseText.slice(comma + 1).trim() : '', comma, anchorLocalStart, anchorLocalEnd, anchorRole };
-}
-
-function isCompleteTriggerOutcomeText(value) {
-    const text = String(value || '').trim();
-    const comma = text.indexOf(',');
-    // The user's complete authored rule is authoritative even when its outcome uses a verb the
-    // canonical parser does not yet recognize (for example, a win-the-game or extra-turn effect).
-    return comma > 0 && isSearchIntentTriggerPhrase(text.slice(0, comma)) && Boolean(text.slice(comma + 1).trim());
-}
-
-// When a source selection was inside the trigger condition, editing it must replace the trigger,
-// not append a trigger to an unchanged source trigger or treat it as an outcome. Full trigger
-// phrases replace the lead; shorter replacements substitute only the anchored source fragment.
-function composeEditedHighlightTriggerOverride(sourceClause, editedTriggerText, sourceAnchorText = '') {
-    const source = String(sourceClause || '').trim();
-    const comma = source.indexOf(',');
-    if (comma <= 0) return null;
-    const oldTrigger = source.slice(0, comma).trim();
-    if (!isSearchIntentTriggerPhrase(oldTrigger)) return null;
-    const resolution = source.slice(comma + 1).trim();
-    const replacement = String(editedTriggerText || '').trim().replace(/[\s,;.!?]+$/g, '');
-    if (!replacement || !resolution) return null;
-    let nextTrigger = replacement;
-    if (!isSearchIntentTriggerPhrase(replacement)) {
-        const anchor = String(sourceAnchorText || '').trim();
-        if (!anchor) return null;
-        const at = oldTrigger.toLocaleLowerCase().indexOf(anchor.toLocaleLowerCase());
-        if (at < 0) return null;
-        nextTrigger = `${oldTrigger.slice(0, at)}${replacement}${oldTrigger.slice(at + anchor.length)}`.replace(/\s+/g, ' ').trim();
-    }
-    if (!isSearchIntentTriggerPhrase(nextTrigger)) return null;
-    return `${nextTrigger}, ${resolution}`;
-}
-
-// Replace only the selected result/outcome while retaining its original trigger and safe modal
-// prefix (for example, “you may”). The user-authored outcome replaces the prior printed outcome.
-function composeEditedHighlightOutcomeOverride(sourceClause, editedOutcomeText, previousSelectedText = '') {
-    const outcome = String(editedOutcomeText || '').trim().replace(/[\s,;.!?]+$/g, '');
-    if (!outcome) return null;
-    if (isCompleteTriggerOutcomeText(outcome)) return outcome;
-    const source = String(sourceClause || '').trim();
-    const comma = source.indexOf(',');
-    const triggerPrefix = comma > 0 && isSearchIntentTriggerPhrase(source.slice(0, comma)) ? source.slice(0, comma).trim() : '';
-    const resolution = getResolutionAfterTrigger(source);
-    let safePrefix = '';
-    const selected = String(previousSelectedText || '').trim();
-    if (resolution && selected) {
-        const at = resolution.toLocaleLowerCase().indexOf(selected.toLocaleLowerCase());
-        if (at >= 0) {
-            const prefix = resolution.slice(0, at).trim();
-            if (/^(?:(?:you|that player|each player|target player|the controller|its controller|that opponent)(?:\s+|$))?(?:(?:may|must|can|also|then)(?:\s+|$))*$/i.test(prefix)) safePrefix = prefix;
-        }
-    }
-    const replacement = [safePrefix, outcome].filter(Boolean).join(' ');
-    return triggerPrefix ? `${triggerPrefix}, ${replacement}` : (replacement || outcome);
-}
-
-function isSearchIntentTriggerPhrase(value) {
-    const text = String(value || '').trim();
-    return /^(?:when|whenever)\b/i.test(text) ||
-        /^(?:at\s+(?:(?:the\s+)?(?:beginning|start|end)\s+of|your|each|every|each opponent's|each player's)\b|during\s+|each\s+(?:opponent's|player's)\s+(?:upkeep|end step|draw step|combat|turn)\b)/i.test(text);
-}
-
-function isLikelyEffectOutcomeText(value) {
-    return /\b(?:draw|create|produce|add|deal|destroy|exile|return|put|move|gain|lose|discard|mill|search|counter|untap|tap|sacrifice|gets?|get|put|place|prevent|double|copy|reveal|shuffle|scry|surveil|transform|fight)\b/i.test(String(value || ''));
-}
-
-function getResolutionAfterTrigger(sourceClause) {
-    const text = String(sourceClause || '').trim();
-    if (!text) return '';
-    const comma = text.indexOf(',');
-    if (comma > 0) {
-        const lead = text.slice(0, comma).trim();
-        const rest = text.slice(comma + 1).trim();
-        if (isSearchIntentTriggerPhrase(lead) && rest) return rest;
-    }
-    // If the selected source clause is itself the effect ("Draw a card."), it can be paired
-    // with an explicitly supplied trigger detail. Do not use a trigger-only source sentence as an
-    // outcome: it contains no resolution to compose.
-    if (!isSearchIntentTriggerPhrase(text) && isLikelyEffectOutcomeText(text)) return text;
-    return '';
-}
-
-function composeHighlightIntentOverride(sourceClause, triggerDetail, selectedEffectText = '') {
-    const detail = String(triggerDetail || '').trim().replace(/[\s,;.!?]+$/g, '');
-    const source = String(sourceClause || '').trim();
-    if (!detail || !isSearchIntentTriggerPhrase(detail)) return null;
-
-    // A user may supply the whole intended rule, e.g. "Whenever an opponent draws a card, draw
-    // a card." In that case use it directly rather than adding a duplicate resolution.
-    const comma = detail.indexOf(',');
-    if (comma > 0 && isLikelyEffectOutcomeText(detail.slice(comma + 1))) return detail;
-
-    const resolution = getResolutionAfterTrigger(source);
-    const selected = String(selectedEffectText || '').trim();
-    if (!resolution || !isLikelyEffectOutcomeText(resolution)) return null;
-    if (selected && !resolution.toLowerCase().includes(selected.toLowerCase())) return null;
-
-    // When the user focuses specifically on "draw a card", don't carry over the tail of a
-    // different source trigger such as "unless that player pays {1}". That restriction belongs
-    // to Rhystic Study's original cast trigger, not the user's replacement trigger. Keep a simple
-    // optional/subject prefix ("you may draw a card"), but stop at the selected draw outcome.
-    let intendedResolution = resolution;
-    if (/\bdraw\s+(?:(?:a|one|two|three|four|five|six|seven|eight|nine|ten|\d+)\s+)?cards?\b/i.test(selected)) {
-        const selectedAt = resolution.toLowerCase().indexOf(selected.toLowerCase());
-        if (selectedAt >= 0) {
-            const prefix = resolution.slice(0, selectedAt).trim();
-            const safePrefix = /^(?:(?:you|that player|each player|target player|the controller|its controller|that opponent)(?:\s+|$))?(?:(?:may|must|can|also|then)(?:\s+|$))*$/i.test(prefix);
-            if (safePrefix) intendedResolution = [prefix, selected].filter(Boolean).join(' ');
-        }
-    }
-    return `${detail}, ${intendedResolution}`;
+    const result = solve(0, 0n);
+    const maxPossible = sources.reduce((sum, e) => sum + Math.max(...candidates.map(c => scoreHighlightEffectMatch(e,c,mode)), 0), 0) || 1;
+    return { score: result.score / maxPossible, matches: result.matches };
 }
 
 // Group multiple UI selections that belong to one grammatical effect. The source text between
@@ -8232,15 +7224,14 @@ function annotateHighlightGroups(highlights, sourceText = getCurrentSourceOracle
     };
 
     const positioned = hs
-        .map(h => ({ highlight: h, anchor: getHighlightSourceAnchor(h, sourceText) }))
-        .filter(item => item.anchor)
-        .sort((a, b) => a.anchor.start - b.anchor.start || a.highlight._highlightIndex - b.highlight._highlightIndex);
+        .filter(h => Number.isFinite(h.start) && Number.isFinite(h.end) && h.end > h.start)
+        .sort((a, b) => a.start - b.start || a._highlightIndex - b._highlightIndex);
     for (let i = 1; i < positioned.length; i++) {
         const prev = positioned[i - 1];
         const next = positioned[i];
-        const gap = String(sourceText || '').slice(prev.anchor.end, next.anchor.start);
+        const gap = String(sourceText || '').slice(prev.end, next.start);
         if (!/[.!?\n]/.test(gap) && gap.length <= 96) {
-            union(hs.indexOf(prev.highlight), hs.indexOf(next.highlight));
+            union(hs.indexOf(prev), hs.indexOf(next));
         }
     }
 
@@ -8249,33 +7240,6 @@ function annotateHighlightGroups(highlights, sourceText = getCurrentSourceOracle
     // colorless mana". The attached intent belongs to that effect even though it does not exist
     // literally in the source Oracle text.
     const indexByOriginal = new Map(hs.map((h, i) => [h._highlightIndex, i]));
-
-    // Older/manual search details may not have an explicit attachment yet. If exactly one
-    // trigger-shaped search detail and one source-backed effect selection exist, infer that
-    // unambiguous relationship unless the user explicitly saved it as Independent. This is what
-    // makes adding "Whenever an opponent draws a card" beside a selected "draw a card" phrase work
-    // without requiring a hidden connection-setting step.
-    const validSourceEffectHighlights = hs.filter(h => h && (h.origin !== 'user' || Boolean(h.editedFrom)) && h.field !== 'type' && getHighlightSourceAnchor(h, sourceText));
-    const unconnectedTriggerDetails = hs.filter(h => h?.origin === 'user' && !h.editedFrom && !Number.isInteger(h.attachedTo) && h.intentConnection !== 'independent' && isSearchIntentTriggerPhrase(h.text));
-    if (validSourceEffectHighlights.length && unconnectedTriggerDetails.length === 1) {
-        // Multiple highlight chips can belong to the same Oracle clause. Count distinct clauses,
-        // not chips, so one custom trigger can still connect when the user selected two spans.
-        const candidateClauses = new Map();
-        for (const candidate of validSourceEffectHighlights) {
-            const anchor = getHighlightSourceAnchor(candidate, sourceText);
-            if (!anchor) continue;
-            const sourceClause = extractHighlightClauseContext(sourceText, anchor.start, anchor.end);
-            const resolution = getResolutionAfterTrigger(sourceClause);
-            if (!resolution || !isLikelyEffectOutcomeText(resolution) || !resolution.toLowerCase().includes(String(anchor.text || '').trim().toLowerCase())) continue;
-            const key = sourceClause.toLocaleLowerCase();
-            if (!candidateClauses.has(key)) candidateClauses.set(key, candidate);
-        }
-        if (candidateClauses.size === 1) {
-            unconnectedTriggerDetails[0].attachedTo = [...candidateClauses.values()][0]._highlightIndex;
-            unconnectedTriggerDetails[0].intentConnection = 'inferred';
-        }
-    }
-
     hs.forEach((h, localIndex) => {
         const targetOriginalIndex = Number.isInteger(h.attachedTo) ? h.attachedTo : null;
         if (targetOriginalIndex === null || targetOriginalIndex === h._highlightIndex) return;
@@ -8304,116 +7268,19 @@ function annotateHighlightGroups(highlights, sourceText = getCurrentSourceOracle
         });
 
     groups.forEach((group, groupId) => {
-        const positionedMembers = group.map(h => ({ highlight: h, anchor: getHighlightSourceAnchor(h, sourceText) })).filter(item => item.anchor);
-        const start = positionedMembers.length ? Math.min(...positionedMembers.map(item => item.anchor.start)) : null;
-        const end = positionedMembers.length ? Math.max(...positionedMembers.map(item => item.anchor.end)) : null;
-        // Keep original Oracle context for parsing, but always use the current edited text as intent.
-        const contextText = start !== null && end !== null ? String(sourceText || '').slice(start, end).trim() : '';
-        const sourceClauseText = start !== null && end !== null ? extractHighlightClauseContext(sourceText, start, end) : '';
+        const positionedMembers = group.filter(h => Number.isFinite(h.start) && Number.isFinite(h.end) && h.end > h.start);
+        const start = positionedMembers.length ? Math.min(...positionedMembers.map(h => h.start)) : null;
+        const end = positionedMembers.length ? Math.max(...positionedMembers.map(h => h.end)) : null;
+        // Only text that actually occurs in the source card belongs in the parser context.
+        // User-added/attached text is kept separately as search intent so it cannot corrupt the
+        // MTG rule parser while still influencing retrieval and ranking.
+        const contextText = start !== null && end !== null
+            ? String(sourceText || '').slice(start, end).trim()
+            : '';
         const connectedIntentTexts = group
-            .filter(h => h.origin === 'user' || h.field === 'type' || !getHighlightSourceAnchor(h, sourceText))
-            .map(h => h.field === 'type' ? `Card type line: ${String(h.text || '').trim()}` : String(h.text || '').trim())
+            .filter(h => h.origin === 'user' || !Number.isFinite(h.start) || !Number.isFinite(h.end))
+            .map(h => String(h.text || '').trim())
             .filter(Boolean);
-        const positionedEffectSelections = group.filter(h => h.field !== 'type' && (
-            (h.origin !== 'user' && getHighlightSourceAnchor(h, sourceText)) ||
-            (h.origin === 'user' && h.editedFrom && getHighlightSourceAnchor(h, sourceText))
-        ));
-        const triggerIntentText = connectedIntentTexts.find(isSearchIntentTriggerPhrase) || '';
-        const selectedOutcomeTexts = positionedEffectSelections
-            .map(h => String(h.origin === 'user' && h.editedFrom ? h.editedFrom.text : h.text || '').trim())
-            .filter(text => text && isLikelyEffectOutcomeText(text));
-        const selectedEffectText = selectedOutcomeTexts[0] || positionedEffectSelections
-            .map(h => String(h.origin === 'user' && h.editedFrom ? h.editedFrom.text : h.text || '').trim()).filter(Boolean).join(' ');
-
-        // A user-edited selection keeps its original source anchor only for grammar. Its current
-        // wording is authoritative and must not be filtered through a small list of recognized verbs:
-        // valid custom effects such as "take an extra turn" or "win the game" must still reach the
-        // parser, semantic retrieval, and ranking even when the canonical parser does not know them.
-        const editedSourceSelections = group.filter(h => h.origin === 'user' && h.editedFrom && h.field !== 'type');
-        const editedSourceRecords = editedSourceSelections.map(highlight => ({
-            highlight,
-            info: getHighlightSourceClauseInfo(highlight, sourceText)
-        })).filter(record => record.info);
-        const editedTriggerRecord = editedSourceRecords.find(record => record.info.anchorRole === 'trigger') || null;
-        const editedOutcomeRecord = editedSourceRecords.find(record => record.info.anchorRole !== 'trigger') || null;
-        const editedOutcomeSelection = editedOutcomeRecord?.highlight || null;
-        const completeCustomRule = connectedIntentTexts.find(isCompleteTriggerOutcomeText)
-            || editedSourceSelections.map(h => String(h.text || '').trim()).find(isCompleteTriggerOutcomeText)
-            || '';
-        let triggerOverrideClause = null;
-        const intentOverrideTexts = [];
-
-        if (completeCustomRule) {
-            triggerOverrideClause = String(completeCustomRule).trim();
-            intentOverrideTexts.push(completeCustomRule);
-        } else if (editedTriggerRecord && editedOutcomeRecord) {
-            const triggerInfo = editedTriggerRecord.info;
-            const outcomeInfo = editedOutcomeRecord.info;
-            const triggerClause = composeEditedHighlightTriggerOverride(
-                triggerInfo.clauseText, editedTriggerRecord.highlight.text, triggerInfo.anchor?.text || editedTriggerRecord.highlight.editedFrom?.text
-            ) || triggerInfo.clauseText;
-            triggerOverrideClause = composeEditedHighlightOutcomeOverride(
-                triggerClause || outcomeInfo.clauseText,
-                editedOutcomeRecord.highlight.text,
-                outcomeInfo.anchor?.text || editedOutcomeRecord.highlight.editedFrom?.text
-            );
-            if (!triggerOverrideClause) {
-                const triggerText = String(editedTriggerRecord.highlight.text || '').trim().replace(/[\s,;.!?]+$/g, '');
-                const outcomeText = String(editedOutcomeRecord.highlight.text || '').trim().replace(/[\s,;.!?]+$/g, '');
-                triggerOverrideClause = isSearchIntentTriggerPhrase(triggerText) ? `${triggerText}, ${outcomeText}` : null;
-            }
-            if (triggerOverrideClause) intentOverrideTexts.push(editedTriggerRecord.highlight.text, editedOutcomeRecord.highlight.text);
-        } else if (editedTriggerRecord) {
-            const info = editedTriggerRecord.info;
-            triggerOverrideClause = composeEditedHighlightTriggerOverride(
-                info.clauseText, editedTriggerRecord.highlight.text, info.anchor?.text || editedTriggerRecord.highlight.editedFrom?.text
-            );
-            if (triggerOverrideClause) intentOverrideTexts.push(editedTriggerRecord.highlight.text);
-        } else if (editedOutcomeSelection && triggerIntentText) {
-            // Combine the explicitly requested trigger with the user's current outcome text. The
-            // anchor's old wording is only used to retain safe grammatical prefixes such as "you may".
-            const info = editedOutcomeRecord.info;
-            const selectedAnchorText = info.anchor?.text || editedOutcomeSelection.editedFrom?.text || '';
-            const triggerClause = composeHighlightIntentOverride(
-                info.clauseText || sourceClauseText || contextText, triggerIntentText, selectedAnchorText
-            );
-            triggerOverrideClause = composeEditedHighlightOutcomeOverride(
-                triggerClause || info.clauseText || sourceClauseText || contextText,
-                editedOutcomeSelection.text,
-                selectedAnchorText
-            );
-            if (!triggerOverrideClause) {
-                const triggerText = String(triggerIntentText).trim().replace(/[\s,;.!?]+$/g, '');
-                const outcomeText = String(editedOutcomeSelection.text).trim().replace(/[\s,;.!?]+$/g, '');
-                if (isSearchIntentTriggerPhrase(triggerText) && outcomeText) triggerOverrideClause = `${triggerText}, ${outcomeText}`;
-            }
-            if (triggerOverrideClause) intentOverrideTexts.push(triggerIntentText, editedOutcomeSelection.text);
-        } else if (editedOutcomeSelection) {
-            const info = editedOutcomeRecord.info;
-            const selectedAnchorText = info.anchor?.text || editedOutcomeSelection.editedFrom?.text || '';
-            triggerOverrideClause = composeEditedHighlightOutcomeOverride(
-                info.clauseText || sourceClauseText || contextText,
-                editedOutcomeSelection.text,
-                selectedAnchorText
-            );
-            // If the original clause is not parseable, do not silently discard the user's revised
-            // text. The plain custom text remains available to semantic and lexical fallback paths.
-            if (!triggerOverrideClause) triggerOverrideClause = String(editedOutcomeSelection.text || '').trim();
-            if (triggerOverrideClause) intentOverrideTexts.push(editedOutcomeSelection.text);
-        } else if (triggerIntentText && positionedEffectSelections.length) {
-            triggerOverrideClause = composeHighlightIntentOverride(sourceClauseText || contextText, triggerIntentText, selectedEffectText);
-            if (triggerOverrideClause) intentOverrideTexts.push(triggerIntentText);
-        } else if (editedSourceSelections.length) {
-            // Last-resort safety path: even if no trigger/outcome grammar could be composed, retain
-            // the current authored text rather than reverting all the way to the old printed clause.
-            triggerOverrideClause = editedSourceSelections.map(h => String(h.text || '').trim()).filter(Boolean).join('. ');
-            if (triggerOverrideClause) intentOverrideTexts.push(...editedSourceSelections.map(h => String(h.text || '').trim()));
-        }
-        // Parse the full source clause for natural highlights, but when users edit a selected
-        // outcome/trigger, compose their current wording into the effective parser/scorer clause.
-        const parseText = triggerOverrideClause || sourceClauseText || contextText || group.map(h => h.text).filter(Boolean).join(' ');
-        const overrideSet = new Set(intentOverrideTexts.map(value => String(value).trim()));
-        const remainingIntentTexts = connectedIntentTexts.filter(value => !overrideSet.has(String(value).trim()));
         const hasExact = group.some(h => h.mode !== 'variable');
         const hasVariable = group.some(h => h.mode === 'variable');
         const groupMode = hasExact && hasVariable ? 'mixed' : (hasVariable ? 'variable' : 'exact');
@@ -8422,14 +7289,8 @@ function annotateHighlightGroups(highlights, sourceText = getCurrentSourceOracle
         const variableTexts = group.filter(h => h.mode === 'variable').map(h => h.text.trim());
         const modes = group.map(h => h.mode === 'variable' ? 'variable' : 'exact');
         group.contextText = contextText || group.filter(h => Number.isFinite(h.start)).map(h => h.text.trim()).join(' ');
-        group.sourceClauseText = sourceClauseText || group.contextText;
-        group.parseText = parseText;
-        group.triggerIntentOverrideText = triggerOverrideClause ? (intentOverrideTexts[0] || triggerIntentText) : '';
-        group.triggerIntentOverride = Boolean(triggerOverrideClause);
-        group.intentOverrideTexts = [...new Set(intentOverrideTexts.map(value => String(value || '').trim()).filter(Boolean))];
-        group.editedFromSource = group.some(h => Boolean(h.editedFrom));
         group.connectedIntentTexts = connectedIntentTexts;
-        group.searchIntentText = [parseText, ...remainingIntentTexts].filter(Boolean).join('. ');
+        group.searchIntentText = [group.contextText, ...connectedIntentTexts].filter(Boolean).join(' ');
         group.sourceStart = start;
         group.sourceEnd = end;
         group.mode = groupMode;
@@ -8457,28 +7318,19 @@ function annotateHighlightGroups(highlights, sourceText = getCurrentSourceOracle
     return groups;
 }
 
-function buildHighlightIntentProfiles(highlights, sourceCard = currentSourceCard, sourceText = getCurrentSourceOracleText(sourceCard)) {
-    const allHighlights = Array.isArray(highlights) ? highlights : [];
-    const effectEntries = allHighlights.map((highlight, originalIndex) => ({ highlight, originalIndex }))
-        .filter(entry => entry.highlight?.field !== 'type');
-    const remappedIndex = new Map(effectEntries.map((entry, index) => [entry.originalIndex, index]));
-    const effectHighlights = effectEntries.map(({ highlight }) => ({
-        ...highlight,
-        attachedTo: Number.isInteger(highlight.attachedTo) ? (remappedIndex.get(highlight.attachedTo) ?? null) : null
-    }));
-    const groups = annotateHighlightGroups(effectHighlights, sourceText);
+function buildHighlightIntentProfiles(highlights) {
+    const groups = annotateHighlightGroups(highlights, getCurrentSourceOracleText());
     return groups.map((group, index) => {
-        // Source-selected text is parsed in its full clause context so trigger conditions survive
-        // selection of only the outcome phrase. A connected trigger-shaped Search detail is a
-        // deliberate override and is composed with that outcome in group.parseText; ordinary
-        // Search details (e.g. "produces three colorless mana") remain semantic hints only.
-        let parsedEffects = parseMTGEffect(group.parseText || group.sourceClauseText || group.contextText || group.map(h => h.text).filter(Boolean).join(' '));
-        parsedEffects.forEach(effect => {
-            if (effect && typeof effect === 'object') {
-                effect.contextClause = String(group.parseText || group.sourceClauseText || group.contextText || effect.raw || '').trim();
-                effect.searchIntentContextOverride = Boolean(group.triggerIntentOverride);
-            }
-        });
+        // Parse only text that actually exists on the source card. Attached search details are
+        // intentionally NOT injected into the rules parser because phrases like "produces 3
+        // colorless mana" can be useful search intent but are not necessarily valid Oracle grammar.
+        // They are carried separately as semantic/retrieval hints below.
+        let parsedEffects = parseMTGEffect(group.contextText || group.map(h => h.text).filter(Boolean).join(' '));
+        if (group.length && Number.isFinite(group.sourceStart) && Number.isFinite(group.sourceEnd)) {
+            const sourceText = getCurrentSourceOracleText();
+            const contextual = String(sourceText || '').slice(group.sourceStart, group.sourceEnd).trim();
+            if (contextual) parsedEffects = parseMTGEffect(contextual);
+        }
         let canonicalFunctions = getCanonicalFunctions(parsedEffects);
         let recognizedEffects = parsedEffects.filter(e => e.action && e.action !== 'generic');
 
@@ -8486,10 +7338,8 @@ function buildHighlightIntentProfiles(highlights, sourceCard = currentSourceCard
         // useful for numeric/custom tokens that would otherwise interrupt a parser pattern while
         // keeping the surrounding grammar intact.
         if (!recognizedEffects.length && group.some(h => h.mode === 'variable')) {
-            let normalized = String(group.parseText || group.sourceClauseText || group.contextText || group.map(h => h.text).join(' '));
-            // Only mask literal variable spans that come from the printed source text. A user-edited
-            // phrase is the intended replacement, not a variable token to erase from the query.
-            for (const h of group.filter(x => x.mode === 'variable' && !(x.origin === 'user' && x.editedFrom))) {
+            let normalized = group.map(h => h.text).join(' ');
+            for (const h of group.filter(x => x.mode === 'variable')) {
                 const escaped = h.text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
                 normalized = normalized.replace(new RegExp(escaped, 'g'), 'N');
             }
@@ -8508,19 +7358,7 @@ function buildHighlightIntentProfiles(highlights, sourceCard = currentSourceCard
             text: group.contextText,
             contextText: group.contextText,
             searchIntentText: group.searchIntentText,
-            sourceClauseText: group.sourceClauseText || '',
-            parseText: group.parseText || '',
-            triggerIntentOverrideText: group.triggerIntentOverrideText || '',
-            triggerIntentOverride: Boolean(group.triggerIntentOverride),
-            userAuthoredOverride: Boolean(group.triggerIntentOverride && group.some(h => h.origin === 'user')),
-            editedFromSource: Boolean(group.editedFromSource),
-            // Any active highlight is a deliberate user focus. For edited/custom text, parseText is
-            // the authoritative composed rule; this text is also the lexical fallback when a new
-            // phrase is not yet covered by the canonical MTG action parser.
-            explicitUserIntent: Boolean(group.length && !group.some(h => h.origin === 'benchmark')),
-            explicitIntentText: String(group.parseText || group.searchIntentText || group.contextText || group.map(h => h.text).filter(Boolean).join('. ')).trim(),
-            intentOverrideTexts: group.intentOverrideTexts || [],
-            connectedIntentTexts: (group.connectedIntentTexts || []).filter(value => !(group.intentOverrideTexts || [group.triggerIntentOverrideText]).includes(String(value).trim())),
+            connectedIntentTexts: group.connectedIntentTexts || [],
             selections: group.selections,
             modes: group.modes,
             mode: group.mode,
@@ -8538,93 +7376,29 @@ function buildHighlightIntentProfiles(highlights, sourceCard = currentSourceCard
 }
 
 function calculateHighlightIntentMatch(profiles, candidateEffects, candidateCard = null) {
-    if (!profiles?.length) return 0;
-    const safeEffects = Array.isArray(candidateEffects) ? candidateEffects : [];
-    const candidateOracle = candidateCard ? getCardOracleText(candidateCard) : '';
-    const clamp01 = value => Math.max(0, Math.min(1, Number(value) || 0));
+    if (!profiles?.length || !candidateEffects?.length) return 0;
     const profileScores = profiles.map(profile => {
-        const sourceEffects = profile.recognizedEffects?.length ? profile.recognizedEffects : (profile.parsedEffects || []);
-        let structuralScore = 0;
-        let coverage = 0;
-        if (sourceEffects.length && safeEffects.length) {
-            const matchingMode = profile.mode === 'mixed' ? 'variable' : profile.mode;
-            const assignment = maxOneToOneHighlightAssignment(sourceEffects, safeEffects, matchingMode);
-            coverage = sourceEffects.length ? assignment.matches.length / sourceEffects.length : 0;
-            const lexicalWeight = profile.benchmarkIntentOnly ? 0.05 : 0.12;
-            const structuralWeight = profile.benchmarkIntentOnly ? 0.78 : 0.76;
-            const coverageWeight = profile.benchmarkIntentOnly ? 0.17 : 0.12;
-            let lexicalSupport = 0;
-            if (candidateOracle && profile.exactTexts?.length) {
-                const oracle = candidateOracle.toLocaleLowerCase();
-                lexicalSupport = profile.exactTexts.filter(t => oracle.includes(String(t).toLocaleLowerCase())).length / profile.exactTexts.length;
-            }
-            structuralScore = clamp01(assignment.score * structuralWeight + coverage * coverageWeight + lexicalSupport * lexicalWeight);
+        const sourceEffects = profile.recognizedEffects.length ? profile.recognizedEffects : profile.parsedEffects;
+        const matchingMode = profile.mode === 'mixed' ? 'variable' : profile.mode;
+        const assignment = maxOneToOneHighlightAssignment(sourceEffects, candidateEffects, matchingMode);
+        const coverage = sourceEffects.length ? assignment.matches.length / sourceEffects.length : 0;
+        const confidence = 0.55 + 0.45 * (profile.parserConfidence || 0);
+        let lexicalSupport = 0;
+        if (candidateCard && profile.exactTexts?.length) {
+            const oracle = getCardOracleText(candidateCard).toLowerCase();
+            lexicalSupport = profile.exactTexts.filter(t => oracle.includes(String(t).toLowerCase())).length / profile.exactTexts.length;
         }
-
-        // Strong text fallback for explicit user intent. This is intentionally independent of parser
-        // recognition: custom wording such as "take an extra turn" must still steer retrieval/ranking
-        // even if the current rules parser returns only a generic effect for it.
-        const explicitQuery = String(profile.explicitIntentText || profile.parseText || profile.searchIntentText || '').trim();
-        let textSupport = 0;
-        if (profile.explicitUserIntent && explicitQuery && candidateOracle) {
-            const simple = clamp01(calculateSimpleSimilarity(explicitQuery, candidateOracle));
-            const fuzzy = clamp01(calculateFuzzyTextMatch(explicitQuery, candidateOracle));
-            const coverageText = clamp01(lexicalTokenCoverage(explicitQuery, candidateOracle));
-            // Preserve phrase/trigger identity over unordered word overlap; lexical coverage is only
-            // a supplement, not enough on its own to call two mechanically different rules equal.
-            textSupport = clamp01(simple * 0.42 + fuzzy * 0.43 + coverageText * 0.15);
-        }
-
-        const hasRecognizedStructure = sourceEffects.some(effect => effect?.canonical || (effect?.action && effect.action !== 'generic'));
-        const strongUserIntent = Boolean(profile.userAuthoredOverride || profile.editedFromSource || (profile.connectedIntentTexts || []).length);
-        let score = structuralScore;
-        if (profile.explicitUserIntent) {
-            // For user-authored edits, the words they wrote get greater say even when the canonical
-            // parser cannot fully classify the effect. When structure is known it remains the
-            // majority signal; when it is unknown, text intent becomes the safe fallback.
-            score = hasRecognizedStructure
-                ? structuralScore * (strongUserIntent ? 0.62 : 0.72) + textSupport * (strongUserIntent ? 0.38 : 0.28)
-                : textSupport * (strongUserIntent ? 0.92 : 0.88) + structuralScore * (strongUserIntent ? 0.08 : 0.12);
-        }
-
-        let confidence = 0.55 + 0.45 * (profile.parserConfidence || 0);
-        if (strongUserIntent && hasRecognizedStructure) confidence = Math.max(confidence, 0.90);
-        else if (strongUserIntent) confidence = Math.max(confidence, 0.84);
-        else if (profile.explicitUserIntent) confidence = Math.max(confidence, 0.78);
-        const explicitIntentPriority = profile.userAuthoredOverride ? 1.12 : (strongUserIntent ? 1.08 : (profile.explicitUserIntent ? 1.06 : 1));
-        // Do not punish a usable text-only intent because parsing returned no candidate effects.
-        return clamp01(score * explicitIntentPriority * confidence);
+        // In mixed benchmark groups the parsed whole-effect is the main signal. Literal wording is
+        // only a small bonus because the point is to permit a changed qualifier/amount while still
+        // preserving the highlighted effect's structure.
+        const lexicalWeight = profile.benchmarkIntentOnly ? 0.05 : 0.12;
+        const structuralWeight = profile.benchmarkIntentOnly ? 0.78 : 0.76;
+        const coverageWeight = profile.benchmarkIntentOnly ? 0.17 : 0.12;
+        return Math.min(1, assignment.score * structuralWeight + coverage * coverageWeight + lexicalSupport * lexicalWeight) * confidence;
     });
     const average = profileScores.reduce((a,b) => a+b,0) / profileScores.length;
     const fullCoverage = profileScores.filter(v => v >= 0.55).length / profileScores.length;
-    return clamp01(average * 0.80 + fullCoverage * 0.20);
-}
-
-
-function getHighlightRankingWeight(profiles = [], { hasHighlight = false, hasEffectHighlight = false, hasTypeHighlight = false } = {}) {
-    if (!hasHighlight) return 0;
-    if (!hasEffectHighlight) return hasTypeHighlight ? 0.18 : 0;
-    const strongIntent = (profiles || []).some(profile =>
-        profile?.userAuthoredOverride || profile?.editedFromSource ||
-        (profile?.connectedIntentTexts || []).length > 0
-    );
-    // The selected/edited text is an explicit user instruction, not a weak side channel. It gets
-    // 30% of the normalized rank for ordinary selections and 42% when the user edits/composes a
-    // search intent. The remaining score still preserves mechanical, semantic, and role evidence.
-    return strongIntent ? 0.42 : 0.30;
-}
-
-function blendHighlightIntentScore(baseScore, highlightScore, profiles = [], options = {}) {
-    const clamp01 = value => Math.max(0, Math.min(1, Number(value) || 0));
-    const base = clamp01(baseScore);
-    const highlight = clamp01(highlightScore);
-    const weight = getHighlightRankingWeight(profiles, options);
-    return {
-        score: clamp01(base * (1 - weight) + highlight * weight),
-        weight,
-        highlightScore: highlight,
-        explicitUserIntent: Boolean(weight >= 0.42)
-    };
+    return Math.min(1, average * 0.80 + fullCoverage * 0.20);
 }
 
 function calculateHighlightIntentRetrievalText(profiles) {
@@ -9064,8 +7838,7 @@ function buildUniversalMechanicProfile(card = null, text = '', parsedEffects = n
     let actionMatch;
     while ((actionMatch = UNIVERSAL_RULE_ACTION_REGEX.exec(oracle))) {
         const action = normalizeMechanicToken(actionMatch[0]);
-        const isDrawStepLabel = action === 'draw' && /^\s+step\b/i.test(oracle.slice(actionMatch.index + actionMatch[0].length));
-        if (action && !isDrawStepLabel) actions.add(action);
+        if (action) actions.add(action);
         if (UNIVERSAL_RULE_ACTION_REGEX.lastIndex === actionMatch.index) UNIVERSAL_RULE_ACTION_REGEX.lastIndex++;
     }
 
@@ -10004,7 +8777,7 @@ function collectSemanticBridgeTextEvidence(text) {
         [/\bshield counter\b/i, 'counter:shield'],
         [/\bpoison counter\b/i, 'resource:poison_counters'],
         [/\benergy counter\b/i, 'resource:energy'],
-        [/\bdraw\b(?!\s+step\b)/i, 'draw:cards_to_hand'],
+        [/\bdraw\b/i, 'draw:cards_to_hand'],
         [/\bdiscard\b/i, 'hand:discard'],
         [/\bsearch\b.*\blibrary\b/i, 'library:tutor_or_search'],
         [/\bshuffle\b/i, 'library:shuffle'],
@@ -10610,13 +9383,11 @@ function extractKeywordAnchorSet(card, text = '') {
 
 function inferMechanicalEvent(effect) {
     const raw = String(effect?.raw || '').toLowerCase();
-    const relationshipText = `${String(effect?.contextClause || '').toLowerCase()} ${raw}`.trim();
     if (effect?.activationCost) return 'activated';
     if (effect?.triggerProfile?.event) return effect.triggerProfile.event;
-    if (effect?.triggerProfile?.type === 'turn_window') return 'turn_trigger';
-    if (/\bwhenever\b/.test(relationshipText)) return 'triggered_event';
-    if (/\bwhen\b/.test(relationshipText)) return 'triggered_event';
-    if (/\bat (?:the )?(?:beginning|start|end) of\b|\beach upkeep\b|\beach end step\b|\bevery turn\b/.test(relationshipText)) return 'turn_trigger';
+    if (/\bwhenever\b/.test(raw)) return 'triggered_event';
+    if (/\bwhen\b/.test(raw)) return 'triggered_event';
+    if (/\bat the beginning of\b|\bat the end of\b/.test(raw)) return 'turn_trigger';
     if (/\binstead\b/.test(raw)) return 'replacement';
     if (/\bprevent(?:s|ed)?\b/.test(raw)) return 'prevention';
     if (/\b(?:can't|cannot)\b/.test(raw)) return 'prohibition';
@@ -10715,7 +9486,6 @@ function buildMechanicalEffectNode(effect, index = 0, graphAnchors = new Set()) 
         costType: normalizeMechanicToken(effect?.activationCost?.type || ''),
         costs: new Set([...(effect?.activationCost?.parts || []), effect?.payCost, p.payCost].filter(Boolean).map(normalizeMechanicToken)),
         effectMode: mode,
-        repeatabilityProfile: getEffectRepeatabilityProfile(effect),
         static: effect?.isStatic === true || mode === 'prohibition' || mode === 'replacement' || mode === 'prevention' || event === 'static' || event === 'static_condition',
         replacement: mode === 'replacement',
         prevention: mode === 'prevention',
@@ -10737,31 +9507,17 @@ function buildMechanicalEffectNode(effect, index = 0, graphAnchors = new Set()) 
 
 function getCachedParsedEffects(card = null, text = '') {
     const oracle = String(text || card?.oracle_text || (card?.card_faces ? card.card_faces.map(f => f.oracle_text || '').join('\n\n') : '') || '');
-    const key = `${normalizeCardNameForIdentity(card?.name || '')}|${String(card?.type_line || '')}|${oracle}`;
-    // Fast per-object reuse protects the current card from LRU eviction while a large pool is
-    // being scored. The global cache remains the cross-stream/cross-search source of truth.
-    if (card && card._manaParsedEffectsCacheKey === key && Array.isArray(card._manaParsedEffectsCacheValue)) {
-        return annotateEffectRepeatability(card, card._manaParsedEffectsCacheValue, oracle);
-    }
-    const cacheKey = `parsed|${key}`;
-    const cached = mechanicalProfileCache.get(cacheKey);
+    const key = `${normalizeCardNameForIdentity(card?.name || '')}|${oracle}`;
+    const cached = mechanicalProfileCache.get(`parsed|${key}`);
     if (cached) {
-        mechanicalProfileCache.delete(cacheKey);
-        mechanicalProfileCache.set(cacheKey, cached);
-        if (card) {
-            card._manaParsedEffectsCacheKey = key;
-            card._manaParsedEffectsCacheValue = cached;
-        }
-        return annotateEffectRepeatability(card, cached, oracle);
+        mechanicalProfileCache.delete(`parsed|${key}`);
+        mechanicalProfileCache.set(`parsed|${key}`, cached);
+        return cached;
     }
-    const parsed = annotateEffectRepeatability(card, parseMTGEffect(oracle), oracle);
-    mechanicalProfileCache.set(cacheKey, parsed);
+    const parsed = parseMTGEffect(oracle);
+    mechanicalProfileCache.set(`parsed|${key}`, parsed);
     while (mechanicalProfileCache.size > MECHANICAL_PROFILE_CACHE_MAX) {
         mechanicalProfileCache.delete(mechanicalProfileCache.keys().next().value);
-    }
-    if (card) {
-        card._manaParsedEffectsCacheKey = key;
-        card._manaParsedEffectsCacheValue = parsed;
     }
     return parsed;
 }
@@ -10769,28 +9525,17 @@ function getCachedParsedEffects(card = null, text = '') {
 function getCachedMechanicalProfile(card = null, text = '', parsedEffects = null) {
     const oracle = String(text || card?.oracle_text || (card?.card_faces ? card.card_faces.map(f => f.oracle_text || '').join('\n\n') : '') || '');
     const key = `${normalizeCardNameForIdentity(card?.name || '')}|${oracle}`;
-    if (card && card._manaMechanicProfileCacheKey === key && card._manaMechanicProfileCacheValue) {
-        return card._manaMechanicProfileCacheValue;
-    }
     const cacheKey = `profile|${key}`;
     const cached = mechanicalProfileCache.get(cacheKey);
     if (cached) {
         mechanicalProfileCache.delete(cacheKey);
         mechanicalProfileCache.set(cacheKey, cached);
-        if (card) {
-            card._manaMechanicProfileCacheKey = key;
-            card._manaMechanicProfileCacheValue = cached;
-        }
         return cached;
     }
     const profile = buildUniversalMechanicProfile(card, oracle, parsedEffects || getCachedParsedEffects(card, oracle));
     mechanicalProfileCache.set(cacheKey, profile);
     while (mechanicalProfileCache.size > MECHANICAL_PROFILE_CACHE_MAX) {
         mechanicalProfileCache.delete(mechanicalProfileCache.keys().next().value);
-    }
-    if (card) {
-        card._manaMechanicProfileCacheKey = key;
-        card._manaMechanicProfileCacheValue = profile;
     }
     return profile;
 }
@@ -10998,31 +9743,7 @@ function mechanicalNodeContradiction(a, b) {
     return Math.min(0.55, penalty);
 }
 
-// Graph similarity intentionally examines the same effect-node pairs in unordered coverage,
-// sequence alignment, and contradiction analysis. Cache the pure pair result so each pair is fully
-// compared once; the returned detail is read-only in all callers. The cache also benefits later
-// searches that reuse the same precomputed card graphs.
-const mechanicalNodePairComparisonCache = new WeakMap();
 function compareMechanicalEffectNodes(a, b) {
-    if (!a || typeof a !== 'object' || !b || typeof b !== 'object') {
-        return computeMechanicalEffectNodeComparison(a, b);
-    }
-    let row = mechanicalNodePairComparisonCache.get(a);
-    if (row?.has(b)) {
-        mechanicalPairCacheStats.graphNodeHits++;
-        return row.get(b);
-    }
-    if (!row) {
-        row = new WeakMap();
-        mechanicalNodePairComparisonCache.set(a, row);
-    }
-    mechanicalPairCacheStats.graphNodeComputed++;
-    const detail = computeMechanicalEffectNodeComparison(a, b);
-    row.set(b, detail);
-    return detail;
-}
-
-function computeMechanicalEffectNodeComparison(a, b) {
     if (!a || !b) return { score: 0, contradiction: 0, breakdown: {} };
 
     const functionExact = a.function && b.function && a.function === b.function;
@@ -11055,7 +9776,6 @@ function computeMechanicalEffectNodeComparison(a, b) {
         event: mechanicalEventSimilarity(a, b),
         duration: mechanicalDurationSimilarity(a, b),
         mode: mechanicalModeSimilarity(a, b),
-        repeatability: repeatabilityProfileSimilarity(a.repeatabilityProfile, b.repeatabilityProfile),
         cost: mechanicalCostSimilarity(a, b),
         role: mechanicalRoleSimilarity(a, b),
         condition: a.condition || b.condition ? (a.condition === b.condition ? 1 : 0.45) : 1,
@@ -11065,7 +9785,7 @@ function computeMechanicalEffectNodeComparison(a, b) {
     const fieldParts = [
         [15, breakdown.object], [14, breakdown.target], [13, breakdown.zone], [10, breakdown.restriction],
         [9, breakdown.quantity], [10, breakdown.trigger], [8, breakdown.event], [7, breakdown.duration],
-        [7, breakdown.mode], [16, breakdown.repeatability], [5, breakdown.cost], [5, breakdown.role], [5, breakdown.condition], [4, breakdown.stats]
+        [7, breakdown.mode], [5, breakdown.cost], [5, breakdown.role], [5, breakdown.condition], [4, breakdown.stats]
     ];
     const fieldScore = fieldParts.reduce((sum, [w, v]) => sum + w * v, 0) / fieldParts.reduce((sum, [w]) => sum + w, 0);
     const contradiction = mechanicalNodeContradiction(a, b);
@@ -11367,14 +10087,7 @@ function getSinglePrimaryEffectSignature(text) {
     // Order-independent signatures deliberately prefer the actual destination/action over generic
     // words such as "return" or "target".
     add(/\b(?:return|put)\b[\s\S]*\bfrom (?:your )?graveyard\b[\s\S]*\b(?:to|onto) the battlefield\b|\bfrom (?:your )?graveyard\b[\s\S]*\b(?:return|put)\b[\s\S]*\b(?:to|onto) the battlefield\b/, 'reanimate');
-    // Returning a card from the graveyard to hand is recursion/card recovery, not a bounce
-    // effect. Only return-to-hand effects that do not originate in a graveyard use the bounce
-    // signature.
-    if (/\breturn\b[\s\S]*\bfrom (?:your )?graveyard\b[\s\S]*\bto (?:its owner's|their owner's|your) hand\b/.test(input)) {
-        found.add('recursion');
-    } else {
-        add(/\breturn\b[\s\S]*\bto (?:its owner's|their owner's|your) hand\b/, 'bounce');
-    }
+    add(/\breturn\b[\s\S]*\bto (?:its owner's|their owner's|your) hand\b/, 'bounce');
     add(/\bdestroy\b/, 'destroy');
     add(/\bexile\b/, 'exile');
     add(/\bdraw\s+(?:a|one|two|three|four|five|\d+)\s+cards?\b/, 'draw');
@@ -11397,25 +10110,9 @@ function getSinglePrimaryEffectSignature(text) {
     return [...found][0];
 }
 
-// Read the destination of graveyard recovery independently from secondary text. A real card
-// such as Reanimate also makes its controller lose life, and Animate Dead has attachment/leaves-play
-// text; those secondary clauses must not hide the primary battlefield-vs-hand distinction. If a
-// card performs both kinds of recovery, return null rather than over-classifying a compound card.
-function getGraveyardReturnDestinationSignature(text) {
-    const input = String(text || '').toLowerCase().replace(/[’]/g, "'");
-    if (!/\bgraveyard\b/.test(input)) return null;
-    const hasReturnVerb = /\b(?:return|put|move|place)\b/.test(input);
-    if (!hasReturnVerb) return null;
-    const toBattlefield = /\b(?:to|onto)\s+the battlefield\b/.test(input);
-    const toHand = /\b(?:to|into)\s+(?:(?:your|its owner's|their owner's|the owner's|that player's|a player's)\s+)?hand\b/.test(input);
-    if (toBattlefield && !toHand) return 'reanimate';
-    if (toHand && !toBattlefield) return 'recursion';
-    return null;
-}
-
 function mechanicalEffectFamily(signature) {
     if (['destroy', 'exile', 'sacrifice'].includes(signature)) return 'removal';
-    if (signature === 'reanimate' || signature === 'recursion') return 'recursion';
+    if (signature === 'reanimate') return 'recursion';
     if (signature === 'bounce') return 'tempo';
     if (signature === 'draw' || signature === 'search_library') return 'card_advantage';
     if (signature === 'tap' || signature === 'untap') return 'board_state';
@@ -11430,85 +10127,14 @@ function mechanicalEffectFamily(signature) {
     return signature;
 }
 
-
-// Detect ordered zone-change effects that a verb-only matcher can mistake for removal.
-// Flicker/blink exiles a permanent and returns it to the battlefield; ordinary exile removal
-// leaves it in exile. Both contain "exile", but they have different outcomes and play patterns.
-function classifyZoneTransitionIntent(text) {
-    const input = String(text || '').toLowerCase().replace(/[’]/g, "'");
-    const exileAt = input.search(/\bexile\b/);
-    if (exileAt < 0) return 'none';
-    const tail = input.slice(exileAt);
-    const returnsToBattlefield = /\b(?:then\s+)?(?:return|put)\s+(?:it|that card|that permanent|those cards|those permanents|them)\b[\s\S]{0,220}\b(?:to|onto)\s+the battlefield\b/i.test(tail);
-    if (returnsToBattlefield) return 'blink';
-    // Do not classify "exile it until end of turn, then return it" as removal if return text
-    // was separated into a second parsed atom: getMechanicalContrastText() reconstructs atoms
-    // in source order, so this check sees the whole effect sequence.
-    return 'exile_removal';
-}
-
-function classifyTokenProductionIntent(text) {
-    const input = String(text || '').toLowerCase();
-    if (/\b(?:twice|three times|double|doubles|triple|triples|multiplied by|that many)\b[\s\S]{0,180}\btokens?\b/i.test(input) &&
-        /\b(?:would be created|would create|create|created instead|creates instead)\b/i.test(input)) {
-        return 'token_multiplier';
-    }
-    if (/\bcreate(?:s)?\b[\s\S]{0,180}\btokens?\b/i.test(input)) return 'token_creation';
-    return 'none';
-}
-
 function inferExplicitMechanicalContrast(parsedA = [], parsedB = []) {
     const textA = getMechanicalContrastText(parsedA);
     const textB = getMechanicalContrastText(parsedB);
     if (!textA || !textB) return { kind: 'none', signatures: [] };
-
-    // Compare full effect sequences before reducing them to a single verb signature. This protects
-    // mechanically distinct cards that share the word "exile" or "create token".
-    const zoneA = classifyZoneTransitionIntent(textA);
-    const zoneB = classifyZoneTransitionIntent(textB);
-    if ((zoneA === 'blink' && zoneB === 'exile_removal') ||
-        (zoneB === 'blink' && zoneA === 'exile_removal')) {
-        return {
-            kind: 'blink-vs-exile-removal',
-            signatures: [zoneA, zoneB],
-            reason: 'exile-and-return sequence differs from permanent exile'
-        };
-    }
-    const tokenA = classifyTokenProductionIntent(textA);
-    const tokenB = classifyTokenProductionIntent(textB);
-    if ((tokenA === 'token_multiplier' && tokenB === 'token_creation') ||
-        (tokenB === 'token_multiplier' && tokenA === 'token_creation')) {
-        return {
-            kind: 'token-multiplier-vs-token-creation',
-            signatures: [tokenA, tokenB],
-            reason: 'replacement multiplier changes another effect instead of independently creating tokens'
-        };
-    }
-
-    // Use the unique graveyard return destination even when a card has a secondary life-loss,
-    // Aura-attachment, or sacrifice clause. Those clauses should not erase the primary destination
-    // difference between battlefield reanimation and returning a card to hand.
-    const graveyardDestinationA = getGraveyardReturnDestinationSignature(textA);
-    const graveyardDestinationB = getGraveyardReturnDestinationSignature(textB);
-    if (graveyardDestinationA && graveyardDestinationB && graveyardDestinationA !== graveyardDestinationB) {
-        return {
-            kind: 'reanimation-vs-graveyard-recursion',
-            signatures: [graveyardDestinationA, graveyardDestinationB],
-            reason: 'graveyard card returns to different destination zones'
-        };
-    }
-
     const a = getSinglePrimaryEffectSignature(textA);
     const b = getSinglePrimaryEffectSignature(textB);
     if (a && b) {
         const key = `${a}|${b}`;
-        if ((a === 'reanimate' && b === 'recursion') || (b === 'reanimate' && a === 'recursion')) {
-            return {
-                kind: 'reanimation-vs-graveyard-recursion',
-                signatures: [a, b],
-                reason: 'graveyard card returns to different destination zones'
-            };
-        }
         if (OPPOSITE_MECHANICS.has(key)) return { kind: 'opposite', signatures: [a, b], reason: 'opposite primary actions' };
         if (mechanicalEffectFamily(a) !== mechanicalEffectFamily(b)) {
             return { kind: 'different-primary-effects', signatures: [a, b], reason: 'single primary effects belong to different mechanical families' };
@@ -11525,43 +10151,6 @@ function inferExplicitMechanicalContrast(parsedA = [], parsedB = []) {
         }
     }
     return { kind: 'none', signatures: [a, b].filter(Boolean) };
-}
-
-// Relationship-aware penalty: the same action word is not enough when the trigger, affected
-// object, or controller differs. This is intentionally conservative: it only compares effects with
-// the same canonical function, and only applies strong penalties to explicit contradictions.
-function calculateEffectRelationshipMismatch(parsedA = [], parsedB = []) {
-    const unwrap = effect => {
-        const canonical = effect?.canonical || effect;
-        const params = canonical?.params || effect?.params || {};
-        return {
-            fn: String(canonical?.function || effect?.function || ''),
-            trigger: params.triggerProfile || effect?.triggerProfile || null,
-            target: params.targetProfile || effect?.targetProfile || null,
-            scope: params.controllerScope || effect?.controllerScope || params.targetProfile?.scope || effect?.targetProfile?.scope || null,
-            condition: String(params.condition || effect?.condition || '').toLowerCase().replace(/\s+/g, ' ').trim(),
-            raw: String(params.raw || canonical?.raw || effect?.raw || '')
-        };
-    };
-    const a = (Array.isArray(parsedA) ? parsedA : []).map(unwrap).filter(x => x.fn);
-    const b = (Array.isArray(parsedB) ? parsedB : []).map(unwrap).filter(x => x.fn);
-    let maxMismatch = 0;
-    for (const left of a) for (const right of b) {
-        if (left.fn !== right.fn) continue;
-        let mismatch = 0;
-        const le = left.trigger?.event || null, re = right.trigger?.event || null;
-        if (le && re && le !== re) mismatch = Math.max(mismatch, 0.82);
-        else if (!!le !== !!re) mismatch = Math.max(mismatch, 0.28);
-        const lo = left.target?.object || null, ro = right.target?.object || null;
-        if (lo && ro && lo !== ro) mismatch = Math.max(mismatch, 0.48);
-        const ls = left.scope, rs = right.scope;
-        if (ls && rs && ((ls === 'you_control' && rs === 'opponent_control') || (ls === 'opponent_control' && rs === 'you_control') || (ls === 'you' && rs === 'opponent') || (ls === 'opponent' && rs === 'you'))) {
-            mismatch = Math.max(mismatch, 0.82);
-        }
-        if (left.condition && right.condition && left.condition !== right.condition) mismatch = Math.max(mismatch, 0.22);
-        maxMismatch = Math.max(maxMismatch, mismatch);
-    }
-    return maxMismatch;
 }
 
 function calculateMechanicalSimilarityDetailed(parsedA, parsedB, profileA = null, profileB = null) {
@@ -11607,38 +10196,18 @@ function calculateMechanicalSimilarityDetailed(parsedA, parsedB, profileA = null
         Math.max(structuredBlend, keywordRescue * 0.92, universal.score * 0.62)
         * (1 - Math.min(0.42, contradictionPenalty * 0.72))
     ));
-    const repeatabilityMismatch = Math.max(
-        calculateRepeatabilityMismatchSeverity(safeA, safeB),
-        calculateCardAcquisitionCadenceMismatch(safeA, safeB)
-    );
-    // A shared verb cannot fully compensate for one card being an ongoing engine and the other
-    // being a one-shot resolution. Card-acquisition cadence receives explicit coverage because
-    // this is a common false match: repeatable draw engines vs. one-time ETB cantrips.
-    const repeatabilityFactor = 1 - (0.52 * repeatabilityMismatch);
-    const relationshipMismatch = calculateEffectRelationshipMismatch(safeA, safeB);
-    // Trigger/controller/target contradictions should reduce rank even when both cards share a
-    // broad action such as draw, damage, or move a card. Keep some residual similarity for useful
-    // near-matches; the penalty is not a hard exclusion.
-    const relationshipFactor = 1 - (0.42 * relationshipMismatch);
     const explicitContrast = inferExplicitMechanicalContrast(safeA, safeB);
-    let score = rawScore * repeatabilityFactor * relationshipFactor;
+    let score = rawScore;
     if (explicitContrast.kind === 'opposite') score = Math.min(score, 0.55);
     else if (explicitContrast.kind === 'different-primary-effects') score = Math.min(score, 0.38);
     else if (explicitContrast.kind === 'mana-choice-vs-simultaneous') score = Math.min(0.89, score * 0.94);
-    else if (explicitContrast.kind === 'blink-vs-exile-removal') score = Math.min(score, 0.52);
-    else if (explicitContrast.kind === 'token-multiplier-vs-token-creation') score = Math.min(score, 0.58);
-    else if (explicitContrast.kind === 'reanimation-vs-graveyard-recursion') score = Math.min(score, 0.72);
 
     return {
         score,
         rawScore,
         explicitContrast,
         structuralScore: structural,
-        graphScore: graph.score * repeatabilityFactor,
-        repeatabilityMismatch,
-        repeatabilityFactor,
-        relationshipMismatch,
-        relationshipFactor,
+        graphScore: graph.score,
         graphSourceCoverage: graph.sourceCoverage,
         graphCandidateCoverage: graph.candidateCoverage,
         graphBalancedCoverage: graph.balancedCoverage,
@@ -11651,7 +10220,7 @@ function calculateMechanicalSimilarityDetailed(parsedA, parsedB, profileA = null
         universal,
         // Reuse this exact comparison in functional similarity / scoring. It is immutable for this
         // source-candidate pair and already contains all the graph evidence fields above.
-        graphDetail: { ...graph, unadjustedScore: graph.score, score: graph.score * repeatabilityFactor, repeatabilityMismatch, repeatabilityFactor }
+        graphDetail: graph
     };
 }
 
@@ -11727,245 +10296,6 @@ const MANASEARCH_MECHANICAL_REGRESSION_CASES = Object.freeze([
     }
 ]);
 
-function runManaSearchRepeatabilityRegressionSuite({ log = true } = {}) {
-    const cases = [
-        {
-            id: 'periodic-draw-is-engine',
-            card: { name: 'Upkeep Draw Engine', type_line: 'Enchantment', oracle_text: 'At the beginning of your upkeep, draw a card.' },
-            fn: 'card_draw', expected: 'periodic_trigger', engine: true
-        },
-        {
-            id: 'one-shot-sorcery-is-not-engine',
-            card: { name: 'One-shot Draw', type_line: 'Sorcery', oracle_text: 'Draw two cards.' },
-            fn: 'card_draw', expected: 'one_shot', engine: false
-        },
-        {
-            id: 'repeatable-token-trigger-is-engine',
-            card: { name: 'Token Trigger', type_line: 'Creature — Shaman', oracle_text: 'Whenever you cast an instant or sorcery spell, create a 1/1 red Elemental creature token.' },
-            fn: 'token_creation', expected: 'repeatable_trigger', engine: true
-        },
-        {
-            id: 'one-shot-token-spell-is-not-engine',
-            card: { name: 'One-shot Tokens', type_line: 'Instant', oracle_text: 'Create two 1/1 white Soldier creature tokens.' },
-            fn: 'token_creation', expected: 'one_shot', engine: false
-        },
-        {
-            id: 'etb-draw-is-not-automatic-engine',
-            card: { name: 'ETB Draw Creature', type_line: 'Creature — Human', oracle_text: 'When ETB Draw Creature enters the battlefield, draw a card.' },
-            fn: 'card_draw', expected: 'entry_trigger', engine: false
-        },
-        {
-            id: 'replacement-effect-is-ongoing-static',
-            card: { name: 'Token Doubler', type_line: 'Legendary Creature — God', oracle_text: 'If one or more tokens would be created under your control, three times that many of those tokens are created instead.' },
-            fn: 'token_multiplier', expected: 'ongoing_static', engine: false, repeatable: true
-        },
-        {
-            id: 'repeatable-sacrifice-cost-does-not-consume-source',
-            card: { name: 'Goblin Bombardment', type_line: 'Enchantment', oracle_text: 'Sacrifice a creature: Goblin Bombardment deals 1 damage to any target.' },
-            fn: 'direct_damage', expected: 'repeatable_activation', engine: true, role: 'burn', repeatable: true
-        },
-        {
-            id: 'repeated-treasure-trigger-is-engine',
-            card: { name: 'Treasure Trigger', type_line: 'Creature — Rogue', oracle_text: 'Whenever one or more artifacts you control are put into a graveyard from the battlefield, create a Treasure token.' },
-            fn: 'token_creation', expected: 'repeatable_trigger', engine: true, repeatable: true
-        },
-        {
-            id: 'at-your-upkeep-shorthand-is-periodic',
-            card: { name: 'Upkeep Shorthand Engine', type_line: 'Enchantment', oracle_text: 'At your upkeep, draw a card.' },
-            fn: 'card_draw', expected: 'periodic_trigger', engine: true
-        },
-        {
-            id: 'at-your-end-step-shorthand-is-periodic',
-            card: { name: 'End Step Shorthand Engine', type_line: 'Enchantment', oracle_text: 'At your end step, create a Treasure token.' },
-            fn: 'token_creation', expected: 'periodic_trigger', engine: true
-        },
-        {
-            id: 'draw-step-trigger-is-periodic',
-            card: { name: 'Draw Step Engine', type_line: 'Enchantment', oracle_text: 'At the beginning of your draw step, draw a card.' },
-            fn: 'card_draw', expected: 'periodic_trigger', engine: true
-        },
-        {
-            id: 'legacy-draw-phase-trigger-is-periodic',
-            card: { name: 'Draw Phase Engine', type_line: 'Enchantment', oracle_text: 'At the beginning of your draw phase, draw a card.' },
-            fn: 'card_draw', expected: 'periodic_trigger', engine: true
-        },
-        {
-            id: 'each-opponents-upkeep-is-periodic',
-            card: { name: 'Opponent Upkeep Tax', type_line: 'Enchantment', oracle_text: "At the beginning of each opponent's upkeep, that player loses 1 life." },
-            fn: 'lose_life', expected: 'periodic_trigger', engine: true, role: 'life_loss_engine'
-        },
-        {
-            id: 'end-step-token-production-is-periodic',
-            card: { name: 'End Step Nursery', type_line: 'Enchantment', oracle_text: 'At the beginning of your end step, create a 1/1 green Saproling creature token.' },
-            fn: 'token_creation', expected: 'periodic_trigger', engine: true
-        },
-        {
-            id: 'each-end-step-token-production-is-periodic',
-            card: { name: 'Every End Step Nursery', type_line: 'Enchantment', oracle_text: 'At the beginning of each end step, create a 1/1 green Saproling creature token.' },
-            fn: 'token_creation', expected: 'periodic_trigger', engine: true
-        },
-        {
-            id: 'next-upkeep-is-one-time-delayed-trigger',
-            card: { name: 'Delayed Token', type_line: 'Enchantment', oracle_text: 'At the beginning of your next upkeep, create a 1/1 green Saproling creature token.' },
-            fn: 'token_creation', expected: 'delayed_trigger', engine: false, repeatable: false
-        }
-    ];
-    const results = [];
-    const parsedCases = [];
-    for (const item of cases) {
-        try {
-            const effects = annotateEffectRepeatability(item.card, parseMTGEffect(item.card.oracle_text), item.card.oracle_text);
-            const matching = effects.filter(e => e?.canonical?.function === item.fn);
-            const profileKind = matching.map(e => getEffectRepeatabilityProfile(e)?.kind).find(Boolean) || 'unknown';
-            const roleProfile = inferStrategicRoleProfile(item.card, effects, '');
-            const role = item.role || (item.fn === 'card_draw' ? 'card_advantage_engine' : 'token_engine');
-            const hasRole = roleProfile.some(r => r.role === role);
-            const hasRepeatableEffect = matching.some(e => getEffectRepeatabilityProfile(e)?.group === 'repeatable_engine');
-            const repeatabilityPass = item.repeatable == null || hasRepeatableEffect === item.repeatable;
-            results.push({ id: item.id, pass: profileKind === item.expected && hasRole === item.engine && repeatabilityPass, profileKind, expected: item.expected, hasRole, expectedRole: item.engine, hasRepeatableEffect, expectedRepeatable: item.repeatable });
-            parsedCases.push({ item, effects });
-        } catch (error) {
-            results.push({ id: item.id, pass: false, error: error?.message || String(error) });
-        }
-    }
-    try {
-        // A recurring draw engine should outrank an ETB cantrip, while the draw condition on
-        // Burlfist Oak must not be mistaken for a draw outcome at all.
-        const rhystic = { name: 'Rhystic Study', type_line: 'Enchantment', oracle_text: 'Whenever an opponent casts a spell, you may draw a card unless that player pays {1}.' };
-        const chronicler = { name: 'Chronicler of Heroes', type_line: 'Creature — Centaur Wizard', oracle_text: 'When Chronicler of Heroes enters the battlefield, draw a card if you control a creature with a +1/+1 counter on it.' };
-        const oak = { name: 'Burlfist Oak', type_line: 'Creature — Treefolk', oracle_text: 'Whenever you draw a card, Burlfist Oak gets +2/+2 until end of turn.' };
-        const rhysticEffects = annotateEffectRepeatability(rhystic, parseMTGEffect(rhystic.oracle_text), rhystic.oracle_text);
-        const chroniclerEffects = annotateEffectRepeatability(chronicler, parseMTGEffect(chronicler.oracle_text), chronicler.oracle_text);
-        const oakEffects = annotateEffectRepeatability(oak, parseMTGEffect(oak.oracle_text), oak.oracle_text);
-        const rhysticCadence = getDirectCardAcquisitionCadence(rhystic, rhysticEffects);
-        const chroniclerCadence = getDirectCardAcquisitionCadence(chronicler, chroniclerEffects);
-        const oakCadence = getDirectCardAcquisitionCadence(oak, oakEffects);
-        const repeatableTwin = { name: 'Rhystic Study Twin', type_line: 'Enchantment', oracle_text: rhystic.oracle_text };
-        const twinEffects = annotateEffectRepeatability(repeatableTwin, parseMTGEffect(repeatableTwin.oracle_text), repeatableTwin.oracle_text);
-        const etbSimilarity = calculateMechanicalSimilarityDetailed(rhysticEffects, chroniclerEffects).score;
-        const repeatableSimilarity = calculateMechanicalSimilarityDetailed(rhysticEffects, twinEffects).score;
-        const etbMismatch = calculateSourceAcquisitionCadenceMismatch(rhysticCadence, chronicler, chroniclerEffects);
-        results.push({
-            id: 'repeatable-draw-engine-not-equivalent-to-etb-cantrip',
-            pass: rhysticCadence.hasAcquisition && rhysticCadence.repeatable && chroniclerCadence.hasAcquisition && chroniclerCadence.singleUse && chroniclerCadence.entryOnly && etbMismatch >= 0.9 && repeatableSimilarity > etbSimilarity,
-            sourceCadence: rhysticCadence, candidateCadence: chroniclerCadence, mismatch: etbMismatch, etbSimilarity, repeatableSimilarity
-        });
-        results.push({
-            id: 'draw-trigger-condition-is-not-a-draw-outcome',
-            pass: oakCadence.hasAcquisition === false,
-            oakCadence
-        });
-
-        const mixedCard = { name: 'Mixed Cadence Draw', type_line: 'Enchantment', oracle_text: 'At the beginning of your upkeep, draw a card. Draw a card.' };
-        const mixedEffects = annotateEffectRepeatability(mixedCard, parseMTGEffect(mixedCard.oracle_text), mixedCard.oracle_text);
-        const mixedDrawProfiles = mixedEffects.filter(e => e?.canonical?.function === 'card_draw').map(e => getEffectRepeatabilityProfile(e)?.kind).filter(Boolean);
-        results.push({ id: 'same-action-can-be-periodic-and-one-shot-on-same-card', pass: mixedDrawProfiles.includes('periodic_trigger') && mixedDrawProfiles.includes('one_shot'), profiles: mixedDrawProfiles });
-
-        const compoundCard = { name: 'Upkeep Token and Draw', type_line: 'Enchantment', oracle_text: 'At the beginning of your upkeep, create a Treasure token and draw a card.' };
-        const compoundEffects = annotateEffectRepeatability(compoundCard, parseMTGEffect(compoundCard.oracle_text), compoundCard.oracle_text);
-        const compoundDraw = compoundEffects.filter(e => e?.canonical?.function === 'card_draw');
-        results.push({ id: 'secondary-effect-inherits-parent-turn-trigger', pass: compoundDraw.length > 0 && compoundDraw.some(e => e.contextClause && getEffectRepeatabilityProfile(e)?.kind === 'periodic_trigger' && e.triggerProfile?.type === 'turn_window'), profileKinds: compoundDraw.map(e => getEffectRepeatabilityProfile(e)?.kind), triggerTypes: compoundDraw.map(e => e.triggerProfile?.type) });
-    } catch (error) {
-        results.push({ id: 'mixed-cadence-context-regression', pass: false, error: error?.message || String(error) });
-    }
-    try {
-        const engineA = parsedCases.find(x => x.item.id === 'periodic-draw-is-engine');
-        const spell = parsedCases.find(x => x.item.id === 'one-shot-sorcery-is-not-engine');
-        const engineBCard = { name: 'Second Upkeep Engine', type_line: 'Enchantment', oracle_text: 'At the beginning of your upkeep, draw a card.' };
-        const engineB = annotateEffectRepeatability(engineBCard, parseMTGEffect(engineBCard.oracle_text), engineBCard.oracle_text);
-        if (engineA && spell) {
-            const mismatch = calculateRepeatabilityMismatchSeverity(engineA.effects, spell.effects);
-            const engineSimilarity = calculateMechanicalSimilarityDetailed(engineA.effects, engineB).score;
-            const oneShotSimilarity = calculateMechanicalSimilarityDetailed(engineA.effects, spell.effects).score;
-            results.push({ id: 'mechanical-score-distinguishes-cadence', pass: mismatch > 0.55 && engineSimilarity > oneShotSimilarity, mismatch, engineSimilarity, oneShotSimilarity });
-            const compareText = buildCompareExplanation(engineA.item.card, spell.item.card).summary;
-            const duplicatedFollowup = /also has a follow-up effect: draw card/i.test(compareText);
-            const nameCasingOk = compareText.includes('One-shot Draw');
-            results.push({ id: 'compare-explains-repeatability', pass: /how often the effect happens/i.test(compareText) && /once|upkeep|repeat/i.test(compareText) && nameCasingOk && !duplicatedFollowup, summary: compareText, duplicatedFollowup, nameCasingOk });
-            const tokenEngineItem = parsedCases.find(x => x.item.id === 'repeatable-token-trigger-is-engine');
-            const oneShotTokenItem = parsedCases.find(x => x.item.id === 'one-shot-token-spell-is-not-engine');
-            if (tokenEngineItem && oneShotTokenItem) {
-                const oneShotTokenScore = calculateMechanicalSimilarityDetailed(tokenEngineItem.effects, oneShotTokenItem.effects).score;
-                const secondTokenEngineCard = { name: 'Treasure Trigger Two', type_line: 'Creature — Rogue', oracle_text: 'Whenever you cast an artifact spell, create a Treasure token.' };
-                const secondTokenEngine = annotateEffectRepeatability(secondTokenEngineCard, parseMTGEffect(secondTokenEngineCard.oracle_text), secondTokenEngineCard.oracle_text);
-                const repeatTokenScore = calculateMechanicalSimilarityDetailed(tokenEngineItem.effects, secondTokenEngine).score;
-                results.push({ id: 'repeatable-token-vs-one-shot-token-score', pass: repeatTokenScore > oneShotTokenScore, repeatableScore: repeatTokenScore, oneShotScore: oneShotTokenScore });
-            }
-            const periodicTokenItem = parsedCases.find(x => x.item.id === 'end-step-token-production-is-periodic');
-            const delayedTokenItem = parsedCases.find(x => x.item.id === 'next-upkeep-is-one-time-delayed-trigger');
-            if (periodicTokenItem && delayedTokenItem) {
-                const periodicTwinCard = { name: 'End Step Nursery Twin', type_line: 'Enchantment', oracle_text: periodicTokenItem.item.card.oracle_text };
-                const periodicTwin = annotateEffectRepeatability(periodicTwinCard, parseMTGEffect(periodicTwinCard.oracle_text), periodicTwinCard.oracle_text);
-                const periodicMatchScore = calculateMechanicalSimilarityDetailed(periodicTokenItem.effects, periodicTwin).score;
-                const delayedMatchScore = calculateMechanicalSimilarityDetailed(periodicTokenItem.effects, delayedTokenItem.effects).score;
-                results.push({ id: 'recurring-trigger-matches-above-one-time-delayed-trigger', pass: periodicMatchScore > delayedMatchScore, periodicMatchScore, delayedMatchScore });
-            }
-            const arenaCard = { name: 'Phyrexian Arena', type_line: 'Enchantment', oracle_text: 'At the beginning of your upkeep, you draw a card and you lose 1 life.' };
-            const arenaEffects = annotateEffectRepeatability(arenaCard, parseMTGEffect(arenaCard.oracle_text), arenaCard.oracle_text);
-            const arenaRoles = inferStrategicRoleProfile(arenaCard, arenaEffects, '').map(r => r.role);
-            results.push({ id: 'arena-combined-draw-and-life-loss-is-still-card-advantage-engine', pass: arenaRoles.includes('card_advantage_engine'), roles: arenaRoles });
-
-            const arenaCompareText = buildCompareExplanation(
-                arenaCard,
-                { name: 'Divination', type_line: 'Sorcery', oracle_text: 'Draw two cards.' }
-            ).summary;
-            results.push({
-                id: 'compare-describes-repeatable-draw-versus-one-shot-and-life-cost',
-                pass: /how often the effect happens/i.test(arenaCompareText) && /Divination draws two cards once/i.test(arenaCompareText) && /lose 1 life/i.test(arenaCompareText),
-                summary: arenaCompareText
-            });
-
-            const counterCompareText = buildCompareExplanation(
-                { name: 'Counterspell', type_line: 'Instant', oracle_text: 'Counter target spell.' },
-                { name: 'Countersquall', type_line: 'Instant', oracle_text: 'Counter target noncreature spell. Its controller loses 2 life.' }
-            ).summary;
-            results.push({
-                id: 'compare-explains-target-restriction-and-additional-cost-once',
-                pass: /noncreature/i.test(counterCompareText) && /lose 2 life/i.test(counterCompareText) && !/additional restriction/i.test(counterCompareText),
-                summary: counterCompareText
-            });
-
-            const tokenMultiplierCompareText = buildCompareExplanation(
-                { name: 'Ojer Taq, Deepest Foundation', type_line: 'Legendary Creature — God', oracle_text: 'If one or more tokens would be created under your control, three times that many of those tokens are created instead.' },
-                { name: 'Doubling Season', type_line: 'Enchantment', oracle_text: 'If an effect would create one or more tokens under your control, it creates twice that many of those tokens instead.' }
-            ).summary;
-            results.push({
-                id: 'compare-explains-different-token-multipliers',
-                pass: /triples/i.test(tokenMultiplierCompareText) && /doubles/i.test(tokenMultiplierCompareText),
-                summary: tokenMultiplierCompareText
-            });
-        }
-    } catch (error) {
-        results.push({ id: 'comparison-and-scoring-check', pass: false, error: error?.message || String(error) });
-    }
-    // Trigger identity must describe the event that causes an ability, not the effect produced.
-    try {
-        const castThenDraw = parseTriggerProfile('Whenever you cast an instant or sorcery spell, draw a card.');
-        results.push({ id: 'cast-trigger-is-not-misidentified-as-draw-trigger', pass: castThenDraw?.type === 'event' && castThenDraw?.event === 'casts_spell', type: castThenDraw?.type, event: castThenDraw?.event });
-        const upkeepDraw = parseTriggerProfile('At the beginning of your upkeep, draw a card.');
-        results.push({ id: 'upkeep-trigger-has-turn-window-not-resolution-event', pass: upkeepDraw?.type === 'turn_window' && upkeepDraw?.event == null && /upkeep/.test(upkeepDraw?.timingText || ''), type: upkeepDraw?.type, event: upkeepDraw?.event, timingText: upkeepDraw?.timingText });
-        const currentDrawStep = parseTriggerProfile('At the beginning of your draw step, draw a card.');
-        const legacyDrawPhase = parseTriggerProfile('At the beginning of your draw phase, draw a card.');
-        results.push({ id: 'legacy-draw-phase-normalizes-to-draw-step', pass: currentDrawStep?.window === 'beginning_of_draw_step' && legacyDrawPhase?.window === currentDrawStep.window, currentWindow: currentDrawStep?.window, legacyWindow: legacyDrawPhase?.window });
-        const drawStepOnly = parseTriggerProfile('Skip your draw step.');
-        results.push({ id: 'draw-step-reference-alone-is-not-a-trigger', pass: drawStepOnly == null, profile: drawStepOnly });
-        const mixedClauses = 'At the beginning of your upkeep, draw a card. Draw a card.';
-        const oneShotContext = findRepeatabilityContextClause('Draw a card.', mixedClauses);
-        results.push({ id: 'standalone-effect-does-not-inherit-neighboring-trigger', pass: !/at the beginning of your upkeep/i.test(oneShotContext), context: oneShotContext });
-    } catch (error) {
-        results.push({ id: 'trigger-identity-and-timing-regressions', pass: false, error: error?.message || String(error) });
-    }
-    const passed = results.filter(r => r.pass).length;
-    const summary = { passed, total: results.length, passRate: results.length ? passed / results.length : 1, results };
-    if (log) {
-        console.groupCollapsed(`ManaSearch repeatability regression: ${passed}/${results.length} passed`);
-        results.forEach(result => console.log(`${result.pass ? 'PASS' : 'FAIL'} ${result.id}`, result));
-        console.groupEnd();
-    }
-    return summary;
-}
-try { window.runManaSearchRepeatabilityRegressionSuite = runManaSearchRepeatabilityRegressionSuite; } catch (_) {}
-
 function runManaSearchMechanicalRegressionSuite({ log = true } = {}) {
     const results = [];
     for (const test of MANASEARCH_MECHANICAL_REGRESSION_CASES) {
@@ -11997,67 +10327,6 @@ function runManaSearchMechanicalRegressionSuite({ log = true } = {}) {
             results.push({ id: test.id, score: 0, expected: [test.min, test.max], pass: false, error: error?.message || String(error) });
         }
     }
-    // Ordered outcomes matter: blink returns the exiled permanent, while exile removal does not.
-    try {
-        const blinkA = parseMTGEffect("Exile target creature, then return that card to the battlefield under its owner's control.");
-        const exileB = parseMTGEffect("Exile target creature.");
-        const blinkDetail = calculateMechanicalSimilarityDetailed(blinkA, exileB);
-        results.push({
-            id: 'blink-sequence-is-not-exile-removal',
-            pass: blinkDetail.explicitContrast?.kind === 'blink-vs-exile-removal' && blinkDetail.score <= 0.52,
-            score: blinkDetail.score,
-            contrast: blinkDetail.explicitContrast
-        });
-
-        const multiplier = parseMTGEffect("If an effect would create one or more tokens under your control, it creates three times that many of those tokens instead.");
-        const creator = parseMTGEffect("Create three 1/1 green Saproling creature tokens.");
-        const tokenDetail = calculateMechanicalSimilarityDetailed(multiplier, creator);
-        results.push({
-            id: 'token-multiplier-is-not-token-creation',
-            pass: tokenDetail.explicitContrast?.kind === 'token-multiplier-vs-token-creation' && tokenDetail.score <= 0.58,
-            score: tokenDetail.score,
-            contrast: tokenDetail.explicitContrast
-        });
-
-        const reanimate = parseMTGEffect('Return target creature card from your graveyard to the battlefield.');
-        const recursion = parseMTGEffect('Return target creature card from your graveyard to your hand.');
-        const recursionDetail = calculateMechanicalSimilarityDetailed(reanimate, recursion);
-        results.push({
-            id: 'graveyard-return-destination-is-mechanically-distinct',
-            pass: recursionDetail.explicitContrast?.kind === 'reanimation-vs-graveyard-recursion' && recursionDetail.score <= 0.72,
-            score: recursionDetail.score,
-            contrast: recursionDetail.explicitContrast
-        });
-
-        const oneShotRankFactor = sourceAcquisitionCadenceRankFactor(0.98);
-        const repeatableRankFactor = sourceAcquisitionCadenceRankFactor(0);
-        results.push({
-            id: 'repeatable-acquisition-rank-adjustment-is-directional',
-            pass: oneShotRankFactor < 0.50 && repeatableRankFactor === 1,
-            oneShotRankFactor,
-            repeatableRankFactor
-        });
-    } catch (error) {
-        results.push({ id: 'mechanic-family-contrast-regressions', pass: false, error: error?.message || String(error) });
-    }
-
-    // A draw-step reference is phase/timing text, not card draw. At the same time, a real draw
-    // action elsewhere on the card must remain scoreable even if its text also names the draw step.
-    try {
-        const drawStepText = 'Skip your draw step.';
-        const drawStepEffects = parseMTGEffect(drawStepText);
-        const drawStepProfile = buildUniversalMechanicProfile(null, drawStepText, drawStepEffects);
-        const falselyParsedAsDraw = drawStepEffects.some(effect => effect?.action === 'draw' || effect?.canonical?.function === 'card_draw') ||
-            drawStepProfile.actions.has('draw') || drawStepProfile.parsedActions.has('draw') || drawStepProfile.canonicalFunctions.has('card_draw');
-        results.push({ id: 'draw-step-is-not-card-draw', pass: !falselyParsedAsDraw, falselyParsedAsDraw });
-
-        const mixedText = 'Skip your draw step. At the beginning of your upkeep, draw a card.';
-        const mixedEffects = parseMTGEffect(mixedText);
-        const preservesRealDraw = mixedEffects.some(effect => effect?.action === 'draw' || effect?.canonical?.function === 'card_draw');
-        results.push({ id: 'real-draw-is-preserved-alongside-draw-step-reference', pass: preservesRealDraw, preservesRealDraw });
-    } catch (error) {
-        results.push({ id: 'draw-step-vs-card-draw-regression', pass: false, error: error?.message || String(error) });
-    }
     const passed = results.filter(r => r.pass).length;
     const summary = { passed, total: results.length, passRate: results.length ? passed / results.length : 1, results };
     if (log) {
@@ -12073,252 +10342,6 @@ function runManaSearchMechanicalRegressionSuite({ log = true } = {}) {
 
 // Available for development/benchmark diagnostics without changing the public UI.
 try { window.runManaSearchMechanicalRegressionSuite = runManaSearchMechanicalRegressionSuite; } catch (_) {}
-
-// V74: curated real-card benchmark. The fixture corpus lives in tests/fixtures/ so card additions
-// do not require editing production logic. CI passes that offline fixture into this diagnostic and
-// exercises the same parser, repeatability annotator, profile builder, and scorer used by searches.
-// The benchmark is opt-in and has no cost during normal site usage.
-function runManaSearchRealCardBenchmarkSuite({ benchmark = null, log = true } = {}) {
-    // Console-friendly behavior: when called without an explicit fixture, load the same static
-    // fixture as runManaSearchRealCardBenchmark(). Returning that Promise makes
-    // `await runManaSearchRealCardBenchmarkSuite()` safe and avoids a misleading 0/0 report.
-    // CI may still pass { benchmark: fixture } to run the scorer synchronously and offline.
-    if (benchmark == null) {
-        return runManaSearchRealCardBenchmarkFromConsole({ log });
-    }
-    const cards = Array.isArray(benchmark?.cards) ? benchmark.cards : [];
-    const pairs = Array.isArray(benchmark?.pairs) ? benchmark.pairs : [];
-    const byId = new Map(cards.map(card => [String(card.id || ''), card]));
-    const parsedById = new Map();
-    const cardChecks = [];
-    const pairChecks = [];
-
-    for (const card of cards) {
-        try {
-            const oracle = String(card.oracle_text || '');
-            const rawEffects = parseMTGEffect(oracle);
-            const effects = annotateEffectRepeatability(card, rawEffects, oracle);
-            const profile = buildUniversalMechanicProfile(card, oracle, effects);
-            const graph = buildMechanicalEffectGraph(card, oracle, effects);
-            const functions = [...new Set((effects || []).flatMap(effect => [
-                effect?.canonical?.function,
-                effect?.function,
-                effect?.action
-            ]).map(value => String(value || '').trim()).filter(Boolean))].sort();
-            const entry = { card, oracle, rawEffects, effects, profile, graph, functions };
-            parsedById.set(card.id, entry);
-            const pass = oracle.trim().length > 0 && effects.length > 0;
-            cardChecks.push({
-                id: `card-parses:${card.id}`,
-                pass,
-                card: card.name,
-                sourceUrl: card.source_url || '',
-                parsedEffectCount: effects.length,
-                recognizedFunctions: functions,
-                expectedFamilies: card.families || []
-            });
-        } catch (error) {
-            cardChecks.push({ id: `card-parses:${card.id}`, pass: false, card: card.name, sourceUrl: card.source_url || '', error: error?.message || String(error) });
-        }
-    }
-
-    for (const test of pairs) {
-        const a = byId.get(test.a), b = byId.get(test.b);
-        const parsedA = parsedById.get(test.a), parsedB = parsedById.get(test.b);
-        if (!a || !b || !parsedA || !parsedB) {
-            pairChecks.push({ id: test.id, pass: false, error: `missing or unparsed card fixture: ${test.a} / ${test.b}` });
-            continue;
-        }
-        try {
-            const detail = calculateMechanicalSimilarityDetailed(parsedA.effects, parsedB.effects, parsedA.profile, parsedB.profile);
-            const score = Number(detail?.score);
-            const expectation = test.expect || {};
-            const failures = [];
-            if (!Number.isFinite(score) || score < 0 || score > 1) failures.push('score-not-finite-or-out-of-range');
-            if (expectation.minScore != null && score < Number(expectation.minScore)) failures.push(`score-below-min:${expectation.minScore}`);
-            if (expectation.maxScore != null && score > Number(expectation.maxScore)) failures.push(`score-above-max:${expectation.maxScore}`);
-            if (expectation.contrastKind && detail?.explicitContrast?.kind !== expectation.contrastKind) failures.push(`contrast-mismatch:${expectation.contrastKind}`);
-            pairChecks.push({
-                id: test.id,
-                category: test.category || 'uncategorized',
-                a: a.name,
-                b: b.name,
-                purpose: test.purpose || '',
-                sourceUrls: [a.source_url || '', b.source_url || ''],
-                score: Number.isFinite(score) ? Number(score.toFixed(4)) : null,
-                rawScore: Number.isFinite(Number(detail?.rawScore)) ? Number(Number(detail.rawScore).toFixed(4)) : null,
-                repeatabilityMismatch: Number(detail?.repeatabilityMismatch) || 0,
-                contrast: detail?.explicitContrast || null,
-                expectation,
-                failures,
-                pass: failures.length === 0
-            });
-        } catch (error) {
-            pairChecks.push({ id: test.id, category: test.category || 'uncategorized', a: a.name, b: b.name, pass: false, error: error?.message || String(error) });
-        }
-    }
-
-    // Relative checks keep thresholds meaningful when scores shift slightly after parser changes.
-    // They verify ranking preferences rather than freezing every score to a brittle exact value.
-    const resultByPairId = new Map(pairChecks.map(result => [result.id, result]));
-    for (const test of pairs) {
-        const result = resultByPairId.get(test.id);
-        const expectation = test.expect || {};
-        const relations = [];
-        if (expectation.scoreAbove) relations.push({ targetId: expectation.scoreAbove, shouldBeAbove: true });
-        for (const targetId of (expectation.scoreAboveAny || [])) relations.push({ targetId, shouldBeAbove: true });
-        if (expectation.scoreBelow) relations.push({ targetId: expectation.scoreBelow, shouldBeAbove: false });
-        for (const relation of relations) {
-            const other = resultByPairId.get(relation.targetId);
-            if (!result) continue;
-            const passed = Boolean(other && Number.isFinite(result.score) && Number.isFinite(other.score) &&
-                (relation.shouldBeAbove ? result.score > other.score : result.score < other.score));
-            result.rankingRelations = result.rankingRelations || [];
-            result.rankingRelations.push({ targetId: relation.targetId, relation: relation.shouldBeAbove ? 'above' : 'below', targetScore: other?.score ?? null, pass: passed });
-            if (!passed) {
-                result.failures = result.failures || [];
-                result.failures.push(`ranking-relation-failed:${relation.shouldBeAbove ? 'above' : 'below'}:${relation.targetId}`);
-                result.pass = false;
-            }
-        }
-    }
-
-    const coverage = [...new Set(pairs.map(pair => pair.category || 'uncategorized'))].sort();
-    const requiredCoverage = Array.isArray(benchmark?.requiredCoverage) ? benchmark.requiredCoverage : [];
-    const missingCoverage = requiredCoverage.filter(category => !coverage.includes(category));
-    const results = [...cardChecks, ...pairChecks];
-    const failed = results.filter(result => !result.pass);
-    const report = {
-        pass: failed.length === 0 && missingCoverage.length === 0 && cards.length >= 20 && pairs.length >= 15,
-        passed: results.length - failed.length,
-        total: results.length,
-        cardCount: cards.length,
-        pairCount: pairs.length,
-        categories: coverage,
-        missingCoverage,
-        failures: failed.map(result => ({ id: result.id, error: result.error || result.failures?.join(', ') || 'failed' })),
-        cardChecks,
-        pairChecks
-    };
-    if (log) {
-        console.groupCollapsed(`[ManaSearch] Real-card mechanical benchmark: ${report.passed}/${report.total} checks passed`);
-        console.log('Coverage:', { cards: report.cardCount, pairs: report.pairCount, categories: report.categories, missingCoverage });
-        for (const result of results) console.log(`${result.pass ? 'PASS' : 'FAIL'} ${result.id}`, result);
-        console.groupEnd();
-    }
-    return report;
-}
-try { window.runManaSearchRealCardBenchmarkSuite = runManaSearchRealCardBenchmarkSuite; } catch (_) {}
-
-// No-argument browser-console entry point for the offline, real-card benchmark. The fixture is
-// deployed as a static JSON file alongside ManaSearch, so this runs entirely in the visitor's
-// browser and needs no custom backend, paid API, or Scryfall requests.
-async function runManaSearchRealCardBenchmarkFromConsole({ log = true, benchmark = null } = {}) {
-    let fixture = benchmark;
-    if (!fixture) {
-        const fixtureUrl = new URL('tests/fixtures/mtg-mechanical-benchmark.json', import.meta.url);
-        try {
-            const { value } = await fetchStaticAsset(fixtureUrl.toString(), { cache: 'no-store' }, {
-                label: 'Real-card mechanical benchmark fixture', timeoutMs: 20000, responseType: 'json'
-            });
-            fixture = value;
-        } catch (error) {
-            throw new Error(`Could not load the benchmark fixture. Confirm the Pages workflow deployed tests/fixtures/mtg-mechanical-benchmark.json. ${error?.message || error}`);
-        }
-    }
-    const report = runManaSearchRealCardBenchmarkSuite({ benchmark: fixture, log });
-    if (log) {
-        console.info('[ManaSearch] Run complete. Inspect the returned report for cardChecks, pairChecks, score expectations and failures.', {
-            pass: report.pass, passed: report.passed, total: report.total,
-            cardCount: report.cardCount, pairCount: report.pairCount,
-            categories: report.categories, failures: report.failures
-        });
-    }
-    return report;
-}
-try { window.runManaSearchRealCardBenchmark = runManaSearchRealCardBenchmarkFromConsole; } catch (_) {}
-
-// Reproducible microbenchmark over the real production parser, repeatability annotator, universal
-// mechanic profiles, and mechanical pair scorer. It intentionally does not launch a network search
-// or mutate UI state, so CI can measure scorer regressions deterministically without Scryfall.
-function runManaSearchPerformanceSuite({ iterations = 12, maxDurationMs = 15000, log = true } = {}) {
-    const fixtures = [
-        [
-            { name: 'Rhystic Study', type_line: 'Enchantment', oracle_text: 'Whenever an opponent casts a spell, you may draw a card unless that player pays {1}.' },
-            { name: 'Chronicler of Heroes', type_line: 'Creature — Centaur Wizard', oracle_text: 'When Chronicler of Heroes enters the battlefield, draw a card if you control a creature with a +1/+1 counter on it.' }
-        ],
-        [
-            { name: 'Upkeep Engine', type_line: 'Enchantment', oracle_text: 'At the beginning of your upkeep, draw a card.' },
-            { name: 'End Step Engine', type_line: 'Enchantment', oracle_text: 'At the beginning of your end step, draw a card.' }
-        ],
-        [
-            { name: 'Blink', type_line: 'Instant', oracle_text: "Exile target creature, then return that card to the battlefield under its owner's control." },
-            { name: 'Exile Removal', type_line: 'Instant', oracle_text: 'Exile target creature.' }
-        ],
-        [
-            { name: 'Token Multiplier', type_line: 'Enchantment', oracle_text: 'If an effect would create one or more tokens under your control, it creates twice that many of those tokens instead.' },
-            { name: 'Token Maker', type_line: 'Sorcery', oracle_text: 'Create two 1/1 white Soldier creature tokens.' }
-        ],
-        [
-            { name: 'Choice Rock', type_line: 'Artifact', oracle_text: '{T}: Add {R}, {G}, or {W}.' },
-            { name: 'Three Mana Rock', type_line: 'Artifact', oracle_text: '{T}: Add {R}{G}{W}.' }
-        ],
-        [
-            { name: 'Counterspell', type_line: 'Instant', oracle_text: 'Counter target spell.' },
-            { name: 'Negate', type_line: 'Instant', oracle_text: 'Counter target noncreature spell.' }
-        ],
-        [
-            { name: 'Phyrexian Arena', type_line: 'Enchantment', oracle_text: 'At the beginning of your upkeep, you draw a card and you lose 1 life.' },
-            { name: 'Divination', type_line: 'Sorcery', oracle_text: 'Draw two cards.' }
-        ]
-    ];
-    const timed = [];
-    const errors = [];
-    let comparisons = 0;
-    let finiteScores = true;
-    const runPair = ([cardA, cardB]) => {
-        const start = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
-        try {
-            const effectsA = annotateEffectRepeatability(cardA, parseMTGEffect(cardA.oracle_text), cardA.oracle_text);
-            const effectsB = annotateEffectRepeatability(cardB, parseMTGEffect(cardB.oracle_text), cardB.oracle_text);
-            const profileA = buildUniversalMechanicProfile(cardA, cardA.oracle_text, effectsA);
-            const profileB = buildUniversalMechanicProfile(cardB, cardB.oracle_text, effectsB);
-            const detail = calculateMechanicalSimilarityDetailed(effectsA, effectsB, profileA, profileB);
-            const score = Number(detail?.score);
-            if (!Number.isFinite(score) || score < 0 || score > 1) finiteScores = false;
-            comparisons++;
-        } catch (error) {
-            errors.push({ pair: `${cardA.name} / ${cardB.name}`, error: error?.message || String(error) });
-        }
-        const end = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
-        return end - start;
-    };
-    // Warm caches first so reported throughput reflects the normal repeat-search path. Keep warm-up
-    // separate from the measured loops; include parse/profile construction in every measured pair.
-    for (let i = 0; i < 2; i++) fixtures.forEach(runPair);
-    comparisons = 0;
-    const startedAt = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
-    for (let i = 0; i < Math.max(1, Math.min(100, Number(iterations) || 12)); i++) {
-        for (const fixture of fixtures) timed.push(runPair(fixture));
-    }
-    const endedAt = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
-    const elapsedMs = Math.max(0, endedAt - startedAt);
-    const sorted = timed.slice().sort((a, b) => a - b);
-    const p95Ms = sorted.length ? sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * 0.95))] : 0;
-    const report = {
-        pass: errors.length === 0 && finiteScores && comparisons === timed.length && elapsedMs <= maxDurationMs,
-        comparisons,
-        elapsedMs: Number(elapsedMs.toFixed(2)),
-        msPerComparison: Number((elapsedMs / Math.max(1, comparisons)).toFixed(3)),
-        p95PairMs: Number(p95Ms.toFixed(3)),
-        maxDurationMs,
-        finiteScores,
-        errors
-    };
-    if (log) console.info('[ManaSearch] Production mechanical-scoring performance:', report);
-    return report;
-}
-try { window.runManaSearchPerformanceSuite = runManaSearchPerformanceSuite; } catch (_) {}
 
 // V24: highlighted-mechanic isolation checks. These specifically guard against a common semantic
 // ranking failure: copying every keyword from a multi-mechanic source card into a short highlight.
@@ -12467,7 +10490,7 @@ function runManaSearchBenchmarkHighlightSuite({ log = true } = {}) {
 try { window.runManaSearchBenchmarkHighlightSuite = runManaSearchBenchmarkHighlightSuite; } catch (_) {}
 
 // Cache tag extraction to prevent running ~70 regex operations repeatedly per card
-function calculateCategoryScore(targetCard, tags, sourceCard = null, sourceEffects = null, precomputed = null) {
+function calculateCategoryScore(targetCard, tags, sourceCard = null, sourceEffects = null) {
     if (!targetCard) return 0;
     const sourceTags = new Set((tags || []).map(t => normalizeMechanicToken(t)).filter(Boolean));
     if (!sourceTags.size && !sourceCard) return 0;
@@ -12479,15 +10502,12 @@ function calculateCategoryScore(targetCard, tags, sourceCard = null, sourceEffec
     const targetText = strategicRoleCardText(targetCard);
     const sourceParsed = Array.isArray(sourceEffects) ? sourceEffects : (sourceCard?._parsedEffects || (sourceText ? parseMTGEffect(sourceText) : []));
     const targetParsed = targetCard._parsedEffects || parseMTGEffect(targetText);
-    // scoreCardBatch can supply these exact profiles so Category doesn't rebuild the same source
-    // profile for every candidate, nor rebuild a candidate profile/role already needed by Synergy.
-    // Other callers omit this argument and retain the original calculation path.
-    const sourceProfile = precomputed?.sourceProfile || buildUniversalMechanicProfile(sourceCard, sourceText, sourceParsed);
-    const targetProfile = precomputed?.targetProfile || buildUniversalMechanicProfile(targetCard, targetText, targetParsed);
+    const sourceProfile = buildUniversalMechanicProfile(sourceCard, sourceText, sourceParsed);
+    const targetProfile = buildUniversalMechanicProfile(targetCard, targetText, targetParsed);
     const universalScore = sourceCard ? calculateUniversalMechanicSimilarity(sourceProfile, targetProfile).score : 0;
 
-    const sourceRole = sourceCard ? (precomputed?.sourceRole || inferStrategicRoleProfile(sourceCard, sourceParsed, '')) : [];
-    const targetRole = precomputed?.targetRole || inferStrategicRoleProfile(targetCard, targetParsed, '');
+    const sourceRole = sourceCard ? inferStrategicRoleProfile(sourceCard, sourceParsed, sourceText) : [];
+    const targetRole = inferStrategicRoleProfile(targetCard, targetParsed, targetText);
     let roleScore = 0;
     for (const a of sourceRole) for (const b of targetRole) {
         if (a.role === b.role) roleScore = Math.max(roleScore, Math.sqrt(a.score * b.score));
@@ -12541,39 +10561,16 @@ async function pauseForUserIdle(initialDelayMs = 0, maxDelayMs = 2500) {
 }
 
 function backgroundAwareDelay(ms) {
-    const delay = Math.max(0, Number(ms) || 0);
     return new Promise(resolve => {
-        let settled = false;
-        let fallbackTimer = null;
-        let handler = null;
-        const finish = () => {
-            if (settled) return;
-            settled = true;
-            if (fallbackTimer !== null) clearTimeout(fallbackTimer);
-            if (handler && bgTimerWorker) {
-                try { bgTimerWorker.removeEventListener('message', handler); } catch (_) {}
+        const id = Math.random().toString();
+        const handler = (e) => {
+            if (e.data === id) {
+                bgTimerWorker.removeEventListener('message', handler);
+                resolve();
             }
-            resolve();
         };
-
-        // Reliable fallback for browsers that do not permit Blob Workers or if a worker exits
-        // after startup. Keep a watchdog even on the Worker path so no delay promise can hang.
-        fallbackTimer = setTimeout(finish, delay + (bgTimerWorker ? 300 : 0));
-        if (!bgTimerWorker) return;
-
-        const id = `mana-delay-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-        handler = event => { if (event.data === id) finish(); };
-        try {
-            bgTimerWorker.addEventListener('message', handler);
-            bgTimerWorker.postMessage({ id, ms: delay });
-        } catch (error) {
-            try { bgTimerWorker.removeEventListener('message', handler); } catch (_) {}
-            bgTimerWorker = null;
-            console.info('[ManaSearch] Background timer message failed; using timer fallback.', error?.message || error);
-            // Re-schedule at the intended delay if a message failed immediately.
-            if (fallbackTimer !== null) clearTimeout(fallbackTimer);
-            fallbackTimer = setTimeout(finish, delay);
-        }
+        bgTimerWorker.addEventListener('message', handler);
+        bgTimerWorker.postMessage({ id, ms });
     });
 }
 
@@ -12762,108 +10759,8 @@ function readConstraintFilters() {
         power: (document.getElementById('filter-power')?.value || '').trim(),
         toughness: (document.getElementById('filter-toughness')?.value || '').trim(),
         set: (document.getElementById('filter-set')?.value || '').trim(),
-        extraOracle: (document.getElementById('filter-extra-oracle')?.value || '').trim(),
-        constraintModes: Object.fromEntries(Array.from(document.querySelectorAll('[data-constraint-mode]')).map(el => [el.dataset.constraintMode, el.value === 'prefer' ? 'prefer' : 'hard']))
+        extraOracle: (document.getElementById('filter-extra-oracle')?.value || '').trim()
     };
-}
-
-/**
- * Fill only currently empty hard-constraint fields from the selected source card. This is an
- * explicit user action rather than an automatic side effect of choosing a source: constraints are
- * hard filters and silently copying them during source selection would hide valid alternatives.
- * Set/rarity/format/oracle filters are intentionally excluded because they are deck/context choices
- * rather than card characteristics that should usually transfer to similar cards.
- */
-function autofillEmptyConstraintsFromSource(source = currentSourceCard) {
-    if (!source) return { filled: [], skipped: ['No source card is selected'] };
-    const filled = [];
-    const skipped = [];
-    const isEmpty = id => {
-        const el = document.getElementById(id);
-        return !el || !String(el.value || '').trim();
-    };
-    const setInput = (id, value, label = id) => {
-        const el = document.getElementById(id);
-        const text = String(value ?? '').trim();
-        if (!el || !text || !isEmpty(id)) return false;
-        el.value = text;
-        el.dispatchEvent(new Event('input', { bubbles: true }));
-        if (el.tagName === 'SELECT') el.dispatchEvent(new Event('change', { bubbles: true }));
-        filled.push(label);
-        return true;
-    };
-    const setList = (id, values, label) => {
-        const el = document.getElementById(id);
-        const clean = [...new Set((Array.isArray(values) ? values : []).map(v => String(v || '').trim().toLowerCase()).filter(Boolean))];
-        if (!el || !clean.length || !isEmpty(id)) return false;
-        el.value = clean.join('|');
-        el.dispatchEvent(new Event('input', { bubbles: true }));
-        const chips = document.getElementById(`${id}-chips`);
-        if (chips) syncConstraintChipField(id, `${id}-chips`);
-        filled.push(label);
-        return true;
-    };
-
-    // The active type line shown in the Source Card panel is authoritative and avoids combining
-    // unrelated front/back types on transforming or modal double-faced cards.
-    const typeLine = String(source.card_faces?.[0]?.type_line || (source === currentSourceCard ? sourceCardType?.textContent : '') || source.type_line || '').trim();
-    const typeParts = getTypeLineParts(typeLine);
-    const typeTokens = new Set(['artifact', 'battle', 'conspiracy', 'creature', 'dungeon', 'enchantment', 'instant', 'kindred', 'land', 'phenomenon', 'plane', 'planeswalker', 'scheme', 'sorcery', 'tribal', 'vanguard']);
-    const supertypeTokens = new Set(['basic', 'legendary', 'ongoing', 'snow', 'world']);
-    const leftTokens = String(typeParts.left || '').toLowerCase().split(/\s+/).filter(Boolean);
-    const types = leftTokens.filter(token => typeTokens.has(token));
-    const supertypes = leftTokens.filter(token => supertypeTokens.has(token));
-    setList('filter-type', types, 'card types');
-    setList('filter-supertype', supertypes, 'supertypes');
-    // Keep the entire subtype sequence as one phrase. This safely supports multiword subtypes
-    // (e.g. Time Lord) and avoids guessing where a multiword subtype ends and another begins.
-    const subtypePhrase = String(typeParts.subtypes || '').trim().replace(/\s+/g, ' ');
-    if (subtypePhrase) setList('filter-subtype', [subtypePhrase], 'subtypes');
-
-    const keywords = Array.isArray(source.keywords) ? source.keywords : [];
-    setList('filter-keyword', keywords, 'keywords');
-
-    const identity = Array.isArray(source.color_identity)
-        ? source.color_identity.map(color => String(color).toLowerCase()).filter(color => 'wubrg'.includes(color)).sort().join('')
-        : '';
-    if (Array.isArray(source.color_identity) && isEmpty('filter-identity')) {
-        setInput('filter-identity', identity || 'c', 'color identity');
-    }
-
-    const colors = Array.isArray(source.colors)
-        ? source.colors.map(color => String(color).toLowerCase()).filter(color => 'wubrg'.includes(color)).sort().join('')
-        : '';
-    if (Array.isArray(source.colors) && isEmpty('filter-colors')) setInput('filter-colors', colors || 'c', 'exact colors');
-
-    const rarity = String(source.rarity || '').toLowerCase();
-    if (['common', 'uncommon', 'rare', 'mythic'].includes(rarity) && isEmpty('filter-rarity')) {
-        setInput('filter-rarity', rarity, 'rarity');
-    }
-    const setCode = String(source.set || '').trim().toLowerCase();
-    if (/^[a-z0-9]{2,3}$/.test(setCode) && isEmpty('filter-set')) setInput('filter-set', setCode, 'set code');
-
-    const cmc = Number(source.cmc ?? source.mana_value);
-    if (Number.isFinite(cmc) && cmc >= 0 && isEmpty('filter-cmc')) setInput('filter-cmc', String(cmc), 'mana value');
-    const activeFace = Array.isArray(source.card_faces) ? source.card_faces[0] : null;
-    const numericConstraint = value => {
-        const text = String(value ?? '').trim();
-        return /^-?\d+(?:\.\d+)?$/.test(text) ? text : '';
-    };
-    const power = numericConstraint(source.power ?? activeFace?.power);
-    const toughness = numericConstraint(source.toughness ?? activeFace?.toughness);
-    if (power) setInput('filter-power', power, 'power');
-    if (toughness) setInput('filter-toughness', toughness, 'toughness');
-
-    const button = document.getElementById('autofill-source-constraints-btn');
-    const status = document.getElementById('constraint-autofill-status');
-    if (status) {
-        status.textContent = filled.length
-            ? `Filled empty fields from ${source.name}: ${filled.join(', ')}. These are hard filters; remove any that should not limit the search.`
-            : `No empty constraint fields could be filled from ${source.name}. Existing values were left unchanged.`;
-        status.classList.remove('hidden');
-    }
-    if (button) button.title = `Fill empty constraints using ${source.name}`;
-    return { filled, skipped };
 }
 
 function hasActiveConstraintFilters(filters) {
@@ -12882,17 +10779,16 @@ function escapeScryfallValue(value) {
 
 function buildScryfallConstraintParts(filters) {
     const parts = [];
-    const hard = key => filters?.constraintModes?.[key] !== 'prefer';
-    if (hard('types')) (filters?.types || []).forEach(type => parts.push(`type:${escapeScryfallValue(type)}`));
+    (filters?.types || []).forEach(type => parts.push(`type:${escapeScryfallValue(type)}`));
     // Supertypes such as legendary are searchable through Scryfall's type: syntax.
     (filters?.supertypes || []).forEach(supertype => parts.push(`type:${escapeScryfallValue(supertype)}`));
-    (filters?.subtypes || []).forEach(subtype => parts.push(`subtype:"${escapeScryfallValue(subtype)}"`));
+    (filters?.subtypes || []).forEach(subtype => parts.push(`subtype:${escapeScryfallValue(subtype)}`));
     (filters?.keywords || []).forEach(keyword => parts.push(`keyword:"${escapeScryfallValue(keyword)}"`));
     if (filters?.format) parts.push(`f:${filters.format}`);
     if (filters?.rarity) parts.push(`r:${filters.rarity}`);
-    if (filters?.identity && hard('identity')) parts.push(`identity:${filters.identity}`);
-    if (filters?.colors && hard('colors')) parts.push(`c:${filters.colors}`);
-    const cmcQuery = hard('cmc') ? comparisonFilterToScryfallQuery('cmc', parseComparisonFilter(filters?.cmc)) : null;
+    if (filters?.identity) parts.push(`identity:${filters.identity}`);
+    if (filters?.colors) parts.push(`c:${filters.colors}`);
+    const cmcQuery = comparisonFilterToScryfallQuery('cmc', parseComparisonFilter(filters?.cmc));
     if (cmcQuery) parts.push(cmcQuery);
     const powerQuery = comparisonFilterToScryfallQuery('pow', parseComparisonFilter(filters?.power));
     if (powerQuery) parts.push(powerQuery);
@@ -13003,7 +10899,7 @@ function explainFilterFailures(card, filters, broadFallbackFilters) {
     if (filters.rarity && (card.rarity || '').toLowerCase() !== filters.rarity.toLowerCase()) {
         failures.push({ field: 'rarity', expected: filters.rarity, actual: card.rarity || '(none)' });
     }
-    if (filters.identity && hard('identity')) {
+    if (filters.identity) {
         const allowed = filters.identity.toLowerCase().replace(/[^wubrgc]/g, '').split('');
         const cardIdentity = (card.color_identity || []).map(c => c.toLowerCase());
         const offenders = cardIdentity.filter(c => !allowed.includes(c));
@@ -13011,13 +10907,12 @@ function explainFilterFailures(card, filters, broadFallbackFilters) {
             failures.push({ field: 'identity', expected: `within {${allowed.join('')}}`, actual: `{${cardIdentity.join('')}}` });
         }
     }
-    if (filters.colors && hard('colors')) {
+    if (filters.colors) {
         const required = filters.colors.toLowerCase().replace(/[^wubrgc]/g, '').split('').sort().join('');
         const actual = (card.colors || []).map(c => c.toLowerCase()).sort().join('');
-        const exactColorlessMatch = required === 'c' && actual === '';
-        if (!exactColorlessMatch && actual !== required) failures.push({ field: 'colors', expected: `{${required}}`, actual: actual ? `{${actual}}` : '{colorless}' });
+        if (actual !== required) failures.push({ field: 'colors', expected: `{${required}}`, actual: `{${actual}}` });
     }
-    if (filters.cmc && hard('cmc')) {
+    if (filters.cmc) {
         const cmcFilter = parseComparisonFilter(filters.cmc);
         if (!cmcFilter) {
             failures.push({ field: 'cmc', expected: `a valid comparison (e.g. "3", "<=2", ">4")`, actual: filters.cmc });
@@ -13068,8 +10963,7 @@ function matchesActiveFilters(card, filters, broadFallbackFilters) {
     if (!card) return false;
 
     const typeLineParts = getTypeLineParts(card);
-    const hard = key => filters?.constraintModes?.[key] !== 'prefer';
-    if (hard('types') && (filters.types || []).some(type => !hasTypeLineToken(typeLineParts.left, type))) return false;
+    if ((filters.types || []).some(type => !hasTypeLineToken(typeLineParts.left, type))) return false;
     if ((filters.supertypes || []).some(supertype => !hasTypeLineToken(typeLineParts.left, supertype))) return false;
     if ((filters.subtypes || []).some(subtype => !hasTypeLineToken(typeLineParts.subtypes, subtype))) return false;
     if ((filters.keywords || []).some(keyword => !cardHasKeyword(card, keyword))) return false;
@@ -13095,10 +10989,7 @@ function matchesActiveFilters(card, filters, broadFallbackFilters) {
     if (filters.colors) {
         const requiredColors = filters.colors.toLowerCase().replace(/[^wubrgc]/g, '').split('').sort().join('');
         const cardColors = (card.colors || []).map(c => c.toLowerCase()).sort().join('');
-        // In Exact Colors, C means exactly colorless. It must not be treated as a fifth/sixth
-        // colored pip because Scryfall's card.colors array represents colorless as an empty array.
-        const matchesColorless = requiredColors === 'c' && cardColors === '';
-        if (!matchesColorless && cardColors !== requiredColors) return false;
+        if (cardColors !== requiredColors) return false;
     }
 
     if (filters.cmc) {
@@ -13144,33 +11035,6 @@ function matchesActiveFilters(card, filters, broadFallbackFilters) {
     }
 
     return true;
-}
-
-function calculateConstraintPreferenceBonus(card, filters) {
-    const modes = filters?.constraintModes || {};
-    const checks = [];
-    if (modes.types === 'prefer' && (filters.types || []).length) {
-        const left = getTypeLineParts(card).left;
-        checks.push((filters.types || []).every(type => hasTypeLineToken(left, type)));
-    }
-    if (modes.identity === 'prefer' && filters.identity) {
-        const allowed = String(filters.identity).toLowerCase().replace(/[^wubrgc]/g, '').split('');
-        const identity = (card.color_identity || []).map(c => String(c).toLowerCase());
-        checks.push(identity.every(c => allowed.includes(c)));
-    }
-    if (modes.colors === 'prefer' && filters.colors) {
-        const wanted = String(filters.colors).toLowerCase().replace(/[^wubrgc]/g, '').split('').sort().join('');
-        const actual = (card.colors || []).map(c => String(c).toLowerCase()).sort().join('');
-        checks.push(wanted === 'c' ? actual === '' : actual === wanted);
-    }
-    if (modes.cmc === 'prefer' && filters.cmc) {
-        const parsed = parseComparisonFilter(filters.cmc);
-        checks.push(Boolean(parsed && matchesComparisonFilter(card.cmc, parsed)));
-    }
-    if (!checks.length) return 0;
-    // Preferences never exclude results. Each satisfied preference contributes a small bounded
-    // bonus (up to +0.06 overall) so mechanics remain the primary ranking signal.
-    return Math.min(0.06, checks.filter(Boolean).length * 0.015);
 }
 
 // Simple bound on cache growth: an unbounded Map here would leak memory across a long
@@ -13602,10 +11466,7 @@ function scryfallThrottledFetch(url, options = {}) {
 }
 // ------------------------------------------------------------------------------------------
 
-async function fetchScryfallSearch(query, maxPagesOverride = MIN_SEARCH_PAGES, searchLabel = "Search", expectedSearchRequestId = null) {
-    // Capture the initiating search before the first await. Callers that themselves awaited before
-    // reaching this fallback may pass their original ID explicitly, so late pages still cancel.
-    const owningSearchRequestId = Number.isFinite(expectedSearchRequestId) ? expectedSearchRequestId : searchRequestId;
+async function fetchScryfallSearch(query, maxPagesOverride = MIN_SEARCH_PAGES, searchLabel = "Search") {
     const depthInput = parseFloat(document.getElementById('filter-depth-percent')?.value);
     const rawDepth = (!isNaN(depthInput) && depthInput > 0) ? depthInput : DEFAULT_SEARCH_DEPTH_PERCENT;
     const depthPercent = Math.max(1, Math.min(MAX_SEARCH_DEPTH_PERCENT, rawDepth));
@@ -13632,7 +11493,6 @@ async function fetchScryfallSearch(query, maxPagesOverride = MIN_SEARCH_PAGES, s
     let bailedAfterRetries = false;
 
     while (hasMore && url) {
-        if (owningSearchRequestId !== searchRequestId) return [];
         let response;
         try {
             // Goes through the shared, rate-limited queue (see above) instead of calling
@@ -13644,11 +11504,7 @@ async function fetchScryfallSearch(query, maxPagesOverride = MIN_SEARCH_PAGES, s
                     'Accept': 'application/json'
                 }
             });
-            if (owningSearchRequestId !== searchRequestId) return [];
         } catch (networkErr) {
-            // A late failure from a superseded search is not a current API failure and must not
-            // surface a stale cooldown notice over the newer run.
-            if (owningSearchRequestId !== searchRequestId) return [];
             // Browser-side CORS failures can hide an HTTP 429 as TypeError/ERR_FAILED. The shared
             // queue treats that as a client-wide circuit-breaker event, so this stream stops and
             // preserves its already-retrieved pages. Locally-generated circuit errors are handled
@@ -13664,7 +11520,6 @@ async function fetchScryfallSearch(query, maxPagesOverride = MIN_SEARCH_PAGES, s
         if (response.status === 200) {
             rateLimitRetries = 0;
             const data = await response.json();
-            if (owningSearchRequestId !== searchRequestId) return [];
             
             if (pagesFetched === 0) {
                 totalCardsForQuery = data.total_cards || 0;
@@ -13689,11 +11544,9 @@ async function fetchScryfallSearch(query, maxPagesOverride = MIN_SEARCH_PAGES, s
             pagesFetched++;
             
             const pageProgressMessage = `${pagesFetched}/${maxPages} pages searched`;
-            const mayReportProgress = owningSearchRequestId === searchRequestId;
-            if (mayReportProgress && typeof activeSearchStreamProgressReporter === 'function') {
-                activeSearchStreamProgressReporter({ label: searchLabel, message: pageProgressMessage, kind: 'progress', ownerRequestId: owningSearchRequestId });
-            } else if (mayReportProgress && activeMainSearchRequestId === owningSearchRequestId &&
-                activeResultView.mode === 'main' && activeResultView.requestId === owningSearchRequestId) {
+            if (typeof activeSearchStreamProgressReporter === 'function') {
+                activeSearchStreamProgressReporter({ label: searchLabel, message: pageProgressMessage, kind: 'progress' });
+            } else {
                 updateProgress(null, null, `[${searchLabel}] ${pageProgressMessage}...`);
             }
             if (pagesFetched >= maxPages) break;
@@ -13753,10 +11606,9 @@ async function fetchScryfallSearch(query, maxPagesOverride = MIN_SEARCH_PAGES, s
             }
             const backoffMs = Math.min(1000 * 2 ** rateLimitRetries, 15000);
             const retryMessage = `API error (${response.status}) — retry ${rateLimitRetries}/${MAX_RATE_LIMIT_RETRIES}`;
-            if (owningSearchRequestId === searchRequestId && typeof activeSearchStreamProgressReporter === 'function') {
-                activeSearchStreamProgressReporter({ label: searchLabel, message: retryMessage, kind: 'error', ownerRequestId: owningSearchRequestId });
-            } else if (owningSearchRequestId === searchRequestId && activeMainSearchRequestId === owningSearchRequestId &&
-                activeResultView.mode === 'main' && activeResultView.requestId === owningSearchRequestId) {
+            if (typeof activeSearchStreamProgressReporter === 'function') {
+                activeSearchStreamProgressReporter({ label: searchLabel, message: retryMessage, kind: 'error' });
+            } else {
                 updateProgress(null, null, `[${searchLabel}] ${retryMessage}...`);
             }
             await backgroundAwareDelay(backoffMs);
@@ -14022,43 +11874,8 @@ let semanticCosineBaselineReady = false;
 const STATIC_CARD_CORPUS_FILENAME = 'cards.bin';
 const STATIC_CARD_CORPUS_VERSION = 1;
 const STATIC_CARD_CORPUS_MAGIC = 'MSCARD1G';
-const STATIC_CARD_CORPUS_CACHE_VERSION = '20261015-79';
+const STATIC_CARD_CORPUS_CACHE_VERSION = '20261009-27';
 const STATIC_DATA_META_FILENAME = 'static-data-meta.json';
-
-// A failed/stalled static asset request must not leave the initial search status spinning forever.
-// The deadline covers both response headers and consuming the response body (including the large
-// cards.bin / semantic-index.bin downloads). This is only a timeout/retry wrapper; assets still come
-// from the static site and are parsed locally in the visitor's browser.
-async function fetchStaticAsset(url, options = {}, {
-    label = 'Static search asset',
-    timeoutMs = 60000,
-    responseType = 'arrayBuffer'
-} = {}) {
-    if (typeof AbortController !== 'function') {
-        const response = await fetch(url, options);
-        if (!response.ok) throw new Error(`${label} download failed (${response.status}).`);
-        const value = responseType === 'json' ? await response.json() : await response.arrayBuffer();
-        return { response, value };
-    }
-
-    const controller = new AbortController();
-    let timedOut = false;
-    const timeoutId = setTimeout(() => {
-        timedOut = true;
-        try { controller.abort(); } catch (_) {}
-    }, Math.max(1000, Number(timeoutMs) || 60000));
-    try {
-        const response = await fetch(url, { ...options, signal: controller.signal });
-        if (!response.ok) throw new Error(`${label} download failed (${response.status}).`);
-        const value = responseType === 'json' ? await response.json() : await response.arrayBuffer();
-        return { response, value };
-    } catch (error) {
-        if (timedOut) throw new Error(`${label} request timed out after ${Math.round(timeoutMs / 1000)} seconds.`);
-        throw error;
-    } finally {
-        clearTimeout(timeoutId);
-    }
-}
 let staticDataMetaPromise = null;
 let staticDataBuildId = null;
 let staticDataBuildCacheKey = null;
@@ -14135,8 +11952,7 @@ function updateStaticSearchStatus(message = null) {
         if (staticSearchStatusSpinner) staticSearchStatusSpinner.classList.add('hidden');
         if (staticSearchRetryBtn) staticSearchRetryBtn.classList.add('hidden');
     } else if (failed) {
-        const failureDetail = String(staticSearchResourceState.lastError || '').trim();
-        staticSearchStatusText.textContent = message || `Search data could not be loaded after 3 attempts. Find Similar Cards is disabled.${failureDetail ? ` Details: ${failureDetail}` : ''}`;
+        staticSearchStatusText.textContent = message || 'Search data could not be loaded after 3 attempts. Find Similar Cards is disabled.';
         staticSearchStatus.classList.add('is-error');
         if (staticSearchStatusSpinner) staticSearchStatusSpinner.classList.add('hidden');
         if (staticSearchRetryBtn) staticSearchRetryBtn.classList.remove('hidden');
@@ -14273,20 +12089,9 @@ async function loadStaticSearchResources({ forceRetry = false } = {}) {
     return staticSearchResourcesPromise;
 }
 
-function getStaticAssetsBaseUrl() {
-    // Resolve data next to this module, not relative to the current address bar URL. On a
-    // project GitHub Pages site, opening `/manasearch` without the trailing slash can otherwise
-    // resolve `cards.bin` against the account root instead of `/manasearch/` on some browsers.
-    try {
-        return new URL('.', import.meta.url);
-    } catch (_) {
-        return new URL('.', document.baseURI || window.location.href);
-    }
-}
-
 function getStaticDataMetaUrl() {
     try {
-        const url = new URL(STATIC_DATA_META_FILENAME, getStaticAssetsBaseUrl());
+        const url = new URL(STATIC_DATA_META_FILENAME, document.baseURI || window.location.href);
         // Metadata is tiny and must be revalidated so newly generated static assets receive
         // a fresh cache key without requiring an app.js deployment.
         url.searchParams.set('v', `${STATIC_CARD_CORPUS_CACHE_VERSION}-meta`);
@@ -14301,11 +12106,13 @@ async function loadStaticDataMetadata() {
     if (staticDataMetaPromise) return staticDataMetaPromise;
     staticDataMetaPromise = (async () => {
         try {
-            const { value: metadata } = await fetchStaticAsset(getStaticDataMetaUrl(), {
+            const response = await fetch(getStaticDataMetaUrl(), {
                 method: 'GET',
                 cache: 'no-store',
                 headers: { 'Accept': 'application/json,*/*;q=0.8' }
-            }, { label: 'Static data metadata', timeoutMs: 20000, responseType: 'json' });
+            });
+            if (!response.ok) throw new Error(`Static data metadata download failed (${response.status}).`);
+            const metadata = await response.json();
             const key = String(metadata?.build_id || '').trim();
             if (!key) throw new Error('Static data metadata does not contain a build_id.');
             staticDataBuildId = key;
@@ -14329,7 +12136,7 @@ function getStaticAssetCacheKey() {
 
 function getStaticCardCorpusUrl(retryAttempt = 0) {
     try {
-        const url = new URL(STATIC_CARD_CORPUS_FILENAME, getStaticAssetsBaseUrl());
+        const url = new URL(STATIC_CARD_CORPUS_FILENAME, document.baseURI || window.location.href);
         url.searchParams.set('v', getStaticAssetCacheKey());
         if (retryAttempt > 1) url.searchParams.set('retry', String(retryAttempt));
         return url.href;
@@ -14365,164 +12172,12 @@ function prepareStaticCardRecord(card) {
     return { ...card, _localSearchText: searchText, _localNameKey: normalizeCardNameForIdentity(card.name) };
 }
 
-// Decode cards.bin incrementally. The compressed file is only ~13 MB, but its JSON expands to
-// ~100 MB. Building one giant JSON string + JSON.parse() temporarily duplicates that payload and
-// can exceed the memory limit of mobile browser tabs. This parser processes one card object at a
-// time, keeping the same card records and lexical index while avoiding that large transient heap.
-async function* decompressStaticCardCorpusChunks(buffer, payloadBytes) {
-    const compressed = new Uint8Array(buffer, 24, payloadBytes);
-    if (typeof window.DecompressionStream === 'function' && typeof ReadableStream !== 'undefined') {
-        let offset = 0;
-        const compressedStream = new ReadableStream({
-            pull(controller) {
-                if (offset >= compressed.length) {
-                    controller.close();
-                    return;
-                }
-                const end = Math.min(offset + 64 * 1024, compressed.length);
-                controller.enqueue(compressed.subarray(offset, end));
-                offset = end;
-            }
-        });
-        let reader;
-        try {
-            reader = compressedStream.pipeThrough(new window.DecompressionStream('gzip')).getReader();
-            const decoder = new TextDecoder();
-            while (true) {
-                const { value, done } = await reader.read();
-                if (done) break;
-                const text = decoder.decode(value, { stream: true });
-                if (text) yield text;
-            }
-            const finalText = decoder.decode();
-            if (finalText) yield finalText;
-            return;
-        } catch (error) {
-            throw new Error(`Could not decompress cards.bin using the browser's gzip decoder: ${error?.message || error}`);
-        } finally {
-            try { reader?.releaseLock(); } catch (_) {}
-        }
-    }
-
-    // Older mobile Safari/WebViews do not expose DecompressionStream. A small bundled pako
-    // fallback keeps the exact same gzip asset usable without requiring a separate 100 MB JSON
-    // download or a third-party CDN at runtime.
-    const pakoApi = window.pako;
-    if (pakoApi?.Inflate) {
-        const inflater = new pakoApi.Inflate({ to: 'string' });
-        let output = [];
-        inflater.onData = chunk => { if (chunk) output.push(chunk); };
-        const chunkBytes = 24 * 1024;
-        for (let offset = 0; offset < compressed.length; offset += chunkBytes) {
-            const end = Math.min(offset + chunkBytes, compressed.length);
-            inflater.push(compressed.subarray(offset, end), end >= compressed.length);
-            if (inflater.err) throw new Error(`Could not decompress cards.bin (fallback decoder): ${inflater.msg || inflater.err}`);
-            if (output.length) {
-                const ready = output;
-                output = [];
-                for (const text of ready) yield text;
-            }
-            if ((offset & 0x3ffff) === 0) await yieldForManaSearchResponsiveness();
-        }
-        if (!inflater.ended) throw new Error('The cards.bin gzip stream ended unexpectedly.');
-        if (output.length) for (const text of output) yield text;
-        return;
-    }
-    throw new Error('This browser lacks built-in gzip streaming and the bundled fallback decoder did not load. Reload the page or update your browser.');
-}
-
-async function buildStaticCardCorpusIndex(cards, { version, payloadBuildId, expectedBuildId, byteLength }) {
-    if (!cards.length) throw new Error('Static card corpus contains no usable cards.');
-
-    // Build the local lexical index once, after cards.bin has been decoded. Use a packed Uint32
-    // posting array instead of Map<string, Set<number>>. Work is still split into short slices.
-    let buildSliceStartedAt = getManaResponsivenessNow();
-    const tokenCounts = new Map();
-    for (let cardIndex = 0; cardIndex < cards.length; cardIndex++) {
-        const tokens = getLocalCorpusIndexTokens(cards[cardIndex]?._localSearchText || '');
-        for (const token of tokens) tokenCounts.set(token, (tokenCounts.get(token) || 0) + 1);
-        if ((cardIndex & 7) === 7) {
-            const now = getManaResponsivenessNow();
-            if (now - buildSliceStartedAt >= getManaSearchSliceBudgetMs()) {
-                await yieldForManaSearchResponsiveness();
-                buildSliceStartedAt = getManaResponsivenessNow();
-            }
-        }
-    }
-    let postingCount = 0;
-    const tokenIndex = new Map();
-    let tokenOps = 0;
-    buildSliceStartedAt = getManaResponsivenessNow();
-    for (const [token, count] of tokenCounts) {
-        tokenIndex.set(token, { offset: postingCount, length: count });
-        postingCount += count;
-        tokenOps++;
-        if ((tokenOps & 255) === 0) {
-            const now = getManaResponsivenessNow();
-            if (now - buildSliceStartedAt >= getManaSearchSliceBudgetMs()) {
-                await yieldForManaSearchResponsiveness();
-                buildSliceStartedAt = getManaResponsivenessNow();
-            }
-        }
-    }
-    const postingData = new Uint32Array(postingCount);
-    const tokenWriteOffsets = new Map();
-    tokenOps = 0;
-    buildSliceStartedAt = getManaResponsivenessNow();
-    for (const [token, meta] of tokenIndex) {
-        tokenWriteOffsets.set(token, meta.offset);
-        tokenOps++;
-        if ((tokenOps & 255) === 0) {
-            const now = getManaResponsivenessNow();
-            if (now - buildSliceStartedAt >= getManaSearchSliceBudgetMs()) {
-                await yieldForManaSearchResponsiveness();
-                buildSliceStartedAt = getManaResponsivenessNow();
-            }
-        }
-    }
-    buildSliceStartedAt = getManaResponsivenessNow();
-    for (let cardIndex = 0; cardIndex < cards.length; cardIndex++) {
-        const tokens = getLocalCorpusIndexTokens(cards[cardIndex]?._localSearchText || '');
-        for (const token of tokens) {
-            const writeAt = tokenWriteOffsets.get(token);
-            if (writeAt == null) continue;
-            postingData[writeAt] = cardIndex;
-            tokenWriteOffsets.set(token, writeAt + 1);
-        }
-        if ((cardIndex & 7) === 7) {
-            const now = getManaResponsivenessNow();
-            if (now - buildSliceStartedAt >= getManaSearchSliceBudgetMs()) {
-                await yieldForManaSearchResponsiveness();
-                buildSliceStartedAt = getManaResponsivenessNow();
-            }
-        }
-    }
-    const byName = new Map();
-    buildSliceStartedAt = getManaResponsivenessNow();
-    for (let cardIndex = 0; cardIndex < cards.length; cardIndex++) {
-        const card = cards[cardIndex];
-        byName.set(normalizeCardNameForIdentity(card.name), card);
-        if ((cardIndex & 7) === 7) {
-            const now = getManaResponsivenessNow();
-            if (now - buildSliceStartedAt >= getManaSearchSliceBudgetMs()) {
-                await yieldForManaSearchResponsiveness();
-                buildSliceStartedAt = getManaResponsivenessNow();
-            }
-        }
-    }
-    return {
-        source: 'static', version, buildId: payloadBuildId || expectedBuildId || null,
-        total: cards.length, cards, byName, tokenIndex, postingData,
-        indexedPostingCount: postingCount, byteLength
-    };
-}
-
-async function parseStaticCardCorpusBinary(buffer) {
+function parseStaticCardCorpusBinary(buffer) {
     if (!(buffer instanceof ArrayBuffer) || buffer.byteLength < 24) {
         throw new Error('Static card corpus is too small or empty.');
     }
-    const bytes = new Uint8Array(buffer, 0, 8);
-    const magic = new TextDecoder().decode(bytes);
+    const bytes = new Uint8Array(buffer);
+    const magic = new TextDecoder().decode(bytes.subarray(0, 8));
     if (magic !== STATIC_CARD_CORPUS_MAGIC) throw new Error('Static card corpus has an unknown format.');
     const view = new DataView(buffer);
     const version = view.getUint32(8, true);
@@ -14530,115 +12185,135 @@ async function parseStaticCardCorpusBinary(buffer) {
     const declaredCount = view.getUint32(16, true);
     if (version !== STATIC_CARD_CORPUS_VERSION) throw new Error(`Static card corpus version ${version} is not supported.`);
     if (!payloadBytes || 24 + payloadBytes > buffer.byteLength) throw new Error('Static card corpus payload is truncated.');
-    if (24 + payloadBytes !== buffer.byteLength) throw new Error('Static card corpus contains unexpected trailing bytes.');
 
-    const cards = [];
-    let sourceCardCount = 0;
-    let payloadBuildId = '';
-    let prefix = '';
-    let foundCardsArray = false;
-    let cardsArrayClosed = false;
-    let inCard = false;
-    let depth = 0;
-    let inString = false;
-    let escaped = false;
-    let currentCardParts = [];
-    let sliceStartedAt = getManaResponsivenessNow();
-
-    const parseCardObject = raw => {
-        let sourceCard;
-        try { sourceCard = JSON.parse(raw); }
-        catch (error) { throw new Error(`cards.bin contains an invalid card record near item ${sourceCardCount + 1}: ${error?.message || error}`); }
-        sourceCardCount++;
-        const card = prepareStaticCardRecord(sourceCard);
-        if (card) cards.push(card);
-    };
-
-    for await (let text of decompressStaticCardCorpusChunks(buffer, payloadBytes)) {
-        if (!foundCardsArray) {
-            prefix += text;
-            const marker = /"cards"\s*:\s*\[/.exec(prefix);
-            if (!marker) {
-                if (prefix.length > 1024 * 1024) throw new Error('cards.bin JSON header is unexpectedly large or missing the cards array.');
-                continue;
-            }
-            const buildMatch = /"build_id"\s*:\s*("(?:\\.|[^"\\])*")/.exec(prefix.slice(0, marker.index));
-            if (buildMatch) {
-                try { payloadBuildId = String(JSON.parse(buildMatch[1]) || '').trim(); } catch (_) { payloadBuildId = ''; }
-            }
-            const expectedBuildId = staticDataBuildId || '';
-            if (expectedBuildId && payloadBuildId && payloadBuildId !== expectedBuildId) {
-                throw new Error('Static card corpus build ID does not match static-data-meta.json.');
-            }
-            text = prefix.slice(marker.index + marker[0].length);
-            prefix = '';
-            foundCardsArray = true;
+    const compressed = buffer.slice(24, 24 + payloadBytes);
+    return (async () => {
+        if (!('DecompressionStream' in window)) {
+            throw new Error('This browser does not support gzip decompression for the static card corpus.');
         }
-        if (cardsArrayClosed) continue;
-
-        let i = 0;
-        let segmentStart = inCard ? 0 : -1;
-        while (i < text.length) {
-            if (!inCard) {
-                const ch = text[i];
-                if (ch === ' ' || ch === '\n' || ch === '\r' || ch === '\t' || ch === ',') { i++; continue; }
-                if (ch === ']') { cardsArrayClosed = true; i++; break; }
-                if (ch !== '{') throw new Error(`cards.bin card array is malformed near item ${sourceCardCount + 1}.`);
-                inCard = true;
-                depth = 1;
-                inString = false;
-                escaped = false;
-                segmentStart = i;
-                i++;
-                continue;
-            }
-
-            const ch = text[i];
-            if (inString) {
-                if (escaped) escaped = false;
-                else if (ch === '\\') escaped = true;
-                else if (ch === '"') inString = false;
-            } else {
-                if (ch === '"') inString = true;
-                else if (ch === '{') depth++;
-                else if (ch === '}') {
-                    depth--;
-                    if (depth === 0) {
-                        currentCardParts.push(text.slice(segmentStart, i + 1));
-                        parseCardObject(currentCardParts.join(''));
-                        currentCardParts = [];
-                        inCard = false;
-                        segmentStart = -1;
-                        i++;
-                        if ((sourceCardCount & 7) === 0) {
-                            const now = getManaResponsivenessNow();
-                            if (now - sliceStartedAt >= getManaSearchSliceBudgetMs()) {
-                                await yieldForManaSearchResponsiveness();
-                                sliceStartedAt = getManaResponsivenessNow();
-                            }
-                        }
-                        continue;
-                    }
+        const stream = new Blob([compressed]).stream().pipeThrough(new DecompressionStream('gzip'));
+        const decompressed = await new Response(stream).arrayBuffer();
+        const json = new TextDecoder().decode(new Uint8Array(decompressed));
+        // Let pending input/paint tasks run before the one-shot JSON.parse operation. Everything
+        // after parsing is processed cooperatively in short, time-budgeted slices below.
+        await yieldForManaSearchResponsiveness();
+        const payload = JSON.parse(json);
+        const sourceCards = Array.isArray(payload) ? payload : payload?.cards;
+        if (!Array.isArray(sourceCards) || !sourceCards.length) throw new Error('Static card corpus contains no cards.');
+        if (declaredCount && sourceCards.length !== declaredCount) {
+            throw new Error(`Static card corpus count mismatch (${sourceCards.length} vs ${declaredCount}).`);
+        }
+        const payloadBuildId = String(payload?.build_id || '').trim();
+        const expectedBuildId = staticDataBuildId || '';
+        if (expectedBuildId && payloadBuildId && payloadBuildId !== expectedBuildId) {
+            throw new Error('Static card corpus build ID does not match static-data-meta.json.');
+        }
+        const cards = [];
+        let buildSliceStartedAt = getManaResponsivenessNow();
+        for (let sourceIndex = 0; sourceIndex < sourceCards.length; sourceIndex++) {
+            const card = prepareStaticCardRecord(sourceCards[sourceIndex]);
+            if (card) cards.push(card);
+            if ((sourceIndex & 7) === 7) {
+                const now = getManaResponsivenessNow();
+                if (now - buildSliceStartedAt >= getManaSearchSliceBudgetMs()) {
+                    await yieldForManaSearchResponsiveness();
+                    buildSliceStartedAt = getManaResponsivenessNow();
                 }
             }
-            i++;
         }
-        if (inCard && segmentStart >= 0) {
-            currentCardParts.push(text.slice(segmentStart));
+        if (!cards.length) throw new Error('Static card corpus contains no usable cards.');
+
+        // Build the local lexical index once, after cards.bin has been decoded. Use a packed
+        // Uint32 posting array instead of Map<string, Set<number>>. Every pass yields by elapsed
+        // time, so indexing all ~35k cards does not monopolize the UI while input or scroll events
+        // are waiting to be handled.
+        const tokenCounts = new Map();
+        buildSliceStartedAt = getManaResponsivenessNow();
+        for (let cardIndex = 0; cardIndex < cards.length; cardIndex++) {
+            const tokens = getLocalCorpusIndexTokens(cards[cardIndex]?._localSearchText || '');
+            for (const token of tokens) tokenCounts.set(token, (tokenCounts.get(token) || 0) + 1);
+            if ((cardIndex & 7) === 7) {
+                const now = getManaResponsivenessNow();
+                if (now - buildSliceStartedAt >= getManaSearchSliceBudgetMs()) {
+                    await yieldForManaSearchResponsiveness();
+                    buildSliceStartedAt = getManaResponsivenessNow();
+                }
+            }
         }
-    }
-
-    if (!foundCardsArray) throw new Error('cards.bin JSON does not contain a cards array.');
-    if (inCard) throw new Error('cards.bin ended in the middle of a card record.');
-    if (!cardsArrayClosed) throw new Error('cards.bin cards array is truncated.');
-    if (declaredCount && sourceCardCount !== declaredCount) {
-        throw new Error(`Static card corpus count mismatch (${sourceCardCount} vs ${declaredCount}).`);
-    }
-    if (!cards.length) throw new Error('Static card corpus contains no usable cards.');
-
-    return buildStaticCardCorpusIndex(cards, {
-        version, payloadBuildId, expectedBuildId: staticDataBuildId || '', byteLength: buffer.byteLength
-    });
+        let postingCount = 0;
+        const tokenIndex = new Map();
+        let tokenOps = 0;
+        buildSliceStartedAt = getManaResponsivenessNow();
+        for (const [token, count] of tokenCounts) {
+            tokenIndex.set(token, { offset: postingCount, length: count });
+            postingCount += count;
+            tokenOps++;
+            if ((tokenOps & 255) === 0) {
+                const now = getManaResponsivenessNow();
+                if (now - buildSliceStartedAt >= getManaSearchSliceBudgetMs()) {
+                    await yieldForManaSearchResponsiveness();
+                    buildSliceStartedAt = getManaResponsivenessNow();
+                }
+            }
+        }
+        const postingData = new Uint32Array(postingCount);
+        const tokenWriteOffsets = new Map();
+        tokenOps = 0;
+        buildSliceStartedAt = getManaResponsivenessNow();
+        for (const [token, meta] of tokenIndex) {
+            tokenWriteOffsets.set(token, meta.offset);
+            tokenOps++;
+            if ((tokenOps & 255) === 0) {
+                const now = getManaResponsivenessNow();
+                if (now - buildSliceStartedAt >= getManaSearchSliceBudgetMs()) {
+                    await yieldForManaSearchResponsiveness();
+                    buildSliceStartedAt = getManaResponsivenessNow();
+                }
+            }
+        }
+        buildSliceStartedAt = getManaResponsivenessNow();
+        for (let cardIndex = 0; cardIndex < cards.length; cardIndex++) {
+            const tokens = getLocalCorpusIndexTokens(cards[cardIndex]?._localSearchText || '');
+            for (const token of tokens) {
+                const writeAt = tokenWriteOffsets.get(token);
+                if (writeAt == null) continue;
+                postingData[writeAt] = cardIndex;
+                tokenWriteOffsets.set(token, writeAt + 1);
+            }
+            if ((cardIndex & 7) === 7) {
+                const now = getManaResponsivenessNow();
+                if (now - buildSliceStartedAt >= getManaSearchSliceBudgetMs()) {
+                    await yieldForManaSearchResponsiveness();
+                    buildSliceStartedAt = getManaResponsivenessNow();
+                }
+            }
+        }
+        const byName = new Map();
+        buildSliceStartedAt = getManaResponsivenessNow();
+        for (let cardIndex = 0; cardIndex < cards.length; cardIndex++) {
+            const card = cards[cardIndex];
+            byName.set(normalizeCardNameForIdentity(card.name), card);
+            if ((cardIndex & 7) === 7) {
+                const now = getManaResponsivenessNow();
+                if (now - buildSliceStartedAt >= getManaSearchSliceBudgetMs()) {
+                    await yieldForManaSearchResponsiveness();
+                    buildSliceStartedAt = getManaResponsivenessNow();
+                }
+            }
+        }
+        return {
+            source: 'static',
+            version,
+            buildId: payloadBuildId || expectedBuildId || null,
+            total: cards.length,
+            cards,
+            byName,
+            tokenIndex,
+            postingData,
+            indexedPostingCount: postingCount,
+            byteLength: buffer.byteLength
+        };
+    })();
 }
 
 async function loadStaticCardCorpus({ retryAttempt = 1 } = {}) {
@@ -14649,11 +12324,13 @@ async function loadStaticCardCorpus({ retryAttempt = 1 } = {}) {
         // Without this await, a newly generated cards.bin could be requested under the
         // old compatibility cache key while semantic-index.bin correctly used the new one.
         await loadStaticDataMetadata();
-        const { value: buffer } = await fetchStaticAsset(getStaticCardCorpusUrl(retryAttempt), {
+        const response = await fetch(getStaticCardCorpusUrl(retryAttempt), {
             method: 'GET',
             cache: retryAttempt > 1 ? 'no-store' : 'force-cache',
             headers: { 'Accept': 'application/octet-stream,*/*;q=0.8' }
-        }, { label: 'Static card corpus (cards.bin)', timeoutMs: 60000, responseType: 'arrayBuffer' });
+        });
+        if (!response.ok) throw new Error(`Static card corpus download failed (${response.status}).`);
+        const buffer = await response.arrayBuffer();
         const corpus = await runWhenIdle(() => parseStaticCardCorpusBinary(buffer), { timeout: 3500 });
         staticCardCorpusMemory = corpus;
         console.info(`Precomputed card corpus loaded: ${corpus.total.toLocaleString()} cards.`);
@@ -14712,10 +12389,8 @@ async function searchStaticCardCorpus(queryText, options = {}) {
     // events until an entire large chunk has been scanned. Time budgets adapt to current UI focus.
     const cards = corpus.cards;
     const useFilters = Boolean(options.filters && hasActiveConstraintFilters(options.filters));
-    const isCancelled = typeof options.isCancelled === 'function' ? options.isCancelled : null;
     let scanSliceStartedAt = getManaResponsivenessNow();
     for (let i = 0; i < cards.length; i++) {
-        if ((i & 7) === 0) throwIfSearchCancelled(isCancelled);
         const card = cards[i];
         if (card?.name && (card._localNameKey || normalizeCardNameForIdentity(card.name)) !== excludeKey &&
             !(options.highlights && options.highlights.length && !matchesExactHighlightConstraints(card, options.highlights)) &&
@@ -14799,7 +12474,7 @@ async function searchStaticCardCorpusAlternatives(queries, options = {}) {
     const previousContext = activeLocalCorpusBatchContext;
     let temporaryContext = null;
     if (!activeLocalCorpusBatchContext?.corpus?.cards?.length) {
-        temporaryContext = createLocalCorpusBatchContext(staticCardCorpusMemory, options.isCancelled || null);
+        temporaryContext = createLocalCorpusBatchContext(staticCardCorpusMemory);
         activeLocalCorpusBatchContext = temporaryContext;
     }
 
@@ -14830,10 +12505,9 @@ function getDepthScaledLocalLimit(requestedLimit, depthPercent = getCurrentSearc
     return Math.max(12, Math.min(1200, Math.round(base * scale)));
 }
 
-function createLocalCorpusBatchContext(corpus = staticCardCorpusMemory, isCancelled = null) {
+function createLocalCorpusBatchContext(corpus = staticCardCorpusMemory) {
     return {
         corpus,
-        isCancelled: typeof isCancelled === 'function' ? isCancelled : null,
         requests: [],
         promise: null,
         results: new Map(),
@@ -14868,8 +12542,6 @@ async function runLocalCorpusBatch(context) {
     const ctx = context;
     const corpus = ctx?.corpus;
     if (!ctx || !corpus?.cards?.length) return new Map();
-    const assertBatchCurrent = () => throwIfSearchCancelled(ctx.isCancelled);
-    assertBatchCurrent();
 
     // V20: every request is assigned a stable state index. This avoids requestStates.indexOf(state)
     // inside the hot candidate loop and, more importantly, keeps the empty-posting fallback local
@@ -14901,8 +12573,7 @@ async function runLocalCorpusBatch(context) {
                         state.candidateIndexes.add(cardIndex);
                         globalCandidateIndexes.add(cardIndex);
                         indexBuildOps++;
-                        if ((indexBuildOps & 255) === 0) {
-                            assertBatchCurrent();
+                        if ((indexBuildOps & 2047) === 0) {
                             const now = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
                             if (now - indexBuildSliceStartedAt >= getManaSearchSliceBudgetMs()) {
                                 await yieldForManaSearchResponsiveness();
@@ -14940,8 +12611,7 @@ async function runLocalCorpusBatch(context) {
             if (!list) statesByCard.set(cardIndex, list = []);
             list.push(state);
             statesBuildOps++;
-            if ((statesBuildOps & 255) === 0) {
-                assertBatchCurrent();
+            if ((statesBuildOps & 2047) === 0) {
                 const now = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
                 if (now - statesBuildSliceStartedAt >= getManaSearchSliceBudgetMs()) {
                     await yieldForManaSearchResponsiveness();
@@ -14951,17 +12621,7 @@ async function runLocalCorpusBatch(context) {
         }
     }
 
-    let candidateSliceStartedAt = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
     for (let candidatePosition = 0; candidatePosition < candidates.length; candidatePosition++) {
-        if ((candidatePosition & 31) === 0) {
-            assertBatchCurrent();
-            const now = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
-            if (now - candidateSliceStartedAt >= getManaSearchSliceBudgetMs() || isManaUiInteractionPriorityActive()) {
-                await yieldForManaSearchResponsiveness();
-                assertBatchCurrent();
-                candidateSliceStartedAt = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
-            }
-        }
         const cardIndex = candidates[candidatePosition];
         const card = corpus.cards[cardIndex];
         if (!card?.name) continue;
@@ -14990,11 +12650,15 @@ async function runLocalCorpusBatch(context) {
             }
         }
 
+        if (candidatePosition + 1 < candidates.length && (
+            candidatePosition % 1400 === 1399 ||
+            (isManaUiInteractionPriorityActive() && candidatePosition % 24 === 23)
+        )) {
+            await yieldForManaSearchResponsiveness();
+        }
     }
 
-    assertBatchCurrent();
     for (const state of requestStates) {
-        assertBatchCurrent();
         state.hits.sort((a, b) => b.score - a.score || String(a.card.name).localeCompare(String(b.card.name)));
         const merged = new Map();
         for (const hit of state.hits.slice(0, state.cap)) {
@@ -15095,36 +12759,26 @@ async function retrieveLocalFirst(localQueries, fallbackQuery, options = {}) {
         broadFallbackFilters = null,
         highlights
     } = options;
-    // Snapshot before the first await: a new source/search should stop this retrieval lane even
-    // if cards.bin was still resolving when the lane was launched.
-    const owningSearchRequestId = Number.isFinite(options.searchRequestId) ? options.searchRequestId : searchRequestId;
-    const isCancelled = typeof options.isCancelled === 'function'
-        ? options.isCancelled
-        : () => owningSearchRequestId !== searchRequestId;
-    if (isCancelled()) return [];
     const corpus = staticCardCorpusMemory || await loadStaticCardCorpus();
-    if (isCancelled()) return [];
     if (corpus?.cards?.length) {
         const unified = requestUnifiedLocalCorpusSearch(localQueries, fallbackQuery, {
-            label, limit, excludeName, filters, broadFallbackFilters, highlights,
-            isCancelled
+            label, limit, excludeName, filters, broadFallbackFilters, highlights
         });
         if (unified) return unified;
         const queries = (Array.isArray(localQueries) ? localQueries : [localQueries])
             .map(q => String(q || '').trim()).filter(Boolean);
-        const results = await searchStaticCardCorpusAlternatives(queries, { limit, excludeName, filters, broadFallbackFilters, highlights, isCancelled });
+        const results = await searchStaticCardCorpusAlternatives(queries, { limit, excludeName, filters, broadFallbackFilters, highlights });
         return decorateLocalCoverage(results, label, queries.join(' | '));
     }
     if (!fallbackQuery) return decorateLocalCoverage([], label, '[local corpus unavailable]');
-    if (isCancelled()) return [];
-    return fetchScryfallSearch(fallbackQuery, fallbackMaxPages, `${label} (Scryfall fallback)`, owningSearchRequestId);
+    return fetchScryfallSearch(fallbackQuery, fallbackMaxPages, `${label} (Scryfall fallback)`);
 }
 
 const FULL_SEMANTIC_INDEX_SEARCH_LIMIT = 96;
 const STATIC_SEMANTIC_INDEX_FILENAME = 'semantic-index.bin';
 const STATIC_SEMANTIC_INDEX_VERSION = 1;
 const STATIC_SEMANTIC_INDEX_MAGIC = 'MSIDX1';
-const STATIC_SEMANTIC_INDEX_CACHE_VERSION = '20261015-79';
+const STATIC_SEMANTIC_INDEX_CACHE_VERSION = '20261008-8';
 let staticSemanticIndexPromise = null;
 let staticSemanticIndexAttempted = false;
 let staticSemanticIndexLoadError = null;
@@ -15134,7 +12788,7 @@ let fullSemanticIndexUnavailableReason = null;
 
 function getStaticSemanticIndexUrl(retryAttempt = 0) {
     try {
-        const url = new URL(STATIC_SEMANTIC_INDEX_FILENAME, getStaticAssetsBaseUrl());
+        const url = new URL(STATIC_SEMANTIC_INDEX_FILENAME, document.baseURI || window.location.href);
         url.searchParams.set('v', getStaticAssetCacheKey());
         if (retryAttempt > 1) url.searchParams.set('retry', String(retryAttempt));
         return url.href;
@@ -15226,11 +12880,15 @@ async function loadStaticSemanticIndex({ retryAttempt = 1 } = {}) {
     staticSemanticIndexPromise = (async () => {
         await loadStaticDataMetadata();
         const url = getStaticSemanticIndexUrl(retryAttempt);
-        const { value: buffer } = await fetchStaticAsset(url, {
+        const response = await fetch(url, {
             method: 'GET',
             cache: retryAttempt > 1 ? 'no-store' : 'force-cache',
             headers: { 'Accept': 'application/octet-stream,*/*;q=0.8' }
-        }, { label: 'Static semantic index (semantic-index.bin)', timeoutMs: 60000, responseType: 'arrayBuffer' });
+        });
+        if (!response.ok) {
+            throw new Error(`Static semantic index download failed (${response.status}).`);
+        }
+        const buffer = await response.arrayBuffer();
         const index = await runWhenIdle(() => parseStaticSemanticIndexBinary(buffer), { timeout: 3500 });
         index.staticUrl = url;
         index.byteLength = buffer.byteLength;
@@ -15543,8 +13201,6 @@ function getSemanticWorkerExcludeKey(excludeName) {
 
 async function findFullSemanticMatches(index, sourceVector, excludeName, limit = FULL_SEMANTIC_INDEX_SEARCH_LIMIT, minSimilarity = 0.42) {
     if (!index || !sourceVector) return [];
-    const owningSearchRequestId = searchRequestId;
-    const cancelled = () => owningSearchRequestId !== searchRequestId;
 
     // Benchmark-local corpora contain the full card payload in each chunk; the worker intentionally
     // transfers only names/ids/vectors, so keep benchmark queries on the main-thread fallback to
@@ -15554,7 +13210,6 @@ async function findFullSemanticMatches(index, sourceVector, excludeName, limit =
     try {
         if (benchmarkLocal) throw new Error('Benchmark-local corpus uses payload-preserving scan.');
         await runWhenIdle(() => ensureSemanticWorkerIndex(index), { timeout: 2500 });
-        if (cancelled()) return [];
         const queryVector = sourceVector instanceof Float32Array ? new Float32Array(sourceVector) : Float32Array.from(sourceVector);
         const results = await semanticWorkerRequest('query', {
             queryBuffer: queryVector.buffer,
@@ -15562,12 +13217,10 @@ async function findFullSemanticMatches(index, sourceVector, excludeName, limit =
             limit,
             minSimilarity,
             baseline: semanticCosineBaseline,
-            generation: owningSearchRequestId
+            generation: searchRequestId
         }, [queryVector.buffer]);
-        if (cancelled()) return [];
         return results || [];
     } catch (workerError) {
-        if (cancelled()) return [];
         if (!benchmarkLocal) console.info('Semantic worker unavailable; using yielding main-thread semantic scan where possible:', workerError?.message || workerError);
         const excludeKey = normalizeCardNameForIdentity(excludeName || '');
         const best = [];
@@ -15581,29 +13234,18 @@ async function findFullSemanticMatches(index, sourceVector, excludeName, limit =
                 best.length = keepCap;
             }
         };
-        let semanticScanSliceStartedAt = getManaResponsivenessNow();
         for (const chunk of index.chunks || []) {
-            if (cancelled()) throw createSearchCancellationError();
             if (!chunk?.vectors) continue;
             for (let i = 0; i < chunk.count; i++) {
-                if ((i & 15) === 0) {
-                    if (cancelled()) throw createSearchCancellationError();
-                    const now = getManaResponsivenessNow();
-                    if (now - semanticScanSliceStartedAt >= getManaSearchSliceBudgetMs() || isManaUiInteractionPriorityActive()) {
-                        await yieldForManaSearchResponsiveness();
-                        if (cancelled()) throw createSearchCancellationError();
-                        semanticScanSliceStartedAt = getManaResponsivenessNow();
-                    }
-                }
                 const name = chunk.names?.[i] || '';
                 if (!name || normalizeCardNameForIdentity(name) === excludeKey) continue;
                 const vector = chunk.vectors.subarray(i * index.dim, (i + 1) * index.dim);
                 const rawCos = approximateQuantizedCosine(sourceVector, vector, index.dim);
                 const calibrated = Math.max(0, Math.min(1, (rawCos - semanticCosineBaseline) / Math.max(0.05, 1 - semanticCosineBaseline)));
                 if (calibrated >= minSimilarity) pushBest({ name, id: chunk.ids?.[i] || null, card: chunk.cards?.[i] || null, similarity: calibrated });
+                if (isManaUiInteractionPriorityActive() && i % 24 === 23) await yieldForManaSearchResponsiveness();
             }
             await yieldForManaSearchResponsiveness();
-            if (cancelled()) throw createSearchCancellationError();
         }
         const sortedBest = await sortManaArrayResponsively(best, (a, b) => b.similarity - a.similarity);
         const seen = new Set();
@@ -15620,13 +13262,11 @@ async function findFullSemanticMatches(index, sourceVector, excludeName, limit =
 
 async function findFullSemanticExactMatches(index, highlights, excludeName, limit = 1024) {
     if (!index || !Array.isArray(highlights) || !highlights.length) return [];
-    const owningSearchRequestId = searchRequestId;
     const out = [];
     const excludeKey = normalizeCardNameForIdentity(excludeName || '');
     let sliceStartedAt = getManaResponsivenessNow();
     for (const chunk of index.chunks || []) {
         for (let i = 0; i < chunk.count; i++) {
-            if ((i & 31) === 0 && owningSearchRequestId !== searchRequestId) throw createSearchCancellationError();
             const card = chunk.cards?.[i];
             if (card?.name && normalizeCardNameForIdentity(card.name) !== excludeKey &&
                 matchesExactHighlightConstraints(card, highlights)) {
@@ -15793,7 +13433,7 @@ async function embedTextBatch(texts, extractor) {
     return vectors;
 }
 
-async function warmEmbeddingCache(texts, extractor, diagnostics, batchSize = 32, isCancelled = null) {
+async function warmEmbeddingCache(texts, extractor, diagnostics, batchSize = 32) {
     const unique = [...new Set(texts.filter(Boolean))].filter(t => !embeddingCache.has(t));
     // Length-bucket the inputs before batching. The feature-extraction pipeline pads each batch to
     // its longest input, so mixing a very long rules text with many short function summaries wastes
@@ -15803,11 +13443,11 @@ async function warmEmbeddingCache(texts, extractor, diagnostics, batchSize = 32,
     // above keeps padding efficient, while the adaptive caps below avoid large activation buffers
     // for long Oracle text. If the runtime still rejects a chunk, it is bisected recursively until
     // it succeeds, so larger batches do not compromise support for slower devices.
-    // Crucially, mere focus on an input is NOT active typing. During real keyboard edits, use
-    // singleton batches to minimize uninterrupted model work; immediately after other UI activity
-    // use smaller batches, while idle searches recover full batching throughput. Every batch yields.
+    // Crucially, mere focus on an input is NOT active typing: reducing to singleton batches whenever
+    // a field remained focused serialized hundreds of model calls during benchmarks. During real
+    // keyboard edits use 4 texts, and for immediately recent other UI activity use 8; idle scoring
+    // uses the size appropriate for the texts. Every batch still yields to the event loop.
     const embedChunkWithFallback = async (chunk) => {
-        throwIfSearchCancelled(isCancelled);
         try {
             const vectors = await embedTextBatch(chunk, extractor);
             chunk.forEach((t, idx) => {
@@ -15829,18 +13469,16 @@ async function warmEmbeddingCache(texts, extractor, diagnostics, batchSize = 32,
     };
     let i = 0;
     while (i < unique.length) {
-        throwIfSearchCancelled(isCancelled);
         const nextTextLength = String(unique[i] || '').length;
         const textBatchCap = nextTextLength > 1600 ? 4
             : (nextTextLength > 1000 ? 8 : (nextTextLength > 600 ? 16 : batchSize));
         const interactionBatchCap = isManaUserActivelyEditing()
-            ? 1
-            : (isManaUiInteractionRecentlyActive(250) ? 4 : batchSize);
+            ? 4
+            : (isManaUiInteractionRecentlyActive(250) ? 8 : batchSize);
         const effectiveBatchSize = Math.max(1, Math.min(batchSize, textBatchCap, interactionBatchCap));
         const chunk = unique.slice(i, i + effectiveBatchSize);
         i += chunk.length;
         await embedChunkWithFallback(chunk);
-        throwIfSearchCancelled(isCancelled);
         await yieldForManaSearchResponsiveness();
     }
 }
@@ -16104,12 +13742,6 @@ function lexicalTokenCoverage(sourceText, candidateText) {
     return pool.filter(t => candidateSet.has(t)).length / Math.max(1, pool.length);
 }
 function calculateCombinedFuzzyScore(sourceCard, targetCard, targetTextForScoring) {
-    // Variable-only benchmark highlights deliberately pass no literal text constraint. Avoid
-    // tokenizing the candidate's entire Oracle text just to rediscover that an empty query has no
-    // lexical coverage. This returns the exact same 2%-weighted name score as the general path.
-    if (!String(targetTextForScoring || '').trim()) {
-        return Math.max(0, Math.min(1, calculateFuzzySimilarity(sourceCard?.name, targetCard?.name) * 0.02));
-    }
     const targetOracle = targetCard.oracle_text || (targetCard.card_faces ? targetCard.card_faces.map(f => f.oracle_text).join(' ') : '');
     const textScore = calculateFuzzyTextMatch(targetTextForScoring, targetOracle);
     const lexicalCoverage = lexicalTokenCoverage(targetTextForScoring, targetOracle);
@@ -16334,8 +13966,8 @@ function calculateSynergyScore(sourceCard, targetCard, activeFilters = {}, preco
     // highlighted/partial scoring profile with the full source text used by the synergy channel.
     const sourceEffects = precomputed?.sourceEffects || (Array.isArray(sourceCard._parsedEffects) ? sourceCard._parsedEffects : parseMTGEffect(strategicRoleCardText(sourceCard)));
     const targetEffects = precomputed?.targetEffects || (Array.isArray(targetCard._parsedEffects) ? targetCard._parsedEffects : parseMTGEffect(strategicRoleCardText(targetCard)));
-    const sourceRoles = precomputed?.sourceRoles || inferStrategicRoleProfile(sourceCard, sourceEffects, '');
-    const targetRoles = precomputed?.targetRoles || inferStrategicRoleProfile(targetCard, targetEffects, '');
+    const sourceRoles = precomputed?.sourceRoles || inferStrategicRoleProfile(sourceCard, sourceEffects, strategicRoleCardText(sourceCard));
+    const targetRoles = precomputed?.targetRoles || inferStrategicRoleProfile(targetCard, targetEffects, strategicRoleCardText(targetCard));
     let roleSim = 0;
     for (const a of sourceRoles) for (const b of targetRoles) {
         if (a.role === b.role) roleSim = Math.max(roleSim, Math.sqrt(a.score * b.score));
@@ -16838,10 +14470,6 @@ function initApp() {
     searchBtn = document.getElementById('search-btn');
     sourceCardSection = document.getElementById('source-card-section');
     sourceCardOracle = document.getElementById('source-card-oracle');
-    sourceCardType = document.getElementById('source-card-type');
-    sourceCardImage = document.getElementById('source-card-image');
-    sourceCardFlipBtn = document.getElementById('source-card-flip-btn');
-    sourceCardPrice = document.getElementById('source-card-price');
     findSimilarBtn = document.getElementById('find-similar-btn');
     staticSearchStatus = document.getElementById('static-search-status');
     staticSearchStatusText = document.getElementById('static-search-status-text');
@@ -16859,7 +14487,6 @@ function initApp() {
     themeToggle = null;
     loadDisplayPreferences();
     applyPresentationPreferences();
-    installManaSearchIntentPanel();
 
     // --- PREFERENCES PANEL ---
     const preferencesBtn = document.getElementById('preferences-btn');
@@ -16869,8 +14496,6 @@ function initApp() {
     const resetPreferencesBtn = document.getElementById('reset-preferences-btn');
     const preferenceResultLimit = document.getElementById('preference-result-limit');
     const preferenceScoreBreakdown = document.getElementById('preference-score-breakdown');
-    const preferenceShowEdhrecButton = document.getElementById('preference-show-edhrec-button');
-    const preferenceShowSearchIntent = document.getElementById('preference-show-search-intent');
     const preferenceTheme = document.getElementById('preference-theme');
     const preferenceDensity = document.getElementById('preference-result-density');
     const preferenceReduceMotion = document.getElementById('preference-reduce-motion');
@@ -16881,8 +14506,6 @@ function initApp() {
     function syncPreferencesControls() {
         if (preferenceResultLimit) preferenceResultLimit.value = String(getDisplayedResultLimit());
         if (preferenceScoreBreakdown) preferenceScoreBreakdown.checked = Boolean(displayPreferences.showScoreBreakdown);
-        if (preferenceShowEdhrecButton) preferenceShowEdhrecButton.checked = displayPreferences.showEdhrecButton !== false;
-        if (preferenceShowSearchIntent) preferenceShowSearchIntent.checked = displayPreferences.showSearchIntent === true;
         if (preferenceTheme) preferenceTheme.value = (displayPreferences.theme === 'light' || displayPreferences.theme === 'dark') ? displayPreferences.theme : 'dark';
         if (preferenceDensity) preferenceDensity.value = displayPreferences.resultDensity || 'comfortable';
         if (preferenceReduceMotion) preferenceReduceMotion.checked = Boolean(displayPreferences.reduceMotion);
@@ -16896,8 +14519,6 @@ function initApp() {
         displayPreferences.maxResults = clampDisplayResultLimit(preferenceResultLimit?.value);
         if (displayPreferences.maxResults !== previousPageSize) currentResultsPage = 1;
         displayPreferences.showScoreBreakdown = preferenceScoreBreakdown?.checked !== false;
-        displayPreferences.showEdhrecButton = preferenceShowEdhrecButton?.checked !== false;
-        displayPreferences.showSearchIntent = preferenceShowSearchIntent?.checked === true;
         displayPreferences.theme = ['dark', 'light'].includes(preferenceTheme?.value) ? preferenceTheme.value : DEFAULT_DISPLAY_PREFERENCES.theme;
         displayPreferences.resultDensity = ['comfortable', 'compact'].includes(preferenceDensity?.value) ? preferenceDensity.value : DEFAULT_DISPLAY_PREFERENCES.resultDensity;
         displayPreferences.reduceMotion = Boolean(preferenceReduceMotion?.checked);
@@ -16905,14 +14526,10 @@ function initApp() {
         displayPreferences.includeDigitalCards = preferenceIncludeDigitalCards?.checked === true;
         displayPreferences.includeTokenEmblemFunnyCards = preferenceIncludeTokenEmblemFunny?.checked === true;
         saveDisplayPreferences();
-        // This preference only changes existing link visibility. Update live cards synchronously,
-        // even if the full result repaint below is deferred to protect UI responsiveness.
-        syncEdhrecCandidateButtonVisibility();
         try {
             localStorage.setItem(THEME_KEY, displayPreferences.theme);
         } catch (_) {}
         applyPresentationPreferences();
-        refreshManaSearchIntentPanel();
         if (resultsSection && !resultsSection.classList.contains('hidden') && Array.isArray(lastSearchResults)) {
             renderResults(lastSearchResults);
             updateResultsSummary();
@@ -17067,10 +14684,7 @@ function initApp() {
         balanced: 'Mechanical + Functional',
         synergy: 'Synergy',
         exactness: 'Exactness',
-        category: 'Category',
-        price: 'Price (lowest first)',
-        manaValue: 'Mana Value (lowest first)',
-        manaValueDesc: 'Mana Value (highest first)'
+        category: 'Category'
     };
     const validOrderRankings = new Set(Object.keys(orderLabels));
 
@@ -17112,12 +14726,6 @@ function initApp() {
         const selected = orderRadios.find(radio => radio.checked)?.value || 'overall';
         activeOrderFeatureFlags.matrix = Boolean(orderMatrixFeature?.checked);
         activeOrderFeatureFlags.diverse = Boolean(orderDiverseFeature?.checked);
-        if (['price', 'manaValue', 'manaValueDesc'].includes(selected)) {
-            activeOrderFeatureFlags.matrix = false;
-            activeOrderFeatureFlags.diverse = false;
-            if (orderMatrixFeature) orderMatrixFeature.checked = false;
-            if (orderDiverseFeature) orderDiverseFeature.checked = false;
-        }
 
         if (sortSelect && sortSelect.value !== selected) {
             sortSelect.value = selected;
@@ -17229,7 +14837,7 @@ function initApp() {
         closeModalBtn.setAttribute('role', 'button');
         closeModalBtn.setAttribute('tabindex', '0');
         closeModalBtn.setAttribute('aria-label', 'Close card comparison');
-        const closeCompare = () => { compareModal.classList.add('hidden'); compareQueue = []; syncCompareButtonFeedback(); };
+        const closeCompare = () => { compareModal.classList.add('hidden'); compareQueue = []; };
         closeModalBtn.addEventListener('click', closeCompare);
         closeModalBtn.addEventListener('keydown', (event) => {
             if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); closeCompare(); }
@@ -17265,25 +14873,22 @@ function initApp() {
         });
     }
 
-    const bindHighlightSelection = (root, field) => {
-        if (!root) return;
-        const handler = () => handleSourceTextSelection(root, field);
-        let touchFirst = false;
-        try { touchFirst = window.matchMedia('(hover: none), (pointer: coarse)').matches; } catch (_) {}
-        // Desktop selection commits naturally on mouseup. On touch devices, retain the native
-        // selection handles and let the explicit "Highlight selected…" action commit it. This
-        // avoids clearing an iOS/Android selection before the user has a chance to inspect it.
-        if (!touchFirst) root.addEventListener('mouseup', event => { if (event.button === 0) handler(); });
-        root.addEventListener('keyup', event => { if (event.shiftKey || event.key.startsWith('Arrow')) handler(); });
-    };
-    bindHighlightSelection(sourceCardOracle, 'oracle');
-    bindHighlightSelection(sourceCardType, 'type');
-    sourceCardFlipBtn?.addEventListener('click', flipCurrentSourceCardFace);
-    document.getElementById('related-use-highlights')?.addEventListener('change', event => {
-        includeSourceHighlightsInRelatedSearch = Boolean(event.target.checked);
-    });
-    installCardImageMagnifier();
-    installFeatureHelpPopovers();
+    if (sourceCardOracle) {
+        // Mouse, touch, and keyboard selection all end up in the same handler.  The mouse handler
+        // MUST only react to the primary (left) mouse button.  A generic `mouseup` listener also
+        // receives the middle-button release used by browser auto-scroll; re-rendering the Oracle
+        // from that event can interfere with the browser's native middle-click scroll state,
+        // especially while a search is replacing/rerendering the page.  Leaving button===1 alone
+        // lets the browser start/stop auto-scroll normally.
+        sourceCardOracle.addEventListener('mouseup', (event) => {
+            if (event.button !== 0) return;
+            handleOracleTextSelection();
+        });
+        sourceCardOracle.addEventListener('touchend', () => setTimeout(handleOracleTextSelection, 0));
+        sourceCardOracle.addEventListener('keyup', (event) => {
+            if (event.shiftKey || event.key.startsWith('Arrow')) handleOracleTextSelection();
+        });
+    }
 
     sourceCardSection?.classList.remove('hidden');
     sourceCardLoaded?.classList.toggle('hidden', !currentSourceCard);
@@ -17365,43 +14970,6 @@ function initApp() {
             cardConstraintsBadge.style.backgroundColor = 'var(--accent-color)';
         }
     }
-    const autofillSourceConstraintsBtn = document.getElementById('autofill-source-constraints-btn');
-    if (autofillSourceConstraintsBtn) {
-        autofillSourceConstraintsBtn.disabled = !currentSourceCard;
-        autofillSourceConstraintsBtn.addEventListener('click', () => {
-            const result = autofillEmptyConstraintsFromSource(currentSourceCard);
-            updateCardConstraintsBadge();
-            if (result.filled.length) {
-                // Dispatching hidden-field events updates badges and chip controls; synchronize
-                // color pips as well for programmatically populated WUBRG values.
-                document.querySelectorAll('.color-pip-group').forEach(group => {
-                    const input = document.getElementById(group.dataset.target);
-                    const active = String(input?.value || '').toLowerCase().split('');
-                    group.querySelectorAll('.color-pip').forEach(pip => pip.classList.toggle('active', active.includes(pip.dataset.color)));
-                });
-            }
-        });
-    }
-    const clearAllConstraintsBtn = document.getElementById('clear-all-constraints-btn');
-    if (clearAllConstraintsBtn) clearAllConstraintsBtn.addEventListener('click', () => {
-        const ids = ['filter-type', 'filter-supertype', 'filter-subtype', 'filter-keyword', 'filter-format', 'filter-rarity', 'filter-identity', 'filter-colors', 'filter-cmc', 'filter-power', 'filter-toughness', 'filter-set', 'filter-extra-oracle'];
-        for (const id of ids) {
-            const el = document.getElementById(id);
-            if (!el) continue;
-            el.value = '';
-            el.dispatchEvent(new Event('input', { bubbles: true }));
-            if (el.tagName === 'SELECT') el.dispatchEvent(new Event('change', { bubbles: true }));
-            if (['filter-type', 'filter-supertype', 'filter-subtype', 'filter-keyword'].includes(id)) {
-                syncConstraintChipField(id, `${id}-chips`);
-            }
-        }
-        document.querySelectorAll('#card-constraints-modal .color-pip.active').forEach(pip => pip.classList.remove('active'));
-        document.querySelectorAll('#card-constraints-modal .constraint-chips').forEach(chips => chips.replaceChildren());
-        const autofillStatus = document.getElementById('constraint-autofill-status');
-        if (autofillStatus) { autofillStatus.textContent = ''; autofillStatus.classList.add('hidden'); }
-        updateCardConstraintsBadge();
-    });
-
     if (toggleCardConstraintsBtn) toggleCardConstraintsBtn.addEventListener('click', () => cardConstraintsModal.classList.remove('hidden'));
     if (closeCardConstraintsBtn) closeCardConstraintsBtn.addEventListener('click', () => cardConstraintsModal.classList.add('hidden'));
     if (saveCardConstraintsBtn) {
@@ -17430,126 +14998,11 @@ function initApp() {
 
     initColorPips();
 
-    // Source-card quick constraints reuse the existing constraint fields as the single source of
-    // truth. They mirror the advanced panel instead of creating a second, conflicting state store.
-    let previousQuickType = '';
-    const quickType = document.getElementById('source-quick-type');
-    const typeConstraintField = document.getElementById('filter-type');
-    if (quickType && typeConstraintField) {
-        const initialTypes = normalizeConstraintList(typeConstraintField.value);
-        previousQuickType = initialTypes[0] || '';
-        quickType.value = previousQuickType ? previousQuickType[0].toUpperCase() + previousQuickType.slice(1) : '';
-        typeConstraintField.addEventListener('input', () => {
-            const activeTypes = normalizeConstraintList(typeConstraintField.value);
-            const selected = activeTypes[0] || '';
-            if (document.activeElement !== quickType) quickType.value = selected ? selected[0].toUpperCase() + selected.slice(1) : '';
-            previousQuickType = selected;
-        });
-        quickType.addEventListener('change', () => {
-            const current = normalizeConstraintList(document.getElementById('filter-type')?.value || '');
-            const next = current.filter(type => type !== previousQuickType.toLowerCase());
-            if (quickType.value) next.push(quickType.value.toLowerCase());
-            const field = document.getElementById('filter-type');
-            if (field) { field.value = [...new Set(next)].join('|'); field.dispatchEvent(new Event('input', { bubbles: true })); }
-            previousQuickType = quickType.value;
-            syncConstraintChipField('filter-type', 'filter-type-chips');
-            updateCardConstraintsBadge();
-        });
-    }
-    // Inline supertype, subtype, and rarity controls reuse the advanced constraint fields as
-    // the single source of truth. This keeps both UI locations synchronized and preserves the
-    // existing filtering implementation.
-    const quickSupertype = document.getElementById('source-quick-supertype');
-    const supertypeField = document.getElementById('filter-supertype');
-    if (quickSupertype && supertypeField) {
-        const syncQuickSupertype = () => {
-            const values = normalizeConstraintList(supertypeField.value);
-            quickSupertype.value = values[0] || '';
-        };
-        syncQuickSupertype();
-        supertypeField.addEventListener('input', () => { if (document.activeElement !== quickSupertype) syncQuickSupertype(); });
-        quickSupertype.addEventListener('change', () => {
-            const values = normalizeConstraintList(supertypeField.value);
-            const previous = quickSupertype.dataset.previous || '';
-            const next = values.filter(v => v !== previous);
-            if (quickSupertype.value) next.push(quickSupertype.value);
-            supertypeField.value = [...new Set(next)].join('|');
-            quickSupertype.dataset.previous = quickSupertype.value;
-            supertypeField.dispatchEvent(new Event('input', { bubbles: true }));
-            syncConstraintChipField('filter-supertype', 'filter-supertype-chips');
-            updateCardConstraintsBadge();
-        });
-        quickSupertype.dataset.previous = quickSupertype.value;
-    }
-    const quickSubtype = document.getElementById('source-quick-subtype');
-    const quickSubtypeAdd = document.getElementById('source-quick-subtype-add');
-    const subtypeField = document.getElementById('filter-subtype');
-    const addQuickSubtype = () => {
-        if (!quickSubtype || !subtypeField) return;
-        const value = quickSubtype.value.trim().replace(/\s+/g, ' ');
-        if (!value) return;
-        const values = normalizeConstraintList(subtypeField.value);
-        if (!values.some(v => v.toLowerCase() === value.toLowerCase())) values.push(value);
-        subtypeField.value = values.join('|');
-        subtypeField.dispatchEvent(new Event('input', { bubbles: true }));
-        syncConstraintChipField('filter-subtype', 'filter-subtype-chips');
-        updateCardConstraintsBadge();
-        quickSubtype.value = '';
-        quickSubtype.focus();
-    };
-    if (quickSubtypeAdd) quickSubtypeAdd.addEventListener('click', addQuickSubtype);
-    if (quickSubtype) quickSubtype.addEventListener('keydown', event => { if (event.key === 'Enter') { event.preventDefault(); addQuickSubtype(); } });
-    if (subtypeField && quickSubtype) {
-        subtypeField.addEventListener('input', () => {
-            const values = normalizeConstraintList(subtypeField.value);
-            quickSubtype.placeholder = values.length ? `Add another (e.g. Elf)` : 'e.g. Elf';
-        });
-    }
-    const quickRarity = document.getElementById('source-quick-rarity');
-    const rarityField = document.getElementById('filter-rarity');
-    if (quickRarity && rarityField) {
-        quickRarity.value = rarityField.value || '';
-        quickRarity.addEventListener('change', () => {
-            rarityField.value = quickRarity.value;
-            rarityField.dispatchEvent(new Event('change', { bubbles: true }));
-            updateCardConstraintsBadge();
-        });
-        rarityField.addEventListener('change', () => { if (document.activeElement !== quickRarity) quickRarity.value = rarityField.value || ''; });
-    }
-
-    const quickCmc = document.getElementById('source-quick-cmc');
-    const cmcField = document.getElementById('filter-cmc');
-    if (quickCmc && cmcField) {
-        quickCmc.value = cmcField.value;
-        quickCmc.addEventListener('input', () => {
-            cmcField.value = quickCmc.value;
-            cmcField.dispatchEvent(new Event('input', { bubbles: true }));
-        });
-        cmcField.addEventListener('input', () => { if (document.activeElement !== quickCmc) quickCmc.value = cmcField.value; });
-    }
-    for (const modeSelect of document.querySelectorAll('[data-constraint-mode]')) {
-        modeSelect.addEventListener('change', () => {
-            // The mode is consumed live by filtering, retrieval query construction, and the final
-            // rank adjustment; changing it does not require a separate save action.
-            updateCardConstraintsBadge();
-            const label = modeSelect.value === 'prefer' ? 'Ranking preference' : 'Hard filter';
-            modeSelect.title = `${label}: ${modeSelect.dataset.constraintMode}`;
-        });
-    }
-    // Keep both the inline color pickers and advanced-panel pickers visually synchronized.
-    for (const target of ['filter-identity', 'filter-colors']) {
-        const field = document.getElementById(target);
-        if (!field) continue;
-        field.addEventListener('input', () => {
-            const active = String(field.value || '').toLowerCase().replace(/[^wubrgc]/g, '').split('');
-            document.querySelectorAll(`.color-pip-group[data-target="${target}"] .color-pip`).forEach(pip => pip.classList.toggle('active', active.includes(pip.dataset.color)));
-        });
-    }
-
     // Fire-and-forget preload of the production static search resources. Find Similar Cards stays
     // disabled until both cards.bin and semantic-index.bin are fully loaded and validated. Each
     // asset receives up to three automatic attempts before the status area offers a manual retry.
     getNLPModel().catch(() => {});
+    loadStaticSearchResources().catch(() => {});
 }
 
 /**
@@ -17590,548 +15043,11 @@ function initColorPips() {
     });
 }
 
-// The first-use hint must be dismissible even if another, unrelated help/control initializer
-// fails. Use a delegated capture listener independent of the larger visual-help setup.
-let manaFirstUseHintDismissalInstalled = false;
-function installFirstUseHintDismissal() {
-    if (manaFirstUseHintDismissalInstalled || typeof document === 'undefined') return;
-    manaFirstUseHintDismissalInstalled = true;
-    document.addEventListener('click', event => {
-        const button = event.target?.closest?.('#dismiss-first-use-help-hint');
-        if (!button) return;
-        event.preventDefault();
-        event.stopPropagation();
-        document.getElementById('first-use-help-hint')?.classList.add('hidden');
-        document.getElementById('first-use-help-hint')?.classList.remove('mana-tour-hint-after');
-        try { localStorage.setItem('manaSearchFirstUseHelpV51', 'dismissed'); } catch (_) {}
-    }, true);
-}
-
-// A lightweight, persistent quick-start guide makes the main workflow understandable even when
-// a new user skips the interactive tour. It deliberately reuses the real picker and search
-// controls so there is only one code path for source selection and searching.
-function installManaSearchQuickStart() {
-    const guide = document.getElementById('quick-start-guide');
-    if (!guide || guide.dataset.installed === 'true') return;
-    guide.dataset.installed = 'true';
-
-    const steps = document.getElementById('quick-start-steps');
-    const toggle = document.getElementById('quick-start-toggle');
-    const summary = document.getElementById('quick-start-summary');
-    const sourceDetail = document.getElementById('quick-start-source-detail');
-    const highlightDetail = document.getElementById('quick-start-highlight-detail');
-    const searchDetail = document.getElementById('quick-start-search-detail');
-    const feedback = document.getElementById('quick-start-feedback');
-    const chooseSource = document.getElementById('quick-start-choose-source');
-    const showHighlight = document.getElementById('quick-start-show-highlight');
-    const quickSearch = document.getElementById('quick-start-search');
-    const sourceLoaded = document.getElementById('source-card-loaded');
-    const sourceName = document.getElementById('source-card-name');
-    const oracle = document.getElementById('source-card-oracle');
-    const highlightChips = document.getElementById('highlight-chips-list');
-    const mainSearch = document.getElementById('find-similar-btn');
-    const loadingIndicatorEl = document.getElementById('loading-indicator');
-    const staticStatusText = document.getElementById('static-search-status-text');
-    const sourceStep = document.getElementById('quick-start-step-source');
-    const highlightStep = document.getElementById('quick-start-step-highlight');
-    const searchStep = document.getElementById('quick-start-step-search');
-
-    let isSearching = false;
-    let hasCompletedSearch = false;
-    let lastResultCount = null;
-    let isCollapsed = false;
-    const hasSource = () => Boolean(sourceLoaded && !sourceLoaded.classList.contains('hidden') && sourceName?.textContent.trim());
-    const hasOracleRules = () => {
-        const text = String(oracle?.textContent || '').trim();
-        return Boolean(text && !/^no rules text\.?$/i.test(text));
-    };
-    const getHighlightCount = () => highlightChips?.querySelectorAll('.highlight-chip').length || 0;
-    const markStep = (node, { complete = false, current = false } = {}) => {
-        if (!node) return;
-        node.classList.toggle('is-complete', complete);
-        node.classList.toggle('is-current', current);
-        if (current) node.setAttribute('aria-current', 'step');
-        else node.removeAttribute('aria-current');
-    };
-    const safeStoreCollapsed = value => {
-        try { localStorage.setItem('manaSearchQuickStartCollapsedV61', value ? 'collapsed' : 'expanded'); } catch (_) {}
-    };
-    const applyCollapsed = value => {
-        isCollapsed = Boolean(value);
-        steps?.classList.toggle('hidden', isCollapsed);
-        feedback?.classList.toggle('hidden', isCollapsed || !feedback.textContent.trim());
-        guide.classList.toggle('is-collapsed', isCollapsed);
-        if (toggle) {
-            toggle.textContent = isCollapsed ? 'Show guide' : 'Hide guide';
-            toggle.setAttribute('aria-expanded', String(!isCollapsed));
-        }
-    };
-
-    try {
-        const savedGuideState = localStorage.getItem('manaSearchQuickStartCollapsedV61');
-        // Keep the guide expanded for the first session, then start compact on later visits
-        // unless the user explicitly chose to keep it expanded.
-        isCollapsed = savedGuideState !== null
-            ? savedGuideState === 'collapsed'
-            : localStorage.getItem('manaSearchQuickStartCompletedV61') === 'completed';
-    } catch (_) {}
-    applyCollapsed(isCollapsed);
-
-    const sync = () => {
-        const selected = hasSource();
-        const name = String(sourceName?.textContent || '').trim();
-        const count = getHighlightCount();
-        const busy = isSearching || Boolean(loadingIndicatorEl && !loadingIndicatorEl.classList.contains('hidden'));
-        const mainReady = Boolean(mainSearch && !mainSearch.disabled && !busy);
-
-        markStep(sourceStep, { complete: selected, current: !selected });
-        markStep(highlightStep, { complete: selected && count > 0, current: false });
-        markStep(searchStep, { complete: hasCompletedSearch && !busy, current: selected && !busy && !hasCompletedSearch });
-
-        if (chooseSource) {
-            chooseSource.classList.toggle('hidden', selected);
-            chooseSource.disabled = false;
-        }
-        if (showHighlight) showHighlight.disabled = !selected || busy;
-        if (quickSearch) {
-            quickSearch.disabled = !selected || !mainReady;
-            quickSearch.textContent = busy ? 'Searching…' : 'Find Similar Cards';
-        }
-
-        if (sourceDetail) {
-            sourceDetail.textContent = selected
-                ? `Selected: ${name}. This is the card ManaSearch will search from.`
-                : 'Pick the card you want to find alternatives for.';
-        }
-        if (highlightDetail) {
-            if (!selected) {
-                highlightDetail.textContent = 'This step is optional. Choose a card first, then select a short phrase in its Oracle Text.';
-            } else if (!hasOracleRules()) {
-                highlightDetail.textContent = 'This card face has no rules text to highlight. That is fine—you can search without highlights.';
-            } else if (count > 0) {
-                highlightDetail.textContent = `${count} highlight${count === 1 ? '' : 's'} selected. Each can stay = Exact or be changed to ≈ Flexible for different wording.`;
-            } else {
-                highlightDetail.textContent = 'Select a short, meaningful phrase in Oracle Text. Exact keeps wording close; Flexible allows different wording. You can skip this step.';
-            }
-        }
-        if (searchDetail) {
-            if (!selected) {
-                searchDetail.textContent = 'Start with the default settings. Methods, Order, and Constraints can be explored later.';
-            } else if (busy) {
-                searchDetail.textContent = 'Your search is running. Initial results appear as they are found.';
-            } else if (hasCompletedSearch && lastResultCount === 0) {
-                searchDetail.textContent = 'No results passed the current criteria. Consider clearing Constraints or adjusting a highlight.';
-            } else if (hasCompletedSearch && Number.isFinite(lastResultCount)) {
-                searchDetail.textContent = `Search complete: ${lastResultCount.toLocaleString()} result${lastResultCount === 1 ? '' : 's'}. Open a result to inspect its similarity details.`;
-            } else if (!mainReady && staticStatusText?.textContent.trim()) {
-                searchDetail.textContent = staticStatusText.textContent.trim();
-            } else {
-                searchDetail.textContent = 'Run with the defaults first. Methods changes discovery, Order changes ranking, and Constraints limits results.';
-            }
-        }
-
-        let message;
-        if (busy) {
-            message = `Searching${name ? ` for cards similar to ${name}` : ''}… Results will appear as they are found.`;
-        } else if (!selected) {
-            message = 'No tour needed: choose a source card, optionally highlight an ability, and search with the defaults.';
-        } else if (hasCompletedSearch && lastResultCount === 0) {
-            message = 'Search finished, but no cards matched the current criteria. Try clearing constraints or changing a highlight; you can keep all other features.';
-        } else if (hasCompletedSearch && Number.isFinite(lastResultCount)) {
-            message = `Search complete: ${lastResultCount.toLocaleString()} result${lastResultCount === 1 ? '' : 's'}. The quick guide will stay here if you need it again.`;
-        } else {
-            message = `You're ready to search${name ? ` from ${name}` : ''}. Highlight a phrase first if useful, or search now.`;
-        }
-        if (summary && summary.textContent !== message) summary.textContent = message;
-        if (feedback && !isCollapsed && !feedback.textContent.trim() && hasCompletedSearch) {
-            feedback.textContent = lastResultCount === 0
-                ? 'Tip: constraints are strict—every active constraint must match a result.'
-                : 'Tip: select a result to compare mechanics, use Favorite to save cards, or export the results when you are ready.';
-            feedback.classList.remove('hidden');
-        }
-    };
-
-    chooseSource?.addEventListener('click', () => {
-        const pickerButton = document.getElementById('source-card-add-btn');
-        if (pickerButton) pickerButton.click();
-    });
-
-    showHighlight?.addEventListener('click', () => {
-        if (!hasSource()) return;
-        const target = document.querySelector('#source-card-loaded .oracle-container');
-        if (!target) return;
-        if (!hasOracleRules()) {
-            if (feedback) {
-                feedback.textContent = 'There is no rules text on this card face to highlight. Try Flip on a double-faced card, or search without a highlight.';
-                feedback.classList.remove('hidden');
-            }
-        } else if (feedback) {
-            feedback.textContent = 'Select a short phrase in Oracle Text, such as “draw a card.” A highlight chip will appear below the text. You can search without doing this.';
-            feedback.classList.remove('hidden');
-        }
-        target.classList.remove('quick-start-highlight-target');
-        // Reflow allows repeated presses to replay the short, non-blocking focus cue.
-        void target.offsetWidth;
-        target.classList.add('quick-start-highlight-target');
-        target.addEventListener('animationend', () => target.classList.remove('quick-start-highlight-target'), { once: true });
-        const reduceMotion = (() => {
-            try { return window.matchMedia('(prefers-reduced-motion: reduce)').matches; } catch (_) { return false; }
-        })();
-        target.scrollIntoView({ behavior: reduceMotion ? 'auto' : 'smooth', block: 'center' });
-    });
-
-    quickSearch?.addEventListener('click', () => {
-        if (!hasSource()) {
-            if (feedback) feedback.textContent = 'Choose a source card before starting a search.';
-            return;
-        }
-        if (!mainSearch || mainSearch.disabled || isSearching) {
-            if (feedback) {
-                feedback.textContent = staticStatusText?.textContent.trim() || 'Search is preparing. The search action will activate when required data is ready.';
-                feedback.classList.remove('hidden');
-            }
-            return;
-        }
-        mainSearch.click();
-    });
-
-    toggle?.addEventListener('click', () => {
-        applyCollapsed(!isCollapsed);
-        safeStoreCollapsed(isCollapsed);
-        if (!isCollapsed) sync();
-    });
-
-    window.addEventListener('manasearch:source-selected', () => {
-        hasCompletedSearch = false;
-        lastResultCount = null;
-        if (feedback) { feedback.textContent = ''; feedback.classList.add('hidden'); }
-        sync();
-    });
-    window.addEventListener('manasearch:source-highlights-changed', () => {
-        if (feedback) { feedback.textContent = ''; feedback.classList.add('hidden'); }
-        sync();
-    });
-    window.addEventListener('manasearch:search-started', () => {
-        isSearching = true;
-        hasCompletedSearch = false;
-        if (feedback) { feedback.textContent = ''; feedback.classList.add('hidden'); }
-        sync();
-    });
-    window.addEventListener('manasearch:search-finished', event => {
-        isSearching = false;
-        hasCompletedSearch = true;
-        const value = Number(event.detail?.resultCount);
-        lastResultCount = Number.isFinite(value) ? value : 0;
-        try { localStorage.setItem('manaSearchQuickStartCompletedV61', 'completed'); } catch (_) {}
-        sync();
-    });
-
-    // The actual availability of the main search button is authoritative. Observing its
-    // disabled state and the source/highlight containers keeps this guide accurate whether the
-    // user clicks normally, uses the tour, or restores a saved source card.
-    if (typeof MutationObserver === 'function') {
-        const sourceObserver = new MutationObserver(sync);
-        if (sourceLoaded) sourceObserver.observe(sourceLoaded, { attributes: true, attributeFilter: ['class'] });
-        if (sourceName) sourceObserver.observe(sourceName, { childList: true, characterData: true, subtree: true });
-        if (highlightChips) sourceObserver.observe(highlightChips, { childList: true, subtree: true });
-        if (mainSearch) sourceObserver.observe(mainSearch, { attributes: true, attributeFilter: ['disabled'] });
-        if (loadingIndicatorEl) sourceObserver.observe(loadingIndicatorEl, { attributes: true, attributeFilter: ['class'] });
-        if (staticStatusText) sourceObserver.observe(staticStatusText, { childList: true, characterData: true, subtree: true });
-    }
-    sync();
-}
-
-// v62 usability layer: mobile search dock, deliberate touch highlighting, and reliable modal dismissal.
-function installManaSearchUsabilityPolish() {
-    if (window.__manaSearchUsabilityPolishInstalled) return;
-    window.__manaSearchUsabilityPolishInstalled = true;
-
-    const sourceLoaded = document.getElementById('source-card-loaded');
-    const sourceName = document.getElementById('source-card-name');
-    const primarySearch = document.getElementById('find-similar-btn');
-    const relatedBar = document.getElementById('related-cards-bar');
-    const staticStatus = document.getElementById('static-search-status-text');
-
-    // A thumb-reachable mobile dock keeps the active source and main search action available
-    // while users browse long rules text or hundreds of results. It proxies the existing button;
-    // there is still only one real search handler/pipeline.
-    let dock = document.getElementById('mobile-search-dock');
-    if (!dock) {
-        dock = document.createElement('aside');
-        dock.id = 'mobile-search-dock';
-        dock.className = 'mobile-search-dock hidden';
-        dock.setAttribute('aria-label', 'Current source and search controls');
-        dock.innerHTML = `
-            <div class="mobile-search-dock-source">
-                <div class="mobile-search-dock-source-copy"><span>Searching from</span><strong id="mobile-search-source-name"></strong></div>
-                <button type="button" id="mobile-change-source-btn" class="mobile-change-source-btn">Change</button>
-            </div>
-            <button type="button" id="mobile-find-similar-btn" class="mobile-find-similar-btn" aria-controls="results-section loading-indicator" aria-describedby="static-search-status-text">Find Similar Cards</button>
-            <p id="mobile-search-dock-status" class="mobile-search-dock-status" role="status" aria-live="polite"></p>`;
-        document.body.appendChild(dock);
-    }
-    const dockSourceName = document.getElementById('mobile-search-source-name');
-    const dockChangeSource = document.getElementById('mobile-change-source-btn');
-    const dockSearch = document.getElementById('mobile-find-similar-btn');
-    const dockStatus = document.getElementById('mobile-search-dock-status');
-    const touchMedia = (() => { try { return window.matchMedia('(hover: none), (pointer: coarse)'); } catch (_) { return null; } })();
-
-    const syncDock = () => {
-        const hasSource = Boolean(sourceLoaded && !sourceLoaded.classList.contains('hidden') && String(sourceName?.textContent || '').trim());
-        const mobile = window.matchMedia('(max-width: 760px)').matches;
-        dock.classList.toggle('hidden', !(hasSource && mobile));
-        document.body.classList.toggle('has-mobile-search-dock', hasSource && mobile);
-        if (dockSourceName) dockSourceName.textContent = String(sourceName?.textContent || '').trim();
-        if (dockSearch && primarySearch) {
-            dockSearch.disabled = primarySearch.disabled;
-            dockSearch.classList.toggle('is-searching', primarySearch.getAttribute('aria-busy') === 'true' || /searching|scanning|scoring/i.test(primarySearch.textContent || ''));
-            dockSearch.textContent = dockSearch.classList.contains('is-searching') ? 'Searching…' : 'Find Similar Cards';
-            dockSearch.title = primarySearch.disabled
-                ? (staticStatus?.textContent || 'Search is not ready yet.')
-                : 'Find similar cards using the current source and settings.';
-        }
-        if (dockStatus) {
-            const ready = !primarySearch?.disabled;
-            dockStatus.textContent = ready ? 'Your current settings are ready.' : (staticStatus?.textContent || 'Preparing search data…');
-            dockStatus.classList.toggle('is-blocked', !ready);
-        }
-    };
-    dockChangeSource?.addEventListener('click', () => {
-        const pickerTrigger = document.getElementById('add-source-card-btn') || document.getElementById('source-card-add-btn');
-        pickerTrigger?.click();
-    });
-    dockSearch?.addEventListener('click', () => {
-        if (!primarySearch || primarySearch.disabled) return;
-        primarySearch.click();
-        window.setTimeout(() => {
-            const loading = document.getElementById('loading-indicator');
-            const results = document.getElementById('results-section');
-            const status = document.getElementById('static-search-status');
-            const target = loading && !loading.classList.contains('hidden') ? loading
-                : results && !results.classList.contains('hidden') ? results : status;
-            target?.scrollIntoView({ block: 'start', behavior: document.body.classList.contains('reduce-motion') ? 'auto' : 'smooth' });
-        }, 60);
-    });
-    const syncDockObserver = typeof MutationObserver === 'function' ? new MutationObserver(syncDock) : null;
-    if (syncDockObserver) {
-        if (sourceLoaded) syncDockObserver.observe(sourceLoaded, { attributes: true, attributeFilter: ['class'] });
-        if (sourceName) syncDockObserver.observe(sourceName, { childList: true, characterData: true, subtree: true });
-        if (primarySearch) syncDockObserver.observe(primarySearch, { attributes: true, attributeFilter: ['disabled', 'aria-busy'], childList: true, characterData: true, subtree: true });
-        if (staticStatus) syncDockObserver.observe(staticStatus, { childList: true, characterData: true, subtree: true });
-        if (relatedBar) syncDockObserver.observe(relatedBar, { attributes: true, attributeFilter: ['class'] });
-    }
-    window.addEventListener('resize', syncDock, { passive: true });
-    touchMedia?.addEventListener?.('change', syncDock);
-    syncDock();
-
-    // Touch-specific selected-text actions. The helper appears only for touch/coarse-pointer
-    // devices, preserves the browser's native selection handles, and lets the existing offset-aware
-    // highlighter handle the actual highlight state/chips.
-    const touchActions = document.getElementById('touch-highlight-actions');
-    const oracle = document.getElementById('source-card-oracle');
-    const typeLine = document.getElementById('source-card-type');
-    const oracleButton = document.getElementById('highlight-selected-oracle-btn');
-    const typeButton = document.getElementById('highlight-selected-type-btn');
-    const isTouchLayout = () => {
-        try { return window.matchMedia('(hover: none), (pointer: coarse)').matches; }
-        catch (_) { return false; }
-    };
-    const isSelectionWithin = root => {
-        const selection = window.getSelection?.();
-        if (!root || !selection || selection.isCollapsed || !selection.rangeCount || !String(selection.toString() || '').trim()) return false;
-        return root.contains(selection.getRangeAt(0).commonAncestorContainer);
-    };
-    const syncHighlightActions = () => {
-        if (touchActions) touchActions.hidden = !isTouchLayout();
-        if (oracleButton) oracleButton.disabled = !isSelectionWithin(oracle);
-        if (typeButton) typeButton.disabled = !isSelectionWithin(typeLine);
-    };
-    const preserveNativeSelection = event => {
-        if (event.pointerType === 'touch' || isTouchLayout()) event.preventDefault();
-    };
-    oracleButton?.addEventListener('pointerdown', preserveNativeSelection);
-    typeButton?.addEventListener('pointerdown', preserveNativeSelection);
-    oracleButton?.addEventListener('click', () => {
-        if (!isSelectionWithin(oracle)) return;
-        handleSourceTextSelection(oracle, 'oracle');
-        syncHighlightActions();
-    });
-    typeButton?.addEventListener('click', () => {
-        if (!isSelectionWithin(typeLine)) return;
-        handleSourceTextSelection(typeLine, 'type');
-        syncHighlightActions();
-    });
-    document.addEventListener('selectionchange', syncHighlightActions);
-    window.addEventListener('resize', syncHighlightActions, { passive: true });
-    window.addEventListener('orientationchange', syncHighlightActions, { passive: true });
-    syncHighlightActions();
-
-    // Dialog behavior is consistent across existing modals: Escape closes the top-most dialog,
-    // tapping the backdrop dismisses it, Tab stays inside a true modal while open, and focus
-    // returns to the invoking control. All closing routes click the original close button where
-    // possible so each feature retains its own cleanup/synchronization handler.
-    // Limit generic modal behavior to the application's actual feature dialogs. The onboarding
-    // tour and card-preview overlays also use dialog semantics, but have their own lifecycle and
-    // must not steal Escape, focus, or backdrop events from a settings dialog.
-    const dialogSelector = '#source-card-picker-modal, #search-methods-modal, #order-modal, #card-constraints-modal, #preferences-modal, #selected-related-modal, #compare-modal, #format-legality-modal';
-    const activeDialogs = () => Array.from(document.querySelectorAll(dialogSelector)).filter(dialog => {
-        let node = dialog;
-        while (node && node !== document.documentElement) {
-            if (node.classList?.contains('hidden')) return false;
-            const style = window.getComputedStyle(node);
-            if (style.display === 'none' || style.visibility === 'hidden') return false;
-            node = node.parentElement;
-        }
-        const rect = dialog.getBoundingClientRect();
-        return rect.width > 0 && rect.height > 0;
-    });
-    const closeButtonFor = dialog => {
-        const map = {
-            'source-card-picker-modal': '#close-source-card-picker',
-            'search-methods-modal': '#close-methods-modal',
-            'order-modal': '#close-order-modal',
-            'card-constraints-modal': '#close-card-constraints-modal',
-            'preferences-modal': '#close-preferences-modal',
-            'selected-related-modal': '#selected-related-modal-close',
-            'compare-modal': '#close-modal',
-            'format-legality-modal': '#close-format-legality-modal'
-        };
-        const selector = map[dialog.id];
-        return (selector && dialog.querySelector(selector)) || dialog.querySelector('button[aria-label*="Close"], .close-btn, .format-legality-close');
-    };
-    const dialogTriggers = new WeakMap();
-    const wasVisible = new WeakMap();
-    let lastInvoker = null;
-    document.addEventListener('click', event => {
-        const target = event.target?.closest?.('button, a, input, select, [role="button"]');
-        if (target && !target.closest(dialogSelector)) lastInvoker = target;
-    }, true);
-    const dismissDialog = dialog => {
-        const close = closeButtonFor(dialog);
-        if (close) close.click();
-        else dialog.classList.add('hidden');
-        window.setTimeout(() => {
-            const invoker = dialogTriggers.get(dialog) || lastInvoker;
-            if (invoker?.isConnected && !invoker.disabled) invoker.focus({ preventScroll: true });
-        }, 0);
-    };
-    document.addEventListener('keydown', event => {
-        const dialogs = activeDialogs();
-        const dialog = dialogs[dialogs.length - 1];
-        if (!dialog) return;
-        if (event.key === 'Escape') {
-            event.preventDefault();
-            event.stopImmediatePropagation();
-            dismissDialog(dialog);
-            return;
-        }
-        if (event.key !== 'Tab') return;
-        const focusables = Array.from(dialog.querySelectorAll('a[href], button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex="-1"])'))
-            .filter(el => el.getAttribute('aria-hidden') !== 'true' && el.getClientRects().length > 0);
-        if (!focusables.length) {
-            event.preventDefault();
-            dialog.setAttribute('tabindex', '-1');
-            dialog.focus({ preventScroll: true });
-            return;
-        }
-        const first = focusables[0], last = focusables[focusables.length - 1];
-        if (event.shiftKey && (document.activeElement === first || !dialog.contains(document.activeElement))) {
-            event.preventDefault(); last.focus();
-        } else if (!event.shiftKey && (document.activeElement === last || !dialog.contains(document.activeElement))) {
-            event.preventDefault(); first.focus();
-        }
-    }, true);
-    document.querySelectorAll(dialogSelector).forEach(dialog => {
-        dialog.addEventListener('click', event => {
-            if (event.target !== dialog || dialog.classList.contains('hidden')) return;
-            event.preventDefault();
-            event.stopImmediatePropagation();
-            dismissDialog(dialog);
-        });
-    });
-    if (typeof MutationObserver === 'function') {
-        const dialogObserver = new MutationObserver(records => {
-            for (const record of records) {
-                const dialog = record.target;
-                const visible = activeDialogs().includes(dialog);
-                const previous = wasVisible.get(dialog) || false;
-                if (visible && !previous) {
-                    dialogTriggers.set(dialog, lastInvoker || document.activeElement);
-                    if (!dialog.contains(document.activeElement)) {
-                        const first = closeButtonFor(dialog) || dialog.querySelector('button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled)');
-                        if (first) first.focus({ preventScroll: true });
-                        else { dialog.setAttribute('tabindex', '-1'); dialog.focus({ preventScroll: true }); }
-                    }
-                } else if (!visible && previous) {
-                    const invoker = dialogTriggers.get(dialog);
-                    window.setTimeout(() => {
-                        if (invoker?.isConnected && !invoker.disabled) invoker.focus({ preventScroll: true });
-                        dialogTriggers.delete(dialog);
-                    }, 0);
-                }
-                wasVisible.set(dialog, visible);
-            }
-        });
-        document.querySelectorAll(dialogSelector).forEach(dialog => {
-            wasVisible.set(dialog, !dialog.classList.contains('hidden'));
-            dialogObserver.observe(dialog, { attributes: true, attributeFilter: ['class', 'style'] });
-        });
-    }
-}
-
-// Start static-data loading independently of the lengthy UI initialization. On mobile, one
-// unrelated control setup can throw before initApp reaches its final statements; in that case
-// the previous arrangement never called loadStaticSearchResources() and the status stayed at
-// 'Search data is preparing…' forever. Starting the asset promises first guarantees the real
-// loader runs regardless of later UI wiring, and initApp immediately reflects its loading state.
-function startManaSearchApp() {
-    try { installManaSearchUsabilityPolish(); }
-    catch (error) { console.error('[ManaSearch] Usability polish setup failed:', error?.stack || error); }
-    installFirstUseHintDismissal();
-    try { installManaSearchQuickStart(); }
-    catch (error) { console.error('[ManaSearch] Quick-start guide setup failed:', error?.stack || error); }
-    // Install help/tour separately from the rest of the UI. A failure while binding an unrelated
-    // control must not leave tutorial entry points inert. Both installers are idempotent.
-    try { installFeatureHelpPopovers(); }
-    catch (error) { console.error('[ManaSearch] Visual help setup failed:', error?.stack || error); }
-    try { installManaSearchOnboarding(); }
-    catch (error) { console.error('[ManaSearch] Guided tour setup failed:', error?.stack || error); }
-    try {
-        initApp();
-    } catch (error) {
-        console.error('[ManaSearch] App initialization failed:', error?.stack || error);
-        // The asset loader was already started above. Surface the UI initialization error too,
-        // rather than letting the page silently remain in its original placeholder state.
-        if (staticSearchStatusText) {
-            staticSearchStatusText.textContent = `The interface did not finish initializing: ${error?.message || error}. Search data loading continues; reload the page if controls do not respond.`;
-            if (staticSearchStatus) {
-                staticSearchStatus.classList.remove('is-loading', 'is-ready');
-                staticSearchStatus.classList.add('is-error');
-            }
-        }
-    }
-}
-
-// Begin fetching the static corpus/index as soon as this module has evaluated. Do not wait
-// for DOMContentLoaded or the end of initApp(): another module (for example the optional NLP
-// CDN module) can delay DOMContentLoaded, and a UI wiring exception used to prevent the asset
-// loader from ever being called. The page controls will reflect the current state as soon as
-// initApp binds their elements.
-loadStaticSearchResources().catch(error => {
-    console.error('[ManaSearch] Static search data bootstrap failed:', error?.message || error);
-});
-
-// Start only after this ES module has finished evaluating. Module scripts commonly run while
-// document.readyState is already "interactive"; calling startManaSearchApp synchronously here
-// would enter initApp before top-level `let` state declared later in this file (for example
-// manaImageMagnifierInstalled and manaFeatureHelpInstalled) has initialized. That throws a
-// temporal-dead-zone ReferenceError and prevents all control handlers from being installed.
-// Deferring by one microtask guarantees every top-level declaration is initialized first.
-const scheduleManaSearchAppStart = () => Promise.resolve().then(() => startManaSearchApp());
+// Fallback execution check for ES Module environments
 if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', scheduleManaSearchAppStart, { once: true });
+    document.addEventListener('DOMContentLoaded', initApp);
 } else {
-    scheduleManaSearchAppStart();
+    initApp();
 }
 
 // --- THEME & STORAGE MANAGEMENT ---
@@ -18156,1177 +15072,6 @@ function getStoredArray(key) {
     } catch (err) {
         console.error(`Error reading ${key} from localStorage:`, err);
         return [];
-    }
-}
-
-let manaImageMagnifierInstalled = false;
-function installCardImageMagnifier() {
-    if (manaImageMagnifierInstalled || typeof document === 'undefined') return;
-    manaImageMagnifierInstalled = true;
-    const selector = '#source-card-image, .card-art-wrap img, .selected-related-card-art-wrap img, .compare-card-art';
-    const magnifier = document.createElement('div');
-    magnifier.className = 'mana-image-magnifier';
-    magnifier.setAttribute('aria-hidden', 'true');
-    const image = document.createElement('img');
-    image.alt = '';
-    magnifier.appendChild(image);
-    document.body.appendChild(magnifier);
-    const hide = () => magnifier.classList.remove('visible');
-    const coarsePointer = () => {
-        try { return window.matchMedia('(hover: none), (pointer: coarse)').matches; }
-        catch (_) { return false; }
-    };
-
-    // A card preview modal gives touch users the same readable zoom they get by hovering on
-    // desktop. Keep it separate from the floating hover magnifier so the image can fit the phone.
-    let previewLayer = null;
-    let priorBodyOverflow = '';
-    let priorFocus = null;
-    const closePreview = () => {
-        if (!previewLayer) return;
-        previewLayer.remove();
-        previewLayer = null;
-        document.body.style.overflow = priorBodyOverflow;
-        document.removeEventListener('keydown', onPreviewKeydown, true);
-        if (priorFocus?.isConnected) priorFocus.focus({ preventScroll: true });
-        priorFocus = null;
-    };
-    const onPreviewKeydown = event => {
-        if (event.key === 'Escape') { event.preventDefault(); closePreview(); }
-    };
-    const openPreview = target => {
-        if (!target) return;
-        closePreview();
-        hide();
-        priorFocus = document.activeElement;
-        priorBodyOverflow = document.body.style.overflow;
-        const source = target.currentSrc || target.src;
-        if (!source || source.startsWith('data:')) return;
-        const card = target.closest('.card-item, .selected-related-card, #source-card-loaded, #compare-modal');
-        const titleText = card?.querySelector('.card-item-title, h3, h4, strong')?.textContent?.trim()
-            || target.alt || 'Card preview';
-        const layer = document.createElement('div');
-        layer.className = 'mana-card-preview-overlay';
-        layer.setAttribute('role', 'dialog');
-        layer.setAttribute('aria-modal', 'true');
-        layer.setAttribute('aria-label', `${titleText} enlarged card image`);
-        layer.tabIndex = -1;
-        const panel = document.createElement('div');
-        panel.className = 'mana-card-preview-panel';
-        const head = document.createElement('div');
-        head.className = 'mana-card-preview-header';
-        const title = document.createElement('strong');
-        title.textContent = titleText;
-        const closeButton = document.createElement('button');
-        closeButton.type = 'button';
-        closeButton.className = 'mana-card-preview-close';
-        closeButton.textContent = '×';
-        closeButton.setAttribute('aria-label', 'Close enlarged card image');
-        head.append(title, closeButton);
-        const enlarged = document.createElement('img');
-        enlarged.className = 'mana-card-preview-image';
-        enlarged.src = source;
-        enlarged.alt = target.alt || titleText;
-        const rotated = Boolean(target.closest('.card-art-wrap')?.classList.contains('is-legacy-flip-rotated')
-            || target.closest('.source-card-art-wrap')?.classList.contains('is-source-legacy-flip-rotated'));
-        if (rotated) enlarged.classList.add('is-legacy-flip-rotated');
-        const note = document.createElement('p');
-        note.className = 'mana-card-preview-note';
-        note.textContent = 'Tap outside the card or press × to close.';
-        panel.append(head, enlarged, note);
-        layer.appendChild(panel);
-        layer.addEventListener('click', event => {
-            if (event.target === layer || event.target === closeButton) { event.preventDefault(); closePreview(); }
-        });
-        document.body.appendChild(layer);
-        previewLayer = layer;
-        document.body.style.overflow = 'hidden';
-        document.addEventListener('keydown', onPreviewKeydown, true);
-        closeButton.focus({ preventScroll: true });
-    };
-
-    document.addEventListener('pointerover', event => {
-        if (event.pointerType === 'touch' || coarsePointer()) return;
-        const target = event.target?.closest?.(selector);
-        if (!target || !(target.currentSrc || target.src)) return;
-        if (event.relatedTarget && target.contains(event.relatedTarget)) return;
-        const source = target.currentSrc || target.src;
-        if (!source || source.startsWith('data:')) return;
-        image.src = source;
-        const rotated = Boolean(target.closest('.card-art-wrap')?.classList.contains('is-legacy-flip-rotated')
-            || target.closest('.source-card-art-wrap')?.classList.contains('is-source-legacy-flip-rotated'));
-        image.classList.toggle('is-legacy-flip-rotated', rotated);
-        const rect = target.getBoundingClientRect();
-        const desiredWidth = Math.min(420, Math.max(250, window.innerWidth * 0.34));
-        const width = Math.min(desiredWidth, window.innerWidth - 16);
-        const left = rect.right + width + 16 < window.innerWidth ? rect.right + 12 : Math.max(8, rect.left - width - 12);
-        const top = Math.max(8, Math.min(rect.top, window.innerHeight - Math.min(window.innerHeight * 0.86, width * 1.45) - 8));
-        magnifier.style.width = `${width}px`;
-        magnifier.style.left = `${left}px`;
-        magnifier.style.top = `${top}px`;
-        magnifier.classList.add('visible');
-    });
-    document.addEventListener('pointerout', event => {
-        const target = event.target?.closest?.(selector);
-        if (target && (!event.relatedTarget || !target.contains(event.relatedTarget))) hide();
-    });
-    // Explicit tap/click enlarges a card on touchscreens where hover is unavailable. Capture
-    // phase prevents a card's unrelated selection handler from stealing the tap.
-    document.addEventListener('click', event => {
-        const target = event.target?.closest?.(selector);
-        if (!target || !coarsePointer()) return;
-        event.preventDefault();
-        event.stopPropagation();
-        openPreview(target);
-    }, true);
-    document.addEventListener('scroll', hide, true);
-    window.addEventListener('resize', hide);
-}
-let manaFeatureHelpInstalled = false;
-function installFeatureHelpPopovers() {
-    if (manaFeatureHelpInstalled || typeof document === 'undefined') return;
-    manaFeatureHelpInstalled = true;
-
-    const examples = {
-        methods: {
-            title: 'Search Methods',
-            description: 'Methods change how ManaSearch discovers candidate cards. Start with Standard, then widen or redirect retrieval when you need different kinds of matches.',
-            howTo: 'Try Broad Search when wording differs; try Divergent Search when the results feel too similar to one another.'
-        },
-        order: {
-            title: 'Order Results',
-            description: 'Order chooses which score or property decides what appears first. It changes the order of results, not which cards the search retrieves.',
-            howTo: 'Use Overall Match as a starting point. Choose Mechanical to prioritize matching game actions, or Price / Mana Value to sort by a card property.'
-        },
-        constraints: {
-            title: 'Constraints',
-            description: 'Constraints are hard filters. A result must satisfy every active constraint, so use only the limits you really need.',
-            howTo: 'For example, choose Creature and green to show only green creatures. Use Clear All Constraints to remove the limits again.'
-        },
-        highlight: {
-            title: 'Highlight the important text',
-            description: 'Select the exact part of the source card that matters. ManaSearch uses the selected passage to focus retrieval and similarity scoring.',
-            howTo: 'On desktop, drag across the phrase. On a phone, press and select the words. Select the same highlighted passage again to remove it. Use Exact for literal wording or Variable when the effect may differ in wording or amount.'
-        },
-        generic: {
-            title: 'Quick help',
-            description: 'This control changes one part of how ManaSearch searches or displays cards.',
-            howTo: 'Try the control, then run a search to see how it changes the results.'
-        }
-    };
-
-    const methodHelp = {
-        'Broad Search': ['Searches more widely when ordinary retrieval misses useful cards.', 'methods', 'Use this when a card describes an effect in unusual or different wording.'],
-        'Divergent Search': ['Encourages a more varied set of matches instead of many near-duplicates.', 'methods', 'Turn it on when the first results all look almost the same.'],
-        'Wording Search': ['Favors cards that use similar rules-text phrases and terminology.', 'methods', 'Useful when the wording itself matters, such as closely templated effects.'],
-        'Functional Search': ['Favors cards that do the same practical job even when their mechanics or wording differ.', 'methods', 'Useful for finding substitutes that fulfill the same role in a deck.'],
-        'Target Search': ['Looks for cards that interact with similar objects, zones, targets, or restrictions.', 'methods', 'Useful when you want another answer to the same kind of problem.'],
-        'Role Search': ['Looks for cards that fill the same strategic role, such as ramp, removal, or card advantage.', 'methods', 'Useful when replacing a card by its job rather than its exact text.'],
-        'Alternative Search': ['Prefers different mechanics that can still reach a similar outcome.', 'methods', 'Useful when you want another route to the same result, not a near-copy.'],
-        'Synergy Search': ['Looks for cards that support or interact with the source card rather than simply copying its effect.', 'methods', 'Useful for tribal cards, build-arounds, and combo pieces.'],
-        'Search Depth': ['Controls how much of the available retrieval pool is explored.', 'methods', '100% requests complete available retrieval; a smaller percentage can finish sooner but may miss candidates.'],
-        'Overall Match': ['Balances the available scoring signals into one all-purpose ranking.', 'order', 'Keep this selected for a general-purpose similarity search.'],
-        'Mechanical': ['Ranks by similarity between the underlying game actions and effects.', 'order', 'Choose this when matching mechanics matters more than wording.'],
-        'Functional': ['Ranks by how closely the cards perform the same practical job.', 'order', 'Choose this to find a functional replacement even when the mechanics differ.'],
-        'Semantic': ['Ranks cards by meaning-level similarity in their rules text.', 'order', 'Choose this when two effects are described differently but mean similar things.'],
-        'Strategic Role': ['Ranks cards by the strategic job they fill in a deck.', 'order', 'Choose this for alternatives such as another ramp piece or card-advantage engine.'],
-        'Mechanical + Functional': ['Balances matching game actions with matching the practical outcome.', 'order', 'Choose this if neither mechanical similarity nor functional role should dominate alone.'],
-        'Synergy': ['Ranks cards by how well they interact with the source card or its context.', 'order', 'Choose this for cards that support the source rather than copy it.'],
-        'Exactness': ['Favors close matches to the selected text and wording.', 'order', 'Choose this when the highlighted wording is especially important.'],
-        'Category': ['Ranks by the cards’ inferred type of effect or strategic category.', 'order', 'Useful for keeping matches within a broad effect family.'],
-        'Price (USD: low to high)': ['Sorts by available price data, cheapest first.', 'order', 'Use this after finding similar cards to look for budget options.'],
-        'Price (lowest first)': ['Sorts by available price data, cheapest first. Cards without a price are placed last.', 'order', 'Use this after finding similar cards to look for budget options.'],
-        'Mana Value (low to high)': ['Sorts cards from lowest mana value to highest.', 'order', 'Useful for finding cheaper-to-cast alternatives.'],
-        'Mana Value (lowest first)': ['Sorts cards from lowest mana value to highest.', 'order', 'Useful for finding cheaper-to-cast alternatives.'],
-        'Mana Value (high to low)': ['Sorts cards from highest mana value to lowest.', 'order', 'Useful when looking for large or expensive versions of an effect.'],
-        'Mana Value (highest first)': ['Sorts cards from highest mana value to lowest.', 'order', 'Useful when looking for large or expensive versions of an effect.'],
-        'Matrix Sweep': ['Spreads results across score dimensions to explore different kinds of strong matches.', 'order', 'Use it when you want to inspect different strengths, not just one narrow ranking.'],
-        'Diverse Spread': ['Reduces the tendency for the visible results to be dominated by near-duplicates.', 'order', 'Use it when you want to discover a broader variety of alternatives.'],
-        'Format Legality': ['Filters by a card’s legality in the selected format.', 'constraints', 'Choose Commander, Modern, or another format to exclude cards that are not legal there.'],
-        'Card Types': ['Keeps only cards that have the selected card type or types.', 'constraints', 'Choose Creature to exclude noncreatures. Every selected type must match.'],
-        'Supertypes': ['Filters for labels such as Legendary, Basic, Snow, or World.', 'constraints', 'Choose Legendary when you specifically want legendary cards.'],
-        'Subtypes': ['Filters by creature, land, artifact, or other subtypes such as Elf, Warrior, or Aura.', 'constraints', 'Enter a subtype such as Elf to narrow the pool to cards with that subtype.'],
-        'Keywords': ['Filters by keyword abilities such as Flying, Flash, or Trample.', 'constraints', 'Enter a keyword to require the matching ability.'],
-        'Rarity': ['Keeps cards with the selected rarity.', 'constraints', 'Choose Common for a common-only search.'],
-        'Color Identity': ['Filters by the colors allowed in a card’s deck-building identity.', 'constraints', 'For Commander deckbuilding, choose the colors allowed by your deck.'],
-        'Exact Colors': ['Filters by the card’s exact color set, including colorless when selected.', 'constraints', 'Use this when you want exactly mono-green, colorless, or another specific color combination.'],
-        'Mana Value (CMC)': ['Filters by mana value; comparison operators such as <=2 and >=4 are supported.', 'constraints', 'Enter <=2 to keep cards with mana value two or less.'],
-        'Power': ['Filters creatures by power; comparison operators can be used.', 'constraints', 'Enter >=4 to require power four or greater.'],
-        'Toughness': ['Filters creatures by toughness; comparison operators can be used.', 'constraints', 'Enter <=2 to require toughness two or less.'],
-        'Set Code': ['Limits results to a particular set code.', 'constraints', 'Enter a set code such as khm to restrict results to that printing set.'],
-        'Oracle Text': ['Select a meaningful phrase in the source card’s rules text to focus the search.', 'highlight', 'Example: select “draw a card” to look for similar card-draw effects.'],
-        'Type:': ['The card type line can also be highlighted, not just rules text.', 'highlight', 'Select “Creature — Elf” or a smaller phrase to focus on that type or subtype.']
-    };
-
-    let popover = null;
-    let activeTrigger = null;
-    let pinned = false;
-
-    const el = (tag, className, text) => {
-        const node = document.createElement(tag);
-        if (className) node.className = className;
-        if (text !== undefined) node.textContent = text;
-        return node;
-    };
-
-    const buildDemo = kind => {
-        const demo = el('div', `mana-help-demo mana-help-demo-${kind || 'generic'}`);
-        if (kind === 'highlight') {
-            demo.appendChild(el('div', 'mana-help-demo-kicker', 'SOURCE CARD · ORACLE TEXT'));
-            const rules = el('p', 'mana-help-demo-rules');
-            rules.appendChild(document.createTextNode('At the beginning of your upkeep, '));
-            rules.appendChild(el('mark', 'mana-help-demo-mark', 'draw a card'));
-            rules.appendChild(document.createTextNode(' and lose 1 life.'));
-            demo.appendChild(rules);
-            const chipRow = el('div', 'mana-help-demo-chip-row');
-            chipRow.appendChild(el('span', 'mana-help-demo-chip', 'Variable highlight'));
-            chipRow.appendChild(el('span', 'mana-help-demo-caption', 'draw a card'));
-            demo.appendChild(chipRow);
-            demo.appendChild(el('div', 'mana-help-demo-step', '1. Select words  →  2. Highlight appears  →  3. Search similar effects'));
-        } else if (kind === 'methods') {
-            demo.appendChild(el('div', 'mana-help-demo-kicker', 'RETRIEVAL EXAMPLE'));
-            const flow = el('div', 'mana-help-demo-flow');
-            flow.appendChild(el('span', 'mana-help-demo-box', 'Source card'));
-            flow.appendChild(el('span', 'mana-help-demo-arrow', '→'));
-            flow.appendChild(el('span', 'mana-help-demo-box mana-help-demo-box-accent', 'Search methods'));
-            flow.appendChild(el('span', 'mana-help-demo-arrow', '→'));
-            flow.appendChild(el('span', 'mana-help-demo-box', 'Candidate cards'));
-            demo.appendChild(flow);
-            demo.appendChild(el('div', 'mana-help-demo-step', 'Methods decide where and how ManaSearch looks for candidates.'));
-        } else if (kind === 'order') {
-            demo.appendChild(el('div', 'mana-help-demo-kicker', 'SAME POOL · DIFFERENT ORDER'));
-            const rows = el('div', 'mana-help-demo-rank-list');
-            [['Mechanical', '92%'], ['Overall Match', '86%'], ['Semantic', '79%']].forEach(([name, score], index) => {
-                const row = el('div', `mana-help-demo-rank-row${index === 0 ? ' is-selected' : ''}`);
-                row.appendChild(el('span', '', name));
-                row.appendChild(el('strong', '', score));
-                rows.appendChild(row);
-            });
-            demo.appendChild(rows);
-            demo.appendChild(el('div', 'mana-help-demo-step', 'Changing Order reorders the candidates; it does not retrieve a new pool.'));
-        } else if (kind === 'flip') {
-            demo.appendChild(el('div', 'mana-help-demo-kicker', 'DOUBLE-FACED CARD'));
-            const flow = el('div', 'mana-help-demo-flow');
-            flow.appendChild(el('span', 'mana-help-demo-box', 'Front face'));
-            flow.appendChild(el('span', 'mana-help-demo-arrow', '⇄'));
-            flow.appendChild(el('span', 'mana-help-demo-box mana-help-demo-box-accent', 'Back face'));
-            demo.appendChild(flow);
-            demo.appendChild(el('div', 'mana-help-demo-step', 'Flip changes which side of the same card is displayed.'));
-        } else if (kind === 'favorite') {
-            demo.appendChild(el('div', 'mana-help-demo-kicker', 'SAVED LOCALLY'));
-            demo.appendChild(el('div', 'mana-help-demo-filter-result', '☆  Favorite card → reopen it quickly from Favorites'));
-        } else if (kind === 'constraints') {
-            demo.appendChild(el('div', 'mana-help-demo-kicker', 'EXAMPLE HARD FILTERS'));
-            const chips = el('div', 'mana-help-demo-chip-row');
-            chips.appendChild(el('span', 'mana-help-demo-chip', 'Creature'));
-            chips.appendChild(el('span', 'mana-help-demo-chip', 'Green identity'));
-            chips.appendChild(el('span', 'mana-help-demo-chip', 'Commander legal'));
-            demo.appendChild(chips);
-            demo.appendChild(el('div', 'mana-help-demo-filter-result', '✓ Only candidates satisfying the active filters remain'));
-            demo.appendChild(el('div', 'mana-help-demo-step', 'Add a constraint to narrow results. Use Clear All Constraints to start over.'));
-        } else {
-            demo.appendChild(el('div', 'mana-help-demo-kicker', 'QUICK EXAMPLE'));
-            demo.appendChild(el('div', 'mana-help-demo-step', 'Choose a setting, see the preview, and adjust it to fit your search.'));
-        }
-        return demo;
-    };
-
-    const close = () => {
-        if (activeTrigger) activeTrigger.setAttribute('aria-expanded', 'false');
-        const closingPopover = popover;
-        if (closingPopover) {
-            closingPopover.classList.add('is-closing');
-            window.setTimeout(() => closingPopover.remove(), 170);
-        }
-        popover = null;
-        activeTrigger = null;
-        pinned = false;
-    };
-
-    const show = (trigger, pin = false) => {
-        const base = trigger?.dataset?.featureTip ? trigger : null;
-        if (!base) return;
-        if (popover && activeTrigger === trigger) {
-            if (pin) {
-                pinned = true;
-                popover.dataset.pinned = 'true';
-                popover.setAttribute('role', 'dialog');
-                activeTrigger.setAttribute('aria-expanded', 'true');
-            }
-            return;
-        }
-        close();
-        const exampleKey = trigger.dataset.featureExample || 'generic';
-        const defaults = examples[exampleKey] || examples.generic;
-        const fallbackLabel = String(trigger.getAttribute('aria-label') || trigger.textContent || '').replace(/\s+/g, ' ').trim();
-        const title = trigger.dataset.featureTitle || fallbackLabel || defaults.title || 'Quick help';
-        const description = trigger.dataset.featureTip || defaults.description;
-        const howTo = trigger.dataset.featureHowto || defaults.howTo;
-
-        popover = el('section', 'mana-feature-help-popover');
-        popover.setAttribute('role', pin ? 'dialog' : 'tooltip');
-        popover.setAttribute('aria-label', title);
-        popover.dataset.pinned = pin ? 'true' : 'false';
-        const head = el('div', 'mana-feature-help-header');
-        head.appendChild(el('strong', 'mana-feature-help-title', title));
-        const closeBtn = el('button', 'mana-feature-help-close', '×');
-        closeBtn.type = 'button';
-        closeBtn.setAttribute('aria-label', 'Close help');
-        closeBtn.addEventListener('click', event => { event.preventDefault(); event.stopPropagation(); close(); });
-        head.appendChild(closeBtn);
-        popover.appendChild(head);
-        popover.appendChild(el('p', 'mana-feature-help-description', description));
-        if (trigger.dataset.featurePreview) popover.appendChild(el('div', 'mana-feature-help-preview', trigger.dataset.featurePreview));
-        popover.appendChild(buildDemo(exampleKey));
-        if (howTo) {
-            const how = el('p', 'mana-feature-help-howto');
-            how.appendChild(el('strong', '', 'How to use it: '));
-            how.appendChild(document.createTextNode(howTo));
-            popover.appendChild(how);
-        }
-        document.body.appendChild(popover);
-        activeTrigger = trigger;
-        pinned = pin;
-        trigger.setAttribute('aria-expanded', 'true');
-        trigger.setAttribute('aria-controls', 'mana-feature-help-popover');
-        popover.id = 'mana-feature-help-popover';
-        positionPopover(trigger);
-    };
-
-    function positionPopover(trigger) {
-        if (!popover || !trigger) return;
-        const rect = trigger.getBoundingClientRect();
-        const margin = 8;
-        const width = Math.min(340, window.innerWidth - margin * 2);
-        popover.style.width = `${width}px`;
-        popover.style.left = `${Math.max(margin, Math.min(rect.left, window.innerWidth - width - margin))}px`;
-        popover.style.top = '8px';
-        // Measure after insertion to keep the panel inside the visible viewport, including mobile keyboards.
-        const height = popover.offsetHeight;
-        let top = rect.bottom + 8;
-        if (top + height > window.innerHeight - margin) top = rect.top - height - 8;
-        if (top < margin) top = Math.max(margin, Math.min(window.innerHeight - height - margin, rect.bottom + 8));
-        popover.style.top = `${Math.max(margin, top)}px`;
-    }
-
-    const setHelp = (target, title, description, example, howTo, interactive = false) => {
-        if (!target) return;
-        target.dataset.featureTitle = title;
-        target.dataset.featureTip = description;
-        target.dataset.featureExample = example;
-        if (howTo) target.dataset.featureHowto = howTo;
-        target.classList.add('mana-help-hover-target');
-        if (interactive) {
-            target.classList.add('mana-feature-help-interactive');
-            target.setAttribute('tabindex', '0');
-            target.setAttribute('role', 'button');
-            target.setAttribute('aria-label', `${title}. Open visual help`);
-        }
-    };
-
-    // Main workspace controls: hover on desktop, open their related modal normally when tapped.
-    setHelp(document.getElementById('toggle-search-methods-btn'), 'Search Methods', examples.methods.description, 'methods', examples.methods.howTo);
-    setHelp(document.getElementById('toggle-order-btn'), 'Order Results', examples.order.description, 'order', examples.order.howTo);
-    setHelp(document.getElementById('toggle-card-constraints-btn'), 'Constraints', examples.constraints.description, 'constraints', examples.constraints.howTo);
-    setHelp(document.getElementById('source-card-add-btn'), 'Choose a source card', 'Choose the card whose mechanics or text you want to search from.', 'highlight', 'After choosing a card, select an important phrase in its type line or rules text.');
-    setHelp(document.getElementById('find-similar-btn'), 'Find Similar Cards', 'Starts the search using the selected source card, highlights, retrieval settings, and constraints.', 'highlight', 'Choose a source card, optionally highlight an important phrase, then press Find Similar Cards.');
-    setHelp(document.getElementById('autofill-source-constraints-btn'), 'Fill Empty From Source', 'Copies reliable properties from the selected source card into empty constraint fields only.', 'constraints', 'Review the filled fields; they become hard filters.');
-
-    // Action buttons keep their normal click behavior. A separate, high-contrast ? button opens
-    // help on touch devices, so tapping Methods/Order/Constraints still opens the actual control.
-    const addActionHelpMarker = (target, title, description, example, howTo) => {
-        if (!target || target.dataset.manaActionHelpAdded === 'true') return;
-        const marker = el('button', 'mana-feature-help-marker mana-feature-help-interactive mana-action-help-marker', '?');
-        marker.type = 'button';
-        marker.setAttribute('aria-label', `Show visual help for ${title}`);
-        marker.dataset.featureTitle = title;
-        marker.dataset.featureTip = description;
-        marker.dataset.featureExample = example;
-        marker.dataset.featureHowto = howTo || '';
-        target.dataset.manaActionHelpAdded = 'true';
-        target.insertAdjacentElement('afterend', marker);
-    };
-    addActionHelpMarker(document.getElementById('toggle-search-methods-btn'), 'Search Methods', examples.methods.description, 'methods', examples.methods.howTo);
-    addActionHelpMarker(document.getElementById('toggle-order-btn'), 'Order Results', examples.order.description, 'order', examples.order.howTo);
-    addActionHelpMarker(document.getElementById('toggle-card-constraints-btn'), 'Constraints', examples.constraints.description, 'constraints', examples.constraints.howTo);
-    addActionHelpMarker(document.getElementById('source-card-add-btn'), 'Choose a source card', 'Choose the card whose mechanics or text you want to search from.', 'highlight', 'After choosing a card, select an important phrase in its type line or rules text.');
-    addActionHelpMarker(document.getElementById('find-similar-btn'), 'Find Similar Cards', 'Starts the search using the selected source card, highlights, retrieval settings, and constraints.', 'highlight', 'Choose a source card, optionally highlight an important phrase, then press Find Similar Cards.');
-
-    // Keep the previously available help tips but provide the nearest matching visual example.
-    const tipExamples = {
-        'preferences-btn': 'generic', 'source-card-flip-btn': 'flip', 'favorite-btn': 'favorite',
-        'export-btn': 'order', 'search-deeper-btn': 'methods', 'clear-selected-btn': 'generic',
-        'related-search-btn': 'highlight'
-    };
-    Object.entries(tipExamples).forEach(([id, example]) => {
-        const target = document.getElementById(id);
-        if (target && !target.dataset.featureExample) target.dataset.featureExample = example;
-    });
-
-    // Each major modal title and each setting name gets a compact, visual explanation.
-    setHelp(document.getElementById('search-methods-title'), 'Search Methods', examples.methods.description, 'methods', examples.methods.howTo, true);
-    setHelp(document.getElementById('order-title'), 'Order Results', examples.order.description, 'order', examples.order.howTo, true);
-    setHelp(document.getElementById('card-constraints-title'), 'Constraints', examples.constraints.description, 'constraints', examples.constraints.howTo, true);
-
-    document.querySelectorAll('#search-methods-modal .method-text strong, #order-modal .method-text strong').forEach(nameNode => {
-        const name = nameNode.textContent.trim();
-        const config = methodHelp[name];
-        if (!config) return;
-        // Hover/focus on the name explains it, while tapping the name itself still selects its option.
-        setHelp(nameNode, name, config[0], config[1], config[2], false);
-        nameNode.setAttribute('tabindex', '0');
-        nameNode.setAttribute('aria-label', `${name}. Hover for explanation; use the question mark for visual help on touch screens.`);
-        const marker = el('button', 'mana-inline-help-marker mana-feature-help-interactive', '?');
-        marker.type = 'button';
-        marker.setAttribute('aria-label', `Show visual help for ${name}`);
-        marker.dataset.featureTitle = name;
-        marker.dataset.featureTip = config[0];
-        marker.dataset.featureExample = config[1];
-        marker.dataset.featureHowto = config[2];
-        nameNode.parentElement?.parentElement?.appendChild(marker);
-    });
-    document.querySelectorAll('#order-modal .order-panel-section-heading h4').forEach(node => {
-        setHelp(node, node.textContent.trim(), node.textContent.includes('Features')
-            ? 'Optional ordering features change how the ranked list is presented. They do not replace the selected primary ranking.'
-            : 'Choose one primary score or property to decide which candidates appear first.', 'order', 'Pick a primary ranking first, then optionally enable Matrix Sweep or Diverse Spread. ', true);
-    });
-
-    document.querySelectorAll('#card-constraints-modal .filters-grid > .filter-group > label').forEach(label => {
-        const raw = label.childNodes.length ? Array.from(label.childNodes).filter(n => n.nodeType === Node.TEXT_NODE).map(n => n.textContent).join(' ').trim() : label.textContent.trim();
-        const name = raw || label.textContent.trim().split(/\s+/).slice(0, 3).join(' ');
-        const config = methodHelp[name] || [
-            `Filters candidates by ${name.toLowerCase()}. Active constraints are hard requirements, not ranking hints.`,
-            'constraints',
-            'Only set this field when you are willing to exclude cards that do not match it.'
-        ];
-        setHelp(label, name, config[0], config[1], config[2]);
-        // A separate tap target works on phones without making the form label itself awkward to use.
-        const marker = el('button', 'mana-feature-help-marker', '?');
-        marker.type = 'button';
-        marker.setAttribute('aria-label', `How to use ${name}`);
-        marker.dataset.featureTitle = name;
-        marker.dataset.featureTip = config[0];
-        marker.dataset.featureExample = config[1];
-        marker.dataset.featureHowto = config[2];
-        marker.classList.add('mana-feature-help-interactive');
-        label.insertAdjacentElement('afterend', marker);
-    });
-
-    const addInlineHelpMarker = (target, title, description, example, howTo) => {
-        if (!target || target.dataset.manaInlineHelpAdded === 'true') return;
-        const marker = el('button', 'mana-inline-help-marker mana-feature-help-interactive', '?');
-        marker.type = 'button';
-        marker.setAttribute('aria-label', `Show visual help for ${title}`);
-        marker.dataset.featureTitle = title;
-        marker.dataset.featureTip = description;
-        marker.dataset.featureExample = example;
-        marker.dataset.featureHowto = howTo || '';
-        target.dataset.manaInlineHelpAdded = 'true';
-        target.insertAdjacentElement('afterend', marker);
-    };
-
-    // The source-card panel is rebuilt whenever a different card is selected. Install highlight
-    // help on current and future nodes so mobile users always have an explicit, tappable ? button.
-    const installSourceHighlightHelp = () => {
-        const oracleHeading = document.querySelector('#source-card-loaded .oracle-container > strong');
-        if (oracleHeading) {
-            setHelp(oracleHeading, 'Highlight rules text', examples.highlight.description, 'highlight', examples.highlight.howTo, true);
-            addInlineHelpMarker(oracleHeading, 'Highlight rules text', examples.highlight.description, 'highlight', examples.highlight.howTo);
-        }
-        const typeLabel = document.querySelector('#source-card-type')?.parentElement?.querySelector('strong');
-        const typeDescription = 'You can highlight a type-line phrase as well as rules text to focus on a card type or subtype.';
-        const typeHowTo = 'Select a phrase such as “Creature — Elf” in the source card type line.';
-        if (typeLabel) {
-            setHelp(typeLabel, 'Highlight the type line', typeDescription, 'highlight', typeHowTo, true);
-            addInlineHelpMarker(typeLabel, 'Highlight the type line', typeDescription, 'highlight', typeHowTo);
-        }
-        const oracleHelp = document.querySelector('#source-card-loaded .oracle-help');
-        if (oracleHelp) setHelp(oracleHelp, 'How highlighting works', examples.highlight.description, 'highlight', examples.highlight.howTo, true);
-    };
-    installSourceHighlightHelp();
-    const sourceCardObserverRoot = document.getElementById('source-card-loaded') || document.getElementById('source-card-section');
-    if (sourceCardObserverRoot && typeof MutationObserver === 'function') {
-        const sourceHelpObserver = new MutationObserver(() => installSourceHighlightHelp());
-        sourceHelpObserver.observe(sourceCardObserverRoot, { childList: true, subtree: true });
-    }
-    const searchDepthLabel = document.querySelector('#search-methods-modal .search-depth-label strong');
-    setHelp(searchDepthLabel, 'Search Depth', methodHelp['Search Depth'][0], 'methods', methodHelp['Search Depth'][2], true);
-    const oracleHelp = document.querySelector('#source-card-loaded .oracle-help');
-    if (oracleHelp) setHelp(oracleHelp, 'How highlighting works', examples.highlight.description, 'highlight', examples.highlight.howTo, true);
-
-    // A once-per-browser first-use hint teaches people to look for the visual help and demonstrates highlighting.
-    const firstHint = document.getElementById('first-use-help-hint');
-    let hintDismissed = false;
-    try {
-        hintDismissed = localStorage.getItem('manaSearchFirstUseHelpV51') === 'dismissed';
-        // v52 could mark the tour complete but accidentally show the quick-tip again. Migrate
-        // existing users so a completed tour really dismisses the new-user panel permanently.
-        if (!hintDismissed && localStorage.getItem('manaSearchOnboardingV52') === 'completed') {
-            hintDismissed = true;
-            localStorage.setItem('manaSearchFirstUseHelpV51', 'dismissed');
-        }
-    } catch (_) {}
-    if (firstHint) firstHint.classList.toggle('hidden', hintDismissed);
-
-    let hoverCloseTimer = 0;
-    let hoverOpenTimer = 0;
-    let pendingHoverTarget = null;
-    const cancelHoverOpen = () => {
-        if (hoverOpenTimer) window.clearTimeout(hoverOpenTimer);
-        hoverOpenTimer = 0;
-        pendingHoverTarget = null;
-    };
-    const cancelHoverClose = () => { if (hoverCloseTimer) window.clearTimeout(hoverCloseTimer); hoverCloseTimer = 0; };
-    const scheduleHoverClose = () => {
-        cancelHoverOpen();
-        cancelHoverClose();
-        hoverCloseTimer = window.setTimeout(() => {
-            if (!pinned) close();
-        }, 180);
-    };
-    document.addEventListener('pointerover', event => {
-        if (event.pointerType === 'touch') return;
-        if (popover && (popover.contains(event.target) || activeTrigger?.contains(event.target))) {
-            cancelHoverClose();
-            return;
-        }
-        const target = event.target?.closest?.('[data-feature-tip]');
-        if (target && !target.contains(event.relatedTarget) && !pinned) {
-            let finePointer = false;
-            try { finePointer = window.matchMedia('(hover: hover) and (pointer: fine)').matches; } catch (_) {}
-            if (!finePointer) return;
-            cancelHoverClose();
-            cancelHoverOpen();
-            pendingHoverTarget = target;
-            hoverOpenTimer = window.setTimeout(() => {
-                if (pendingHoverTarget === target && target.isConnected && !pinned) show(target, false);
-                hoverOpenTimer = 0;
-                pendingHoverTarget = null;
-            }, 3000);
-        }
-    });
-    document.addEventListener('pointerout', event => {
-        const hoveredTarget = event.target?.closest?.('[data-feature-tip]');
-        if (hoveredTarget && hoveredTarget === pendingHoverTarget && !(event.relatedTarget && hoveredTarget.contains(event.relatedTarget))) cancelHoverOpen();
-        if (!popover || pinned) return;
-        const related = event.relatedTarget;
-        // Leave enough time to cross the small gap between a help label and the visual panel.
-        if (related && (popover.contains(related) || activeTrigger?.contains(related))) return;
-        if (popover.contains(event.target) || activeTrigger?.contains(event.target) || event.target === activeTrigger) {
-            scheduleHoverClose();
-            return;
-        }
-        const target = event.target?.closest?.('[data-feature-tip]');
-        if (target && activeTrigger === target) scheduleHoverClose();
-    });
-    document.addEventListener('focusin', event => {
-        // Avoid surprising popovers on incidental focus. Help opens by sustained desktop hover
-        // or an explicit activation of a help marker (keyboard included).
-        const target = event.target?.closest?.('.mana-feature-help-interactive[data-feature-tip]');
-        if (target && !pinned && target.matches('button')) return;
-    });
-    document.addEventListener('focusout', event => {
-        if (!activeTrigger || pinned || event.target !== activeTrigger) return;
-        const next = event.relatedTarget;
-        if (next && (activeTrigger.contains(next) || popover?.contains(next))) return;
-        close();
-    });
-    document.addEventListener('click', event => {
-        const touchLike = (() => {
-            try { return window.matchMedia('(hover: none), (pointer: coarse)').matches; }
-            catch (_) { return false; }
-        })();
-        const target = event.target?.closest?.('.mana-feature-help-interactive');
-        if (target) {
-            event.preventDefault();
-            event.stopPropagation();
-            cancelHoverClose();
-            cancelHoverOpen();
-            if (pinned && activeTrigger === target) close();
-            else show(target, true);
-            return;
-        }
-        // In touch mode, any tap on an option row outside its actual checkbox/radio means
-        // "explain this option". This prevents the label's default action from silently toggling
-        // the option when the user is trying to learn what Divergent Search (or another option) does.
-        const optionCard = event.target?.closest?.('#search-methods-modal .method-card, #order-modal .method-card');
-        const inputTarget = event.target?.closest?.('input[type="checkbox"], input[type="radio"]');
-        if (touchLike && optionCard && !inputTarget) {
-            const optionName = optionCard.querySelector('.method-text strong');
-            const trigger = optionName?.dataset?.featureTip ? optionName : optionCard;
-            event.preventDefault();
-            event.stopPropagation();
-            cancelHoverClose();
-            if (trigger.dataset.featureTip) show(trigger, true);
-            return;
-        }
-        // A focused hover-only label may open a tooltip just before its click arrives. Pin it
-        // rather than closing it instantly, which is particularly important on touch browsers.
-        if (popover && !popover.contains(event.target)) {
-            const activeLabel = event.target?.closest?.('.mana-help-hover-target[data-feature-tip]');
-            if (activeLabel && activeLabel === activeTrigger) {
-                pinned = true;
-                popover.dataset.pinned = 'true';
-                popover.setAttribute('role', 'dialog');
-                activeLabel.setAttribute('aria-expanded', 'true');
-                cancelHoverClose();
-            } else {
-                close();
-            }
-        }
-    }, true);
-    document.addEventListener('keydown', event => {
-        const target = event.target?.closest?.('.mana-feature-help-interactive');
-        if (!target || !['Enter', ' '].includes(event.key)) return;
-        event.preventDefault();
-        event.stopPropagation();
-        if (pinned && activeTrigger === target) close();
-        else show(target, true);
-    });
-    document.addEventListener('keydown', event => { if (event.key === 'Escape' && popover) close(); });
-    document.addEventListener('scroll', () => { if (popover && !pinned) close(); }, true);
-    window.addEventListener('resize', () => { if (popover && activeTrigger) positionPopover(activeTrigger); });
-    installManaSearchOnboarding();
-}
-
-// A short, step-by-step onboarding tour. It is deliberately one idea per screen, works with
-// touch and keyboard (not just hover), and can be replayed from the header at any time.
-function installManaSearchOnboarding() {
-    if (window.__manaSearchOnboardingInstalled) return;
-    window.__manaSearchOnboardingInstalled = true;
-
-    const tourKey = 'manaSearchFirstSearchTourV59';
-    const firstUseHintKey = 'manaSearchFirstUseHelpV51';
-    // Starter cards demonstrate different kinds of search intent. Buttons open the normal picker
-    // with the chosen name prefilled, so the user still explicitly selects the source card.
-    const starterCards = [
-        { name: 'Phyrexian Arena', reason: 'Recurring card draw', prompt: 'Find cards that generate value over multiple turns.' },
-        { name: 'Sol Ring', reason: 'Fast mana', prompt: 'Find artifacts that produce mana efficiently.' },
-        { name: 'Counterspell', reason: 'Counter a spell', prompt: 'Find other ways to stop a spell from resolving.' },
-        { name: 'Young Pyromancer', reason: 'Repeatable token creation', prompt: 'Find cards that reward casting spells with tokens.' }
-    ];
-    const steps = [
-        {
-            title: 'Welcome to ManaSearch',
-            text: 'Let’s complete a real search together. You will choose a card, focus on one useful part of its Oracle text, and run a search so you finish the tour with results.',
-            example: 'welcome', target: null,
-            hint: 'This tour is interactive. It pauses when you need to use the real card picker or highlight text.'
-        },
-        {
-            title: '1. Choose a card to explore',
-            text: 'Pick a card you want alternatives for, or try one of the suggested starting points. The suggested card only fills the search box; you still choose the matching card in the picker.',
-            example: 'source', target: '#source-card-add-btn', fallback: '#source-card-section',
-            hint: 'Phyrexian Arena is a good first search for recurring draw; Sol Ring is good for fast mana.'
-        },
-        {
-            title: '2. Highlight a short Exact anchor',
-            text: 'Select a meaningful fragment of the card’s Oracle text—not the whole sentence. Keep a distinctive trigger or condition Exact, such as “At the beginning of your upkeep”.',
-            example: 'highlight-exact', target: '#source-card-loaded .oracle-container', fallback: '#source-card-section',
-            hint: 'Press “Select exact phrase” to temporarily reveal the card text. On a phone, long-press and adjust the selection handles.'
-        },
-        {
-            title: '3. Add a Flexible fragment too',
-            text: 'Select a second, separate phrase from the same effect—for example “draw a card”. Keep the trigger/anchor Exact, then change the second highlight from “= Exact” to “≈ Flexible”. This keeps the search focused while allowing equivalent wording.',
-            example: 'highlight-mixed', target: '#highlight-chips-list', fallback: '#source-card-loaded .oracle-container',
-            hint: 'Avoid making the entire sentence Flexible: that loses the narrow anchor. Use a short Exact anchor plus a short Flexible effect phrase.'
-        },
-        {
-            title: '4. Choose search Methods',
-            text: 'Methods control how ManaSearch discovers candidates. Standard is a strong first choice; you can enable more methods later if you want a wider candidate pool.',
-            example: 'methods', target: '#toggle-search-methods-btn', fallback: '#filter-section',
-            hint: 'You can use the question-mark help on touch devices or hover a dotted-underlined name on desktop.'
-        },
-        {
-            title: '5. Choose result Order',
-            text: 'Order changes which candidates appear first, not which cards were retrieved. Overall Match is a good starting point because it balances the scoring signals.',
-            example: 'order', target: '#toggle-order-btn', fallback: '#filter-section',
-            hint: 'Mechanical emphasizes similar game actions; Semantic emphasizes related meaning.'
-        },
-        {
-            title: '6. Keep Constraints broad at first',
-            text: 'Constraints are hard filters: every active constraint must be satisfied. For your first search, leave them broad unless you already know you need a particular color, type, mana value, or format.',
-            example: 'constraints', target: '#toggle-card-constraints-btn', fallback: '#filter-section',
-            hint: 'If too few cards appear, clear constraints before weakening a useful highlight.'
-        },
-        {
-            title: '7. Run your first search',
-            text: 'You have chosen a source card and refined the text signal. Start the actual search now; the tour will wait while ManaSearch retrieves and ranks candidates, then return with your results.',
-            example: 'search', target: '#find-similar-btn', fallback: '#filter-section',
-            hint: 'The button runs the same full search pipeline as the main Find Similar Cards button.'
-        },
-        {
-            title: 'Your first search is ready',
-            text: 'Your search has finished. Browse the results, open Compare to understand differences, favorite useful cards, or adjust highlights and search again.',
-            example: 'results', target: '#results-section', fallback: '#find-similar-btn',
-            hint: 'You can replay the Guided tour from the header any time.'
-        }
-    ];
-
-    const make = (tag, className, text) => {
-        const node = document.createElement(tag);
-        if (className) node.className = className;
-        if (text !== undefined) node.textContent = text;
-        return node;
-    };
-    let layer = null;
-    let highlighted = null;
-    let currentStep = 0;
-    let lastFocused = null;
-    let waitingForSource = false;
-    let tourSourceChosen = false;
-    let waitingForSearch = false;
-    let waitingForHighlight = '';
-    let secondHighlightAdded = false;
-    let waitingForMixedMode = false;
-    let tourMessage = '';
-    let renderStep = null;
-    let closeTour = null;
-
-    const sourceOracleHighlights = () => (Array.isArray(manualHighlights) ? manualHighlights : [])
-        .filter(h => h && h.origin === 'source' && h.field !== 'type' && String(h.text || '').trim());
-    const hasExactAnchor = () => sourceOracleHighlights().some(h => h.mode !== 'variable');
-    const hasMixedHighlightModes = () => {
-        const items = sourceOracleHighlights();
-        return items.length >= 2 && items.some(h => h.mode !== 'variable') && items.some(h => h.mode === 'variable');
-    };
-    const skipHighlightTutorial = () => {
-        waitingForHighlight = '';
-        waitingForMixedMode = false;
-        currentStep = 4;
-        tourMessage = 'No problem. You can search without highlights, but a short Exact anchor plus a Flexible effect phrase often narrows results better.';
-        renderStep?.();
-    };
-    const getVisibleTarget = step => {
-        if (!step.target) return null;
-        const isVisible = node => {
-            if (!node || !node.isConnected || node.closest('.hidden')) return false;
-            const style = getComputedStyle(node);
-            const rect = node.getBoundingClientRect();
-            return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
-        };
-        let target = document.querySelector(step.target);
-        if (!isVisible(target) && step.fallback) target = document.querySelector(step.fallback);
-        return isVisible(target) ? target : null;
-    };
-    const demoMarkup = {
-        welcome: '<div class="mana-tour-demo-flow"><span>Choose a card</span><b>→</b><span>Mix Exact + Flexible</span><b>→</b><span>Search results</span></div>',
-        source: '<div class="mana-tour-demo-caption">Choose a starter idea, then select the card from the normal picker.</div>',
-        'highlight-exact': '<div class="mana-tour-demo-rules">At the beginning of your upkeep, <mark>draw a card</mark> and lose 1 life.</div><small class="mana-tour-demo-caption">Example: keep “At the beginning of your upkeep” Exact as the anchor.</small>',
-        'highlight-mixed': '<div class="mana-tour-demo-rules"><mark class="tour-mark-exact">At the beginning of your upkeep</mark>, <mark class="tour-mark-flexible">draw a card</mark> and lose 1 life.</div><small class="mana-tour-demo-caption">Exact anchor + Flexible effect phrase. Select separate fragments, not the whole sentence as Flexible.</small>',
-        methods: '<div class="mana-tour-demo-flow"><span>Standard</span><b>→</b><span class="is-accent">More retrieval options</span></div>',
-        order: '<div class="mana-tour-demo-rank"><span>Mechanical</span><strong>Similar actions</strong></div><div class="mana-tour-demo-rank is-accent"><span>Overall Match</span><strong>Balanced default</strong></div><div class="mana-tour-demo-rank"><span>Semantic</span><strong>Related meaning</strong></div>',
-        constraints: '<div class="mana-tour-demo-chips"><span>Type</span><span>Color</span><span>Mana value</span></div><small class="mana-tour-demo-caption">Every active constraint must match.</small>',
-        search: '<div class="mana-tour-demo-search">Find Similar Cards <span>→</span></div>',
-        results: '<div class="mana-tour-demo-result"><span>Your search</span><strong class="mana-tour-results-count">Results are ready</strong></div><div class="mana-tour-demo-result is-accent"><span>Next</span><strong>Compare · Favorite · Explore pages</strong></div>'
-    };
-
-    const removeSpotlight = () => {
-        if (highlighted) highlighted.classList.remove('mana-onboarding-spotlight');
-        highlighted = null;
-    };
-    const persist = status => { try { localStorage.setItem(tourKey, status); } catch (_) {} };
-
-    const showTour = () => {
-        if (!layer) return;
-        layer.classList.remove('hidden');
-        renderStep?.();
-        const next = layer.querySelector('.mana-onboarding-next');
-        next?.focus({ preventScroll: true });
-    };
-    const hideTourForRealAction = () => {
-        removeSpotlight();
-        layer?.classList.add('hidden');
-    };
-
-    closeTour = status => {
-        const finalStatus = status || 'skipped';
-        removeSpotlight();
-        if (layer) layer.remove();
-        layer = null;
-        waitingForSource = waitingForSearch = waitingForMixedMode = false;
-        tourSourceChosen = false;
-        waitingForHighlight = '';
-        window.__manaSearchTourSelectingSource = false;
-        persist(finalStatus);
-        const hint = document.getElementById('first-use-help-hint');
-        if (finalStatus === 'completed') {
-            try { localStorage.setItem(firstUseHintKey, 'dismissed'); } catch (_) {}
-            hint?.classList.add('hidden');
-            hint?.classList.remove('mana-tour-hint-after');
-        } else {
-            let hintDismissed = false;
-            try { hintDismissed = localStorage.getItem(firstUseHintKey) === 'dismissed'; } catch (_) {}
-            if (hint) {
-                if (hintDismissed) hint.classList.add('hidden');
-                else { hint.classList.remove('hidden'); hint.classList.add('mana-tour-hint-after'); }
-            }
-        }
-        const focusTarget = lastFocused && lastFocused.isConnected && !lastFocused.closest('.hidden')
-            ? lastFocused : document.getElementById('start-onboarding-tour-btn');
-        if (focusTarget?.isConnected) focusTarget.focus({ preventScroll: true });
-    };
-
-    const openPickerFromTour = query => {
-        if (!layer) return;
-        waitingForSource = true;
-        window.__manaSearchTourSelectingSource = true;
-        hideTourForRealAction();
-        openSourceCardPicker();
-        if (!sourceCardPickerModal || sourceCardPickerModal.classList.contains('hidden')) {
-            waitingForSource = false;
-            window.__manaSearchTourSelectingSource = false;
-            tourMessage = 'The card picker could not open. Close this tour and use Add Source Card, then replay the tour.';
-            showTour();
-            return;
-        }
-        if (query && sourceCardPickerInput) {
-            sourceCardPickerInput.value = query;
-            void searchSourceCardPicker(query);
-        }
-    };
-
-    const openTour = () => {
-        if (layer) { showTour(); return; }
-        lastFocused = document.activeElement;
-        const hint = document.getElementById('first-use-help-hint');
-        if (hint) hint.classList.add('hidden');
-        currentStep = 0;
-        waitingForSource = waitingForSearch = waitingForMixedMode = false;
-        tourSourceChosen = false;
-        window.__manaSearchTourSelectingSource = false;
-        waitingForHighlight = '';
-        secondHighlightAdded = false;
-        tourMessage = '';
-        layer = make('div', 'mana-onboarding-layer');
-        layer.setAttribute('role', 'presentation');
-        const scrim = make('div', 'mana-onboarding-scrim');
-        const dialog = make('section', 'mana-onboarding-card');
-        dialog.setAttribute('role', 'dialog');
-        dialog.setAttribute('aria-modal', 'true');
-        dialog.setAttribute('aria-labelledby', 'mana-onboarding-title');
-        dialog.setAttribute('aria-describedby', 'mana-onboarding-text');
-
-        const top = make('div', 'mana-onboarding-top');
-        const brand = make('span', 'mana-onboarding-kicker', 'YOUR FIRST MANASEARCH');
-        const closeButton = make('button', 'mana-onboarding-close', '×');
-        closeButton.type = 'button';
-        closeButton.setAttribute('aria-label', 'Skip guided tour');
-        top.append(brand, closeButton);
-        const progressWrap = make('div', 'mana-onboarding-progress-wrap');
-        const progressText = make('span', 'mana-onboarding-progress-text');
-        const progressTrack = make('div', 'mana-onboarding-progress-track');
-        const progressFill = make('div', 'mana-onboarding-progress-fill');
-        progressTrack.appendChild(progressFill);
-        progressWrap.append(progressText, progressTrack);
-        const title = make('h2', 'mana-onboarding-title');
-        title.id = 'mana-onboarding-title';
-        const description = make('p', 'mana-onboarding-text');
-        description.id = 'mana-onboarding-text';
-        const demo = make('div', 'mana-onboarding-demo');
-        const hintText = make('p', 'mana-onboarding-hint');
-        const footer = make('div', 'mana-onboarding-footer');
-        const skipButton = make('button', 'mana-onboarding-skip', 'Skip tour');
-        skipButton.type = 'button';
-        const nav = make('div', 'mana-onboarding-nav');
-        const backButton = make('button', 'mana-onboarding-back', 'Back');
-        backButton.type = 'button';
-        const nextButton = make('button', 'mana-onboarding-next', 'Next');
-        nextButton.type = 'button';
-        nav.append(backButton, nextButton);
-        footer.append(skipButton, nav);
-        dialog.append(top, progressWrap, title, description, demo, hintText, footer);
-        layer.append(scrim, dialog);
-        document.body.appendChild(layer);
-
-        const makeActionButton = (label, className, handler) => {
-            const button = make('button', className || 'mana-tour-action', label);
-            button.type = 'button';
-            button.addEventListener('click', handler);
-            return button;
-        };
-        const sourceControls = () => {
-            const group = make('div', 'mana-tour-source-options');
-            starterCards.forEach(card => {
-                const button = make('button', 'mana-tour-starter-card');
-                button.type = 'button';
-                const strong = make('strong', '', card.name);
-                const detail = make('small', '', `${card.reason} · ${card.prompt}`);
-                button.append(strong, detail);
-                button.addEventListener('click', () => openPickerFromTour(card.name));
-                group.appendChild(button);
-            });
-            group.appendChild(makeActionButton('Choose a different card…', 'mana-tour-action mana-tour-action-secondary', () => openPickerFromTour('')));
-            return group;
-        };
-        const addHighlightControls = step => {
-            const group = make('div', 'mana-tour-action-row');
-            if (step.example === 'highlight-exact') {
-                group.appendChild(makeActionButton('Select an Exact phrase on the card', 'mana-tour-action', () => {
-                    if (!currentSourceCard) { tourMessage = 'Choose a source card first.'; renderStep(); return; }
-                    waitingForHighlight = 'first';
-                    hideTourForRealAction();
-                    const oracle = document.querySelector('#source-card-loaded .oracle-container');
-                    (oracle || document.getElementById('source-card-section'))?.scrollIntoView({ block: 'center', behavior: 'smooth' });
-                }));
-                group.appendChild(makeActionButton('Search without highlights', 'mana-tour-action mana-tour-action-secondary', skipHighlightTutorial));
-            } else {
-                const itemCount = sourceOracleHighlights().length;
-                if (!secondHighlightAdded && itemCount < 2) {
-                    group.appendChild(makeActionButton('Select a second phrase', 'mana-tour-action', () => {
-                        waitingForHighlight = 'second';
-                        tourMessage = '';
-                        hideTourForRealAction();
-                        document.querySelector('#source-card-loaded .oracle-container')?.scrollIntoView({ block: 'center', behavior: 'smooth' });
-                    }));
-                } else if (!hasMixedHighlightModes()) {
-                    group.appendChild(makeActionButton('Change a highlight to Flexible', 'mana-tour-action', () => {
-                        waitingForMixedMode = true;
-                        hideTourForRealAction();
-                        document.getElementById('highlight-chips-list')?.scrollIntoView({ block: 'center', behavior: 'smooth' });
-                    }));
-                    group.appendChild(makeActionButton('Continue with Exact only', 'mana-tour-action mana-tour-action-secondary', () => {
-                        currentStep = 4;
-                        tourMessage = 'You can search with Exact highlights only. A mixed Exact + Flexible pair is recommended when you want an exact anchor but allow alternate wording for the effect.';
-                        renderStep();
-                    }));
-                }
-            }
-            return group;
-        };
-        const startTourSearch = async () => {
-            if (!currentSourceCard) {
-                tourMessage = 'Choose a source card first.';
-                currentStep = 1;
-                renderStep();
-                return;
-            }
-            if (!staticSearchResourcesReady()) {
-                tourMessage = 'Search data is still loading. Wait for the ready message, then press Run my search again.';
-                renderStep();
-                return;
-            }
-            waitingForSearch = true;
-            hideTourForRealAction();
-            try { await findSimilarCards(); }
-            catch (error) {
-                waitingForSearch = false;
-                tourMessage = `The search could not finish: ${error?.message || 'unknown error'}. You can retry.`;
-                showTour();
-            }
-        };
-
-        renderStep = () => {
-            removeSpotlight();
-            const step = steps[currentStep];
-            const target = getVisibleTarget(step);
-            if (target && !layer.classList.contains('hidden')) {
-                target.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'auto' });
-                target.classList.add('mana-onboarding-spotlight');
-                highlighted = target;
-            }
-            progressText.textContent = currentStep === 0 ? 'Welcome' : `Step ${currentStep} of ${steps.length - 1}`;
-            progressFill.style.width = `${((currentStep + 1) / steps.length) * 100}%`;
-            title.textContent = step.title;
-            description.textContent = step.text;
-            demo.innerHTML = demoMarkup[step.example] || demoMarkup.welcome;
-            if (step.example === 'source') demo.appendChild(sourceControls());
-            if (step.example === 'highlight-exact' || step.example === 'highlight-mixed') demo.appendChild(addHighlightControls(step));
-            if (step.example === 'search') {
-                const run = makeActionButton('Run my first search', 'mana-tour-action', () => { void startTourSearch(); });
-                run.disabled = !currentSourceCard;
-                demo.appendChild(run);
-            }
-            if (step.example === 'results') {
-                const count = Array.isArray(lastSearchResults) ? lastSearchResults.length : 0;
-                const countEl = demo.querySelector('.mana-tour-results-count');
-                if (countEl) countEl.textContent = count ? `${count.toLocaleString()} candidate cards found` : 'Search finished — no candidates passed your filters';
-            }
-            hintText.textContent = tourMessage || (step.hint || '');
-            backButton.disabled = currentStep === 0 || waitingForSearch;
-            nextButton.textContent = currentStep === steps.length - 1 ? 'Finish tour' : currentStep === 0 ? 'Start tour' : currentStep === 7 ? 'Run search below' : 'Next';
-            nextButton.disabled = currentStep === 7;
-            dialog.classList.toggle('is-top', Boolean(target && target.getBoundingClientRect().top > window.innerHeight * 0.52));
-            dialog.scrollTop = 0;
-        };
-
-        // Skipping is irreversible for this tour session, so ask before closing.
-        // Use the browser's native confirmation UI for reliable keyboard and mobile support;
-        // cancelling leaves the tour, current step, and all selected progress untouched.
-        const skip = () => {
-            let confirmed = false;
-            try {
-                confirmed = window.confirm(
-                    'Are you sure you want to skip the guided tour? You can start it again later using the Guided tour button.'
-                );
-            } catch (error) {
-                // If confirmation is unavailable in a restricted embedded context, do not
-                // unexpectedly dismiss the guide.
-                console.warn('[ManaSearch] Skip confirmation could not be shown; keeping the guide open.', error);
-                tourMessage = 'To leave the guide, use Skip tour and confirm the browser prompt. You can also continue the guide.';
-                if (hintText) hintText.textContent = tourMessage;
-                return;
-            }
-            if (confirmed) closeTour?.('skipped');
-        };
-        closeButton.addEventListener('click', skip);
-        skipButton.addEventListener('click', skip);
-        scrim.addEventListener('click', () => { tourMessage = 'Use Skip tour to exit, or continue through the steps to complete a real search.'; hintText.textContent = tourMessage; });
-        backButton.addEventListener('click', () => {
-            if (currentStep <= 0) return;
-            currentStep--;
-            tourMessage = '';
-            renderStep();
-        });
-        nextButton.addEventListener('click', () => {
-            if (currentStep === 0) { currentStep = 1; tourMessage = ''; renderStep(); return; }
-            if (currentStep === 1) {
-                if (!tourSourceChosen || !currentSourceCard) { tourMessage = 'Choose a recommended card or select your own card to continue.'; renderStep(); return; }
-                currentStep = hasUsableOracleText(currentSourceCard) ? 2 : 4;
-                tourMessage = hasUsableOracleText(currentSourceCard) ? '' : 'This card has no Oracle text, so we will continue without text highlights.';
-                renderStep(); return;
-            }
-            if (currentStep === 2) {
-                if (!hasExactAnchor()) { tourMessage = 'First select a short phrase in Oracle Text and keep it Exact. Don’t select the whole sentence.'; renderStep(); return; }
-                currentStep = 3; tourMessage = ''; renderStep(); return;
-            }
-            if (currentStep === 3) {
-                if (!hasMixedHighlightModes()) { tourMessage = 'For a tighter search, keep one short phrase Exact and make a second, non-overlapping phrase Flexible. You can also continue with Exact only.'; renderStep(); return; }
-                currentStep = 4; tourMessage = ''; renderStep(); return;
-            }
-            if (currentStep === 6) { currentStep = 7; tourMessage = ''; renderStep(); return; }
-            if (currentStep === 7) { void startTourSearch(); return; }
-            if (currentStep >= steps.length - 1) { closeTour?.('completed'); return; }
-            currentStep++; tourMessage = ''; renderStep();
-        });
-        dialog.addEventListener('keydown', event => {
-            if (event.key === 'Escape') { event.preventDefault(); skip(); return; }
-            if (event.key === 'Tab') {
-                const controls = Array.from(dialog.querySelectorAll('button:not(:disabled)'));
-                if (!controls.length) return;
-                const first = controls[0], last = controls[controls.length - 1];
-                if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
-                else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
-            }
-        });
-        renderStep();
-        nextButton.focus({ preventScroll: true });
-    };
-
-    // When the tour opens the normal picker, keep its stage in memory while the user interacts
-    // with the real application. These callbacks are re-bound whenever the tour is opened.
-    window.addEventListener('manasearch:source-selected', event => {
-        if (!waitingForSource || !layer) return;
-        waitingForSource = false;
-        tourSourceChosen = true;
-        window.__manaSearchTourSelectingSource = false;
-        const card = event.detail?.card || currentSourceCard;
-        currentStep = hasUsableOracleText(card) ? 2 : 4;
-        tourMessage = hasUsableOracleText(card)
-            ? `Selected ${card?.name || 'source card'}. Next, select one short Exact phrase from its Oracle text.`
-            : `${card?.name || 'This card'} has no Oracle text to highlight, so we will continue without highlights.`;
-        showTour();
-    });
-    window.addEventListener('manasearch:source-picker-closed', () => {
-        if (!waitingForSource || !layer) return;
-        waitingForSource = false;
-        window.__manaSearchTourSelectingSource = false;
-        tourMessage = 'The picker was closed. Choose a suggested starter or browse for any card to continue.';
-        showTour();
-    });
-    window.addEventListener('manasearch:source-selection-failed', event => {
-        if (!waitingForSource || !layer) return;
-        waitingForSource = false;
-        window.__manaSearchTourSelectingSource = false;
-        tourMessage = event.detail?.message || 'That card could not be loaded. Please choose another card.';
-        showTour();
-    });
-    window.addEventListener('manasearch:source-highlights-changed', () => {
-        if (!layer || layer.classList.contains('hidden')) {
-            if (!waitingForHighlight && !waitingForMixedMode) return;
-        }
-        const items = sourceOracleHighlights();
-        if (waitingForHighlight === 'first' && items.some(h => h.mode !== 'variable')) {
-            waitingForHighlight = '';
-            currentStep = 3;
-            secondHighlightAdded = false;
-            tourMessage = 'Great. Keep that short phrase Exact. Now select a second, separate phrase from the same effect.';
-            showTour();
-            return;
-        }
-        if (waitingForHighlight === 'second' && items.length >= 2) {
-            waitingForHighlight = '';
-            secondHighlightAdded = true;
-            tourMessage = hasMixedHighlightModes()
-                ? 'Nice—you already have both modes. Keep the distinctive phrase Exact and the second phrase Flexible.'
-                : 'Second phrase added. Now change only that second highlight from = Exact to ≈ Flexible.';
-            if (hasMixedHighlightModes()) currentStep = 4;
-            showTour();
-            return;
-        }
-        if (waitingForMixedMode && hasMixedHighlightModes()) {
-            waitingForMixedMode = false;
-            currentStep = 4;
-            tourMessage = 'Perfect: the Exact anchor narrows the search, while the Flexible phrase lets equivalent wording match.';
-            showTour();
-            return;
-        }
-        // Never leave a user trapped behind a hidden tutorial if a duplicate tap removed a
-        // highlight or a mode tap did not produce the requested Exact/Flexible pair.
-        if (waitingForHighlight === 'first' && items.length === 0) {
-            tourMessage = 'No new phrase was added. Select a short, non-empty phrase in the Oracle Text area, then try again.';
-            showTour();
-        } else if (waitingForHighlight === 'second' && items.length < 2) {
-            tourMessage = 'The second phrase was not added (selecting the same highlight removes it). Choose a different, non-overlapping phrase.';
-            showTour();
-        } else if (waitingForMixedMode && !hasMixedHighlightModes()) {
-            tourMessage = 'The modes are not mixed yet. Keep the distinctive phrase Exact and switch the other phrase to Flexible.';
-            showTour();
-        }
-    });
-    window.addEventListener('manasearch:search-finished', event => {
-        if (!waitingForSearch || !layer) return;
-        waitingForSearch = false;
-        currentStep = 8;
-        const count = Number(event.detail?.resultCount) || 0;
-        tourMessage = count
-            ? `Your search finished with ${count.toLocaleString()} results. The cards below are ready to explore.`
-            : 'Your search finished. No cards passed the current filters; you can clear constraints or adjust highlights and try again.';
-        showTour();
-    });
-
-    document.addEventListener('click', event => {
-        const launcher = event.target?.closest?.('#start-onboarding-tour-btn, #replay-onboarding-tour-btn');
-        if (!launcher) return;
-        event.preventDefault();
-        event.stopPropagation();
-        openTour();
-    }, true);
-
-    let tourStatus = '';
-    let hasPriorUse = false;
-    try {
-        tourStatus = localStorage.getItem(tourKey) || '';
-        const priorUseKeys = [HISTORY_KEY, FAVORITES_KEY, DISPLAY_PREFERENCES_KEY, THEME_KEY, firstUseHintKey, 'manaSearchOnboardingV52'];
-        hasPriorUse = priorUseKeys.some(key => {
-            const value = localStorage.getItem(key);
-            if (!value) return false;
-            if (key === HISTORY_KEY || key === FAVORITES_KEY) {
-                try { return JSON.parse(value).length > 0; } catch (_) { return false; }
-            }
-            return true;
-        });
-    } catch (_) {}
-    if (!tourStatus && hasPriorUse) {
-        tourStatus = 'existing-user';
-        persist(tourStatus);
-    }
-    if (tourStatus !== 'completed' && tourStatus !== 'skipped' && tourStatus !== 'existing-user') {
-        window.setTimeout(() => openTour(), 650);
-    } else {
-        const hint = document.getElementById('first-use-help-hint');
-        let hintDismissed = false;
-        try { hintDismissed = localStorage.getItem(firstUseHintKey) === 'dismissed'; } catch (_) {}
-        if (hint && !hintDismissed) hint.classList.remove('hidden');
     }
 }
 
@@ -19405,57 +15150,17 @@ function getHistoryCardPreviews() {
 }
 
 function addToHistory(cardName, card = currentSourceCard) {
-    const normalizedName = String(cardName || '').trim();
-    if (!normalizedName) return;
     if (card) storeHistoryCardPreview(card);
-    // Selecting a card again explicitly opts it back into Recent Searches after a prior dismissal.
-    const dismissed = getStoredArray(HISTORY_DISMISSED_KEY)
-        .filter(name => String(name || '').toLowerCase() !== normalizedName.toLowerCase());
-    try { localStorage.setItem(HISTORY_DISMISSED_KEY, JSON.stringify(dismissed)); } catch (_) {}
     let history = getStoredArray(HISTORY_KEY);
-    history = history.filter(name => String(name || '').toLowerCase() !== normalizedName.toLowerCase());
-    history.unshift(normalizedName);
-    if (history.length > 10) history = history.slice(0, 10);
+    history = history.filter(name => name.toLowerCase() !== cardName.toLowerCase());
+    history.unshift(cardName);
+    if (history.length > 10) history.pop();
     try {
         localStorage.setItem(HISTORY_KEY, JSON.stringify(history));
     } catch (err) {
         console.warn("Search history could not be saved:", err.message);
     }
     renderSidebarLists();
-}
-
-/**
- * Removes one card from Recent Searches only. It does not affect Favorites, the active source card,
- * or cached card data; typing the name in the picker still finds it, and selecting it again puts it
- * back into history. The dismissed list also excludes it from the picker's unfiltered recent tiles.
- */
-function removeRecentSearchCard(cardName) {
-    const normalizedName = String(cardName || '').trim();
-    if (!normalizedName) return false;
-    const key = normalizedName.toLowerCase();
-    const history = getStoredArray(HISTORY_KEY).filter(name => String(name || '').toLowerCase() !== key);
-    const dismissed = getStoredArray(HISTORY_DISMISSED_KEY).filter(name => String(name || '').toLowerCase() !== key);
-    dismissed.unshift(normalizedName);
-    try {
-        localStorage.setItem(HISTORY_KEY, JSON.stringify(history));
-        localStorage.setItem(HISTORY_DISMISSED_KEY, JSON.stringify(dismissed.slice(0, 100)));
-        const favoriteNames = new Set(getStoredArray(FAVORITES_KEY).map(name => String(name || '').toLowerCase()));
-        // The preview cache also backs Favorites. Retain a removed history preview when the card
-        // is still favorited, but the dismissed-key filter keeps it out of recent picker suggestions.
-        const previews = getStoredArray(HISTORY_CARD_PREVIEWS_KEY)
-            .filter(card => String(card?.name || '').toLowerCase() !== key || favoriteNames.has(key));
-        localStorage.setItem(HISTORY_CARD_PREVIEWS_KEY, JSON.stringify(previews));
-    } catch (err) {
-        console.warn('Recent Search could not be removed:', err.message);
-        return false;
-    }
-    renderSidebarLists();
-    // Refresh only an open picker showing its recent suggestions. A typed search should not be
-    // interrupted by this cleanup.
-    if (sourceCardPickerModal && !sourceCardPickerModal.classList.contains('hidden') && !sourceCardPickerInput?.value.trim()) {
-        void searchSourceCardPicker('');
-    }
-    return true;
 }
 
 function setFavoriteState(cardName, shouldFavorite) {
@@ -19491,8 +15196,6 @@ function updateFavoriteButtons(cardName) {
 
     if (favoriteBtn && currentSourceCard && String(currentSourceCard.name || '').toLowerCase() === normalizedName) {
         favoriteBtn.textContent = isFavorite ? '★ Favorited' : '☆ Favorite';
-        favoriteBtn.classList.toggle('is-favorited', isFavorite);
-        favoriteBtn.setAttribute('aria-pressed', isFavorite ? 'true' : 'false');
     }
 
     document.querySelectorAll('[data-favorite-card-name]').forEach(button => {
@@ -19500,7 +15203,6 @@ function updateFavoriteButtons(cardName) {
         button.textContent = isFavorite ? '★' : '☆';
         button.title = isFavorite ? `Remove ${button.dataset.favoriteCardName} from favorites` : `Add ${button.dataset.favoriteCardName} to favorites`;
         button.setAttribute('aria-label', button.title);
-        button.setAttribute('aria-pressed', isFavorite ? 'true' : 'false');
         button.classList.toggle('is-favorited', isFavorite);
     });
 }
@@ -19522,67 +15224,37 @@ function toggleFavorite() {
 function renderSidebarLists() {
     const history = getStoredArray(HISTORY_KEY);
     const favorites = getStoredArray(FAVORITES_KEY);
+
     const previewByName = new Map(getHistoryCardPreviews().map(card => [String(card.name || '').toLowerCase(), card]));
 
-    if (historyList) {
-        historyList.replaceChildren();
-        history.forEach(name => {
-            const li = document.createElement('li');
-            li.className = 'history-entry';
-            const preview = mergeCardRecords(
-                previewByName.get(String(name).toLowerCase()) || null,
-                sourceCardCache.get(String(name).toLowerCase()) || null
-            );
-            const open = document.createElement('button');
-            open.type = 'button';
-            open.className = 'history-card-open';
-            open.textContent = name;
-            open.title = `Load ${name} as the source card`;
-            open.addEventListener('click', () => loadSourceCard(name, preview));
+    historyList.innerHTML = '';
+    history.forEach(name => {
+        const li = document.createElement('li');
+        li.textContent = name;
+        const preview = mergeCardRecords(
+            previewByName.get(String(name).toLowerCase()) || null,
+            sourceCardCache.get(String(name).toLowerCase()) || null
+        );
+        li.addEventListener('click', () => loadSourceCard(name, preview));
+        historyList.appendChild(li);
+    });
 
-            const remove = document.createElement('button');
-            remove.type = 'button';
-            remove.className = 'history-card-remove';
-            remove.textContent = '\u00D7';
-            remove.title = `Remove ${name} from Recent Searches`;
-            remove.setAttribute('aria-label', `Remove ${name} from Recent Searches`);
-            remove.addEventListener('click', event => {
-                event.preventDefault();
-                event.stopPropagation();
-                removeRecentSearchCard(name);
-            });
-            li.append(open, remove);
-            historyList.appendChild(li);
-        });
-    }
-
-    if (favoritesList) {
-        favoritesList.replaceChildren();
-        favorites.forEach(name => {
-            const li = document.createElement('li');
-            li.className = 'favorite-entry';
-            const preview = mergeCardRecords(
-                previewByName.get(String(name).toLowerCase()) || null,
-                sourceCardCache.get(String(name).toLowerCase()) || null
-            );
-            const open = document.createElement('button');
-            open.type = 'button';
-            open.className = 'history-card-open';
-            open.textContent = name;
-            open.title = `Load ${name} as the source card`;
-            open.addEventListener('click', () => loadSourceCard(name, preview));
-            li.appendChild(open);
-            favoritesList.appendChild(li);
-        });
-    }
+    favoritesList.innerHTML = '';
+    favorites.forEach(name => {
+        const li = document.createElement('li');
+        li.textContent = name;
+        const preview = mergeCardRecords(
+            previewByName.get(String(name).toLowerCase()) || null,
+            sourceCardCache.get(String(name).toLowerCase()) || null
+        );
+        li.addEventListener('click', () => loadSourceCard(name, preview));
+        favoritesList.appendChild(li);
+    });
 }
 
 function checkFavoriteStatus(cardName) {
     const favorites = getStoredArray(FAVORITES_KEY);
-    const isFavorite = favorites.some(name => String(name).toLowerCase() === String(cardName || '').toLowerCase());
-    favoriteBtn.textContent = isFavorite ? '★ Favorited' : '☆ Favorite';
-    favoriteBtn.classList.toggle('is-favorited', isFavorite);
-    favoriteBtn.setAttribute('aria-pressed', isFavorite ? 'true' : 'false');
+    favoriteBtn.textContent = favorites.includes(cardName) ? '★ Favorited' : '☆ Favorite';
 }
 
 // --- MULTI-SOURCE CARD CONTEXT ------------------------------------------------------------
@@ -19657,9 +15329,7 @@ async function addAdditionalSourceCard(card) {
             const reason = getPreferenceHiddenReason(fullCard);
             throw new Error(`${fullCard.name} is hidden by your current Preferences (${reason}). Enable the relevant option in Preferences to use it as a source card.`);
         }
-        sourceCardCache.set(fullCard.name.toLowerCase(), fullCard);
-        if (addSourceCardToSet(fullCard)) addToHistory(fullCard.name, fullCard);
-        closeSourceCardPicker();
+        sourceCardCache.set(fullCard.name.toLowerCase(),fullCard); addSourceCardToSet(fullCard); closeSourceCardPicker();
     } catch(error) { alert(error.message||'Unable to add source card.'); }
 }
 function updateSourceCardMultiSearchState() {
@@ -19706,17 +15376,9 @@ function toggleSelectRelatedCard(card) {
 }
 
 function clearSelectedRelatedCards() {
-    // Treat Clear All as an authoritative reset, even if the Map and visible checkbox/chip
-    // state drifted out of sync after a fast sequence of result updates.
+    if (selectedRelatedCards.size === 0) return;
     invalidateInFlightRelatedSearch();
     selectedRelatedCards.clear();
-    document.querySelectorAll('.card-item input.related-checkbox, .card-item input[type="checkbox"][data-related-select], .card-item .related-card-select, .card-item .select-related-card').forEach(input => {
-        if ('checked' in input) input.checked = false;
-        input.setAttribute('aria-checked', 'false');
-    });
-    document.querySelectorAll('.card-item.is-related-selected, .card-item.related-selected, .card-item.selected-for-related').forEach(node => {
-        node.classList.remove('is-related-selected', 'related-selected', 'selected-for-related');
-    });
     updateRelatedBar();
     if (lastSearchResults) renderResults(lastSearchResults);
 }
@@ -19833,171 +15495,32 @@ function closeSelectedRelatedCardsModal() {
 }
 
 // --- SOURCE CARD PICKER ---
-const SOURCE_CARD_STARTER_SUGGESTIONS = Object.freeze([
-    'Sol Ring', 'Counterspell', 'Lightning Bolt', 'Cultivate', 'Phyrexian Arena',
-    'Swords to Plowshares', 'Young Pyromancer', 'Rhystic Study', 'Wrath of God',
-    'Arcane Signet', 'Elvish Mystic', 'Ponder'
-]);
-const SOURCE_CARD_SUGGESTION_THRESHOLD = 4;
-
-function closeSourceCardPicker({ selectionInProgress = false } = {}) {
+function closeSourceCardPicker() {
     if (!sourceCardPickerModal) return;
     sourceCardPickerModal.classList.add('hidden');
     if (sourceCardPickerDebounce) {
         clearTimeout(sourceCardPickerDebounce);
         sourceCardPickerDebounce = null;
     }
-    // The first-search tour temporarily hides its dialog while the user chooses a source card.
-    // Distinguish a deliberate close from the close that immediately precedes source loading.
-    if (!selectionInProgress) {
-        window.dispatchEvent(new CustomEvent('manasearch:source-picker-closed'));
-    }
 }
 
-/**
- * Recent cards is backed by explicit source history, not the entire in-memory cache.
- * Retrieval and typed-name search can cache many cards; those must not appear as recent until
- * a user has actually selected one and it successfully loads as a source.
- */
 function getSourceCardPickerMatches() {
-    const historyNames = getStoredArray(HISTORY_KEY);
-    const previews = new Map(getHistoryCardPreviews().map(card => [String(card?.name || '').trim().toLowerCase(), card]));
-    const cached = new Map();
-    sourceCardCache.forEach(card => {
-        if (card?.name) cached.set(String(card.name).trim().toLowerCase(), card);
-    });
-    const dismissed = new Set(getStoredArray(HISTORY_DISMISSED_KEY).map(name => String(name || '').trim().toLowerCase()));
-    const corpusByName = staticCardCorpusMemory?.byName;
-    const seen = new Set();
+    const previews = getHistoryCardPreviews();
+    const cached = Array.from(sourceCardCache.values()).filter(card => card && card.name);
     const merged = [];
-
-    historyNames.forEach(rawName => {
-        const name = String(rawName || '').trim();
-        const key = name.toLowerCase();
-        if (!name || seen.has(key) || dismissed.has(key)) return;
-        seen.add(key);
-        const local = corpusByName?.get(normalizeCardNameForIdentity(name)) || null;
-        const preview = previews.get(key) || null;
-        const cachedCard = cached.get(key) || null;
-        let card = mergeCardRecords(preview, cachedCard);
-        card = mergeCardRecords(card, local);
-        merged.push(card ? mergeCardRecords({ name }, card) : { name });
-    });
-    return filterSourceCardsByCurrentPreferences(merged, staticCardCorpusMemory);
-}
-
-function getSourceCardSuggestionMatches(recentCards = []) {
-    const recentNames = new Set((Array.isArray(recentCards) ? recentCards : [])
-        .map(card => String(card?.name || '').trim().toLowerCase()).filter(Boolean));
-    const dismissed = new Set(getStoredArray(HISTORY_DISMISSED_KEY).map(name => String(name || '').trim().toLowerCase()));
-    const cacheByName = new Map();
-    sourceCardCache.forEach(card => { if (card?.name) cacheByName.set(String(card.name).trim().toLowerCase(), card); });
-    const corpusByName = staticCardCorpusMemory?.byName;
-    const suggestions = [];
     const seen = new Set();
-
-    for (const name of SOURCE_CARD_STARTER_SUGGESTIONS) {
-        const key = name.toLowerCase();
-        if (recentNames.has(key) || dismissed.has(key) || seen.has(key)) continue;
+    [...previews, ...cached].forEach(card => {
+        const key = String(card.name || '').toLowerCase();
+        if (!key || seen.has(key)) return;
         seen.add(key);
-        const local = corpusByName?.get(normalizeCardNameForIdentity(name)) || null;
-        const cached = cacheByName.get(key) || null;
-        // Keep curated suggestions usable even while recovering from a missing local catalog.
-        // Selection still goes through the normal loader, which fetches the full card if needed.
-        const card = local || cached || {
-            name,
-            image_uris: { normal: `https://api.scryfall.com/cards/named?exact=${encodeURIComponent(name)}&format=image&version=normal` }
-        };
-        if (isAllowedByCandidatePreferences(enrichCardForPreferenceEvaluation(card, staticCardCorpusMemory))) {
-            suggestions.push(card);
-        }
-    }
-    return suggestions;
-}
-
-function createSourceCardPickerTile(card, { removable = false } = {}) {
-    const tile = document.createElement('div');
-    tile.className = `source-picker-card-tile${removable ? ' is-recent' : ''}`;
-
-    const button = document.createElement('button');
-    button.type = 'button';
-    button.className = 'source-picker-card';
-    button.title = `Use ${card.name} as a source card`;
-    const imageUrl = getCardImageUrl(card);
-    if (imageUrl) {
-        const img = document.createElement('img');
-        img.src = imageUrl;
-        img.alt = card.name;
-        img.loading = 'lazy';
-        img.addEventListener('error', () => { img.style.display = 'none'; }, { once: true });
-        button.appendChild(img);
-    } else {
-        const placeholder = document.createElement('div');
-        placeholder.className = 'source-card-picker-placeholder';
-        placeholder.textContent = 'MTG';
-        button.appendChild(placeholder);
-    }
-
-    const body = document.createElement('span');
-    body.className = 'source-picker-card-body';
-    const name = document.createElement('strong');
-    name.textContent = card.name;
-    const type = document.createElement('span');
-    type.textContent = [card.mana_cost, card.type_line].filter(Boolean).join(' • ');
-    body.append(name, type);
-    button.appendChild(body);
-    button.addEventListener('click', () => {
-        // During the first-search tour, choosing a card means choosing the primary source, even
-        // for a returning user who already has one loaded. Keep the ordinary multi-source behavior
-        // unchanged outside the tour.
-        cardSearchInput.value = card.name;
-        if (window.__manaSearchTourSelectingSource) {
-            window.__manaSearchTourSelectingSource = false;
-            closeSourceCardPicker({ selectionInProgress: true });
-            void loadSourceCard(card.name, card);
-            return;
-        }
-        // Merely displaying a suggestion or caching a search match never records history.
-        // A recent entry is saved by loadSourceCard/addAdditionalSourceCard only after success.
-        if (currentSourceCard) void addAdditionalSourceCard(card);
-        else { closeSourceCardPicker({ selectionInProgress: true }); void loadSourceCard(card.name, card); }
+        merged.push(card);
     });
-    tile.appendChild(button);
-
-    if (removable) {
-        const remove = document.createElement('button');
-        remove.type = 'button';
-        remove.className = 'source-picker-card-remove';
-        remove.textContent = '\u00D7';
-        remove.title = `Remove ${card.name} from Recent Searches`;
-        remove.setAttribute('aria-label', `Remove ${card.name} from Recent Searches`);
-        remove.addEventListener('click', event => {
-            event.preventDefault();
-            event.stopPropagation();
-            removeRecentSearchCard(card.name);
-        });
-        tile.appendChild(remove);
-    }
-    return tile;
+    return filterSourceCardsByCurrentPreferences(merged);
 }
 
-function appendSourceCardPickerHeading(fragment, title, description = '') {
-    const heading = document.createElement('div');
-    heading.className = 'source-picker-section-heading';
-    const strong = document.createElement('strong');
-    strong.textContent = title;
-    heading.appendChild(strong);
-    if (description) {
-        const hint = document.createElement('span');
-        hint.textContent = description;
-        heading.appendChild(hint);
-    }
-    fragment.appendChild(heading);
-}
-
-function renderSourceCardPickerCards(cards, emptyMessage = 'No cards found.', { removable = false } = {}) {
+function renderSourceCardPickerCards(cards, emptyMessage = 'No cards found.') {
     if (!sourceCardPickerResults) return;
-    sourceCardPickerResults.replaceChildren();
+    sourceCardPickerResults.innerHTML = '';
     if (!cards.length) {
         const empty = document.createElement('div');
         empty.className = 'source-card-picker-empty';
@@ -20005,39 +15528,41 @@ function renderSourceCardPickerCards(cards, emptyMessage = 'No cards found.', { 
         sourceCardPickerResults.appendChild(empty);
         return;
     }
+
     const fragment = document.createDocumentFragment();
-    cards.slice(0, 12).forEach(card => fragment.appendChild(createSourceCardPickerTile(card, { removable })));
-    sourceCardPickerResults.appendChild(fragment);
-}
-
-function renderSourceCardPickerHome(recentCards, { emptyMessage = 'No recent cards yet.', allowSuggestions = true } = {}) {
-    if (!sourceCardPickerResults) return;
-    sourceCardPickerResults.replaceChildren();
-    const recent = Array.isArray(recentCards) ? recentCards.slice(0, 10) : [];
-    const suggestions = allowSuggestions && recent.length < SOURCE_CARD_SUGGESTION_THRESHOLD
-        ? getSourceCardSuggestionMatches(recent).slice(0, recent.length === 0 ? 6 : 4)
-        : [];
-    const fragment = document.createDocumentFragment();
-
-    if (recent.length) {
-        appendSourceCardPickerHeading(fragment, 'Recent cards', 'Cards you have selected as sources');
-        recent.forEach(card => fragment.appendChild(createSourceCardPickerTile(card, { removable: true })));
-    } else {
-        const empty = document.createElement('div');
-        empty.className = 'source-card-picker-empty source-card-picker-empty-intro';
-        empty.textContent = emptyMessage;
-        fragment.appendChild(empty);
-    }
-
-    if (suggestions.length) {
-        appendSourceCardPickerHeading(fragment, 'Suggestions to try', 'Choose a card to explore similar cards');
-        suggestions.forEach(card => fragment.appendChild(createSourceCardPickerTile(card)));
-    } else if (!recent.length) {
-        const empty = document.createElement('div');
-        empty.className = 'source-card-picker-empty';
-        empty.textContent = 'Start typing above to search for a source card.';
-        fragment.appendChild(empty);
-    }
+    cards.slice(0, 12).forEach(card => {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'source-picker-card';
+        const imageUrl = getCardImageUrl(card);
+        if (imageUrl) {
+            const img = document.createElement('img');
+            img.src = imageUrl;
+            img.alt = card.name;
+            img.loading = 'lazy';
+            img.addEventListener('error', () => { img.style.display = 'none'; }, { once: true });
+            button.appendChild(img);
+        } else {
+            const placeholder = document.createElement('div');
+            placeholder.className = 'source-picker-card-placeholder';
+            placeholder.textContent = 'MTG';
+            button.appendChild(placeholder);
+        }
+        const body = document.createElement('span');
+        body.className = 'source-picker-card-body';
+        const name = document.createElement('strong');
+        name.textContent = card.name;
+        const type = document.createElement('span');
+        type.textContent = [card.mana_cost, card.type_line].filter(Boolean).join(' • ');
+        body.append(name, type);
+        button.appendChild(body);
+        button.addEventListener('click', () => {
+            cardSearchInput.value = card.name;
+            if (currentSourceCard) addAdditionalSourceCard(card);
+            else { closeSourceCardPicker(); loadSourceCard(card.name, card); }
+        });
+        fragment.appendChild(button);
+    });
     sourceCardPickerResults.appendChild(fragment);
 }
 
@@ -20049,30 +15574,32 @@ function openSourceCardPicker() {
         sourceCardPickerInput.focus();
     }
     const hasLocalCorpus = Boolean(staticCardCorpusMemory?.cards?.length);
+    const history = getSourceCardPickerMatches();
     if (hasLocalCorpus) {
-        const history = getSourceCardPickerMatches();
-        if (sourceCardPickerStatus) sourceCardPickerStatus.textContent = history.length
-            ? (history.length < SOURCE_CARD_SUGGESTION_THRESHOLD ? 'Recent cards and suggestions' : 'Recent cards')
-            : 'Try a suggested card or search by name.';
-        renderSourceCardPickerHome(history, { emptyMessage: 'No recent cards yet. Try a suggested card or search by name.' });
+        if (sourceCardPickerStatus) sourceCardPickerStatus.textContent = history.length ? 'Recent cards' : 'Start typing to search the local card database.';
+        renderSourceCardPickerCards(history, 'No recent cards match the current preferences. Start typing to search.');
         return;
     }
 
+    // Do not briefly show incomplete history previews before they have been checked against the
+    // digital/token/funny-card preferences. The corpus is normally already loaded, but when a
+    // user opens this picker early we wait and then refresh only if it is still showing recents.
     if (sourceCardPickerStatus) sourceCardPickerStatus.textContent = 'Checking recent cards against Preferences…';
-    renderSourceCardPickerCards([], 'Loading card data to prepare recent cards and suggestions…');
+    renderSourceCardPickerCards([], 'Loading card data to apply source-card preferences…');
     void loadStaticCardCorpus().then(() => {
         if (!sourceCardPickerModal || sourceCardPickerModal.classList.contains('hidden') || sourceCardPickerInput?.value.trim()) return;
         const canClassifyHistory = Boolean(staticCardCorpusMemory?.cards?.length);
         const currentHistory = canClassifyHistory ? getSourceCardPickerMatches() : [];
         if (sourceCardPickerStatus) sourceCardPickerStatus.textContent = currentHistory.length
-            ? (currentHistory.length < SOURCE_CARD_SUGGESTION_THRESHOLD ? 'Recent cards and suggestions' : 'Recent cards')
-            : canClassifyHistory ? 'Try a suggested card or search by name.' : 'Local card catalog unavailable';
-        if (canClassifyHistory) renderSourceCardPickerHome(currentHistory, { emptyMessage: 'No recent cards yet. Try a suggested card or search by name.' });
-        else renderSourceCardPickerCards([], 'Recent cards could not be checked because the local card catalog is unavailable. Type to search instead.');
+            ? 'Recent cards'
+            : canClassifyHistory ? 'Start typing to search the card database.' : 'Local card catalog unavailable';
+        renderSourceCardPickerCards(currentHistory, canClassifyHistory
+            ? 'No recent cards match the current preferences. Start typing to search.'
+            : 'Recent cards could not be checked because the local card catalog is unavailable. Type to search instead.');
     }).catch(() => {
         if (!sourceCardPickerModal || sourceCardPickerModal.classList.contains('hidden') || sourceCardPickerInput?.value.trim()) return;
         if (sourceCardPickerStatus) sourceCardPickerStatus.textContent = 'Local card catalog unavailable';
-        renderSourceCardPickerCards([], 'Recent cards could not be checked because the local card catalog is unavailable. Type to search using the fallback card search.');
+        renderSourceCardPickerCards([], 'Recent cards could not be checked against Preferences. Type to search using the fallback card search.');
     });
 }
 
@@ -20090,10 +15617,11 @@ async function searchSourceCardPicker(query) {
         const canClassifyHistory = Boolean(corpus?.cards?.length);
         const history = canClassifyHistory ? getSourceCardPickerMatches() : [];
         if (sourceCardPickerStatus) sourceCardPickerStatus.textContent = history.length
-            ? (history.length < SOURCE_CARD_SUGGESTION_THRESHOLD ? 'Recent cards and suggestions' : 'Recent cards')
-            : canClassifyHistory ? 'Try a suggested card or search by name.' : 'Local card catalog unavailable';
-        if (canClassifyHistory) renderSourceCardPickerHome(history, { emptyMessage: 'No recent cards yet. Try a suggested card or search by name.' });
-        else renderSourceCardPickerCards([], 'Recent cards could not be checked against Preferences because the local card catalog is unavailable. Type to search using the fallback card search.');
+            ? 'Recent cards'
+            : canClassifyHistory ? 'Start typing to search the local card database.' : 'Local card catalog unavailable';
+        renderSourceCardPickerCards(history, canClassifyHistory
+            ? 'No recent cards match the current preferences. Start typing to search.'
+            : 'Recent cards could not be checked against Preferences because the local card catalog is unavailable. Type to search using the fallback card search.');
         return;
     }
     if (q.length < 2) {
@@ -20132,7 +15660,7 @@ async function searchSourceCardPicker(query) {
                         : 'No matching cards';
             }
             renderSourceCardPickerCards(cards, nameMatches.length
-                ? 'Matching cards are hidden by current Preferences. Adjust the Digital-only or Tokens/Emblems/Nontraditional cards preferences to include them.'
+                ? 'Matching cards are hidden by current Preferences. Adjust the Digital-only or Tokens/Emblems/Funny cards preferences to include them.'
                 : 'No matching cards.');
             return;
         }
@@ -20160,7 +15688,7 @@ async function searchSourceCardPicker(query) {
                 : fetchedCards.length ? 'Matching cards are hidden by current Preferences' : 'No matching cards';
         }
         renderSourceCardPickerCards(cards, fetchedCards.length
-            ? 'Matching cards are hidden by current Preferences. Adjust the Digital-only or Tokens/Emblems/Nontraditional cards preferences to include them.'
+            ? 'Matching cards are hidden by current Preferences. Adjust the Digital-only or Tokens/Emblems/Funny cards preferences to include them.'
             : 'No matching cards.');
     } catch (error) {
         if (requestId !== sourceCardPickerRequestId) return;
@@ -20199,7 +15727,6 @@ function clearSourceCard() {
     ++searchRequestId;
     activeMainSearchRequestId = null;
     cancelScheduledProgressiveResultRender();
-    cancelDeferredResultRender();
     ++sourceCardPickerRequestId;
     currentSourceCard = null;
     sourceCards.clear();
@@ -20226,17 +15753,12 @@ function clearSourceCard() {
     sourceCardLoaded?.classList.add('hidden');
     sourceCardSection?.classList.remove('hidden');
     if (findSimilarBtn) findSimilarBtn.disabled = true;
-    const autofillConstraintsBtn = document.getElementById('autofill-source-constraints-btn');
-    if (autofillConstraintsBtn) autofillConstraintsBtn.disabled = true;
-    const autofillStatus = document.getElementById('constraint-autofill-status');
-    if (autofillStatus) { autofillStatus.textContent = ''; autofillStatus.classList.add('hidden'); }
     updateStaticSearchAvailability();
     if (resultsSection) resultsSection.classList.add('hidden');
     if (resultsGrid) resultsGrid.innerHTML = '';
     if (cardSearchInput) cardSearchInput.value = '';
     updateRelatedBar();
     renderHighlightChips();
-    notifyManaSearchHighlightsChanged();
     renderTags();
     checkFavoriteStatus('');
     const removeBtn = document.getElementById('discard-source-card-btn');
@@ -20255,9 +15777,7 @@ async function loadSourceCard(query, providedCard = null) {
         const evaluatedPreflight = enrichCardForPreferenceEvaluation(preflightRecord);
         const hiddenReason = getPreferenceHiddenReason(evaluatedPreflight);
         if (preflightRecord && hiddenReason) {
-            const message = `${evaluatedPreflight.name || query} is hidden by your current Preferences (${hiddenReason}). Enable the relevant option in Preferences to use it as a source card.`;
-            alert(message);
-            window.dispatchEvent(new CustomEvent('manasearch:source-selection-failed', { detail: { message } }));
+            alert(`${evaluatedPreflight.name || query} is hidden by your current Preferences (${hiddenReason}). Enable the relevant option in Preferences to use it as a source card.`);
             return;
         }
     }
@@ -20266,7 +15786,6 @@ async function loadSourceCard(query, providedCard = null) {
     const requestId = ++searchRequestId;
     activeMainSearchRequestId = null;
     cancelScheduledProgressiveResultRender();
-    cancelDeferredResultRender();
 
     showLoading(true);
     resultsSection.classList.add('hidden');
@@ -20280,7 +15799,6 @@ async function loadSourceCard(query, providedCard = null) {
     updateResultsPagination(0);
     selectedRelatedCards.clear();
     manualHighlights = [];
-    nextHighlightColorIndex = 0;
     // Diagnostics belong to a specific search - clear them alongside the results so a later
     // benchmark or debug read can't pick up instrumentation from a previous, unrelated search.
     lastSearchDiagnostics = null;
@@ -20388,10 +15906,6 @@ async function loadSourceCard(query, providedCard = null) {
         }
 
         currentSourceCard = cardData;
-        const autofillConstraintsBtn = document.getElementById('autofill-source-constraints-btn');
-        if (autofillConstraintsBtn) autofillConstraintsBtn.disabled = false;
-        const autofillStatus = document.getElementById('constraint-autofill-status');
-        if (autofillStatus) { autofillStatus.textContent = ''; autofillStatus.classList.add('hidden'); }
         sourceCards.clear();
         primarySourceCardKey = getSourceCardIdentity(cardData);
         if (primarySourceCardKey) sourceCards.set(primarySourceCardKey, cardData);
@@ -20402,15 +15916,10 @@ async function loadSourceCard(query, providedCard = null) {
         updateSourceCardMultiSearchState();
         activeTags = generateTags(cardData);
         renderTags();
-        // Benchmarks load source cards programmatically; keep those fixtures out of a user's
-        // Recent Searches. Ordinary user-driven successful selections are recorded here.
-        if (!benchmarkColdMode) addToHistory(cardData.name, cardData);
+        addToHistory(cardData.name, cardData);
         checkFavoriteStatus(cardData.name);
         const removeBtn = document.getElementById('discard-source-card-btn');
         if (removeBtn) removeBtn.disabled = false;
-        if (!benchmarkColdMode) {
-            window.dispatchEvent(new CustomEvent('manasearch:source-selected', { detail: { card: cardData } }));
-        }
     } catch (error) {
         activeSearchStreamProgressReporter = null;
         if (requestId !== searchRequestId) return;
@@ -20419,16 +15928,11 @@ async function loadSourceCard(query, providedCard = null) {
             throw error;
         }
         currentSourceCard = null;
-        const autofillConstraintsBtn = document.getElementById('autofill-source-constraints-btn');
-        if (autofillConstraintsBtn) autofillConstraintsBtn.disabled = true;
-        const autofillStatus = document.getElementById('constraint-autofill-status');
-        if (autofillStatus) { autofillStatus.textContent = ''; autofillStatus.classList.add('hidden'); }
         activeTags = [];
         manualHighlights = [];
         highlightComposerOpen = false;
         selectedRelatedCards.clear();
         alert(error.message);
-        window.dispatchEvent(new CustomEvent('manasearch:source-selection-failed', { detail: { message: error?.message || 'The card could not be loaded.' } }));
         sourceCardSection.classList.remove('hidden');
         sourceCardLoaded?.classList.add('hidden');
         sourceCardEmpty?.classList.remove('hidden');
@@ -20439,319 +15943,10 @@ async function loadSourceCard(query, providedCard = null) {
     }
 }
 
-function getSourceCardFaceImages(card = currentSourceCard) {
-    return Array.isArray(card?.card_faces) ? card.card_faces.filter(face => face?.image_uris?.normal || face?.image_uris?.large || face?.image_uris?.png) : [];
-}
-
-function getSourceCardFaceImageUrl(card = currentSourceCard, faceIndex = currentSourceCardFaceIndex) {
-    const faces = getSourceCardFaceImages(card);
-    if (faces.length) {
-        const face = faces[Math.max(0, Math.min(faceIndex, faces.length - 1))];
-        return face?.image_uris?.normal || face?.image_uris?.large || face?.image_uris?.png || getCardImageUrl(card);
-    }
-    return getCardImageUrl(card);
-}
-
-function updateSourceCardFaceDisplay(card = currentSourceCard, animate = false) {
-    if (!sourceCardImage) sourceCardImage = document.getElementById('source-card-image');
-    if (!sourceCardFlipBtn) sourceCardFlipBtn = document.getElementById('source-card-flip-btn');
-    if (!sourceCardImage) return;
-    const faces = getSourceCardFaceImages(card);
-    const isLegacyFlip = String(card?.layout || '').toLowerCase() === 'flip' && Boolean(card?.image_uris?.normal);
-    const canFlip = faces.length > 1 || isLegacyFlip;
-    const wrap = document.getElementById('source-card-art-wrap');
-    wrap?.classList.toggle('is-source-legacy-flip-rotated', isLegacyFlip && currentSourceCardFaceIndex === 1);
-    if (sourceCardFlipBtn) {
-        sourceCardFlipBtn.classList.toggle('hidden', !canFlip);
-        sourceCardFlipBtn.disabled = !canFlip || sourceCardFlipBtn.dataset.animating === 'true';
-        sourceCardFlipBtn.textContent = isLegacyFlip ? 'Rotate' : 'Flip';
-        sourceCardFlipBtn.setAttribute('aria-label', !canFlip ? 'This card has no other face' : isLegacyFlip
-            ? (currentSourceCardFaceIndex === 1 ? 'Rotate source card back to its front half' : 'Rotate source card to read its other half')
-            : `Flip source card to ${faces[(currentSourceCardFaceIndex + 1) % faces.length]?.name || 'its other face'}`);
-    }
-    const url = isLegacyFlip ? getCardImageUrl(card) : getSourceCardFaceImageUrl(card, currentSourceCardFaceIndex);
-    sourceCardImage.alt = isLegacyFlip
-        ? `${card?.name || 'Card Artwork'}${currentSourceCardFaceIndex === 1 ? ' (rotated to read the other half)' : ''}`
-        : (faces[currentSourceCardFaceIndex]?.name || card?.name || 'Card Artwork');
-    sourceCardImage.style.display = url ? 'block' : 'none';
-    if (!animate) { sourceCardImage.src = url; return; }
-    // Classic flip cards use one image containing both halves. CSS rotates it as one physical
-    // card; do not run the double-faced image-swap timer on this layout.
-    if (isLegacyFlip) { sourceCardImage.src = url; return; }
-    const reducedMotion = document.body?.classList.contains('reduce-motion') || window.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches;
-    if (reducedMotion) { sourceCardImage.src = url; return; }
-    // Reuse the wrapper reference captured above. Redeclaring `const wrap` in the same function
-    // makes this ES module fail to parse entirely, which prevents every UI handler and both data
-    // loaders from ever starting.
-    if (!wrap) { sourceCardImage.src = url; return; }
-    if (sourceCardFlipTimer) clearTimeout(sourceCardFlipTimer);
-    if (sourceCardFlipFinalTimer) clearTimeout(sourceCardFlipFinalTimer);
-    wrap.classList.add('is-source-flipping');
-    if (sourceCardFlipBtn) { sourceCardFlipBtn.disabled = true; sourceCardFlipBtn.dataset.animating = 'true'; }
-    sourceCardFlipTimer = setTimeout(() => { sourceCardImage.src = url; }, 190);
-    sourceCardFlipFinalTimer = setTimeout(() => {
-        wrap.classList.remove('is-source-flipping');
-        sourceCardFlipTimer = 0;
-        sourceCardFlipFinalTimer = 0;
-        if (sourceCardFlipBtn) { sourceCardFlipBtn.disabled = !canFlip; sourceCardFlipBtn.dataset.animating = 'false'; }
-    }, 390);
-}
-
-function flipCurrentSourceCardFace() {
-    const faces = getSourceCardFaceImages(currentSourceCard);
-    const isLegacyFlip = String(currentSourceCard?.layout || '').toLowerCase() === 'flip' && Boolean(currentSourceCard?.image_uris?.normal);
-    if ((!isLegacyFlip && faces.length < 2) || sourceCardFlipBtn?.dataset.animating === 'true') return;
-    currentSourceCardFaceIndex = isLegacyFlip
-        ? (currentSourceCardFaceIndex === 0 ? 1 : 0)
-        : (currentSourceCardFaceIndex + 1) % faces.length;
-    updateSourceCardFaceDisplay(currentSourceCard, true);
-}
-
-// Source-card metadata helpers: keep the visible supertype/subtype fields in sync with the
-// underlying editable Scryfall type line without touching Oracle text or the card corpus.
-const SOURCE_CARD_SUPERTYPES = new Set(['basic', 'legendary', 'ongoing', 'snow', 'world']);
-function getSourceCardTypeLine(card = currentSourceCard) {
-    return String(card?.type_line || card?.card_faces?.[currentSourceCardFaceIndex]?.type_line || card?.card_faces?.[0]?.type_line || sourceCardType?.dataset.originalText || sourceCardType?.textContent || '').trim();
-}
-function splitSourceCardTypeLine(typeLine) {
-    const raw = String(typeLine || '').trim();
-    const pieces = raw.split(/\s+[—–]\s+/);
-    const left = (pieces.shift() || '').trim();
-    const subtypes = pieces.join(' — ').trim();
-    const tokens = left ? left.split(/\s+/).filter(Boolean) : [];
-    const supertypes = tokens.filter(token => SOURCE_CARD_SUPERTYPES.has(token.toLowerCase()));
-    const types = tokens.filter(token => !SOURCE_CARD_SUPERTYPES.has(token.toLowerCase()));
-    return { supertypes, types, subtypes };
-}
-function syncSourceCardMetadataDisplays(card = currentSourceCard, typeLine = getSourceCardTypeLine(card)) {
-    const parsed = splitSourceCardTypeLine(typeLine);
-    const supertypeDisplay = document.getElementById('source-card-supertype');
-    const subtypeDisplay = document.getElementById('source-card-subtype');
-    const manaValueDisplay = document.getElementById('source-card-mana-value');
-    const rarityDisplay = document.getElementById('source-card-rarity');
-    if (supertypeDisplay) supertypeDisplay.textContent = parsed.supertypes.join(' ') || 'None';
-    if (subtypeDisplay) subtypeDisplay.textContent = parsed.subtypes || 'None';
-    if (manaValueDisplay) {
-        const raw = card?.cmc ?? card?.mana_value ?? 0;
-        const numeric = Number(raw);
-        manaValueDisplay.textContent = Number.isFinite(numeric) ? String(Number.isInteger(numeric) ? numeric : Number(numeric.toFixed(4))) : String(raw || '0');
-    }
-    if (rarityDisplay) {
-        const rarity = String(card?.rarity || 'unknown').toLowerCase();
-        rarityDisplay.textContent = rarity === 'mythic' ? 'Mythic' : rarity === 'uncommon' ? 'Uncommon' : rarity === 'rare' ? 'Rare' : rarity === 'common' ? 'Common' : rarity === 'special' ? 'Special' : rarity === 'bonus' ? 'Bonus' : 'Unknown';
-    }
-}
-function applySourceCardTypeLine(typeLine, { clearTypeHighlights = true } = {}) {
-    const normalized = String(typeLine || '').trim().replace(/\s+/g, ' ');
-    if (!normalized || !currentSourceCard) return false;
-    currentSourceCard.type_line = normalized;
-    if (Array.isArray(currentSourceCard.card_faces) && currentSourceCard.card_faces[currentSourceCardFaceIndex]) {
-        currentSourceCard.card_faces[currentSourceCardFaceIndex].type_line = normalized;
-    }
-    if (sourceCardType) {
-        sourceCardType.dataset.originalText = normalized;
-        sourceCardType.textContent = normalized;
-    }
-    if (clearTypeHighlights) manualHighlights = manualHighlights.filter(h => h?.field !== 'type');
-    syncSourceCardMetadataDisplays(currentSourceCard, normalized);
-    reapplyTypeLineHighlights();
-    renderHighlightChips();
-    notifyManaSearchHighlightsChanged();
-    window.dispatchEvent(new CustomEvent('manasearch:source-type-changed', { detail: { typeLine: normalized } }));
-    return true;
-}
-function composeSourceCardTypeLine({ supertypes, types, subtypes }) {
-    const left = [...(supertypes || []), ...(types || [])].map(value => String(value || '').trim()).filter(Boolean).join(' ').replace(/\s+/g, ' ');
-    const right = String(subtypes || '').trim().replace(/\s+/g, ' ');
-    return `${left}${right ? ` — ${right}` : ''}`.trim();
-}
-function cleanSourceSupertypeInput(value) {
-    const raw = String(value || '').trim();
-    if (!raw || /^none$/i.test(raw)) return [];
-    const canonical = new Map(['Basic', 'Legendary', 'Ongoing', 'Snow', 'World'].map(value => [value.toLowerCase(), value]));
-    return [...new Set(raw.replace(/[,;/]+/g, ' ').split(/\s+/).filter(Boolean).map(token => canonical.get(token.toLowerCase()) || token))];
-}
-function initSourceMetadataEditors() {
-    const byId = id => document.getElementById(id);
-    const bindEditor = ({ buttonId, editorId, inputId, applyId, cancelId, readValue, saveValue, allowBlank = true }) => {
-        const button = byId(buttonId), editor = byId(editorId), input = byId(inputId), apply = byId(applyId), cancel = byId(cancelId);
-        if (!button || !editor || !input || !apply || !cancel || button.dataset.bound) return;
-        button.dataset.bound = 'true';
-        const close = () => { editor.classList.add('hidden'); button.setAttribute('aria-expanded', 'false'); };
-        const open = () => {
-            input.value = readValue();
-            editor.classList.remove('hidden'); button.setAttribute('aria-expanded', 'true');
-            input.focus?.();
-            if (typeof input.setSelectionRange === 'function') {
-                const end = input.value.length;
-                try { input.setSelectionRange(end, end); } catch (_) { /* number/select inputs do not support a text selection */ }
-            }
-        };
-        const commit = () => {
-            const raw = input.value;
-            if (!allowBlank && !String(raw).trim()) { input.focus(); return; }
-            if (saveValue(raw) !== false) close();
-        };
-        button.addEventListener('click', () => editor.classList.contains('hidden') ? open() : close());
-        apply.addEventListener('click', commit);
-        cancel.addEventListener('click', close);
-        input.addEventListener('keydown', event => {
-            if (event.key === 'Enter') { event.preventDefault(); commit(); }
-            else if (event.key === 'Escape') { event.preventDefault(); close(); }
-        });
-    };
-    bindEditor({
-        buttonId: 'edit-source-mana-value-btn', editorId: 'source-mana-value-editor', inputId: 'source-mana-value-input',
-        applyId: 'apply-source-mana-value-btn', cancelId: 'cancel-source-mana-value-btn', allowBlank: false,
-        readValue: () => String(currentSourceCard?.cmc ?? currentSourceCard?.mana_value ?? 0),
-        saveValue: raw => {
-            const value = Number(raw);
-            if (!Number.isFinite(value) || value < 0 || value > 999) return false;
-            if (currentSourceCard) {
-                currentSourceCard.cmc = value;
-                currentSourceCard.mana_value = value;
-            }
-            syncSourceCardMetadataDisplays();
-            window.dispatchEvent(new CustomEvent('manasearch:source-metadata-changed', { detail: { field: 'manaValue', value } }));
-            return true;
-        }
-    });
-    bindEditor({
-        buttonId: 'edit-source-supertype-btn', editorId: 'source-supertype-editor', inputId: 'source-supertype-input',
-        applyId: 'apply-source-supertype-btn', cancelId: 'cancel-source-supertype-btn',
-        readValue: () => splitSourceCardTypeLine(getSourceCardTypeLine()).supertypes.join(' '),
-        saveValue: raw => {
-            const parsed = splitSourceCardTypeLine(getSourceCardTypeLine());
-            const next = composeSourceCardTypeLine({ supertypes: cleanSourceSupertypeInput(raw), types: parsed.types, subtypes: parsed.subtypes });
-            return applySourceCardTypeLine(next);
-        }
-    });
-    bindEditor({
-        buttonId: 'edit-source-subtype-btn', editorId: 'source-subtype-editor', inputId: 'source-subtype-input',
-        applyId: 'apply-source-subtype-btn', cancelId: 'cancel-source-subtype-btn',
-        readValue: () => splitSourceCardTypeLine(getSourceCardTypeLine()).subtypes,
-        saveValue: raw => {
-            const parsed = splitSourceCardTypeLine(getSourceCardTypeLine());
-            const value = /^none$/i.test(String(raw || '').trim()) ? '' : String(raw || '').trim().replace(/\s+/g, ' ');
-            const next = composeSourceCardTypeLine({ supertypes: parsed.supertypes, types: parsed.types, subtypes: value });
-            return applySourceCardTypeLine(next);
-        }
-    });
-    bindEditor({
-        buttonId: 'edit-source-rarity-btn', editorId: 'source-rarity-editor', inputId: 'source-rarity-input',
-        applyId: 'apply-source-rarity-btn', cancelId: 'cancel-source-rarity-btn',
-        readValue: () => String(currentSourceCard?.rarity || 'unknown').toLowerCase(),
-        saveValue: raw => {
-            if (!currentSourceCard) return false;
-            currentSourceCard.rarity = String(raw || 'unknown').toLowerCase();
-            syncSourceCardMetadataDisplays();
-            window.dispatchEvent(new CustomEvent('manasearch:source-metadata-changed', { detail: { field: 'rarity', value: currentSourceCard.rarity } }));
-            return true;
-        }
-    });
-}
-if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', initSourceMetadataEditors, { once: true }); else initSourceMetadataEditors();
-
-// Lightweight MTG type-line editor. This edits only the local source-card search context; it does
-// not alter the card database or Oracle rules text. Suggestions are intentionally curated and
-// typo correction is conservative so unusual subtypes remain editable.
-const MANA_TYPE_WORDS = [
-    'Artifact','Battle','Creature','Enchantment','Instant','Kindred','Land','Planeswalker','Sorcery','Tribal',
-    'Basic','Legendary','Snow','World','Ongoing','Token','Conspiracy','Dungeon','Plane','Phenomenon','Scheme','Vanguard',
-    'Advisor','Aetherborn','Alien','Angel','Antelope','Ape','Archer','Archon','Army','Artificer','Assassin','Assembly-Worker','Atog','Aurochs','Avatar',
-    'Badger','Barbarian','Bard','Basilisk','Bat','Bear','Beast','Beeble','Berserker','Bird','Blinkmoth','Boar','Bringer','Brushwagg',
-    'Camarid','Camel','Capybara','Caribou','Carrier','Cat','Centaur','Child','Chimera','Citizen','Cleric','Clown','Cockatrice','Construct','Coward','Coyote','Crab','Crocodile','Cyclops',
-    'Dauthi','Demigod','Demon','Deserter','Detective','Devil','Dinosaur','Djinn','Doctor','Dog','Dragon','Drake','Dreadnought','Drone','Druid','Dryad','Dwarf',
-    'Efreet','Egg','Elder','Eldrazi','Elemental','Elephant','Elf','Elk','Employee','Eye','Faerie','Ferret','Fish','Flagbearer','Fox','Fractal','Frog','Fungus',
-    'Gamer','Gargoyle','Germ','Giant','Gith','Gnoll','Gnome','Goat','Goblin','God','Golem','Gorgon','Graveborn','Gremlin','Griffin','Guest',
-    'Hag','Halfling','Hamster','Harpy','Hellion','Hippo','Hippogriff','Homarid','Homunculus','Horror','Horse','Human','Hydra','Hyena',
-    'Illusion','Imp','Incarnation','Inkling','Inquisitor','Insect','Jackal','Jellyfish','Juggernaut','Kavu','Kirin','Kithkin','Knight','Kobold','Kor','Kraken',
-    'Leech','Lhurgoyf','Licid','Lizard','Manticore','Masticore','Mercenary','Merfolk','Metathran','Minion','Minotaur','Mole','Monger','Mongoose','Monk','Monkey','Moonfolk','Mouse','Mutant','Myr','Mystic',
-    'Naga','Nautilus','Necron','Nephilim','Nightmare','Ninja','Noble','Noggle','Nomad','Nymph','Octopus','Ogre','Ooze','Orb','Orc','Orgg','Otter','Ouphe','Ox','Oyster',
-    'Peasant','Pegasus','Pentavite','Pest','Phoenix','Phyrexian','Pilot','Pincher','Pirate','Plant','Praetor','Prism','Processor','Rabbit','Raccoon','Ranger','Rat','Rebel','Reflection','Rhino','Rigger','Robot','Rogue',
-    'Sable','Salamander','Samurai','Sand','Saproling','Satyr','Scarecrow','Scientist','Scion','Scorpion','Scout','Sculpture','Serf','Serpent','Servo','Shade','Shaman','Shapeshifter','Shark','Sheep','Siren','Skeleton','Slith','Sliver','Slug','Snake','Soldier','Soltari','Spawn','Specter','Spellshaper','Sphinx','Spider','Spike','Spirit','Splinter','Sponge','Squid','Squirrel','Starfish','Survivor','Synth',
-    'Tentacle','Tetravite','Thalakos','Thopter','Thrull','Tiefling','Time Lord','Toy','Treefolk','Trilobite','Triskelavite','Troll','Turtle','Unicorn','Vampire','Vedalken','Villain','Volver','Wall','Walrus','Warlock','Warrior','Weird','Werewolf','Whale','Wizard','Wolf','Wolverine','Wombat','Worm','Wraith','Wurm','Yeti','Zombie','Zubera',
-    'Power-Plant','Tower','Mine','Desert','Gate','Lair','Locus','Sphere','Urza’s','Urza\'s'
-];
-function initSourceTypeEditor() {
-    const display = document.getElementById('source-card-type');
-    const openBtn = document.getElementById('edit-source-type-btn');
-    const editor = document.getElementById('source-type-editor');
-    const input = document.getElementById('source-type-input');
-    const suggestions = document.getElementById('source-type-suggestions');
-    const apply = document.getElementById('apply-source-type-btn');
-    const cancel = document.getElementById('cancel-source-type-btn');
-    if (!display || !openBtn || !editor || !input || !suggestions || openBtn.dataset.bound) return;
-    openBtn.dataset.bound = 'true';
-    const showEditor = () => {
-        input.value = display.dataset.originalText || display.textContent || '';
-        editor.classList.remove('hidden'); openBtn.setAttribute('aria-expanded','true');
-        updateSuggestions(); input.focus(); input.setSelectionRange(input.value.length,input.value.length);
-    };
-    const closeEditor = () => { editor.classList.add('hidden'); openBtn.setAttribute('aria-expanded','false'); suggestions.classList.add('hidden'); };
-    const activeToken = value => {
-        const match = String(value).match(/([A-Za-z][A-Za-z'’-]*)$/);
-        return match ? {word:match[1], start:value.length-match[1].length} : null;
-    };
-    const updateSuggestions = () => {
-        const token = activeToken(input.value);
-        suggestions.replaceChildren();
-        if (!token || token.word.length < 2) { suggestions.classList.add('hidden'); return; }
-        const q = token.word.toLowerCase();
-        const matches = [...new Set(MANA_TYPE_WORDS)].filter(word => word.toLowerCase().startsWith(q) && word.toLowerCase() !== q).slice(0,7);
-        if (!matches.length) { suggestions.classList.add('hidden'); return; }
-        for (const word of matches) {
-            const btn = document.createElement('button'); btn.type='button'; btn.textContent=word; btn.setAttribute('role','option');
-            btn.addEventListener('pointerdown', e => e.preventDefault());
-            btn.addEventListener('click', () => { input.value = input.value.slice(0,token.start)+word+input.value.slice(token.start+token.word.length); input.focus(); updateSuggestions(); });
-            suggestions.appendChild(btn);
-        }
-        suggestions.classList.remove('hidden');
-    };
-    const distance = (a,b) => { a=a.toLowerCase(); b=b.toLowerCase(); let prev=Array.from({length:b.length+1},(_,i)=>i); for(let i=1;i<=a.length;i++){const row=[i];for(let j=1;j<=b.length;j++)row[j]=Math.min(row[j-1]+1,prev[j]+1,prev[j-1]+(a[i-1]===b[j-1]?0:1));prev=row;}return prev[b.length]; };
-    const autocorrect = value => {
-        const allowed = new Map(MANA_TYPE_WORDS.map(w=>[w.toLowerCase(),w]));
-        // Correct known type words only. Preserve punctuation, unknown subtypes and all other words.
-        return String(value).replace(/[A-Za-z][A-Za-z'’-]*/g, word => {
-            if (allowed.has(word.toLowerCase())) return allowed.get(word.toLowerCase());
-            if (word.length < 4) return word;
-            let best=null, score=Infinity;
-            for (const candidate of MANA_TYPE_WORDS) { const d=distance(word,candidate); if(d<score){score=d;best=candidate;} }
-            return score <= (word.length >= 8 ? 2 : 1) ? best : word;
-        });
-    };
-    const applyEdit = () => {
-        const corrected = autocorrect(input.value.trim().replace(/\s+/g,' '));
-        if (!corrected) return;
-        input.value = corrected;
-        // Type offsets are no longer reliable after a type-line edit. The shared updater removes
-        // only type-line highlights, preserves Oracle highlights, and refreshes the companion fields.
-        applySourceCardTypeLine(corrected);
-        closeEditor();
-    };
-    openBtn.addEventListener('click', () => editor.classList.contains('hidden') ? showEditor() : closeEditor());
-    input.addEventListener('input', updateSuggestions);
-    input.addEventListener('keydown', e => {
-        if ((e.key==='Tab' || e.key==='ArrowRight') && !suggestions.classList.contains('hidden')) {
-            const first=suggestions.querySelector('button'); if(first && activeToken(input.value)){e.preventDefault();first.click();} return;
-        }
-        if(e.key==='Enter'){e.preventDefault();applyEdit();}
-        if(e.key==='Escape'){e.preventDefault();closeEditor();}
-    });
-    apply.addEventListener('click', applyEdit); cancel.addEventListener('click', closeEditor);
-}
-
-if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', initSourceTypeEditor, { once:true }); else initSourceTypeEditor();
-
 function displaySourceCard(card) {
     document.getElementById('source-card-name').textContent = card.name;
     document.getElementById('source-card-mana').textContent = card.mana_cost || 'None';
-    if (sourceCardType) {
-        const typeText = card.type_line || card.card_faces?.[0]?.type_line || '';
-        sourceCardType.textContent = typeText;
-        sourceCardType.dataset.originalText = typeText;
-        syncSourceCardMetadataDisplays(card, typeText);
-    }
+    document.getElementById('source-card-type').textContent = card.type_line;
     
     // Keep the displayed Oracle text in exactly the same coordinate space used by the scoring
     // layer. Face names are metadata, not Oracle text; including them here shifted highlight
@@ -20763,34 +15958,16 @@ function displaySourceCard(card) {
     // highlight offsets because HTML entity lengths differ from text-node lengths.
     sourceCardOracle.dataset.originalHtml = sourceCardOracle.innerHTML;
     manualHighlights = [];
-    nextHighlightColorIndex = 0;
-    if (sourceCardFlipTimer) clearTimeout(sourceCardFlipTimer);
-    if (sourceCardFlipFinalTimer) clearTimeout(sourceCardFlipFinalTimer);
-    sourceCardFlipTimer = sourceCardFlipFinalTimer = 0;
-    document.getElementById('source-card-art-wrap')?.classList.remove('is-source-flipping');
-    if (sourceCardFlipBtn) sourceCardFlipBtn.dataset.animating = 'false';
-    currentSourceCardFaceIndex = 0;
-    if (sourceCardPrice) {
-        const usd = card?.prices?.usd;
-        const eur = card?.prices?.eur;
-        sourceCardPrice.textContent = [usd ? `$${usd}` : null, eur ? `€${eur}` : null].filter(Boolean).join(' / ') || 'Unavailable';
-    }
-    if (sourceCardType) reapplyTypeLineHighlights();
     renderHighlightChips();
-    updateSourceCardFaceDisplay(card, false);
+    
+    const imageUrl = getCardImageUrl(card);
+    const sourceImage = document.getElementById('source-card-image');
+    if (sourceImage) { sourceImage.src = imageUrl; sourceImage.style.display = imageUrl ? 'block' : 'none'; }
 
     sourceCardEmpty?.classList.add('hidden');
     sourceCardLoaded?.classList.remove('hidden');
     sourceCardSection.classList.remove('hidden');
     updateStaticSearchAvailability();
-}
-
-// A one-time card-draw effect should remain discoverable, but it should not outrank true
-// recurring draw engines just because several non-mechanical channels happen to be high.
-const SOURCE_ACQUISITION_CADENCE_RANKING_PENALTY = 0.55;
-function sourceAcquisitionCadenceRankFactor(mismatch) {
-    const severity = Math.max(0, Math.min(1, Number(mismatch) || 0));
-    return Math.max(0, Math.min(1, 1 - SOURCE_ACQUISITION_CADENCE_RANKING_PENALTY * severity));
 }
 
 // 1. Batch NLP embedding calculations and chunk thread yields
@@ -20808,9 +15985,6 @@ async function scoreCardBatch({
     // 0% mechanical score simply because the original source has additional unrelated effects.
     sourceParsedEffectsOverride = null,
     sourceReferenceParsedEffects = [],
-    // Main search passes an immutable snapshot so typing/editing highlights during a long search
-    // cannot silently change the profile used by later scoring batches.
-    highlightsForScoring = null,
     // Related Search supplies a consensus profile so the scorer can distinguish "shares the same
     // mechanic" from "matches the dominant parameter the selected cards agree on".
     relatedIntentProfile = null,
@@ -20825,9 +15999,6 @@ async function scoreCardBatch({
     targetVectors = null,
     sourceFunctionVector: suppliedSourceFunctionVector = null,
     isCancelled = null,
-    // Optional, throttled stage telemetry. This changes UI status only; it never changes scores,
-    // candidate selection, weights, or ranking order.
-    onProgress = null,
     extractor,
     weights = {},
     tags = [],
@@ -20835,48 +16006,41 @@ async function scoreCardBatch({
     sniperIds = new Set(),
     activeFilters = {}
 }) {
-    const __scoreBatchStartedAt = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
-    const __scoreStageTimings = {
-        sourceSetupMs: 0, structuralMs: 0, cacheCalibrationMs: 0, triageAndSelectionMs: 0,
-        embeddingTextPreparationMs: 0, embeddingWarmCacheMs: 0,
-        semanticPassMs: 0, calibrationMs: 0, finalBlendMs: 0, totalMs: 0, unattributedMs: 0
-    };
-    const __scoreNow = () => (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
-    let __lastProgressAt = 0;
-    let __lastProgressStage = '';
-    const __emitScoreProgress = (stage, processed = 0, total = cards.length, force = false) => {
-        if (typeof onProgress !== 'function') return;
-        const now = __scoreNow();
-        // Avoid making score progress itself a source of UI churn. Stage transitions paint
-        // immediately; within a stage, updates are capped to roughly 3 per second.
-        if (!force && stage === __lastProgressStage && now - __lastProgressAt < 350 && processed < total) return;
-        __lastProgressStage = stage;
-        __lastProgressAt = now;
-        try { onProgress({ stage, processed: Math.max(0, processed), total: Math.max(0, total), elapsedMs: now - __scoreBatchStartedAt }); }
-        catch (progressError) { console.debug('[ManaSearch] Progress listener skipped:', progressError?.message || progressError); }
-    };
-    __emitScoreProgress('setup', 0, cards.length, true);
-    const __pairCacheStatsAtStart = { ...mechanicalPairCacheStats };
     const rawWM = weights.mechanical ?? 45;
     const rawWS = weights.synergy ?? 10;
     const rawWC = weights.context ?? 20;
     const rawWE = weights.exactness ?? 15;
     const rawWCa = weights.category ?? 10;
-    const activeHighlights = Array.isArray(highlightsForScoring) ? highlightsForScoring : (Array.isArray(manualHighlights) ? manualHighlights : []);
-    const effectHighlights = activeHighlights.filter(h => h?.field !== 'type');
-    const typeLineHighlights = activeHighlights.filter(h => h?.field === 'type');
-    const hasHighlight = activeHighlights.length > 0;
-    const hasEffectHighlight = effectHighlights.length > 0;
+    const hasHighlight = Boolean(manualHighlights && manualHighlights.length > 0);
+
+    // Strategic role is a NEW ranking dimension, but it is deliberately carved out of the existing
+    // 100-point budget instead of being added on top. That keeps a role match from making every
+    // candidate look better merely because another score was added. Existing user-controlled
+    // weights are proportionally scaled to leave a fixed 14-point role budget (12 with highlights).
+    const roleWeight = hasHighlight ? 12 : 14;
+    const rawExistingWeightTotal = Math.max(1, rawWM + rawWS + rawWC + rawWE + rawWCa);
+    const existingWeightScale = (100 - roleWeight) / rawExistingWeightTotal;
+    const wM = rawWM * existingWeightScale;
+    const wS = rawWS * existingWeightScale;
+    const wC = rawWC * existingWeightScale;
+    const wE = rawWE * existingWeightScale;
+    const wCa = rawWCa * existingWeightScale;
+    const wH = hasHighlight ? Math.min(roleWeight, Math.max(0, wM * 0.20)) : 0;
+    const totalWeight = 100;
+
+    // Highlight intent is an explicit user constraint, so its weight is carved out of the
+    // mechanical budget rather than silently inflating the total score.
+    const effectiveHighlightWeight = Math.min(wH, wM);
+    const effectiveMechanicalBase = wM - effectiveHighlightWeight;
+    const highlightProfiles = hasHighlight ? buildHighlightIntentProfiles(manualHighlights) : [];
 
     const sourceText = sourceCard.oracle_text || (sourceCard.card_faces ? sourceCard.card_faces.map(f => f.oracle_text).join(' ') : '');
-    const highlightProfiles = hasEffectHighlight ? buildHighlightIntentProfiles(effectHighlights, sourceCard, sourceText) : [];
-    const sourceTextToParse = (hasEffectHighlight && targetText) ? (buildHighlightScoringText(effectHighlights, sourceText) || sourceText) : sourceText;
+    const sourceTextToParse = (hasHighlight && targetText) ? targetText : sourceText;
     const parsedSourceCard = Array.isArray(sourceParsedEffectsOverride) && sourceParsedEffectsOverride.length > 0
         ? sourceParsedEffectsOverride
         : (sourceTextToParse === (sourceCard.oracle_text || (sourceCard.card_faces ? sourceCard.card_faces.map(f => f.oracle_text).join(' ') : ''))
             ? getCachedParsedEffects(sourceCard, sourceTextToParse)
             : parseMTGEffect(sourceTextToParse));
-    annotateEffectRepeatability(sourceCard, parsedSourceCard, sourceTextToParse);
     const sourceMechanicProfile = getCachedMechanicalProfile(sourceCard, sourceTextToParse, parsedSourceCard);
     const sourceMechanicalGraph = getCachedMechanicalEffectGraph(sourceCard, sourceTextToParse, parsedSourceCard);
     parsedSourceCard._mechanicProfile = sourceMechanicProfile;
@@ -20894,7 +16058,7 @@ async function scoreCardBatch({
     const sourceRoleProfile = inferStrategicRoleProfile(sourceCard, parsedSourceCard, targetText);
     const sourceRoleText = strategicRoleToText(sourceRoleProfile);
     const sourceRoleFingerprint = buildStrategicRoleFingerprint(sourceCard, parsedSourceCard, sourceRoleProfile);
-    const rankingIntent = inferRankingIntent(sourceCard, parsedSourceCard, targetText, sourceRoleProfile, activeHighlights);
+    const rankingIntent = inferRankingIntent(sourceCard, parsedSourceCard, targetText, sourceRoleProfile, manualHighlights);
     sourceCard._strategicRoleFingerprint = sourceRoleFingerprint;
     sourceCard._rankingIntent = rankingIntent;
     // Field-level confidence gives a far better read on whether the structural parse is actually
@@ -20907,20 +16071,7 @@ async function scoreCardBatch({
     // times. The separate parsedSourceCard above remains unchanged for highlight-aware mechanics.
     const sourceSynergyText = strategicRoleCardText(sourceCard);
     const sourceSynergyEffects = getCachedParsedEffects(sourceCard, sourceSynergyText);
-    // When the user has narrowed the search with an effect highlight, compare card-acquisition
-    // cadence against that effective highlighted parse rather than unrelated draw abilities elsewhere
-    // on the full source card. This prevents an edited outcome (e.g. replacing Rhystic's draw with an
-    // extra-turn goal) from inheriting the original card-draw cadence penalty.
-    const sourceCadenceEffects = hasEffectHighlight && !relatedIntentProfile ? parsedSourceCard : sourceSynergyEffects;
-    const sourceAcquisitionCadence = getDirectCardAcquisitionCadence(sourceCard, sourceCadenceEffects);
-    const sourceSynergyRoleProfile = inferStrategicRoleProfile(sourceCard, sourceSynergyEffects, '');
-
-    // Category previously rebuilt these source-side profiles for every candidate using full source
-    // Oracle text paired with parsedSourceCard (which can be highlight-aware). Compute them once
-    // with those same inputs; don't substitute the narrower highlight-aware profile above.
-    const categorySourceText = strategicRoleCardText(sourceCard);
-    const categorySourceProfile = buildUniversalMechanicProfile(sourceCard, categorySourceText, parsedSourceCard);
-    const categorySourceRoleProfile = inferStrategicRoleProfile(sourceCard, parsedSourceCard, '');
+    const sourceSynergyRoleProfile = inferStrategicRoleProfile(sourceCard, sourceSynergyEffects, sourceSynergyText);
 
     // Tallies how the embedding cache performed for this batch: how many lookups were already
     // cached, how many required an actual model call, and how many of those calls failed and
@@ -20951,18 +16102,11 @@ async function scoreCardBatch({
         ? buildMechanicalConsensusGraph(referenceMechanicalGraphs)
         : null;
 
-    __scoreStageTimings.sourceSetupMs = __scoreNow() - __scoreBatchStartedAt;
-    const __structuralPassStartedAt = __scoreNow();
-    const __structuralDetailTimings = {
-        parseMs: 0, exactnessMs: 0, profileGraphSynergyMs: 0,
-        mechanicalPairingMs: 0, roleHighlightConfidenceMs: 0, categoryMs: 0
-    };
     let structuralYieldStartedAt = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
     for (let i = 0; i < cards.length; i++) {
         throwIfSearchCancelled(isCancelled);
         const card = cards[i];
-        const cardText = card.oracle_text || (card.card_faces ? card.card_faces.map(f => f.oracle_text || '').join(' ') : '');
-        let __detailStageStartedAt = __scoreNow();
+        const cardText = card.oracle_text || (card.card_faces ? card.card_faces.map(f => f.oracle_text).join(' ') : '');
 
         // Parse once before any scorer needs the candidate's effects. Previously synergy scoring
         // called parseMTGEffect directly here and then mechanical scoring parsed the same Oracle text
@@ -20970,33 +16114,21 @@ async function scoreCardBatch({
         // the hard filters.
         const parsedCandidateCard = getCachedParsedEffects(card, cardText);
         card._parsedEffects = parsedCandidateCard;
-        __structuralDetailTimings.parseMs += __scoreNow() - __detailStageStartedAt;
-        __detailStageStartedAt = __scoreNow();
+
+        // Pass activeFilters to prevent duplicate scoring of hard-filtered fields. The source-side
+        // effects/role are invariant and the candidate effects are reused from the parse above.
+        card.synergyScore = calculateSynergyScore(sourceCard, card, activeFilters, {
+            sourceEffects: sourceSynergyEffects,
+            targetEffects: parsedCandidateCard,
+            sourceRoles: sourceSynergyRoleProfile
+        });
 
         // Exactness Score & Mechanical Similarity calculations remain independent
         card.exactnessScore = calculateCombinedFuzzyScore(sourceCard, card, exactnessText);
-        __structuralDetailTimings.exactnessMs += __scoreNow() - __detailStageStartedAt;
-        __detailStageStartedAt = __scoreNow();
         const candidateMechanicProfile = getCachedMechanicalProfile(card, cardText, parsedCandidateCard);
         parsedCandidateCard._mechanicProfile = candidateMechanicProfile;
         const candidateMechanicalGraph = getCachedMechanicalEffectGraph(card, cardText, parsedCandidateCard);
         parsedCandidateCard._mechanicalGraph = candidateMechanicalGraph;
-
-        // Synergy and Category both classify the candidate's own strategic role. Their historical
-        // inputs are the same full card text + this parsed card, so compute it once and reuse it.
-        const categoryTargetText = strategicRoleCardText(card);
-        const categoryTargetProfile = categoryTargetText === cardText
-            ? candidateMechanicProfile
-            : getCachedMechanicalProfile(card, categoryTargetText, parsedCandidateCard);
-        const categoryTargetRoleProfile = inferStrategicRoleProfile(card, parsedCandidateCard, '');
-        card.synergyScore = calculateSynergyScore(sourceCard, card, activeFilters, {
-            sourceEffects: sourceSynergyEffects,
-            targetEffects: parsedCandidateCard,
-            sourceRoles: sourceSynergyRoleProfile,
-            targetRoles: categoryTargetRoleProfile
-        });
-        __structuralDetailTimings.profileGraphSynergyMs += __scoreNow() - __detailStageStartedAt;
-        __detailStageStartedAt = __scoreNow();
 
         // Related-card search can have several legitimate mechanical reference cards. Score the
         // candidate against each reference and keep the strongest coherent mechanical match. This
@@ -21076,8 +16208,6 @@ async function scoreCardBatch({
             mechanicalDetail: calculateMechanicalSimilarityDetailed(parsedSourceCard, parsedCandidateCard, sourceMechanicProfile, candidateMechanicProfile),
             graphDetail: calculateMechanicalGraphSimilarity(sourceMechanicalGraph, candidateMechanicalGraph)
         };
-        __structuralDetailTimings.mechanicalPairingMs += __scoreNow() - __detailStageStartedAt;
-        __detailStageStartedAt = __scoreNow();
 
         card.mechanicalScore = bestMechanical.mechanical;
         card.mechanicalEvidence = {
@@ -21098,23 +16228,9 @@ async function scoreCardBatch({
         card.roleProfile = inferStrategicRoleProfile(card, parsedCandidateCard, targetText);
         card._strategicRoleFingerprint = buildStrategicRoleFingerprint(card, parsedCandidateCard, card.roleProfile);
         card.roleScore = calculateStrategicRoleScore(sourceRoleProfile, card.roleProfile, sourceRoleFingerprint, card._strategicRoleFingerprint);
-        const effectHighlightScore = hasEffectHighlight
+        card.highlightIntentScore = hasHighlight
             ? calculateHighlightIntentMatch(highlightProfiles, parsedCandidateCard, card)
             : 0;
-        const candidateTypeLine = String(card.type_line || '').toLowerCase();
-        const typeHighlightScore = typeLineHighlights.length
-            ? typeLineHighlights.reduce((sum, h) => {
-                const phrase = String(h.text || '').toLowerCase().trim();
-                if (!phrase) return sum;
-                const oneScore = h.mode === 'variable'
-                    ? calculateSimpleSimilarity(phrase, candidateTypeLine)
-                    : (candidateTypeLine.includes(phrase) ? 1 : 0);
-                return sum + oneScore;
-            }, 0) / typeLineHighlights.length
-            : 0;
-        card.highlightIntentScore = hasEffectHighlight && typeLineHighlights.length
-            ? (effectHighlightScore * 0.85 + typeHighlightScore * 0.15)
-            : (hasEffectHighlight ? effectHighlightScore : typeHighlightScore);
         card._parsedEffects = parsedCandidateCard;
         card.fieldConfidence = calculateCardFieldConfidence(parsedCandidateCard);
         card.parseConfidence = calculateParseConfidence(parsedCandidateCard);
@@ -21134,41 +16250,19 @@ async function scoreCardBatch({
             card.exactnessScore = Math.min(1.0, Math.max(card.exactnessScore, ((nameScore * 0.05) + (textScore * 0.95)) + 0.40));
         }
 
-        __structuralDetailTimings.roleHighlightConfidenceMs += __scoreNow() - __detailStageStartedAt;
-        __detailStageStartedAt = __scoreNow();
-        card.categoryScore = calculateCategoryScore(card, tags, sourceCard, parsedSourceCard, {
-            sourceProfile: categorySourceProfile,
-            targetProfile: categoryTargetProfile,
-            sourceRole: categorySourceRoleProfile,
-            targetRole: categoryTargetRoleProfile
-        });
-        __structuralDetailTimings.categoryMs += __scoreNow() - __detailStageStartedAt;
+        card.categoryScore = calculateCategoryScore(card, tags, sourceCard, parsedSourceCard);
 
         // Yield after roughly an 8 ms slice. The time budget adapts to card-text complexity and
         // lets input, paints, and modal interaction run during long searches without changing score math.
         const structuralNow = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
         if (structuralNow - structuralYieldStartedAt >= getManaSearchSliceBudgetMs()) {
-            throwIfSearchCancelled(isCancelled);
             await yieldForManaSearchResponsiveness();
             structuralYieldStartedAt = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
         }
-        if ((i & 15) === 15 || i === cards.length - 1) __emitScoreProgress('mechanics', i + 1, cards.length);
     }
-    __emitScoreProgress('mechanics', cards.length, cards.length, true);
 
-    __scoreStageTimings.structuralMs = __scoreNow() - __structuralPassStartedAt;
-    __scoreStageTimings.structuralDetails = { ...__structuralDetailTimings };
-    __scoreStageTimings.pairCache = {
-        directionalComputed: mechanicalPairCacheStats.directionalComputed - __pairCacheStatsAtStart.directionalComputed,
-        directionalHits: mechanicalPairCacheStats.directionalHits - __pairCacheStatsAtStart.directionalHits,
-        graphNodeComputed: mechanicalPairCacheStats.graphNodeComputed - __pairCacheStatsAtStart.graphNodeComputed,
-        graphNodeHits: mechanicalPairCacheStats.graphNodeHits - __pairCacheStatsAtStart.graphNodeHits
-    };
-    const __cacheCalibrationStartedAt = __scoreNow();
     if (embeddingCache.size >= 8) calibrateSemanticCosineFromCache();
-    __scoreStageTimings.cacheCalibrationMs = __scoreNow() - __cacheCalibrationStartedAt;
-    const __triageSelectionStartedAt = __scoreNow();
-    const oracleTargetVector = targetVector || targetVectors?.oracle || null;
+    const oracleTargetVector = targetVectors?.oracle || targetVector || null;
     const semanticRetrievalTargetVector = targetVectors?.semanticRetrieval || oracleTargetVector;
     const hasSemanticEngine = Boolean(extractor && extractor.type !== 'fallback' && oracleTargetVector);
 
@@ -21229,23 +16323,15 @@ async function scoreCardBatch({
         const exactness = card.exactnessScore || 0;
         const lexical = calculateSimpleSimilarity(targetText, strategicRoleCardText(card));
         const semanticRetrieval = card._semanticRetrievalSimilarity || (card.retrievalEvidence?.includes('Search G') ? 0.58 : 0);
-        const triageBase = mechanical * 0.35 + role * 0.15 + exactness * 0.12 + lexical * 0.10 + retrievalAgreement * 0.04 + searchFAgreement * 0.04 + semanticRetrieval * 0.20;
-        const triageBlend = blendHighlightIntentScore(triageBase, card.highlightIntentScore || 0, highlightProfiles, {
-            hasHighlight, hasEffectHighlight, hasTypeHighlight: typeLineHighlights.length > 0
-        });
-        const triage = triageBlend.score;
-        triageDetails.push({ card, triage, mechanical, role, exactness, lexical, retrievalCount, searchFAgreement, semanticRetrieval, highlightIntent: Number(card.highlightIntentScore) || 0, triageIndex: triageDetails.length });
+        const triage = mechanical * 0.35 + role * 0.15 + exactness * 0.12 + lexical * 0.10 + retrievalAgreement * 0.04 + searchFAgreement * 0.04 + semanticRetrieval * 0.20;
+        triageDetails.push({ card, triage, mechanical, role, exactness, lexical, retrievalCount, searchFAgreement, semanticRetrieval, triageIndex: triageDetails.length });
         const triageNow = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
         if (triageNow - triageSliceStartedAt >= getManaSearchSliceBudgetMs()) {
             throwIfSearchCancelled(isCancelled);
             await yieldForManaSearchResponsiveness();
             triageSliceStartedAt = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
         }
-        if ((triageDetails.length & 63) === 0 || triageDetails.length === cards.length) {
-            __emitScoreProgress('triage', triageDetails.length, cards.length);
-        }
     }
-    __emitScoreProgress('triage', cards.length, cards.length, true);
 
     if (cards.length > MIN_SEMANTIC_SCORING_CANDIDATES) {
         const budget = Math.min(MAX_SEMANTIC_SCORING_CANDIDATES, cards.length);
@@ -21318,9 +16404,6 @@ async function scoreCardBatch({
         embeddingDiagnostics.skippedForBudget = cards.length - semanticEligible.length;
     }
     const semanticEligibleSet = new Set(semanticEligible);
-    embeddingDiagnostics.totalCandidates = cards.length;
-    embeddingDiagnostics.semanticEligibleCount = semanticEligible.length;
-    __scoreStageTimings.triageAndSelectionMs = __scoreNow() - __triageSelectionStartedAt;
 
     // Pre-resolve every embedding this batch will need, in small concurrent chunks, before
     // scoring a single card. Previously each candidate's oracle-text embedding and function-text
@@ -21331,7 +16414,6 @@ async function scoreCardBatch({
     // and means the scoring pass below never re-embeds text it has already seen this session
     // (review: parallel embedding batch / embedding cache).
     if (hasSemanticEngine || sourceFunctionVector) {
-        const __embeddingTextPrepStartedAt = __scoreNow();
         const textsToEmbed = [];
         for (const card of semanticEligible) {
             if (card.contextScore !== undefined) continue;
@@ -21342,14 +16424,9 @@ async function scoreCardBatch({
                 if (candidateFunctionText) textsToEmbed.push(candidateFunctionText);
             }
         }
-        __scoreStageTimings.embeddingTextPreparationMs = __scoreNow() - __embeddingTextPrepStartedAt;
-        __emitScoreProgress('embeddings', 0, cards.length, true);
-        const __embeddingWarmStartedAt = __scoreNow();
-        await warmEmbeddingCache(textsToEmbed, extractor, embeddingDiagnostics, 32, isCancelled);
-        __scoreStageTimings.embeddingWarmCacheMs = __scoreNow() - __embeddingWarmStartedAt;
+        await warmEmbeddingCache(textsToEmbed, extractor, embeddingDiagnostics);
     }
 
-    const __semanticPassStartedAt = __scoreNow();
     let semanticYieldStartedAt = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
     for (let i = 0; i < cards.length; i++) {
         const card = cards[i];
@@ -21410,14 +16487,9 @@ async function scoreCardBatch({
             await yieldForManaSearchResponsiveness();
             semanticYieldStartedAt = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
         }
-        if ((i & 15) === 15 || i === cards.length - 1) __emitScoreProgress('semantic', i + 1, cards.length);
     }
-    __emitScoreProgress('semantic', cards.length, cards.length, true);
 
-    __scoreStageTimings.semanticPassMs = __scoreNow() - __semanticPassStartedAt;
-    const __calibrationStartedAt = __scoreNow();
     const semanticCalibration = await calibrateBatchSemanticScores(cards);
-    __scoreStageTimings.calibrationMs = __scoreNow() - __calibrationStartedAt;
 
     // V20 ranking: collapse the model to three intentionally different channels.
     //   1) structural parse: explicit rules mechanics + earned fields only
@@ -21451,10 +16523,8 @@ async function scoreCardBatch({
     const semanticW = rawChannels[1] / channelDenom;
     const functionRoleW = rawChannels[2] / channelDenom;
 
-    const __finalBlendStartedAt = __scoreNow();
     let finalRankYieldStartedAt = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
     for (let i = 0; i < cards.length; i++) {
-        throwIfSearchCancelled(isCancelled);
         const card = cards[i];
         const cardText = card.oracle_text || (card.card_faces ? card.card_faces.map(f => f.oracle_text || '').join(' ') : '');
         // Reuse the parsed candidate profile created during the structural scoring pass. The old
@@ -21480,11 +16550,7 @@ async function scoreCardBatch({
             ? Math.max(roleSemantic, functionSemanticAugmented)
             : Math.max(functionSemanticAugmented * 0.72 + roleSemantic * 0.28, roleSemantic * 0.70);
 
-        const baseChannelScore = (structuralTrusted * structuralW) + (rawSemantic * semanticW) + (functionRole * functionRoleW);
-        const highlightBlend = blendHighlightIntentScore(baseChannelScore, card.highlightIntentScore || 0, highlightProfiles, {
-            hasHighlight, hasEffectHighlight, hasTypeHighlight: typeLineHighlights.length > 0
-        });
-        const channelScore = highlightBlend.score;
+        const channelScore = (structuralTrusted * structuralW) + (rawSemantic * semanticW) + (functionRole * functionRoleW);
 
         // Agreement is only the convergence of the same three channels. It is capped hard so it
         // can never turn three weakly-related signals into a strong match by itself.
@@ -21573,22 +16639,9 @@ async function scoreCardBatch({
             ? (1 - (0.50 * (1 - relatedConsensus.score) * Math.max(0, Math.min(1, relatedIntentProfile.confidence))))
             : 1;
         card.relatedConsensusGate = relatedConsensusGate;
-        card.rankingEvidence = { mechanical: structural, mechanicalTrusted: structuralTrusted, mechanicalConfidence, rawSemantic, functionSemantic: functionSemanticAugmented, roleSemantic, highlightIntent: Number(card.highlightIntentScore) || 0, highlightIntentWeight: highlightBlend.weight, explicitUserIntent: highlightBlend.explicitUserIntent, baseChannelScore, effectCoverage, balancedCoverage, primaryEffectMatch, evidenceAgreement: agreement, retrievalSimilarity: Number(card._semanticRetrievalSimilarity) || 0, rankingIntent: rankingIntent.kind, rankingIntentConfidence: rankingIntent.confidence, relatedConsensus: relatedConsensus ? { score: relatedConsensus.score, functionMatch: relatedConsensus.functionMatch, quantityFit: relatedConsensus.quantityFit, roleFit: relatedConsensus.roleFit, artifactFit: relatedConsensus.artifactFit, dominantFunction: relatedIntentProfile?.dominantFunction || null, targetQuantity: relatedIntentProfile?.numericTarget ?? null, confidence: relatedIntentProfile?.confidence || 0 } : null };
-        const preCadenceSimilarityScore = Math.max(0, Math.min(1,
-            (channelScore + agreementBonus + rankingRefinement) * evidenceGate * contradictionPenalty * relatedConsensusGate
-        ));
-        const acquisitionCadenceMismatch = calculateSourceAcquisitionCadenceMismatch(
-            sourceAcquisitionCadence, card, candidateParsedEffects
-        );
-        // Keep the full scorer ensemble and its user-configurable weights. This final directional
-        // gate only prevents a candidate that draws once on entry from inheriting a near-perfect
-        // score when the source is explicitly a repeatable card-advantage engine. It is a soft
-        // down-rank, not exclusion, so discovery and all search methods still work.
-        card.acquisitionCadenceMismatch = acquisitionCadenceMismatch;
-        card.acquisitionCadenceRankFactor = sourceAcquisitionCadenceRankFactor(acquisitionCadenceMismatch);
-        card.similarityBeforeCadenceAdjustment = preCadenceSimilarityScore;
+        card.rankingEvidence = { mechanical: structural, mechanicalTrusted: structuralTrusted, mechanicalConfidence, rawSemantic, functionSemantic: functionSemanticAugmented, roleSemantic, effectCoverage, balancedCoverage, primaryEffectMatch, evidenceAgreement: agreement, retrievalSimilarity: Number(card._semanticRetrievalSimilarity) || 0, rankingIntent: rankingIntent.kind, rankingIntentConfidence: rankingIntent.confidence, relatedConsensus: relatedConsensus ? { score: relatedConsensus.score, functionMatch: relatedConsensus.functionMatch, quantityFit: relatedConsensus.quantityFit, roleFit: relatedConsensus.roleFit, artifactFit: relatedConsensus.artifactFit, dominantFunction: relatedIntentProfile?.dominantFunction || null, targetQuantity: relatedIntentProfile?.numericTarget ?? null, confidence: relatedIntentProfile?.confidence || 0 } : null };
         card.similarityScore = Math.max(0, Math.min(1,
-            preCadenceSimilarityScore * card.acquisitionCadenceRankFactor
+            (channelScore + agreementBonus + rankingRefinement) * evidenceGate * contradictionPenalty * relatedConsensusGate
         ));
 
         const finalRankNow = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
@@ -21597,18 +16650,8 @@ async function scoreCardBatch({
             await yieldForManaSearchResponsiveness();
             finalRankYieldStartedAt = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
         }
-        if ((i & 15) === 15 || i === cards.length - 1) __emitScoreProgress('ranking', i + 1, cards.length);
     }
-    __emitScoreProgress('ranking', cards.length, cards.length, true);
 
-    __scoreStageTimings.finalBlendMs = __scoreNow() - __finalBlendStartedAt;
-    __scoreStageTimings.totalMs = __scoreNow() - __scoreBatchStartedAt;
-    const __timedStagesMs = __scoreStageTimings.sourceSetupMs + __scoreStageTimings.structuralMs +
-        __scoreStageTimings.cacheCalibrationMs + __scoreStageTimings.triageAndSelectionMs +
-        __scoreStageTimings.embeddingTextPreparationMs + __scoreStageTimings.embeddingWarmCacheMs +
-        __scoreStageTimings.semanticPassMs + __scoreStageTimings.calibrationMs + __scoreStageTimings.finalBlendMs;
-    __scoreStageTimings.unattributedMs = Math.max(0, __scoreStageTimings.totalMs - __timedStagesMs);
-    embeddingDiagnostics.stageTimings = { ...__scoreStageTimings };
     return { embeddingDiagnostics, semanticCalibration };
 }
 async function executeRelatedCardSearch() {
@@ -21622,13 +16665,6 @@ async function executeRelatedCardSearch() {
     const sourceSearchRequestId = searchRequestId;
     const sourceCardAtStart = currentSourceCard;
     const selectedCardsAtStart = new Map(selectedRelatedCards);
-    const relatedSourceHighlights = includeSourceHighlightsInRelatedSearch
-        ? manualHighlights.filter(h => h && h.origin !== 'user')
-            .map(h => ({ ...h }))
-        : [];
-    const relatedHighlightText = relatedSourceHighlights.length
-        ? buildHighlightScoringText(relatedSourceHighlights, getCurrentSourceOracleText(sourceCardAtStart))
-        : '';
     const isCurrentRelatedSearch = () =>
         requestId === relatedSearchRequestId &&
         sourceSearchRequestId === searchRequestId &&
@@ -21685,7 +16721,6 @@ async function executeRelatedCardSearch() {
         let lastRelatedQueryError = null;
         const localRelatedQueries = [
             buildRelatedConsensusIntentText(relatedIntentProfile),
-            ...(relatedHighlightText ? [`Source-highlight focus: ${relatedHighlightText}`] : []),
             ...repeatingPatterns.slice(0, 8),
             ...relatedSearchQueries.flatMap(attempt => extractLocalRetrievalAlternativesFromScryfallQuery(
                 typeof attempt === 'string' ? attempt : attempt?.query
@@ -21915,11 +16950,9 @@ async function executeRelatedCardSearch() {
         const supportingPatternText = relatedIntentProfile?.confidence >= 0.55
             ? repeatingPatterns.slice(0, 2).join('. ')
             : repeatingPatterns.slice(0, 3).join('. ');
-        const combinedTargetText = [
-            canonicalTargetText || (repeatingPatterns.length > 0 ? repeatingPatterns.join('. ') : getCurrentSourceOracleText(sourceCardAtStart)),
-            supportingPatternText,
-            relatedHighlightText ? `Focus on the selected source-card detail: ${relatedHighlightText}` : ''
-        ].filter(Boolean).join('. ');
+        const combinedTargetText = canonicalTargetText
+            ? [canonicalTargetText, supportingPatternText].filter(Boolean).join('. ')
+            : (repeatingPatterns.length > 0 ? repeatingPatterns.join('. ') : getCurrentSourceOracleText(sourceCardAtStart));
 
         // Related search is an ensemble query: a candidate is mechanically related when it
         // matches a meaningful effect from ANY selected card, not only the original source card.
@@ -22465,20 +17498,10 @@ function getSearchIntent(sourceCard, highlights = []) {
     const sourceText = getCurrentSourceOracleText(sourceCard) || '';
     const signature = JSON.stringify((highlights || []).map(h => ({
         text: String(h?.text || ''),
-        field: h?.field || 'oracle',
-        colorIndex: Number.isInteger(h?.colorIndex) ? h.colorIndex : 0,
         mode: h?.mode === 'variable' ? 'variable' : 'exact',
         origin: h?.origin || 'user',
-        // Offsets are part of live highlight identity: selecting the same phrase in a different
-        // clause can produce a different grammatical context and therefore a different intent.
-        start: Number.isInteger(h?.start) ? h.start : null,
-        end: Number.isInteger(h?.end) ? h.end : null,
-        typeStart: Number.isInteger(h?.typeStart) ? h.typeStart : null,
-        typeEnd: Number.isInteger(h?.typeEnd) ? h.typeEnd : null,
         attachedTo: Number.isInteger(h?.attachedTo) ? h.attachedTo : null,
-        intentConnection: h?.intentConnection || '',
         intent: String(h?.intent || ''),
-        editedFrom: h?.editedFrom ? { text: String(h.editedFrom.text || ''), start: Number.isInteger(h.editedFrom.start) ? h.editedFrom.start : null, end: Number.isInteger(h.editedFrom.end) ? h.editedFrom.end : null } : null,
         benchmarkIntentOnly: Boolean(h?.benchmarkIntentOnly)
     })));
     const key = `${normalizeCardNameForIdentity(sourceCard?.name || '')}|${sourceText}|${signature}`;
@@ -22490,23 +17513,19 @@ function getSearchIntent(sourceCard, highlights = []) {
         return cached;
     }
 
-    const effectHighlights = (Array.isArray(highlights) ? highlights : []).filter(h => h?.field !== 'type');
-    const typeHighlights = (Array.isArray(highlights) ? highlights : []).filter(h => h?.field === 'type');
-    const hasHighlight = effectHighlights.length > 0 || typeHighlights.length > 0;
+    const hasHighlight = Array.isArray(highlights) && highlights.length > 0;
     const targetText = hasHighlight
         ? buildHighlightScoringText(highlights, sourceText)
         : sourceText;
 
     let parsedEffects;
     if (hasHighlight) {
-        // Parse source Oracle clauses for their complete trigger/outcome context. A trigger-shaped
-        // user Search detail explicitly connected (or unambiguously inferred) to a selected outcome
-        // is composed into the effective clause so ranking uses that intended trigger, not the
-        // source card's unrelated original trigger. Other user details remain semantic hints only.
-        const profiles = buildHighlightIntentProfiles(highlights, sourceCard, sourceText);
+        // Parse only the source-card Oracle excerpts, never the attached search-only wording.
+        // The latter is semantic/retrieval intent and may not be valid MTG grammar.
+        const profiles = buildHighlightIntentProfiles(highlights);
         parsedEffects = profiles.flatMap(p => p.recognizedEffects?.length ? p.recognizedEffects : (p.parsedEffects || []));
         if (!parsedEffects.length) {
-            const sourceOnlyText = (profiles.map(p => p.parseText || p.searchIntentText || p.contextText).filter(Boolean).join('. ') || targetText || sourceText);
+            const sourceOnlyText = (profiles.map(p => p.contextText).filter(Boolean).join('. ') || targetText);
             parsedEffects = parseMTGEffect(sourceOnlyText);
         }
     } else {
@@ -22524,449 +17543,6 @@ function getSearchIntent(sourceCard, highlights = []) {
     return intent;
 }
 
-
-// Search Intent is a live explanation of the same `getSearchIntent()` object consumed by the
-// production search/scoring path. It never calculates a second, competing interpretation of the
-// source card: canonical effects, repeatability, highlights, and role evidence are derived from
-// the active scoring profile.
-let manaSearchIntentPanelInstalled = false;
-let manaSearchIntentRenderGeneration = 0;
-let manaSearchIntentRenderFrame = 0;
-let manaSearchIntentRenderTimer = 0;
-
-const SEARCH_INTENT_FUNCTION_LABELS = Object.freeze({
-    card_draw: 'draw cards', mana_ability: 'produce mana', token_creation: 'create tokens',
-    token_multiplier: 'multiply token production', reanimate: 'return cards from graveyards to the battlefield',
-    recursion: 'return cards from graveyards to hand', bounce: 'return permanents to their owners’ hands',
-    tutor: 'search a library for a card', ramp_tutor: 'find a land and accelerate mana',
-    counter: 'counter a spell or ability', removal: 'remove permanents', exile_removal: 'exile permanents',
-    direct_damage: 'deal damage', place_counter: 'place counters', anthem: 'boost creatures or change their keywords',
-    tribal_anthem: 'boost a creature type', stat_buff: 'change power or toughness',
-    gain_life: 'gain life', lose_life: 'cause life loss', discard: 'discard cards', mill: 'mill cards',
-    tap: 'tap permanents', untap: 'untap permanents', cost_reduction: 'reduce costs',
-    gain_control: 'gain control of permanents', destroy: 'destroy permanents',
-    self_sacrifice: 'sacrifice a permanent as a cost', zone_change: 'move objects between zones',
-    tuck: 'put cards into libraries'
-});
-
-const SEARCH_INTENT_ROLE_LABELS = Object.freeze({
-    fast_mana: 'fast mana / acceleration', land_ramp: 'land ramp', catch_up_ramp: 'catch-up ramp',
-    card_advantage_engine: 'card-advantage engine', token_engine: 'repeatable token engine',
-    token_multiplier: 'token multiplier', tribal_anthem: 'tribal payoff', anthem: 'team-wide buff',
-    board_wipe: 'mass removal', single_target_removal: 'targeted removal', counterspell: 'countermagic',
-    bounce: 'bounce / tempo', burn: 'direct damage', graveyard_recursion: 'graveyard recursion',
-    tutor: 'tutoring', discard_engine: 'discard / disruption', mill_engine: 'mill strategy',
-    life_gain_engine: 'life-gain effect', life_loss_engine: 'life-loss effect'
-});
-
-function searchIntentFunctionLabel(effect) {
-    const canonical = effect?.canonical || (effect ? deriveCanonicalFunction(effect) : null);
-    const fn = canonical?.function || effect?.action || '';
-    const base = SEARCH_INTENT_FUNCTION_LABELS[fn] || String(fn).replace(/_/g, ' ');
-    const p = canonical?.params || {};
-    const details = [];
-    if (p.quantity != null && Number.isFinite(Number(p.quantity)) && Number(p.quantity) > 0) {
-        if (fn === 'card_draw') details.push(Number(p.quantity) === 1 ? 'usually one card per resolution' : `${p.quantity} cards per resolution`);
-        else if (fn === 'mana_ability') details.push(`${p.quantity} net mana when used`);
-        else if (fn === 'direct_damage') details.push(`${p.quantity} damage`);
-    }
-    if (p.subtype && !['all', 'other'].includes(p.subtype)) details.push(`subtype: ${p.subtype}`);
-    return { label: base, detail: details.join(' · '), canonical };
-}
-
-function searchIntentCadenceDescription(effect) {
-    const profile = getEffectRepeatabilityProfile(effect);
-    if (!profile || profile.group === 'unknown' || !profile.kind) return { label: 'Repeatability unclear', group: 'unknown', detail: '' };
-    const rawContext = String(effect?.contextClause || effect?.parentClauseRaw || effect?.raw || '');
-    const trigger = effect?.triggerProfile || effect?.canonical?.params?.triggerProfile || {};
-    if (profile.kind === 'periodic_trigger') {
-        const timing = profile.timingText || trigger.timingText || '';
-        return { label: 'Recurring turn trigger', group: profile.group, detail: timing ? `repeats ${timing}` : 'repeats in a recurring turn window' };
-    }
-    if (profile.kind === 'repeatable_trigger') {
-        let eventText = String(profile.eventText || '').trim();
-        if (!eventText && trigger.event) {
-            const eventLabels = { casts_spell: 'a spell is cast', enters_battlefield: 'a permanent enters the battlefield', dies: 'a creature dies', attacks: 'this creature attacks', blocks: 'this creature blocks', draw_card: 'a card is drawn', discard: 'a card is discarded', sacrifice: 'a permanent is sacrificed', deals_damage: 'damage is dealt', gain_life: 'life is gained', lose_life: 'life is lost', create: 'a token is created', zone_change: 'a permanent changes zones' };
-            eventText = eventLabels[trigger.event] || 'the triggering event occurs';
-        }
-        eventText = eventText.replace(/^[,\s]+|[,;.]\s*$/g, '');
-        return { label: 'Repeatable triggered ability', group: profile.group, detail: eventText ? `repeats when ${eventText.replace(/^(?:whenever|when)\s+/i, '')}` : 'can trigger repeatedly when its event happens' };
-    }
-    if (profile.kind === 'repeatable_activation') return { label: 'Repeatable activated ability', group: profile.group, detail: 'can be activated again when its costs and timing allow' };
-    if (profile.kind === 'ongoing_static') return { label: 'Ongoing effect', group: profile.group, detail: 'continues to apply while its conditions are met' };
-    if (profile.kind === 'entry_trigger') return { label: 'One-time enter-the-battlefield trigger', group: profile.group, detail: 'normally resolves once when this permanent enters' };
-    if (profile.kind === 'delayed_trigger') return { label: 'One-time delayed trigger', group: profile.group, detail: profile.timingText ? `happens once at ${profile.timingText}` : 'happens once at a specified later time' };
-    if (profile.kind === 'self_event') return { label: 'One-time self-event trigger', group: profile.group, detail: 'depends on a one-time event for this permanent' };
-    if (profile.kind === 'single_use_activation') return { label: 'Single-use activation', group: profile.group, detail: 'the source or resource is consumed by the activation' };
-    if (profile.kind === 'repeatable_spell') return { label: 'Repeatable spell', group: profile.group, detail: 'can be cast repeatedly through its rules text' };
-    if (profile.kind === 'recastable_spell') return { label: 'Spell with limited reuse', group: profile.group, detail: 'has a defined reuse mechanic' };
-    if (profile.kind === 'one_shot') return { label: 'One-shot effect', group: profile.group, detail: 'does not itself indicate a repeatable engine' };
-    return { label: profile.label || 'Effect cadence', group: profile.group, detail: rawContext.slice(0, 130) };
-}
-
-function buildSearchIntentPresentationModel(sourceCard = currentSourceCard, highlights = manualHighlights) {
-    if (!sourceCard) return null;
-    const activeHighlights = Array.isArray(highlights) ? highlights : [];
-    const intent = getSearchIntent(sourceCard, activeHighlights);
-    const sourceText = String(intent.sourceText || getCurrentSourceOracleText(sourceCard) || '');
-    const parsed = Array.isArray(intent.parsedEffects) ? intent.parsedEffects.filter(effect => effect && !effect.isCostEffect) : [];
-    // The scorer's no-highlight parse is already annotated; highlight-derived profiles are parsed
-    // excerpts, so attach the same repeatability metadata before presenting them.
-    annotateEffectRepeatability(sourceCard, parsed, sourceText);
-    const roles = inferStrategicRoleProfile(sourceCard, parsed, intent.targetText || sourceText);
-    const seen = new Set();
-    const effectViews = parsed
-        .filter(effect => effect.canonical || effect.action && effect.action !== 'generic')
-        .map(effect => {
-            const fn = effect.canonical?.function || effect.action || 'unknown';
-            const cadence = searchIntentCadenceDescription(effect);
-            const trigger = effect.triggerProfile || effect.canonical?.params?.triggerProfile || {};
-            const eventKey = trigger.event || cadence.detail || '';
-            const key = `${fn}|${effect.canonical?.outcome || effect.outcome || ''}|${cadence.label}|${eventKey}`;
-            if (seen.has(key)) return null;
-            seen.add(key);
-            return { effect, fn, ...searchIntentFunctionLabel(effect), cadence, importance: Number(effect.importance) || 0, trigger };
-        })
-        .filter(Boolean)
-        .sort((a, b) => b.importance - a.importance)
-        .slice(0, 4);
-
-    const highlightsView = activeHighlights.filter(h => h && String(h.text || '').trim()).map(h => ({
-        text: String(h.text).trim(),
-        field: h.field === 'type' ? 'type line' : (h.origin === 'user' ? 'search intent' : 'Oracle text'),
-        mode: h.mode === 'variable' ? 'Flexible' : 'Exact',
-        origin: h.origin === 'user' ? (h.editedFrom ? 'Edited source selection' : 'Search detail') : 'Selected text',
-        attached: Number.isInteger(h.attachedTo)
-    }));
-    const primary = effectViews[0] || null;
-    let summary;
-    if (primary) {
-        const action = primary.label;
-        if (primary.cadence.group === 'repeatable_engine') {
-            if (primary.effect?.repeatabilityProfile?.kind === 'periodic_trigger') {
-                summary = `Look for cards that ${action} repeatedly${primary.cadence.detail ? ` (${primary.cadence.detail})` : ''}.`;
-            } else if (primary.effect?.repeatabilityProfile?.kind === 'repeatable_trigger') {
-                const trigger = String(primary.cadence.detail || '').replace(/^repeats when\s*/i, '').trim();
-                summary = `Look for cards that ${action}${trigger ? ` whenever ${trigger}` : ' through repeatable triggered abilities'}.`;
-            } else if (primary.cadence.label === 'Ongoing effect') {
-                summary = `Look for cards that ${action} through an ongoing effect.`;
-            } else {
-                summary = `Look for cards that ${action} through a repeatable ability.`;
-            }
-        } else if (primary.cadence.group === 'single_use') {
-            summary = `Look for cards that ${action} in a one-time effect. Recurring effects are related, but their cadence differs.`;
-        } else {
-            summary = `Look for cards that ${action}, comparing the actual rules outcome and context rather than wording alone.`;
-        }
-    } else {
-        const activeText = String(intent.targetText || '').trim();
-        summary = activeHighlights.length
-            ? `The parser did not recognize a canonical action from this selection, but your current highlighted wording remains an active high-priority search intent. ${activeText ? 'The effective intent is shown below and still guides retrieval and ranking.' : 'Semantic text and other available scoring evidence remain active.'}`
-            : 'The selected text did not produce a clear canonical action. ManaSearch will still use the active text, semantic context, card type, and other available scoring evidence.';
-    }
-    if (highlightsView.length) {
-        const exact = highlightsView.some(h => h.mode === 'Exact');
-        const flexible = highlightsView.some(h => h.mode === 'Flexible');
-        const modes = [exact ? 'Exact highlights require matching text in candidate Oracle text' : '', flexible ? 'Flexible highlights focus on matching mechanics even when wording differs' : ''].filter(Boolean);
-        if (modes.length) summary += ` Highlight behavior: ${modes.join('; ')}.`;
-    }
-    const coverage = effectViews.length > 0;
-    const roleViews = roles.slice(0, 3).map(role => ({
-        role: SEARCH_INTENT_ROLE_LABELS[role.role] || String(role.role || '').replace(/_/g, ' '),
-        score: Number(role.score) || 0,
-        anchors: Array.isArray(role.anchors) ? role.anchors.filter(Boolean).slice(0, 2) : []
-    }));
-    const hasEditedSourceIntent = activeHighlights.some(h => h?.origin === 'user' && h?.editedFrom);
-    const focusExplanation = highlightsView.length
-        ? `${hasEditedSourceIntent ? 'Edited highlight wording is an explicit search intent. Its original card-text location is retained only to preserve trigger/condition context; the previous outcome is not silently reused.' : 'The selected spans are the active focus passed to the scorer.'} Exact spans also participate in literal-match requirements; Flexible spans allow the wording or numeric values to differ.`
-        : 'No highlight is active, so the scorer uses the source card’s full Oracle text as its target context.';
-    const hasExplicitEdit = activeHighlights.some(h => h?.origin === 'user' && h?.editedFrom);
-    const rankingEvidence = [
-        ...(highlightsView.length ? [{
-            title: 'Explicit highlighted intent',
-            detail: hasExplicitEdit
-                ? 'Your edited wording receives a stronger 42% share of the normalized ranking score. The original text location supplies grammar/context only; the prior outcome is not reused as the intended result.'
-                : 'Your selected text and its governing rules clause actively shape parsing, retrieval, and ranking. Exact/Flexible mode controls literal matching versus mechanical flexibility.'
-        }] : []),
-        { title: 'Mechanical structure', detail: 'Parsed actions and outcomes, affected objects, targets, quantities, restrictions, conditions, and effect relationships.' },
-        { title: 'Repeatability and timing', detail: coverage ? 'Where the parser can identify it, recurring triggers/activations are distinguished from one-time, delayed, and enter-the-battlefield effects.' : 'Cadence will be compared when the source effect can be parsed confidently.' },
-        { title: 'Function, role, and semantic context', detail: roleViews.length ? `Recognized role evidence: ${roleViews.map(r => r.role).join(', ')}. These signals supplement rather than replace mechanical similarity.` : 'Broader function, role, card type, and semantic context supplement mechanical similarity.' }
-    ];
-    return { sourceName: sourceCard.name || 'Source card', summary, effectViews, highlightsView, roleViews, rankingEvidence, focusExplanation, parsedEffectCount: parsed.length, canonicalEffectCount: effectViews.length, hasHighlight: highlightsView.length > 0, semanticText: intent.semanticText || '', targetText: intent.targetText || sourceText };
-}
-
-function setSearchIntentText(node, text) {
-    if (node) node.textContent = String(text ?? '');
-}
-
-function appendSearchIntentNode(parent, tag, className, text) {
-    const node = document.createElement(tag);
-    if (className) node.className = className;
-    if (text !== undefined) node.textContent = String(text);
-    parent.appendChild(node);
-    return node;
-}
-
-function renderManaSearchIntentModel(model) {
-    const body = document.getElementById('search-intent-body');
-    if (!body) return;
-    body.replaceChildren();
-    if (!model) {
-        appendSearchIntentNode(body, 'p', 'search-intent-placeholder', 'Choose a source card to see the current search intent.');
-        return;
-    }
-    appendSearchIntentNode(body, 'p', 'search-intent-summary', model.summary);
-    if (model.hasHighlight && String(model.targetText || '').trim()) {
-        const effectiveSection = appendSearchIntentNode(body, 'div', 'search-intent-effective-section');
-        appendSearchIntentNode(effectiveSection, 'h4', '', 'Effective intent sent to parsing, retrieval, and ranking');
-        appendSearchIntentNode(effectiveSection, 'p', 'search-intent-effective-text', model.targetText);
-    }
-    appendSearchIntentNode(body, 'p', 'search-intent-focus-explanation', model.focusExplanation);
-
-    if (model.highlightsView.length) {
-        const section = appendSearchIntentNode(body, 'div', 'search-intent-subsection');
-        appendSearchIntentNode(section, 'h4', '', 'Active highlight focus');
-        const chips = appendSearchIntentNode(section, 'div', 'search-intent-chips');
-        model.highlightsView.forEach(highlight => {
-            const chip = appendSearchIntentNode(chips, 'span', `search-intent-chip ${highlight.mode === 'Exact' ? 'is-exact' : 'is-flexible'}`);
-            appendSearchIntentNode(chip, 'strong', '', highlight.mode);
-            appendSearchIntentNode(chip, 'span', '', `“${highlight.text}”`);
-            appendSearchIntentNode(chip, 'small', '', highlight.field);
-            if (highlight.origin === 'Search detail') chip.title = 'User-added search detail; not asserted to be literal source Oracle wording.';
-        });
-    }
-
-    const effectsSection = appendSearchIntentNode(body, 'div', 'search-intent-subsection');
-    appendSearchIntentNode(effectsSection, 'h4', '', 'Effects recognized by the scorer');
-    if (model.effectViews.length) {
-        const list = appendSearchIntentNode(effectsSection, 'div', 'search-intent-effect-list');
-        model.effectViews.forEach((view, index) => {
-            const row = appendSearchIntentNode(list, 'div', 'search-intent-effect-row');
-            const main = appendSearchIntentNode(row, 'div', 'search-intent-effect-main');
-            const title = appendSearchIntentNode(main, 'strong', 'search-intent-effect-title', view.label);
-            if (index === 0) title.insertAdjacentText('beforeend', ' · highest parsed importance');
-            if (view.detail) appendSearchIntentNode(main, 'p', 'search-intent-effect-detail', view.detail);
-            appendSearchIntentNode(row, 'span', `search-intent-cadence ${view.cadence.group === 'repeatable_engine' ? 'is-repeatable' : view.cadence.group === 'single_use' ? 'is-one-shot' : ''}`, view.cadence.label);
-            if (view.cadence.detail) appendSearchIntentNode(row, 'p', 'search-intent-cadence-detail', view.cadence.detail);
-        });
-    } else {
-        appendSearchIntentNode(effectsSection, 'p', 'search-intent-muted', 'No canonical effect was recognized from this active focus. Broader text and semantic evidence remain available.');
-    }
-
-    if (model.roleViews.length) {
-        const rolesSection = appendSearchIntentNode(body, 'div', 'search-intent-subsection');
-        appendSearchIntentNode(rolesSection, 'h4', '', 'Strategic roles recognized');
-        const roleChips = appendSearchIntentNode(rolesSection, 'div', 'search-intent-chips');
-        model.roleViews.forEach(role => {
-            const chip = appendSearchIntentNode(roleChips, 'span', 'search-intent-chip is-role', role.role);
-            if (role.anchors.length) chip.title = `Role evidence: ${role.anchors.join(', ')}`;
-        });
-    }
-
-    const rankingSection = appendSearchIntentNode(body, 'div', 'search-intent-subsection');
-    appendSearchIntentNode(rankingSection, 'h4', '', 'What influences ranking');
-    const rankingList = appendSearchIntentNode(rankingSection, 'ol', 'search-intent-ranking-list');
-    model.rankingEvidence.forEach((item, index) => {
-        const li = appendSearchIntentNode(rankingList, 'li', '');
-        appendSearchIntentNode(li, 'strong', '', item.title);
-        appendSearchIntentNode(li, 'p', '', item.detail);
-    });
-}
-
-function refreshManaSearchIntentPanel() {
-    const panel = document.getElementById('search-intent-panel');
-    const body = document.getElementById('search-intent-body');
-    const spinner = document.getElementById('search-intent-spinner');
-    const statusText = document.getElementById('search-intent-status-text');
-    if (!panel || !body) return;
-    const generation = ++manaSearchIntentRenderGeneration;
-    if (manaSearchIntentRenderFrame) cancelAnimationFrame(manaSearchIntentRenderFrame);
-    if (manaSearchIntentRenderTimer) clearTimeout(manaSearchIntentRenderTimer);
-    manaSearchIntentRenderFrame = 0;
-    manaSearchIntentRenderTimer = 0;
-
-    const enabled = displayPreferences?.showSearchIntent === true;
-    const hasSource = Boolean(currentSourceCard && String(currentSourceCard.name || '').trim());
-    if (!enabled || !hasSource) {
-        panel.classList.add('hidden');
-        panel.setAttribute('aria-busy', 'false');
-        spinner?.classList.add('hidden');
-        setSearchIntentText(statusText, '');
-        return;
-    }
-
-    panel.classList.remove('hidden');
-    panel.setAttribute('aria-busy', 'true');
-    spinner?.classList.remove('hidden');
-    setSearchIntentText(statusText, 'Updating from current highlights…');
-    if (!body.childElementCount) appendSearchIntentNode(body, 'p', 'search-intent-placeholder', 'Updating search intent…');
-
-    // Let the spinner paint before parsing. A generation check prevents a slow refresh from
-    // overwriting a newer source/highlight state when users click several highlight controls fast.
-    manaSearchIntentRenderFrame = requestAnimationFrame(() => {
-        manaSearchIntentRenderFrame = 0;
-        manaSearchIntentRenderTimer = window.setTimeout(() => {
-            manaSearchIntentRenderTimer = 0;
-            if (generation !== manaSearchIntentRenderGeneration) return;
-            try {
-                const model = buildSearchIntentPresentationModel(currentSourceCard, manualHighlights);
-                if (generation !== manaSearchIntentRenderGeneration) return;
-                renderManaSearchIntentModel(model);
-                setSearchIntentText(statusText, 'Live');
-                panel.dataset.intentKey = `${String(currentSourceCard?.name || '')}|${(manualHighlights || []).map(h => `${h.field || 'oracle'}:${h.mode || 'exact'}:${h.text}`).join('|')}`;
-            } catch (error) {
-                console.error('[ManaSearch] Search intent refresh failed:', error?.message || error);
-                body.replaceChildren();
-                appendSearchIntentNode(body, 'p', 'search-intent-error', 'Search intent could not be refreshed. Search itself is unaffected; try changing the highlight again or reloading the page.');
-                setSearchIntentText(statusText, 'Could not update');
-            } finally {
-                if (generation === manaSearchIntentRenderGeneration) {
-                    panel.setAttribute('aria-busy', 'false');
-                    spinner?.classList.add('hidden');
-                }
-            }
-        }, 0);
-    });
-}
-
-function installManaSearchIntentPanel() {
-    if (manaSearchIntentPanelInstalled || typeof window === 'undefined' || typeof document === 'undefined') return;
-    manaSearchIntentPanelInstalled = true;
-    window.addEventListener('manasearch:source-selected', () => refreshManaSearchIntentPanel());
-    window.addEventListener('manasearch:source-highlights-changed', () => refreshManaSearchIntentPanel());
-    window.addEventListener('manasearch:source-selection-failed', () => refreshManaSearchIntentPanel());
-    const sourceLoaded = document.getElementById('source-card-loaded');
-    if (typeof MutationObserver === 'function' && sourceLoaded) {
-        const observer = new MutationObserver(() => {
-            if (sourceLoaded.classList.contains('hidden')) refreshManaSearchIntentPanel();
-        });
-        observer.observe(sourceLoaded, { attributes: true, attributeFilter: ['class'] });
-    }
-    refreshManaSearchIntentPanel();
-}
-
-function runManaSearchIntentRegressionSuite() {
-    const checks = [];
-    const check = (id, pass, detail = '') => checks.push({ id, pass: Boolean(pass), detail });
-    const source = currentSourceCard;
-    const oldHighlights = manualHighlights;
-    try {
-        const rhystic = { name: 'Rhystic Study', type_line: 'Enchantment', oracle_text: 'Whenever an opponent casts a spell, you may draw a card unless that player pays {1}.' };
-        currentSourceCard = rhystic;
-        manualHighlights = [];
-        const full = buildSearchIntentPresentationModel(rhystic, []);
-        check('full-source-intent-identifies-card-draw', /draw cards/i.test(full?.summary || '') && full?.effectViews?.some(e => e.fn === 'card_draw'), full?.summary || '');
-        const start = rhystic.oracle_text.toLowerCase().indexOf('draw a card');
-        manualHighlights = [{ text: 'draw a card', field: 'oracle', mode: 'exact', origin: 'source', start, end: start + 'draw a card'.length, colorIndex: 0, attachedTo: null }];
-        const exact = buildSearchIntentPresentationModel(rhystic, manualHighlights);
-        check('exact-highlight-is-described-in-live-intent', exact?.hasHighlight && exact.highlightsView.some(h => h.text === 'draw a card' && h.mode === 'Exact') && /Exact highlights require matching text/i.test(exact.summary), exact?.summary || '');
-        manualHighlights = [{ text: 'draw a card', field: 'oracle', mode: 'variable', origin: 'source', start, end: start + 'draw a card'.length, colorIndex: 0, attachedTo: null }];
-        const flexible = buildSearchIntentPresentationModel(rhystic, manualHighlights);
-        check('flexible-highlight-changes-match-guidance', flexible?.hasHighlight && flexible.highlightsView.some(h => h.mode === 'Flexible') && /Flexible highlights focus on matching mechanics even when wording differs/i.test(flexible.summary) && exact?.summary !== flexible?.summary && /Flexible spans allow the wording or numeric values to differ/i.test(flexible?.focusExplanation || ''), flexible?.summary || '');
-
-        // Selecting only the action phrase must keep its governing clause, so a card-draw
-        // highlight on Rhystic Study still understands the native opponent-casts trigger.
-        const selectedStart = rhystic.oracle_text.toLowerCase().indexOf('draw a card');
-        manualHighlights = [{ text: 'draw a card', field: 'oracle', mode: 'variable', origin: 'source', start: selectedStart, end: selectedStart + 'draw a card'.length, colorIndex: 0, attachedTo: null }];
-        const selectedOnlyIntent = getSearchIntent(rhystic, manualHighlights);
-        const selectedOnlyDraw = (selectedOnlyIntent.parsedEffects || []).find(effect => effect?.canonical?.function === 'card_draw');
-        check('selected-draw-phrase-retains-native-trigger-context', Boolean(selectedOnlyDraw?.triggerProfile?.event === 'casts_spell') && /Whenever an opponent casts a spell/i.test(selectedOnlyIntent.targetText), JSON.stringify({ summary: buildSearchIntentPresentationModel(rhystic, manualHighlights)?.summary, trigger: selectedOnlyDraw?.triggerProfile }));
-
-        // A trigger-shaped Search detail connected to a selected result changes the effective
-        // intent and the actual parsed scoring effects, not only the panel's descriptive wording.
-        manualHighlights = [
-            { text: 'draw a card', field: 'oracle', mode: 'variable', origin: 'source', start: selectedStart, end: selectedStart + 'draw a card'.length, colorIndex: 0, attachedTo: null },
-            { text: 'Whenever an opponent draws a card', field: 'oracle', mode: 'exact', origin: 'user', start: null, end: null, colorIndex: 1, attachedTo: 0, intentConnection: 'attached' }
-        ];
-        const customTriggerIntent = getSearchIntent(rhystic, manualHighlights);
-        const customTriggerDraw = (customTriggerIntent.parsedEffects || []).find(effect => effect?.canonical?.function === 'card_draw');
-        const customTriggerModel = buildSearchIntentPresentationModel(rhystic, manualHighlights);
-        check('connected-trigger-detail-overrides-native-trigger-in-scorer-profile', customTriggerDraw?.triggerProfile?.event === 'draw_card' && customTriggerDraw?.searchIntentContextOverride === true && /Whenever an opponent draws a card, you may draw a card/i.test(customTriggerIntent.targetText), JSON.stringify({ trigger: customTriggerDraw?.triggerProfile, targetText: customTriggerIntent.targetText }));
-        check('search-intent-summary-reflects-connected-trigger-detail', /opponent draws a card/i.test(customTriggerModel?.summary || '') && !/opponent casts a spell/i.test(customTriggerModel?.summary || '') && customTriggerModel?.effectViews?.some(effect => effect.fn === 'card_draw' && /Repeatable triggered ability/i.test(effect.cadence.label)), customTriggerModel?.summary || '');
-        check('trigger-override-drops-unrelated-native-trigger-restrictions', /Whenever an opponent draws a card, you may draw a card\.?/i.test(customTriggerIntent.targetText) && !/unless that player pays/i.test(customTriggerIntent.targetText) && !/opponent casts a spell/i.test(customTriggerIntent.targetText), customTriggerIntent.targetText || '');
-
-        // Edited text must be the actual search target, not merely a UI label. Test a noncanonical
-        // changed outcome so the fallback path is required to preserve it even when action parsing is uncertain.
-        manualHighlights = [{
-            text: 'take an extra turn', field: 'oracle', mode: 'variable', origin: 'user',
-            start: null, end: null, colorIndex: 0, attachedTo: null,
-            editedFrom: { text: 'draw a card', start: selectedStart, end: selectedStart + 'draw a card'.length, clauseText: rhystic.oracle_text }
-        }];
-        const editedOutcomeIntent = getSearchIntent(rhystic, manualHighlights);
-        const editedOutcomeProfiles = buildHighlightIntentProfiles(manualHighlights, rhystic, rhystic.oracle_text);
-        check('edited-highlight-outcome-replaces-printed-outcome-in-search-target', /Whenever an opponent casts a spell, you may take an extra turn/i.test(editedOutcomeIntent.targetText) && !/draw a card|unless that player pays/i.test(editedOutcomeIntent.targetText), editedOutcomeIntent.targetText || '');
-        check('edited-noncanonical-outcome-reaches-explicit-scoring-profile', editedOutcomeProfiles[0]?.explicitUserIntent && editedOutcomeProfiles[0]?.editedFromSource && /take an extra turn/i.test(editedOutcomeProfiles[0]?.explicitIntentText || ''), JSON.stringify({ explicit: editedOutcomeProfiles[0]?.explicitUserIntent, parseText: editedOutcomeProfiles[0]?.parseText }));
-        check('edited-outcome-reaches-semantic-retrieval-text-without-stale-outcome', /take an extra turn/i.test(editedOutcomeIntent.semanticText || '') && !/draw a card/i.test(editedOutcomeIntent.semanticText || ''), editedOutcomeIntent.semanticText || '');
-        check('edited-outcome-is-the-effective-text-parsed-for-mechanics', /take an extra turn/i.test(editedOutcomeProfiles[0]?.parseText || '') && !/draw a card/i.test(editedOutcomeProfiles[0]?.parseText || ''), editedOutcomeProfiles[0]?.parseText || '');
-
-        const extraTurnCandidate = { name: 'Extra Turn on Cast', type_line: 'Enchantment', oracle_text: 'Whenever an opponent casts a spell, you may take an extra turn.' };
-        const oldDrawCandidate = { name: 'Original Draw on Cast', type_line: 'Enchantment', oracle_text: rhystic.oracle_text };
-        const editedMatchScore = calculateHighlightIntentMatch(editedOutcomeProfiles, [], extraTurnCandidate);
-        const staleOutcomeScore = calculateHighlightIntentMatch(editedOutcomeProfiles, [], oldDrawCandidate);
-        check('unrecognized-edited-outcome-still-guides-candidate-match', editedMatchScore > staleOutcomeScore && editedMatchScore > 0.45, JSON.stringify({ editedMatchScore, staleOutcomeScore }));
-
-        const oldTrigger = 'Whenever an opponent casts a spell';
-        const oldTriggerStart = rhystic.oracle_text.indexOf(oldTrigger);
-        manualHighlights = [{
-            text: 'Whenever an opponent draws a card', field: 'oracle', mode: 'variable', origin: 'user',
-            start: null, end: null, colorIndex: 0, attachedTo: null,
-            editedFrom: { text: oldTrigger, start: oldTriggerStart, end: oldTriggerStart + oldTrigger.length, clauseText: rhystic.oracle_text }
-        }];
-        const editedTriggerIntent = getSearchIntent(rhystic, manualHighlights);
-        check('editing-the-highlighted-trigger-replaces-the-original-trigger', /Whenever an opponent draws a card/i.test(editedTriggerIntent.targetText) && !/Whenever an opponent casts a spell/i.test(editedTriggerIntent.targetText) && /draw a card/i.test(editedTriggerIntent.targetText), editedTriggerIntent.targetText || '');
-
-        const baselineBlend = blendHighlightIntentScore(0.50, 0.90, [], { hasHighlight: false, hasEffectHighlight: false });
-        const selectedBlend = blendHighlightIntentScore(0.50, 0.90, [{ explicitUserIntent: true }], { hasHighlight: true, hasEffectHighlight: true });
-        const editedBlend = blendHighlightIntentScore(0.50, 0.90, [{ explicitUserIntent: true, editedFromSource: true }], { hasHighlight: true, hasEffectHighlight: true });
-        check('highlight-score-is-blended-into-final-ranking-with-higher-edited-intent-priority', baselineBlend.weight === 0 && selectedBlend.weight === 0.30 && editedBlend.weight === 0.42 && editedBlend.score > selectedBlend.score && selectedBlend.score > baselineBlend.score, JSON.stringify({ baselineBlend, selectedBlend, editedBlend }));
-
-        // Reproduce the UI state from the reported issue: a user-added Exact trigger detail can
-        // predate the source selection, so it may have no attachment index yet. In that unambiguous
-        // one-detail/one-outcome case, inference must attach it regardless of chip order.
-        manualHighlights = [
-            { text: 'Whenever an opponent draws a card', field: 'oracle', mode: 'exact', origin: 'user', start: null, end: null, colorIndex: 1, attachedTo: null, intentConnection: 'auto' },
-            { text: 'draw a card', field: 'oracle', mode: 'variable', origin: 'source', start: selectedStart, end: selectedStart + 'draw a card'.length, colorIndex: 0, attachedTo: null }
-        ];
-        const inferredTriggerIntent = getSearchIntent(rhystic, manualHighlights);
-        const inferredTriggerDraw = (inferredTriggerIntent.parsedEffects || []).find(effect => effect?.canonical?.function === 'card_draw');
-        const inferredTriggerModel = buildSearchIntentPresentationModel(rhystic, manualHighlights);
-        check('unattached-search-trigger-infers-connection-to-single-highlighted-outcome', inferredTriggerDraw?.triggerProfile?.event === 'draw_card' && inferredTriggerDraw?.searchIntentContextOverride === true && /Whenever an opponent draws a card, you may draw a card/i.test(inferredTriggerIntent.targetText), JSON.stringify({ trigger: inferredTriggerDraw?.triggerProfile, targetText: inferredTriggerIntent.targetText }));
-        check('inferred-intent-summary-uses-user-selected-trigger', /opponent draws a card/i.test(inferredTriggerModel?.summary || '') && !/opponent casts a spell/i.test(inferredTriggerModel?.summary || ''), inferredTriggerModel?.summary || '');
-
-        // The corrected intent must affect the production mechanical scorer: cards that actually
-        // draw when an opponent draws should beat cards that draw when an opponent casts a spell.
-        const intendedTriggerCard = { name: 'Draw on Opponent Draw', type_line: 'Enchantment', oracle_text: 'Whenever an opponent draws a card, draw a card.' };
-        const castTriggerCard = { name: 'Draw on Opponent Cast', type_line: 'Enchantment', oracle_text: 'Whenever an opponent casts a spell, draw a card.' };
-        const intendedTriggerEffects = parseMTGEffect(intendedTriggerCard.oracle_text);
-        const castTriggerEffects = parseMTGEffect(castTriggerCard.oracle_text);
-        annotateEffectRepeatability(intendedTriggerCard, intendedTriggerEffects, intendedTriggerCard.oracle_text);
-        annotateEffectRepeatability(castTriggerCard, castTriggerEffects, castTriggerCard.oracle_text);
-        const intendedTriggerScore = calculateMechanicalSimilarityDetailed(inferredTriggerIntent.parsedEffects, intendedTriggerEffects).score;
-        const castTriggerScore = calculateMechanicalSimilarityDetailed(inferredTriggerIntent.parsedEffects, castTriggerEffects).score;
-        check('mechanical-score-prefers-matching-opponent-draw-trigger', intendedTriggerScore > castTriggerScore + 0.05, JSON.stringify({ intendedTriggerScore, castTriggerScore }));
-
-        const chronicler = { name: 'Chronicler of Heroes', type_line: 'Creature — Centaur Wizard', oracle_text: 'When Chronicler of Heroes enters the battlefield, draw a card if you control a creature with a +1/+1 counter on it.' };
-        currentSourceCard = chronicler;
-        manualHighlights = [];
-        const etb = buildSearchIntentPresentationModel(chronicler, []);
-        check('one-time-etb-draw-is-described-as-one-time', /one-time effect/i.test(etb?.summary || '') && etb?.effectViews?.some(e => e.cadence.label === 'One-time enter-the-battlefield trigger'), etb?.summary || '');
-    } catch (error) {
-        check('search-intent-regression-suite-executes', false, error?.stack || error?.message || String(error));
-    } finally {
-        currentSourceCard = source;
-        manualHighlights = oldHighlights;
-    }
-    const failed = checks.filter(item => !item.pass);
-    console.table(checks);
-    const report = { pass: failed.length === 0, passed: checks.length - failed.length, total: checks.length, checks, failures: failed };
-    console.info(`[ManaSearch] Search intent regression suite: ${report.passed}/${report.total}`, report);
-    return report;
-}
-
-if (typeof window !== 'undefined') {
-    window.runManaSearchIntentRegressionSuite = runManaSearchIntentRegressionSuite;
-    window.refreshManaSearchIntentPanel = refreshManaSearchIntentPanel;
-}
 
 function runMechanicalRegressionSuite() {
     const checks = [];
@@ -23036,7 +17612,6 @@ function runMechanicalRegressionSuite() {
     else console.info('[ManaSearch] Mechanical regression suite passed:', checks.length, 'checks.');
     return report;
 }
-try { window.runMechanicalRegressionSuite = runMechanicalRegressionSuite; } catch (_) {}
 
 function createSearchCancellationError() {
     const error = new Error('Search superseded by a newer search.');
@@ -23065,9 +17640,6 @@ async function findSimilarCards() {
         }
     }
 
-    const searchHighlightsSnapshot = Array.isArray(manualHighlights)
-        ? manualHighlights.map(h => ({ ...h, editedFrom: h?.editedFrom ? { ...h.editedFrom } : undefined }))
-        : [];
     const requestId = ++searchRequestId;
     cancelScheduledProgressiveResultRender();
     activeResultView = { mode: 'main', requestId };
@@ -23086,9 +17658,6 @@ async function findSimilarCards() {
     const timings = {};
 
     showLoading(true);
-    window.dispatchEvent(new CustomEvent('manasearch:search-started', {
-        detail: { sourceName: currentSourceCard?.name || '', highlightCount: searchHighlightsSnapshot.length }
-    }));
     // Keep the Results area visible during the search. The user should be able to see the
     // first-pass candidates as soon as they arrive instead of waiting for the entire pipeline.
     if (resultsSection) resultsSection.classList.remove('hidden');
@@ -23146,7 +17715,7 @@ async function findSimilarCards() {
         ? "Retrieval in progress — searching multiple source cards and gathering initial candidates..."
         : "Retrieval in progress — gathering initial candidates from the search streams...");
 
-    const hasHighlight = Boolean(searchHighlightsSnapshot && searchHighlightsSnapshot.length > 0);
+    const hasHighlight = Boolean(manualHighlights && manualHighlights.length > 0);
 
     // Initialize before any retrieval/checklist code can touch the binding. `functionalRetrievalPlans`
     // is populated later, but keeping the binding initialized from the start prevents a Temporal
@@ -23160,7 +17729,7 @@ async function findSimilarCards() {
     // clause-splitting (which looks for sentence-ending punctuation) then reads as a single
     // malformed clause instead of two separate effects - corrupting mechanical/semantic parsing
     // for any multi-highlight search. A period restores the boundary the parser relies on.
-    const searchIntent = getSearchIntent(currentSourceCard, searchHighlightsSnapshot);
+    const searchIntent = getSearchIntent(currentSourceCard, manualHighlights);
     const sourceOracleTextForScoring = searchIntent.sourceText ||
         (sourceCardOracle?.textContent ? sourceCardOracle.textContent : '');
     const targetTextForScoring = searchIntent.targetText || sourceOracleTextForScoring;
@@ -23170,12 +17739,12 @@ async function findSimilarCards() {
     // A mixed benchmark highlight on one grammatical effect uses its Exact fragments as structural
     // anchors and its Variable fragments as flexible parameters. Do not turn those anchors into a
     // literal hard query, or semantically equivalent cards are filtered out before scoring.
-    const highlightProfilesForSearch = hasHighlight ? buildHighlightIntentProfiles(searchHighlightsSnapshot) : [];
+    const highlightProfilesForSearch = hasHighlight ? buildHighlightIntentProfiles(manualHighlights) : [];
     const hasBenchmarkMixedHighlightIntent = benchmarkColdMode && highlightProfilesForSearch.some(p => p.benchmarkIntentOnly);
     const exactnessTextForScoring = hasHighlight
         ? (hasBenchmarkMixedHighlightIntent
             ? ''
-            : searchHighlightsSnapshot.filter(h => h.field !== 'type' && h.mode === 'exact' && !h.benchmarkIntentOnly).map(h => h.text).join('. '))
+            : manualHighlights.filter(h => h.mode === 'exact' && !h.benchmarkIntentOnly).map(h => h.text).join('. '))
         : targetTextForScoring;
 
     const filters = readConstraintFilters();
@@ -23263,7 +17832,7 @@ async function findSimilarCards() {
     const sourceParseConfidence = calculateParseConfidence(sourceParsedEffects);
     const sourceFieldConfidence = calculateCardFieldConfidence(sourceParsedEffects);
     const sourceRoleProfileForFloor = inferStrategicRoleProfile(currentSourceCard, sourceParsedEffects, targetTextForScoring);
-    const sourceRankingIntentForFloor = inferRankingIntent(currentSourceCard, sourceParsedEffects, targetTextForScoring, sourceRoleProfileForFloor, searchHighlightsSnapshot);
+    const sourceRankingIntentForFloor = inferRankingIntent(currentSourceCard, sourceParsedEffects, targetTextForScoring, sourceRoleProfileForFloor, manualHighlights);
 
     const highlightRetrievalText = hasHighlight
         ? calculateHighlightIntentRetrievalText(highlightProfilesForSearch)
@@ -23274,16 +17843,15 @@ async function findSimilarCards() {
     const exactHighlightQueries = [];
     if (hasHighlight) {
         const seenExactQueries = new Set();
-        for (const highlight of searchHighlightsSnapshot.filter(h => h?.mode !== 'variable' && !h.benchmarkIntentOnly && typeof h.text === 'string' && h.text.trim())) {
+        for (const highlight of manualHighlights.filter(h => h?.mode !== 'variable' && !h.benchmarkIntentOnly && typeof h.text === 'string' && h.text.trim())) {
             const literal = highlight.text.trim().replaceAll('\\', '\\\\').replaceAll('"', '\\"');
-            const prefix = highlight.field === 'type' ? 'type' : 'oracle';
-            const key = `${prefix}:${literal.toLowerCase()}`;
+            const key = literal.toLowerCase();
             if (!literal || seenExactQueries.has(key)) continue;
             seenExactQueries.add(key);
             exactHighlightQueries.push({
-                query: `${prefix}:"${literal}" ${excludeSelf}`.trim(),
+                query: `oracle:"${literal}" ${excludeSelf}`.trim(),
                 narrow: true,
-                source: highlight.field === 'type' ? 'highlight-type' : 'highlight-exact'
+                source: 'highlight-exact'
             });
         }
     }
@@ -23390,11 +17958,8 @@ async function findSimilarCards() {
     // Match chip. Any unexpected label is still shown so a genuinely new stream can never remain
     // invisible; the normal A/B/C/E labels below use the same names here, avoiding the duplicate
     // gray chips that used to appear as "Search A (Exact Phrase)" alongside the completed chip.
-    activeSearchStreamProgressReporter = ({ label, message, kind = 'progress', ownerRequestId = requestId } = {}) => {
-        // The reporter is global because the stream broker is shared. Always validate the stream's
-        // originating request and the view that currently owns the result area.
-        if (requestId !== searchRequestId || ownerRequestId !== requestId ||
-            activeResultView.mode !== 'main' || activeResultView.requestId !== requestId || !label) return;
+    activeSearchStreamProgressReporter = ({ label, message, kind = 'progress' } = {}) => {
+        if (requestId !== searchRequestId || !label) return;
         const displayLabel = /^Search F #\d+ \(Functional Match\)$/.test(label)
             ? 'Functional Match'
             : label;
@@ -23419,13 +17984,8 @@ async function findSimilarCards() {
                 ? `Done • ${coverage.pagesFetched}/${coverage.maxPages} pages • ${coverage.retrievedCount} cards`
                 : 'Done';
             streamChecklistDetail.set(label, detail);
-            // Stream completions can arrive while a Related Search owns the result view. Update
-            // the hidden main-search bookkeeping, but don't repaint or replace the active view's
-            // progress text for a background request.
-            if (activeResultView.mode === 'main' && activeResultView.requestId === requestId) {
-                renderStreamChecklist();
-                updateProgress(1, totalSteps, `Retrieval in progress — ${streamsSettled}/${totalTrackedStreams} search streams finished; ${label} finished.`);
-            }
+            renderStreamChecklist();
+            updateProgress(1, totalSteps, `Retrieval in progress — ${streamsSettled}/${totalTrackedStreams} search streams finished; ${label} finished.`);
             return r;
         });
     };
@@ -23438,12 +17998,7 @@ async function findSimilarCards() {
     const previousLocalCorpusBatchContext = activeLocalCorpusBatchContext;
     if (!benchmarkUseLocalOracleCorpus) {
         const localCorpus = staticCardCorpusMemory || await loadStaticCardCorpus();
-        // A source/search change may happen while the shared corpus load is resolving. Do not let
-        // that older request replace the newer request's one-pass local retrieval context.
-        if (requestId !== searchRequestId) return;
-        activeLocalCorpusBatchContext = localCorpus?.cards?.length
-            ? createLocalCorpusBatchContext(localCorpus, () => requestId !== searchRequestId)
-            : null;
+        activeLocalCorpusBatchContext = localCorpus?.cards?.length ? createLocalCorpusBatchContext(localCorpus) : null;
         if (activeLocalCorpusBatchContext) {
             const depth = activeLocalCorpusBatchContext.depthPercent;
             updateProgress(1, totalSteps, `Local corpus ready — one-pass retrieval across ${localCorpus.total.toLocaleString()} cards at ${depth}% depth.`);
@@ -23459,7 +18014,7 @@ async function findSimilarCards() {
             (searchA_Query
                 ? retrieveLocalFirst(localExactQueries, searchA_Query, {
                     label: 'Exact Phrase', fallbackMaxPages: benchmarkPageCap, limit: isBroadSearch ? 320 : 220,
-                    excludeName: currentSourceCard.name, filters, broadFallbackFilters, highlights: searchHighlightsSnapshot
+                    excludeName: currentSourceCard.name, filters, broadFallbackFilters, highlights: manualHighlights
                 }).catch(() => [])
                 : Promise.resolve([])),
             "Exact Phrase"
@@ -23487,52 +18042,24 @@ async function findSimilarCards() {
         const MIN_PREVIEW_RESULTS = 1;
         const PREVIEW_RENDER_CAP = 20;
         const PREVIEW_RENDER_MIN_INTERVAL_MS = 300;
-        // Provisional display must never parse/profile the entire retrieval pool and then force the
-        // authoritative pass to do that same work again. All candidates still receive the full
-        // scoring pipeline once; only the immediate preview uses this cheap lexical/retrieval hint.
-        const MAX_PROGRESSIVE_FULL_SCORE_CANDIDATES = 96;
-        const progressiveRankingPending = new Map();
-        let progressiveRankingRunning = false;
-        let progressiveFullScoreCount = 0;
-        let requestProgressiveRanking = null;
-        let lightweightPreviewCount = 0;
-        const previewTokenCache = new WeakMap();
-        const previewQueryText = targetTextForScoring || getCurrentSourceOracleText(currentSourceCard);
-        const previewQueryTokenList = getLocalCorpusIndexTokens(previewQueryText).slice(0, 48);
-        const previewQueryTokens = new Set(previewQueryTokenList);
         let previewRenderTimer = null;
         let previewRenderDirty = false;
         let previewRenderFlushing = false;
         let previewRenderLabel = '';
         let previewLastRenderedAt = 0;
 
+        const previewSourceMechanicProfile = buildUniversalMechanicProfile(currentSourceCard, targetTextForScoring, sourceParsedEffects);
+
         function computePreviewScore(card) {
-            lightweightPreviewCount++;
-            let candidateTokens = previewTokenCache.get(card);
-            if (!candidateTokens) {
-                const rawText = card?._localSearchText || normalizeLocalCorpusText([
-                    card?.name || '', getCurrentSourceOracleText(card),
-                    Array.isArray(card?.keywords) ? card.keywords.join(' ') : '', card?.type_line || ''
-                ].join(' '));
-                candidateTokens = new Set(rawText.split(/\s+/).filter(token =>
-                    token.length >= 3 && !LOCAL_CORPUS_STOP_WORDS.has(token)
-                ));
-                previewTokenCache.set(card, candidateTokens);
-            }
-            let shared = 0;
-            for (const token of previewQueryTokens) if (candidateTokens.has(token)) shared++;
-            const queryCoverage = previewQueryTokens.size ? shared / previewQueryTokens.size : 0;
-            const candidateCoverage = candidateTokens.size ? shared / candidateTokens.size : 0;
-            const semanticHint = Math.max(0, Math.min(1, Number(card?._semanticRetrievalSimilarity) || 0));
-            const localHint = Math.max(0, Math.min(1, Number(card?._localCorpusSimilarity) || 0));
-            const retrievalHint = Math.min(1, (card?.retrievalEvidence?.length || 0) / 5);
-            // This score is explicitly provisional. It provides a fast first look while the 96
-            // strongest candidates receive real progressive NLP scores; final ranking still runs
-            // the complete unchanged scorer for every candidate.
-            return Math.max(0, Math.min(1,
-                queryCoverage * 0.56 + candidateCoverage * 0.08 +
-                semanticHint * 0.22 + localHint * 0.10 + retrievalHint * 0.04
-            ));
+            const cText = card.oracle_text || (card.card_faces ? card.card_faces.map(f => f.oracle_text).join(' ') : '');
+            const cParsed = parseMTGEffect(cText);
+            const cProfile = buildUniversalMechanicProfile(card, cText, cParsed);
+            const mech = calculateMechanicalSimilarity(sourceParsedEffects, cParsed, previewSourceMechanicProfile, cProfile);
+            const cat = calculateCategoryScore(card, activeTags);
+            const syn = calculateSynergyScore(currentSourceCard, card, filters);
+            // Weighted toward mechanical since it's the most direct "does this do the same
+            // thing" signal available without the embedding model.
+            return (mech * 0.55) + (cat * 0.25) + (syn * 0.20);
         }
 
         async function flushPreviewRender() {
@@ -23578,7 +18105,7 @@ async function findSimilarCards() {
             for (const c of newResults) {
                 if (requestId !== searchRequestId) return;
                 if (!c || !c.name || isSameCardName(c.name, currentSourceCard.name) ||
-                    !matchesExactHighlightConstraints(c, searchHighlightsSnapshot) ||
+                    !matchesExactHighlightConstraints(c, manualHighlights) ||
                     !matchesActiveFilters(c, filters, broadFallbackFilters)) continue;
                 const key = c.name.toLowerCase();
                 if (!previewPool.has(key)) {
@@ -23586,9 +18113,6 @@ async function findSimilarCards() {
                     c.similarityScore = c._previewScore;
                     c._isProvisionalScore = true;
                     previewPool.set(key, c);
-                    if (progressiveFullScoreCount < MAX_PROGRESSIVE_FULL_SCORE_CANDIDATES) {
-                        progressiveRankingPending.set(key, c);
-                    }
                     addedAny = true;
                 }
                 const mergeNow = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
@@ -23631,7 +18155,7 @@ async function findSimilarCards() {
             (searchB_Query
                 ? retrieveLocalFirst([cleanKeywords.join(' ')], searchB_Query, {
                     label: 'Oracle Terms', fallbackMaxPages: searchBMaxPages, limit: isBroadSearch ? 360 : 240,
-                    excludeName: currentSourceCard.name, filters, broadFallbackFilters, highlights: searchHighlightsSnapshot
+                    excludeName: currentSourceCard.name, filters, broadFallbackFilters, highlights: manualHighlights
                 }).catch(() => [])
                 : Promise.resolve([])),
             "Oracle Terms"
@@ -23642,7 +18166,7 @@ async function findSimilarCards() {
             (searchC_Query
                 ? retrieveLocalFirst(activeTags, searchC_Query, {
                     label: 'Mechanics/Tags', fallbackMaxPages: benchmarkPageCap, limit: isBroadSearch ? 360 : 240,
-                    excludeName: currentSourceCard.name, filters, broadFallbackFilters, highlights: searchHighlightsSnapshot
+                    excludeName: currentSourceCard.name, filters, broadFallbackFilters, highlights: manualHighlights
                 }).catch(() => [])
                 : Promise.resolve([])),
             "Mechanics/Tags"
@@ -23657,8 +18181,7 @@ async function findSimilarCards() {
                 excludeName: currentSourceCard.name,
                 filters,
                 broadFallbackFilters,
-                highlights: searchHighlightsSnapshot,
-                isCancelled: () => requestId !== searchRequestId,
+                highlights: manualHighlights,
                 limit: isBroadSearch ? 260 : 180
             });
         })(),
@@ -23670,7 +18193,7 @@ async function findSimilarCards() {
             (searchE_Query
                 ? retrieveLocalFirst([primaryType || '', sourceRoleProfileForFloor?.kind || '', ...activeTags], searchE_Query, {
                     label: 'Broader Mechanical', fallbackMaxPages: benchmarkPageCap, limit: isBroadSearch ? 320 : 220,
-                    excludeName: currentSourceCard.name, filters, broadFallbackFilters, highlights: searchHighlightsSnapshot
+                    excludeName: currentSourceCard.name, filters, broadFallbackFilters, highlights: manualHighlights
                 }).catch(() => [])
                 : Promise.resolve([])),
             "Broader Mechanical"
@@ -23686,7 +18209,7 @@ async function findSimilarCards() {
                 (broadOracleQuery
                     ? retrieveLocalFirst([broadSourceText], broadOracleQuery, {
                         label: 'Broad Retrieval', fallbackMaxPages: broadSearchMaxPages, limit: 520,
-                        excludeName: currentSourceCard.name, filters, broadFallbackFilters, highlights: searchHighlightsSnapshot
+                        excludeName: currentSourceCard.name, filters, broadFallbackFilters, highlights: manualHighlights
                     }).catch(() => [])
                     : Promise.resolve([])),
                 "Broad Retrieval"
@@ -23699,7 +18222,7 @@ async function findSimilarCards() {
                 benchmarkUseLocalOracleCorpus ? Promise.resolve([]) :
                 retrieveLocalFirst(sharedLocalQueries, sharedSourceTextQuery, {
                     label: 'Shared Source Text', fallbackMaxPages: benchmarkPageCap, limit: 420,
-                    excludeName: currentSourceCard.name, filters, broadFallbackFilters, highlights: searchHighlightsSnapshot
+                    excludeName: currentSourceCard.name, filters, broadFallbackFilters, highlights: manualHighlights
                 }).catch(() => []),
                 "Shared Source Text"
             )
@@ -23727,7 +18250,7 @@ async function findSimilarCards() {
             const localQueries = extractLocalRetrievalAlternativesFromScryfallQuery(q.query);
             const p = retrieveLocalFirst(localQueries, q.query, {
                 label: streamLabel, fallbackMaxPages: benchmarkPageCap, limit: isBroadSearch ? 320 : 220,
-                excludeName: currentSourceCard.name, filters, broadFallbackFilters, highlights: searchHighlightsSnapshot
+                excludeName: currentSourceCard.name, filters, broadFallbackFilters, highlights: manualHighlights
             }).catch(() => []);
             p.then(r => mergeIntoPreview(r, `functional match ${idx + 1}`)).catch(() => {});
             return p;
@@ -23755,7 +18278,7 @@ async function findSimilarCards() {
             const p = trackStream(
                 retrieveLocalFirst([q.query.match(/\"([^\"]+)\"/)?.[1] || q.query], q.query, {
                     label: streamLabel, fallbackMaxPages: benchmarkPageCap, limit: 260,
-                    excludeName: currentSourceCard.name, filters, broadFallbackFilters, highlights: searchHighlightsSnapshot
+                    excludeName: currentSourceCard.name, filters, broadFallbackFilters, highlights: manualHighlights
                 }).catch(() => []),
                 streamLabel
             );
@@ -23769,7 +18292,7 @@ async function findSimilarCards() {
                 benchmarkUseLocalOracleCorpus ? Promise.resolve([]) :
                 retrieveLocalFirst(extractLocalRetrievalAlternativesFromScryfallQuery(query), query, {
                     label, fallbackMaxPages: benchmarkPageCap, limit: isBroadSearch ? 320 : 220,
-                    excludeName: currentSourceCard.name, filters, broadFallbackFilters, highlights: searchHighlightsSnapshot
+                    excludeName: currentSourceCard.name, filters, broadFallbackFilters, highlights: manualHighlights
                 }).catch(() => []),
                 label
             );
@@ -23843,7 +18366,7 @@ async function findSimilarCards() {
                 }));
                 const matches = Array.from(mergedMatches.values()).sort((a,b)=>(b.similarity||0)-(a.similarity||0)).slice(0, limit);
                 const exactMatches = benchmarkUseLocalOracleCorpus && hasHighlight
-                    ? await findFullSemanticExactMatches(index, searchHighlightsSnapshot, currentSourceCard.name, 1024)
+                    ? await findFullSemanticExactMatches(index, manualHighlights, currentSourceCard.name, 1024)
                     : [];
 
                 const byName = new Map();
@@ -23904,6 +18427,9 @@ async function findSimilarCards() {
         // re-renders the provisional result order. The final full-pool pass remains authoritative
         // and reuses the embedding cache, so this improves time-to-ranked-results without changing
         // the final ranking model.
+        let requestProgressiveRanking = null;
+        let progressiveRankingRunning = false;
+        const progressiveRankingPending = new Map();
         const progressiveRankingBatchSize = 18;
         let progressiveTargetVectorPromise = null;
         const getProgressiveTargetVector = async () => {
@@ -23923,35 +18449,25 @@ async function findSimilarCards() {
                 const ex = await extractorPromise;
                 if (!ex || requestId !== searchRequestId) return;
                 const targetVector = await getProgressiveTargetVector();
-                while (progressiveRankingPending.size && requestId === searchRequestId &&
-                    progressiveFullScoreCount < MAX_PROGRESSIVE_FULL_SCORE_CANDIDATES) {
+                while (progressiveRankingPending.size && requestId === searchRequestId) {
                     const sortedPending = await sortManaArrayResponsively(
                         Array.from(progressiveRankingPending.values()),
                         (a, b) => (b._previewScore || 0) - (a._previewScore || 0)
                     );
                     if (requestId !== searchRequestId) break;
-                    const remainingProgressiveBudget = MAX_PROGRESSIVE_FULL_SCORE_CANDIDATES - progressiveFullScoreCount;
-                    const batch = sortedPending.slice(0, Math.min(
-                        remainingProgressiveBudget,
-                        isManaUiInteractionPriorityActive() ? 3 : progressiveRankingBatchSize
-                    ));
+                    const batch = sortedPending.slice(0, isManaUiInteractionPriorityActive() ? 3 : progressiveRankingBatchSize);
                     if (!batch.length) break;
                     batch.forEach(card => progressiveRankingPending.delete((card.name||'').toLowerCase()));
                     await scoreCardBatch({
                         cards: batch, sourceCard: currentSourceCard, targetText: targetTextForScoring,
                         exactnessText: exactnessTextForScoring, targetVector, extractor: ex,
-                        highlightsForScoring: searchHighlightsSnapshot,
                         targetVectors: { oracle: targetVector, semanticRetrieval: targetVector },
                         isCancelled: () => requestId !== searchRequestId,
                         weights:{mechanical:45,synergy:10,context:20,exactness:15,category:10},
                         tags:activeTags, topNNames:new Set(), sniperIds:new Set(), activeFilters:filters
                     });
                     if (requestId !== searchRequestId) break;
-                    batch.forEach(card=>{
-                        card._progressivelyRanked = true;
-                        card._isProvisionalScore = false;
-                    });
-                    progressiveFullScoreCount += batch.length;
+                    batch.forEach(card=>{card._progressivelyRanked=true;});
                     // Related Search may intentionally own the Results grid while this main
                     // search continues in the background. Do not repaint the user's active view.
                     if (activeResultView.mode !== 'main' || activeResultView.requestId !== requestId) break;
@@ -23962,29 +18478,16 @@ async function findSimilarCards() {
                     });
                     if (requestId !== searchRequestId) break;
                     scheduleProgressiveResultRender(ranked, requestId);
-                    if (progressiveFullScoreCount >= MAX_PROGRESSIVE_FULL_SCORE_CANDIDATES) {
-                        // Remaining candidates keep their cheap preview score only until the
-                        // authoritative full-pool pass replaces the preview. Never structurally
-                        // score the same large pool twice just to animate intermediate ordering.
-                        progressiveRankingPending.clear();
-                        break;
-                    }
                     await yieldForManaSearchResponsiveness();
                 }
-            } catch(error) {
-                // A provisional scoring failure must not keep retrying the same expensive batch.
-                // The authoritative final pass still scores every candidate with the full pipeline.
-                progressiveRankingPending.clear();
-                console.info('Progressive ranking paused; final ranking continues:', error?.message||error);
-            } finally { progressiveRankingRunning=false; }
+            } catch(error) { console.info('Progressive ranking paused; final ranking continues:', error?.message||error); }
+            finally { progressiveRankingRunning=false; }
         };
         requestProgressiveRanking = () => {
-            if (requestId !== searchRequestId || progressiveFullScoreCount >= MAX_PROGRESSIVE_FULL_SCORE_CANDIDATES) return;
+            if (requestId !== searchRequestId) return;
+            previewPool.forEach((card,key)=>{ if(card && key && !card._progressivelyRanked) progressiveRankingPending.set(key,card); });
             runProgressiveRanking();
         };
-        // Start immediately if a retrieval stream filled the queue before the ranking worker was
-        // initialized. Each later arrival is enqueued once by mergeIntoPreview; no repeated Map scan.
-        if (progressiveRankingPending.size) runProgressiveRanking();
 
         const [resultsA, resultsB, resultsC, resultsLocalCorpus, resultsE, resultsBroad, resultsShared, resultsFSets, resultsExactSets, extractor, semanticRetrieval, resolvedMethodStreams] = await Promise.all([
             streamAPromise, streamBPromise, streamCPromise, streamLocalCorpusPromise, streamEPromise, streamBroadPromise, streamSharedPromise,
@@ -23994,9 +18497,6 @@ async function findSimilarCards() {
             semanticRetrievalPromise,
             Promise.all(methodStreamPromises.map(entry => entry.promise))
         ]);
-        // Every retrieval source cooperatively cancels where possible. This final boundary is a
-        // safety net: superseded searches must stop before entering the authoritative scoring pass.
-        if (requestId !== searchRequestId) return;
         const methodResults = Object.fromEntries(methodStreamPromises.map((entry, index) => [entry.key, resolvedMethodStreams[index] || []]));
         updateProgress(2, totalSteps, 'Scoring in progress — combining retrieved candidates and calculating similarity signals...');
         const resultsF = resultsFSets.flat();
@@ -24108,9 +18608,9 @@ let hardFilterOps = 0;
 for (const card of rawCandidates) {
     if (card && card.id && card.name && card.id !== currentSourceCard.id && !isSameCardName(card.name, currentSourceCard.name)) {
         // Exact highlight = mandatory text constraint. Semantic retrieval never overrides it.
-        if (!matchesExactHighlightConstraints(card, searchHighlightsSnapshot)) {
+        if (!matchesExactHighlightConstraints(card, manualHighlights)) {
             const nameKey = card.name.toLowerCase();
-            if (!filterFailureReasons.has(nameKey)) filterFailureReasons.set(nameKey, explainExactHighlightFailures(card, searchHighlightsSnapshot));
+            if (!filterFailureReasons.has(nameKey)) filterFailureReasons.set(nameKey, explainExactHighlightFailures(card, manualHighlights));
         } else if (matchesActiveFilters(card, filters, broadFallbackFilters)) {
             filteredCandidates.push(card);
         } else {
@@ -24130,7 +18630,7 @@ for (const card of rawCandidates) {
 // Stage 2: Passed hard filters set
 const passedFilterNames = new Set(filteredCandidates.map(c => (c.name || '').toLowerCase()));
 const countPassedFiltersRaw = filteredCandidates.length;
-const exactHighlightConstraintCount = searchHighlightsSnapshot.filter(h => h?.mode !== 'variable' && !h.benchmarkIntentOnly && typeof h.text === 'string' && h.text.trim()).length;
+const exactHighlightConstraintCount = manualHighlights.filter(h => h?.mode !== 'variable' && !h.benchmarkIntentOnly && typeof h.text === 'string' && h.text.trim()).length;
 
 // Dedupe by card NAME rather than Scryfall's print id - different printings (different set,
 // frame, or art) of the same card have different ids but are the same card for search purposes,
@@ -24208,36 +18708,15 @@ if (candidates.length > 0) {
     
     const scoringStartedAt = Date.now();
 
-    let lastUserFacingScoreProgressAt = 0;
-    let lastUserFacingScoreProgressStage = '';
     const { embeddingDiagnostics, semanticCalibration } = await scoreCardBatch({
         cards: candidates,
         sourceCard: currentSourceCard,
         targetText: targetTextForScoring,
         exactnessText: exactnessTextForScoring,
-        highlightsForScoring: searchHighlightsSnapshot,
         targetVector,
         targetVectors,
         sourceFunctionVector,
         isCancelled: () => requestId !== searchRequestId,
-        onProgress: ({ stage, processed, total }) => {
-            if (requestId !== searchRequestId || activeResultView.mode !== 'main' || activeResultView.requestId !== requestId) return;
-            const now = getManaResponsivenessNow();
-            const stageChanged = stage !== lastUserFacingScoreProgressStage;
-            if (!stageChanged && stage !== 'setup' && now - lastUserFacingScoreProgressAt < 350 && processed < total) return;
-            lastUserFacingScoreProgressAt = now;
-            lastUserFacingScoreProgressStage = stage;
-            const count = `${Math.min(processed, total).toLocaleString()} / ${total.toLocaleString()} candidates`;
-            const messages = {
-                setup: `Preparing scoring context for ${total.toLocaleString()} candidates…`,
-                mechanics: `Evaluating card mechanics and strategic roles — ${count} processed…`,
-                triage: `Selecting the semantic scoring pool — ${count} reviewed…`,
-                embeddings: `Preparing semantic embeddings for the strongest candidates…`,
-                semantic: `Calculating semantic and functional similarity — ${count} processed…`,
-                ranking: `Combining scores and refining relevance — ${count} finalized…`
-            };
-            updateProgress(2, totalSteps, messages[stage] || `Scoring candidates — ${count} processed…`);
-        },
         extractor,
         weights: { mechanical: wM, synergy: wS, context: wC, exactness: wE, category: wCa },
         tags: activeTags,
@@ -24246,7 +18725,6 @@ if (candidates.length > 0) {
         activeFilters: filters
     });
     timings.scoringMs = Date.now() - scoringStartedAt;
-    if (requestId !== searchRequestId) return;
 
     // Feed this search's results (and its source card) into the session semantic corpus so a
     // LATER search - on this or any other source card, this session - can find them via Search G
@@ -24257,7 +18735,6 @@ if (candidates.length > 0) {
         recordInSessionSemanticCorpus(currentSourceCard, sourceFunctionVector, sourceOracleVector);
         let semanticCorpusSliceStartedAt = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
         for (let candidateIndex = 0; candidateIndex < candidates.length; candidateIndex++) {
-            if (requestId !== searchRequestId) return;
             const card = candidates[candidateIndex];
             const cardText = card.oracle_text || (card.card_faces ? card.card_faces.map(f => f.oracle_text || '').join(' ') : '');
             const candidateFunctionText = card._parsedEffects ? canonicalFunctionToText(getCanonicalFunctions(card._parsedEffects)) : null;
@@ -24268,7 +18745,6 @@ if (candidates.length > 0) {
                 const now = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
                 if (now - semanticCorpusSliceStartedAt >= getManaSearchSliceBudgetMs()) {
                     await yieldForManaSearchResponsiveness();
-                    if (requestId !== searchRequestId) return;
                     semanticCorpusSliceStartedAt = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
                 }
             }
@@ -24293,10 +18769,7 @@ if (candidates.length > 0) {
     // Overall Match score so selecting e.g. Category or Strategic Role does not accidentally turn
     // those secondary channels into hard eligibility tests.
     const scoreKey = 'similarityScore';
-    // Keep the canonical score untouched until after the relevance floor is decided. Preferences
-    // may reorder eligible results, but must never rescue an otherwise irrelevant candidate.
     candidates = await sortManaArrayResponsively(candidates, (a, b) => (b[scoreKey] || 0) - (a[scoreKey] || 0));
-    if (requestId !== searchRequestId) return;
 
     // Stage 5: Relevance Floor.
     //
@@ -24353,7 +18826,6 @@ if (candidates.length > 0) {
         candidates.filter(c => passesAbsoluteFloor(c) && (passesRelativeFloor(c) || hasStrongDirectEvidence(c))),
         (a, b) => (b[scoreKey] || 0) - (a[scoreKey] || 0)
     );
-    if (requestId !== searchRequestId) return;
 
     // Catastrophic-empty guard. A relevance floor must control noisy results, not make a valid
     // search disappear completely. This can happen when semantic calibration lowers the absolute
@@ -24391,7 +18863,6 @@ if (candidates.length > 0) {
         const rescueOrder = evidenceBearing.length > 0
             ? evidenceBearing
             : await sortManaArrayResponsively(candidates, (a, b) => (b[scoreKey] || 0) - (a[scoreKey] || 0));
-        if (requestId !== searchRequestId) return;
         qualified = rescueOrder.slice(0, Math.min(CATASTROPHIC_EMPTY_RESCUE_CAP, candidates.length));
 
         qualified.forEach(c => { c._catastrophicEmptyRescue = true; });
@@ -24409,17 +18880,6 @@ if (candidates.length > 0) {
 
     const countAfterRelevanceFloor = candidates.length;
     const relevanceFloorRescued = candidates.filter(c => c._catastrophicEmptyRescue).length;
-    // Apply soft constraint preferences only after eligibility pruning. This makes them genuine
-    // ranking nudges rather than a way to inflate weak cards above the relevance floor.
-    const activeConstraintPreferences = readConstraintFilters();
-    for (const candidate of qualified) {
-        const bonus = calculateConstraintPreferenceBonus(candidate, activeConstraintPreferences);
-        candidate.constraintPreferenceScore = bonus;
-        if (bonus > 0) candidate.similarityScore = Math.min(1, (Number(candidate.similarityScore) || 0) + bonus);
-    }
-    qualified = await sortManaArrayResponsively(qualified, (a, b) => (b[scoreKey] || 0) - (a[scoreKey] || 0));
-    if (requestId !== searchRequestId) return;
-
     // Stage 6: what survived pruning. Matrix Sweep is an Order mode, so it never trims the
     // scored candidate pool.
     const passedRelevanceFloorNames = new Set(candidates.map(c => (c.name || '').toLowerCase()));
@@ -24538,7 +18998,7 @@ if (candidates.length > 0) {
             sourceCard: currentSourceCard, scoreKey, orderCriteria: validOrderCriteriaForOrdering(priorityValue),
             // Snapshot the highlight state so Search Deeper cannot accidentally consult mutated
             // global UI state if the user changes/removes a highlight after the initial search.
-            highlightConstraints: (searchHighlightsSnapshot || []).map(h => ({
+            highlightConstraints: (manualHighlights || []).map(h => ({
                 text: typeof h?.text === 'string' ? h.text : '',
                 mode: h?.mode === 'variable' ? 'variable' : 'exact'
             }))
@@ -24576,12 +19036,6 @@ if (candidates.length > 0) {
         // - previously silent (review: embedding diagnostics).
         embeddingDiagnostics,
         semanticCalibration,
-        previewOptimization: {
-            lightweightCandidates: lightweightPreviewCount,
-            progressiveFullScored: progressiveFullScoreCount,
-            progressiveFullScoreCap: MAX_PROGRESSIVE_FULL_SCORE_CANDIDATES,
-            remainingQueuedForFinalPass: progressiveRankingPending.size
-        },
         rankingEvidenceTop,
         highlightIntentDiagnostics: hasHighlight ? highlightProfilesForSearch.map(p => ({
             groupId: p.groupId, contextText: p.contextText, mode: p.mode, selections: p.selections,
@@ -24675,13 +19129,6 @@ if (candidates.length > 0) {
         if (requestId === searchRequestId && activeResultView.mode === 'main' && activeResultView.requestId === requestId) {
             updateProgress(null, null, "All done! Candidates retrieved and ranked purely by similarity.");
             showLoading(false);
-            window.dispatchEvent(new CustomEvent('manasearch:search-finished', {
-                detail: {
-                    sourceName: currentSourceCard?.name || '',
-                    resultCount: Array.isArray(lastSearchResults) ? lastSearchResults.length : 0,
-                    diagnostics: lastSearchDiagnostics || null
-                }
-            }));
         }
     }
 }
@@ -24854,9 +19301,6 @@ function getRankingScoreForCriteria(card, criteria) {
         case 'synergy': return Number(card.synergyScore) || 0;
         case 'exactness': return Number(card.exactnessScore) || 0;
         case 'category': return Number(card.categoryScore) || 0;
-        case 'price': { const raw = card?.prices?.usd; if (raw === null || raw === undefined || raw === '') return -1e9; const price = Number(raw); return Number.isFinite(price) && price >= 0 ? -price : -1e9; }
-        case 'manaValue': { const raw = card?.cmc; if (raw === null || raw === undefined || raw === '') return -1e9; const manaValue = Number(raw); return Number.isFinite(manaValue) && manaValue >= 0 ? -manaValue : -1e9; }
-        case 'manaValueDesc': { const raw = card?.cmc; if (raw === null || raw === undefined || raw === '') return -1e9; const manaValue = Number(raw); return Number.isFinite(manaValue) && manaValue >= 0 ? manaValue : -1e9; }
         case 'overall':
         default: return Number(card.similarityScore) || 0;
     }
@@ -25021,11 +19465,10 @@ function applyResultOrdering(cards, criteria, featureFlags = null) {
     const features = featureFlags || activeOrderFeatureFlags;
     let output = input.sort((a, b) => getRankingScoreForCriteria(b, ranking) - getRankingScoreForCriteria(a, ranking));
 
-    // Attribute sorts (price/mana value) should remain strictly ordered; diversity/matrix are
-    // presentation modifiers for similarity rankings only.
-    const attributeSort = ['price', 'manaValue', 'manaValueDesc'].includes(ranking);
-    if (!attributeSort && features.diverse) output = buildDiverseOrder(output, ranking);
-    if (!attributeSort && features.matrix) output = buildMatrixSweepOrder(output, ranking);
+    // Features are presentation modifiers layered on top of the selected ranking. They can be
+    // combined with one another and never replace the primary ranking category.
+    if (features.diverse) output = buildDiverseOrder(output, ranking);
+    if (features.matrix) output = buildMatrixSweepOrder(output, ranking);
     return output;
 }
 
@@ -25036,14 +19479,13 @@ async function applyResultOrderingResponsively(cards, criteria, featureFlags = n
     const features = featureFlags || activeOrderFeatureFlags;
     let output = await sortManaArrayResponsively(input,
         (a, b) => getRankingScoreForCriteria(b, ranking) - getRankingScoreForCriteria(a, ranking));
-    const attributeSort = ['price', 'manaValue', 'manaValueDesc'].includes(ranking);
-    if (!attributeSort && features.diverse) output = await buildDiverseOrderResponsively(output, ranking);
-    if (!attributeSort && features.matrix) output = await buildMatrixSweepOrderResponsively(output, ranking);
+    if (features.diverse) output = await buildDiverseOrderResponsively(output, ranking);
+    if (features.matrix) output = await buildMatrixSweepOrderResponsively(output, ranking);
     return output;
 }
 
 function validOrderCriteriaForOrdering(criteria) {
-    const allowed = new Set(['overall','mechanical','functional','semantic','role','balanced','synergy','exactness','category','price','manaValue','manaValueDesc']);
+    const allowed = new Set(['overall','mechanical','functional','semantic','role','balanced','synergy','exactness','category']);
     return allowed.has(criteria) ? criteria : 'overall';
 }
 
@@ -25118,21 +19560,15 @@ async function flipResultCardFace(cardElement, flipButton) {
     if (!cardElement || !flipButton || resultCardFlipInProgress.has(cardElement)) return;
     const card = visibleResultCardData.get(cardElement.dataset.cardKey) || cardElement._resultCardData;
     const faces = getResultCardFaceImages(card);
-    const isLegacyFlip = String(card?.layout || '').toLowerCase() === 'flip' && Boolean(card?.image_uris?.normal);
-    if (!card || (!isLegacyFlip && faces.length < 2)) return;
+    if (!card || faces.length < 2) return;
 
     const img = cardElement.querySelector('.card-art-wrap img');
-    const artWrap = cardElement.querySelector('.card-art-wrap');
-    if (!img || !artWrap) return;
+    if (!img) return;
     const stateKey = getResultCardStateKey(card);
-    const currentIndex = isLegacyFlip
-        ? (Number(resultCardFaceState.get(stateKey)) === 1 ? 1 : 0)
-        : Math.max(0, Math.min(faces.length - 1, Number(resultCardFaceState.get(stateKey)) || 0));
-    const nextIndex = isLegacyFlip ? (currentIndex === 0 ? 1 : 0) : (currentIndex + 1) % faces.length;
-    const nextFace = isLegacyFlip ? null : faces[nextIndex];
-    const nextSrc = isLegacyFlip ? (img.dataset.cardImageSrc || getCardImageUrl(card)) : nextFace.image_uris.normal;
-    const currentOrientation = isLegacyFlip && currentIndex === 1 ? 180 : 0;
-    const nextOrientation = isLegacyFlip && nextIndex === 1 ? 180 : 0;
+    const currentIndex = Math.max(0, Math.min(faces.length - 1, Number(resultCardFaceState.get(stateKey)) || 0));
+    const nextIndex = (currentIndex + 1) % faces.length;
+    const nextFace = faces[nextIndex];
+    const nextSrc = nextFace.image_uris.normal;
     const reducedMotion = typeof window.matchMedia === 'function'
         && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
     const canAnimate = typeof img.animate === 'function' && !reducedMotion;
@@ -25145,45 +19581,37 @@ async function flipResultCardFace(cardElement, flipButton) {
     flipButton.disabled = true;
     flipButton.setAttribute('aria-busy', 'true');
     try {
+        // Rotate the current face nearly edge-on, swap the artwork, then rotate the new face in.
+        // Updating the visible image directly avoids it being delayed by the lazy-image queue.
         if (canAnimate) {
             closeAnimation = img.animate([
-                { transform: `perspective(900px) rotate(${currentOrientation}deg) rotateY(0deg) scale(1)`, filter: 'brightness(1)' },
-                { transform: `perspective(900px) rotate(${currentOrientation}deg) rotateY(88deg) scale(.97)`, filter: 'brightness(.75)' }
+                { transform: 'perspective(900px) rotateY(0deg) scale(1)', filter: 'brightness(1)' },
+                { transform: 'perspective(900px) rotateY(88deg) scale(.97)', filter: 'brightness(.75)' }
             ], { duration: 170, easing: 'ease-in', fill: 'forwards' });
             try { await closeAnimation.finished; } catch (_) {}
         }
 
         resultCardFaceState.set(stateKey, nextIndex);
-        if (isLegacyFlip) {
-            // Classic Kamigawa flip cards have both halves printed on one image, one upside down.
-            // Rotate the complete physical-card image 180 degrees instead of searching for a
-            // nonexistent separate card_faces image.
-            artWrap.classList.toggle('is-legacy-flip-rotated', nextIndex === 1);
-            img.alt = `${card.name}${nextIndex === 1 ? ' (rotated to read the other half)' : ''}`;
-            flipButton.textContent = 'Rotate';
-            flipButton.title = nextIndex === 1 ? 'Rotate card back to its front half' : 'Rotate card to read its other half';
-            flipButton.setAttribute('aria-label', nextIndex === 1 ? `Rotate ${card.name} back` : `Rotate ${card.name} to read its other half`);
-        } else {
-            resultImageLoadQueue.delete(img);
-            img.dataset.cardImageSrc = nextSrc;
-            img.dataset.cardImageLoaded = nextSrc;
-            img.alt = nextFace.name || card.name;
-            img.src = nextSrc;
-            flipButton.textContent = 'Flip';
-            flipButton.title = `Flip to ${faces[(nextIndex + 1) % faces.length].name || 'other face'}`;
-            flipButton.setAttribute('aria-label', `Flip ${card.name} to ${faces[(nextIndex + 1) % faces.length].name || 'the other face'}`);
-        }
+        resultImageLoadQueue.delete(img);
+        img.dataset.cardImageSrc = nextSrc;
+        img.dataset.cardImageLoaded = nextSrc;
+        img.alt = nextFace.name || card.name;
+        img.src = nextSrc;
+        flipButton.title = `Flip to ${faces[(nextIndex + 1) % faces.length].name || 'other face'}`;
+        flipButton.setAttribute('aria-label', `Flip ${card.name} to ${faces[(nextIndex + 1) % faces.length].name || 'the other face'}`);
 
         if (canAnimate) {
             openAnimation = img.animate([
-                { transform: `perspective(900px) rotate(${nextOrientation}deg) rotateY(-88deg) scale(.97)`, filter: 'brightness(.75)' },
-                { transform: `rotate(${nextOrientation}deg) scale(1)`, filter: 'brightness(1)' }
+                { transform: 'perspective(900px) rotateY(-88deg) scale(.97)', filter: 'brightness(.75)' },
+                { transform: 'perspective(900px) rotateY(0deg) scale(1)', filter: 'brightness(1)' }
             ], { duration: 190, easing: 'ease-out', fill: 'forwards' });
             try { await openAnimation.finished; } catch (_) {}
         }
     } catch (error) {
         console.warn('Could not flip result card face:', error?.message || error);
     } finally {
+        // WAAPI's filled animation holds its last frame. Cancel both effects after the new face
+        // has come to rest so they do not interfere with later image or layout updates.
         try { openAnimation?.cancel(); } catch (_) {}
         try { closeAnimation?.cancel(); } catch (_) {}
         resultCardFlipInProgress.delete(cardElement);
@@ -25193,6 +19621,7 @@ async function flipResultCardFace(cardElement, flipButton) {
         flipButton.removeAttribute('aria-busy');
     }
 }
+
 function getRenderableResultCards(cards) {
     if (!Array.isArray(cards)) return [];
     const seenNames = new Set();
@@ -25533,9 +19962,6 @@ function renderCardLegalityPanel(card, panel) {
 }
 
 function renderResults(cards, internalOptions = {}) {
-    // Keep this presentation-only toggle immediate even if card score/order rendering must yield
-    // while a modal is open or the user is interacting with controls.
-    syncEdhrecCandidateButtonVisibility();
     // A final/search-deeper/user-triggered render is authoritative. Drop any queued progressive
     // snapshot before painting, otherwise a timer could repaint an older partial order afterward.
     if (internalOptions?.progressive !== true && internalOptions?.preservePendingProgressive !== true) {
@@ -25546,7 +19972,6 @@ function renderResults(cards, internalOptions = {}) {
     if (internalOptions?.forceImmediate !== true && (document.body?.classList.contains('mana-panel-open') || shouldDeferManaResultRender())) {
         deferredResultRenderCards = cards;
         deferredResultRenderPending = true;
-        deferredResultRenderSearchGeneration = searchRequestId;
         if (isManaUserActivelyEditing() || isManaUiInteractionRecentlyActive(MANASEARCH_UI_RENDER_QUIET_WINDOW_MS)) {
             scheduleDeferredResultFlushAfterEditing();
         }
@@ -25562,7 +19987,6 @@ function renderResults(cards, internalOptions = {}) {
     }
     deferredResultRenderCards = null;
     deferredResultRenderPending = false;
-    deferredResultRenderSearchGeneration = 0;
     resultsSection.classList.remove('hidden');
     // Keep pagination, summary text, and card rendering bound to one atomic source snapshot.
     currentRenderedResultsCards = Array.isArray(cards) ? cards.slice() : [];
@@ -25618,13 +20042,12 @@ function renderResults(cards, internalOptions = {}) {
         const image = card.image_uris?.normal || card.card_faces?.[0]?.image_uris?.normal || '';
         const stateKey = getResultCardStateKey(card);
         const faces = Array.isArray(card.card_faces) ? card.card_faces.filter(face => face?.image_uris?.normal) : [];
-        const isLegacyFlip = String(card.layout || '').toLowerCase() === 'flip' && Boolean(card.image_uris?.normal);
         const faceIndex = faces.length > 1
             ? Math.max(0, Math.min(faces.length - 1, Number(resultCardFaceState.get(stateKey)) || 0))
-            : isLegacyFlip ? (Number(resultCardFaceState.get(stateKey)) === 1 ? 1 : 0) : 0;
+            : 0;
         return JSON.stringify([
             key, card.id || '', card.name || '', card.type_line || '', image,
-            faces.length > 1 ? (faces[faceIndex]?.image_uris?.normal || '') : '', isLegacyFlip, faceIndex,
+            faces.length > 1 ? (faces[faceIndex]?.image_uris?.normal || '') : '', faceIndex,
             valueAsPercent(card.similarityScore ?? card._previewScore),
             valueAsPercent(card.mechanicalScore),
             valueAsPercent(card.functionScore ?? card.functionalSimilarityScore),
@@ -25634,9 +20057,7 @@ function renderResults(cards, internalOptions = {}) {
             valueAsPercent(card.quantitySimilarityScore), valueAsPercent(card.relatedConsensusScore),
             card.prices?.usd ?? '', card.prices?.eur ?? '', Boolean(card._weakBackfillMatch),
             selectedRelatedCards.has(card.id), favoriteNameSet.has(String(card.name || '').toLowerCase()),
-            displayPreferences.showScoreBreakdown !== false,
-            displayPreferences.showEdhrecButton !== false,
-            shouldShowBannedCardArtStamp(card), getBannedCardArtStampDescription(card)
+            displayPreferences.showScoreBreakdown !== false
         ]);
     };
 
@@ -25669,26 +20090,13 @@ function renderResults(cards, internalOptions = {}) {
         cardElement.dataset.cardKey = getCardKey(card);
 
         const img = cardElement.querySelector('.card-art-wrap img');
-        const artWrap = cardElement.querySelector('.card-art-wrap');
-        const banStamp = cardElement.querySelector('.card-banned-stamp');
-        if (banStamp) {
-            const showBanStamp = shouldShowBannedCardArtStamp(card);
-            const banDescription = getBannedCardArtStampDescription(card);
-            banStamp.hidden = !showBanStamp;
-            banStamp.title = banDescription;
-            banStamp.setAttribute('aria-label', banDescription);
-            banStamp.dataset.banScope = isBannedInEveryTrackedFormat(card) ? 'all-formats' : 'commander';
-        }
         const faceImages = getResultCardFaceImages(card);
         const hasMultipleFaces = faceImages.length > 1;
-        const isLegacyFlip = String(card.layout || '').toLowerCase() === 'flip' && Boolean(card.image_uris?.normal);
-        const hasFlipControl = hasMultipleFaces || isLegacyFlip;
         const stateKey = getResultCardStateKey(card);
         const faceIndex = hasMultipleFaces
             ? Math.max(0, Math.min(faceImages.length - 1, Number(resultCardFaceState.get(stateKey)) || 0))
-            : isLegacyFlip && Number(resultCardFaceState.get(stateKey)) === 1 ? 1 : 0;
+            : 0;
         const desiredSrc = hasMultipleFaces ? faceImages[faceIndex].image_uris.normal : cardImg;
-        if (artWrap) artWrap.classList.toggle('is-legacy-flip-rotated', isLegacyFlip && faceIndex === 1);
         if (img) {
             const previousDesired = img.dataset.cardImageSrc || '';
             if (previousDesired !== desiredSrc || !img.getAttribute('src')) {
@@ -25701,20 +20109,13 @@ function renderResults(cards, internalOptions = {}) {
                 }
             }
         }
-        if (img) {
-            img.alt = hasMultipleFaces ? (faceImages[faceIndex].name || card.name) : isLegacyFlip
-                ? `${card.name}${faceIndex === 1 ? ' (rotated to read the other half)' : ''}` : card.name;
-        }
+        if (img) img.alt = hasMultipleFaces ? (faceImages[faceIndex].name || card.name) : card.name;
 
         const flipBtn = cardElement.querySelector('.card-flip-btn');
         if (flipBtn) {
-            flipBtn.hidden = !hasFlipControl;
+            flipBtn.hidden = !hasMultipleFaces;
             flipBtn.disabled = cardElement.dataset.isFlipping === 'true';
-            flipBtn.textContent = isLegacyFlip ? 'Rotate' : 'Flip';
-            if (isLegacyFlip) {
-                flipBtn.title = faceIndex === 1 ? 'Rotate card back to its front half' : 'Rotate card to read its other half';
-                flipBtn.setAttribute('aria-label', faceIndex === 1 ? `Rotate ${card.name} back` : `Rotate ${card.name} to read its other half`);
-            } else if (hasMultipleFaces) {
+            if (hasMultipleFaces) {
                 const nextFace = faceImages[(faceIndex + 1) % faceImages.length];
                 flipBtn.title = `Flip to ${nextFace.name || 'other face'}`;
                 flipBtn.setAttribute('aria-label', `Flip ${card.name} to ${nextFace.name || 'the other face'}`);
@@ -25726,15 +20127,7 @@ function renderResults(cards, internalOptions = {}) {
         const typeLine = cardElement.querySelector('.result-type-line');
         if (typeLine) typeLine.textContent = card.type_line || '';
         const matchLine = cardElement.querySelector('.card-match-line');
-        if (matchLine) {
-            matchLine.textContent = `Overall Match: ${matchPercentage}%`;
-            matchLine.classList.remove('score-band-low', 'score-band-medium', 'score-band-high', 'score-band-excellent');
-            const scoreBand = matchPercentage < 40 ? 'score-band-low' : matchPercentage < 60 ? 'score-band-medium' : matchPercentage < 80 ? 'score-band-high' : 'score-band-excellent';
-            matchLine.classList.add(scoreBand);
-            // Keep score colors theme-aware. An inline color here overrides the darker
-            // score-band variables used by the light theme and can make labels unreadable.
-            matchLine.style.removeProperty('color');
-        }
+        if (matchLine) matchLine.textContent = `Overall Match: ${matchPercentage}%`;
 
         const badge = cardElement.querySelector('.weak-match-badge');
         if (card._weakBackfillMatch) {
@@ -25781,42 +20174,16 @@ function renderResults(cards, internalOptions = {}) {
             legalityToggle.removeAttribute('aria-expanded');
         }
 
-        const edhrecLink = cardElement.querySelector('.edhrec-link-btn');
-        if (edhrecLink) {
-            edhrecLink.href = getEdhrecUrlForCard(card);
-            edhrecLink.hidden = displayPreferences.showEdhrecButton === false;
-            edhrecLink.title = `Open ${card.name} on EDHREC in a new tab`;
-            edhrecLink.setAttribute('aria-label', `View ${card.name} on EDHREC`);
-        }
-
         const favoriteBtn = cardElement.querySelector('.result-favorite-btn');
         if (favoriteBtn) {
-            // updateFavoriteButtons uses this shared identity to refresh visible result buttons
-            // immediately after a favorite is toggled. Without it, the stored state changed but
-            // candidate buttons did not visually update until a later full render.
-            favoriteBtn.dataset.favoriteCardName = String(card.name || '');
             const isFav = favoriteNameSet.has(String(card.name).toLowerCase());
             favoriteBtn.textContent = isFav ? '★' : '☆';
             favoriteBtn.classList.toggle('is-favorited', isFav);
             favoriteBtn.title = isFav ? `Remove ${card.name} from favorites` : `Add ${card.name} to favorites`;
             favoriteBtn.setAttribute('aria-label', favoriteBtn.title);
-            favoriteBtn.setAttribute('aria-pressed', isFav ? 'true' : 'false');
-        }
-        const compareBtn = cardElement.querySelector('.compare-btn');
-        if (compareBtn) {
-            const isComparing = compareQueue.length > 1 && String(compareQueue[1]?.id || '') === String(card.id || '');
-            compareBtn.textContent = isComparing ? 'Compared' : 'Compare';
-            compareBtn.classList.toggle('is-comparing', isComparing);
-            compareBtn.setAttribute('aria-pressed', isComparing ? 'true' : 'false');
-            compareBtn.setAttribute('aria-label', isComparing ? `Currently comparing ${card.name} with the source card` : `Compare ${card.name} with the source card`);
         }
         const checkbox = cardElement.querySelector('.related-checkbox');
-        if (checkbox) {
-            checkbox.checked = isSelected;
-            checkbox.setAttribute('aria-checked', isSelected ? 'true' : 'false');
-            const selectText = checkbox.closest('.result-select-label')?.querySelector('.result-select-text');
-            if (selectText) selectText.textContent = isSelected ? 'Selected' : 'Select';
-        }
+        if (checkbox) checkbox.checked = isSelected;
     };
 
     const createResultCard = card => {
@@ -25831,21 +20198,11 @@ function renderResults(cards, internalOptions = {}) {
         img.decoding = 'async';
         img.src = RESULT_IMAGE_PLACEHOLDER;
         artWrap.appendChild(img);
-        const banStamp = document.createElement('div');
-        banStamp.className = 'card-banned-stamp';
-        banStamp.textContent = 'BANNED';
-        banStamp.hidden = true;
-        banStamp.setAttribute('role', 'img');
-        banStamp.setAttribute('aria-label', 'Banned in all tracked formats');
-        banStamp.title = 'Banned in all tracked formats';
-        artWrap.appendChild(banStamp);
         const flipBtn = document.createElement('button');
         flipBtn.type = 'button';
         flipBtn.className = 'card-flip-btn';
         flipBtn.textContent = 'Flip';
         flipBtn.title = 'Flip card face';
-        flipBtn.dataset.featureTip = 'View the other face of a double-faced card.';
-        flipBtn.dataset.featurePreview = 'Front face ⇄ back face';
         flipBtn.setAttribute('aria-label', `Flip ${card.name}`);
         flipBtn.hidden = true;
         flipBtn.addEventListener('click', event => {
@@ -25898,40 +20255,22 @@ function renderResults(cards, internalOptions = {}) {
         favoriteBtn.className = 'result-favorite-btn';
         favoriteBtn.style.alignSelf = 'center';
         favoriteBtn.dataset.role = 'favorite';
-        favoriteBtn.dataset.favoriteCardName = String(card.name || '');
-        favoriteBtn.setAttribute('aria-pressed', 'false');
-        favoriteBtn.dataset.featureTip = 'Add this candidate to favorites for quick access later.';
-        favoriteBtn.dataset.featurePreview = '☆ → ★ Saved in your local favorites';
         const compareBtn = document.createElement('button');
         compareBtn.type = 'button';
         compareBtn.className = 'compare-btn';
         compareBtn.dataset.role = 'compare';
         compareBtn.textContent = 'Compare';
-        compareBtn.dataset.featureTip = 'Compare the card with your source or another candidate.';
-        compareBtn.dataset.featurePreview = 'Shared effects · costs · restrictions · differences';
         const selectLabel = document.createElement('label');
         selectLabel.className = 'result-select-label';
         selectLabel.style.cssText = 'font-size: 11px; display: flex; align-items: center; justify-content: center; gap: 4px; cursor: pointer; white-space: nowrap;';
         const checkbox = document.createElement('input');
         checkbox.type = 'checkbox';
         checkbox.className = 'related-checkbox';
-        checkbox.setAttribute('aria-label', `Select ${card.name} for Search Related Cards`);
         const selectText = document.createElement('span');
         selectText.className = 'result-select-text';
         selectText.textContent = 'Select';
         selectLabel.append(checkbox, selectText);
         actions.append(favoriteBtn, compareBtn, selectLabel);
-
-        const edhrecLink = document.createElement('a');
-        edhrecLink.className = 'edhrec-link-btn';
-        edhrecLink.textContent = 'View on EDHREC ↗';
-        edhrecLink.target = '_blank';
-        edhrecLink.rel = 'noopener noreferrer external';
-        edhrecLink.href = getEdhrecUrlForCard(card);
-        edhrecLink.title = `Open ${card.name} on EDHREC in a new tab`;
-        edhrecLink.setAttribute('aria-label', `View ${card.name} on EDHREC`);
-        edhrecLink.hidden = displayPreferences.showEdhrecButton === false;
-        actions.appendChild(edhrecLink);
 
         const legalityToggle = document.createElement('button');
         legalityToggle.type = 'button';
@@ -25970,11 +20309,6 @@ function renderResults(cards, internalOptions = {}) {
         if (img) resultImageLoadQueue.delete(img);
         node.remove();
     });
-
-    // Final presentation sync covers both stable/reused nodes and newly-created nodes. This is
-    // intentionally cheap (one attribute update per rendered EDHREC link) and independent of score
-    // signatures so a preference change can never be skipped by DOM reuse.
-    syncEdhrecCandidateButtonVisibility(resultsGrid);
 
     // One delegated listener set handles both stable/reused nodes and newly-created nodes. This
     // avoids index-based closures becoming stale when progressive ranking reorders the grid.
@@ -26083,7 +20417,7 @@ function ensureComparePresentationStyles() {
         }
         #compare-modal .compare-card .compare-card-art {
             display: block;
-            width: min(100%, 360px);
+            width: min(100%, 260px);
             height: auto;
             margin: 0 auto 14px;
             border-radius: 10px;
@@ -26156,57 +20490,17 @@ function ensureComparePresentationStyles() {
         @media (max-width: 760px) {
             #compare-modal .modal-content { padding: 16px; }
             #compare-modal .compare-container { grid-template-columns: 1fr; gap: 14px; }
-            #compare-modal .compare-card-art { width: min(100%, 340px) !important; }
+            #compare-modal .compare-card-art { width: min(100%, 300px) !important; }
         }
     `;
     document.head.appendChild(style);
 }
 
-function buildCompareSupplementalCanonicalEffects(card, text, canonical = []) {
-    const present = new Set((canonical || []).map(effect => effect?.function).filter(Boolean));
-    const quantity = '(?:a|an|one|two|three|four|five|six|seven|eight|nine|ten|\\d+|x)';
-    const patterns = [
-        { fn: 'card_draw', regex: new RegExp(`\\b(?:draw|draws)\\s+${quantity}\\s+cards?\\b`, 'i') },
-        { fn: 'token_creation', regex: new RegExp(`\\bcreates?\\s+${quantity}\\s+((?:\\d+\\/\\d+\\s+)?(?:[a-z'-]+\\s+){0,4}tokens?)\\b`, 'i') },
-        { fn: 'gain_life', regex: new RegExp(`\\b(?:gain|gains)\\s+(?:${quantity}\\s+)?life\\b`, 'i') },
-        { fn: 'lose_life', regex: new RegExp(`\\b(?:lose|loses)\\s+(?:${quantity}\\s+)?life\\b`, 'i') },
-        { fn: 'direct_damage', regex: /\b(?:deal|deals)\s+(?:\d+|x)\s+damage(?:\s+to\s+[^.;,]+)?/i },
-        { fn: 'mill', regex: new RegExp(`\\bmill\\s+${quantity}\\s+cards?\\b`, 'i') },
-        { fn: 'discard', regex: new RegExp(`\\bdiscard\\s+${quantity}\\s+cards?\\b`, 'i') }
-    ];
-    const supplemental = [];
-    for (const spec of patterns) {
-        if (present.has(spec.fn)) continue;
-        const sourceText = String(text || '');
-        const found = sourceText.match(spec.regex);
-        if (!found?.[0]) continue;
-        if (spec.fn === 'token_creation') {
-            const before = sourceText.slice(Math.max(0, found.index - 32), found.index);
-            const after = sourceText.slice(found.index, found.index + 140);
-            if (/\bwould\s*$/i.test(before) || /\b(?:twice|three times|four times|double|triple)\s+that many\b/i.test(after)) continue;
-        }
-        try {
-            const miniParsed = annotateEffectRepeatability(card, parseMTGEffect(found[0]), text);
-            const effect = getCanonicalFunctions(miniParsed).find(item => item?.function === spec.fn);
-            if (!effect) continue;
-            const cloned = {
-                ...effect,
-                params: { ...(effect.params || {}), raw: found[0], compareSupplemental: true },
-                _compareSupplemental: true
-            };
-            supplemental.push(cloned);
-            present.add(spec.fn);
-        } catch (_) {}
-    }
-    return supplemental;
-}
-
 function getCompareParsedCard(card) {
     const text = card?.oracle_text || (card?.card_faces ? card.card_faces.map(f => f.oracle_text || '').join(' ') : '');
     try {
-        const parsed = annotateEffectRepeatability(card, card?._parsedEffects || getCachedParsedEffects(card, text), text);
+        const parsed = card?._parsedEffects || parseMTGEffect(text);
         const canonical = getCanonicalFunctions(parsed);
-        canonical.push(...buildCompareSupplementalCanonicalEffects(card, text, canonical));
         const roles = inferStrategicRoleProfile(card, parsed, '') || [];
         return { text, parsed, canonical, roles };
     } catch (_) {
@@ -26414,126 +20708,6 @@ function compareEffectDescription(cf) {
     }
 }
 
-function compareRepeatabilityLabel(profile) {
-    if (!profile?.kind) return '';
-    return REPEATABILITY_PROFILE_META[profile.kind]?.label || 'Repeatability unclear';
-}
-
-function compareNaturalQuantity(value, singular, plural = `${singular}s`) {
-    const n = typeof value === 'number' && Number.isFinite(value) ? value : null;
-    if (n === 1) return `a ${singular}`;
-    if (n !== null) {
-        const words = { 0: 'zero', 2: 'two', 3: 'three', 4: 'four', 5: 'five', 6: 'six', 7: 'seven', 8: 'eight', 9: 'nine', 10: 'ten' };
-        return `${words[n] || n} ${plural}`;
-    }
-    return plural;
-}
-
-function compareNaturalEffectAction(cf) {
-    const core = compareEffectCore(cf);
-    const p = cf?.params || {};
-    const q = core.quantity;
-    switch (core.fn) {
-        case 'card_draw': return `draw ${compareNaturalQuantity(q, 'card')}`;
-        case 'token_creation': {
-            const raw = String(cf?.raw || p.raw || '');
-            const tokenMatch = raw.match(/\bcreates?\s+(?:a|an|one|two|three|four|five|six|seven|eight|nine|ten|\d+)\s+(.+?\btoken(?:s)?\b)/i);
-            const token = compareClean(tokenMatch?.[1] || core.subtype || p.tokenType || 'token').replace(/\btokens?$/i, 'token');
-            const pluralToken = token.replace(/\btoken$/i, 'tokens');
-            return `create ${compareNaturalQuantity(q, token, pluralToken)}`;
-        }
-        case 'token_multiplier': {
-            const raw = String(cf?.raw || p.raw || '').toLowerCase();
-            if (/\bthree times\b|\btriple\b/.test(raw)) return 'triple the tokens you would create';
-            if (/\btwice\b|\bdouble\b/.test(raw)) return 'double the tokens you would create';
-            return 'multiply the tokens you would create';
-        }
-        case 'gain_life': return q !== null ? `gain ${q} life` : 'gain life';
-        case 'lose_life': return q !== null ? `lose ${q} life` : 'lose life';
-        case 'direct_damage': return q !== null ? `deal ${q} damage${core.target ? ` to ${core.target}` : ''}` : `deal damage${core.target ? ` to ${core.target}` : ''}`;
-        case 'mill': return `mill ${compareNaturalQuantity(q, 'card')}`;
-        case 'discard': return `discard ${compareNaturalQuantity(q, 'card')}`;
-        case 'mana_ability': return q !== null ? `add ${q} mana` : 'add mana';
-        case 'removal': return `destroy ${core.target || core.object || 'the relevant permanent'}`;
-        case 'exile_removal': return `exile ${core.target || core.object || 'the relevant permanent'}`;
-        case 'counter': return `counter ${core.target || core.object || 'the relevant spell or ability'}`;
-        default: return compareEffectDescription(cf) || `use its ${compareFunctionLabel(core.fn || 'effect').toLowerCase()} effect`;
-    }
-}
-
-function compareNaturalThirdPerson(action) {
-    return String(action || '').replace(/^(draw|create|gain|lose|deal|mill|discard|add|destroy|exile|counter|triple|double|multiply|return|put|search|tap|untap)\b/i, verb => ({
-        draw: 'draws', create: 'creates', gain: 'gains', lose: 'loses', deal: 'deals', mill: 'mills', discard: 'discards', add: 'adds',
-        destroy: 'destroys', exile: 'exiles', counter: 'counters', triple: 'triples', double: 'doubles', multiply: 'multiplies',
-        return: 'returns', put: 'puts', search: 'searches', tap: 'taps', untap: 'untaps'
-    }[verb.toLowerCase()] || verb));
-}
-
-function describeRepeatabilityBehavior(card, cf) {
-    const core = compareEffectCore(cf);
-    const profile = core.repeatabilityProfile;
-    const name = card?.name || 'This card';
-    const action = compareNaturalEffectAction(cf);
-    const thirdPerson = compareNaturalThirdPerson(action);
-    if (!profile || profile.group === 'unknown') return '';
-    switch (profile.kind) {
-        case 'periodic_trigger': {
-            let timing = String(profile.timingText || '').toLowerCase();
-            timing = timing.replace(/^at the beginning of your upkeep$/, 'the beginning of each of your upkeeps')
-                .replace(/^at the beginning of each upkeep$/, 'the beginning of each upkeep')
-                .replace(/^at the beginning of every upkeep$/, 'the beginning of every upkeep')
-                .replace(/^at the end of your turn$/, 'the end of each of your turns');
-            return timing ? `At ${timing}, ${name} lets you ${action}` : `${name} repeatedly lets you ${action} on a recurring turn schedule`;
-        }
-        case 'repeatable_trigger': {
-            const event = String(profile.eventText || '').replace(/[,.]+$/g, '').trim();
-            if (event && /^(when|whenever)\b/i.test(event)) return `${event.charAt(0).toUpperCase()}${event.slice(1)}, ${name} ${thirdPerson}`;
-            return `Whenever its trigger condition occurs, ${name} ${thirdPerson}`;
-        }
-        case 'repeatable_activation':
-            return `${name} can ${action} repeatedly by paying its activation cost`;
-        case 'ongoing_static':
-            return `${name} continuously ${action}`;
-        case 'repeatable_spell':
-            return `${name} can repeat the effect by using its reusable casting mechanic`;
-        case 'recastable_spell':
-            return `${name} performs the effect once per cast, but its rules text gives you a way to cast it again`;
-        case 'entry_trigger':
-            return `${name} ${thirdPerson} when it enters the battlefield; that trigger does not repeat just because the permanent stays in play`;
-        case 'self_event':
-            return `${name} ${thirdPerson} when its one-time event occurs, rather than providing a recurring effect while it stays in play`;
-        case 'single_use_activation':
-            return `${name} can ${action} with its ability, but doing so consumes the source`;
-        case 'one_shot':
-            return /\b(?:instant|sorcery)\b/i.test(String(card?.type_line || ''))
-                ? `${name} ${thirdPerson} once when the spell resolves`
-                : `${name} lets you ${action} once when its ability resolves`;
-        default:
-            return `${name} ${thirdPerson}`;
-    }
-}
-
-function findRepeatabilityMismatchMatch(matches = []) {
-    for (const match of (matches || []).slice(0, 8)) {
-        const aCore = compareEffectCore(match.af), bCore = compareEffectCore(match.bf);
-        if (!aCore.fn || !bCore.fn) continue;
-        if (aCore.fn !== bCore.fn && aCore.family !== bCore.family) continue;
-        const pa = aCore.repeatabilityProfile, pb = bCore.repeatabilityProfile;
-        if (!pa || !pb || pa.group === 'unknown' || pb.group === 'unknown') continue;
-        if (repeatabilityProfileSimilarity(pa, pb) < 0.58) return match;
-    }
-    return null;
-}
-
-function compareRepeatabilitySentence(cardA, cardB, matches = []) {
-    const match = findRepeatabilityMismatchMatch(matches);
-    if (!match) return '';
-    const behaviorA = describeRepeatabilityBehavior(cardA, match.af);
-    const behaviorB = describeRepeatabilityBehavior(cardB, match.bf);
-    if (!behaviorA || !behaviorB) return '';
-    return `The key difference is how often the effect happens: ${behaviorA}, whereas ${behaviorB}.`;
-}
-
 function compareEffectCore(cf) {
     const p = cf?.params || {};
     return {
@@ -26560,7 +20734,6 @@ function compareEffectCore(cf) {
         targetProfile: p.targetProfile || null,
         quantityProfile: p.quantityProfile || null,
         triggerProfile: p.triggerProfile || null,
-        repeatabilityProfile: p.repeatabilityProfile || null,
         dependencyProfile: p.dependencyProfile || null,
         durationProfile: p.durationProfile || null,
         raw: p.raw || ''
@@ -26606,67 +20779,34 @@ function compareConditionPhrase(core) {
     return '';
 }
 
-function compareNaturalActivationCost(rawCost) {
-    const parts = String(rawCost || '').split(/\s*,\s*/).map(part => part.trim()).filter(Boolean);
-    if (!parts.length) return '';
-    const naturalParts = parts.map(part => {
-        if (/^\{t\}$/i.test(part)) return 'tap the permanent';
-        if (/^\{[^}]+\}$/.test(part)) return `pay ${part}`;
-        if (/^sacrifice\b/i.test(part)) return `sacrifice ${part.replace(/^sacrifice\s+/i, '')}`;
-        if (/^tap\b/i.test(part)) return `tap ${part.replace(/^tap\s+/i, '')}`;
-        if (/^pay\b/i.test(part)) return `pay ${part.replace(/^pay\s+/i, '')}`;
-        if (/^discard\b/i.test(part)) return `discard ${part.replace(/^discard\s+/i, '')}`;
-        return part;
-    });
-    return `requires you to ${compareFormatList(naturalParts)} each time you activate it`;
-}
-
-function compareCostPhrase(core, cardText = '') {
+function compareCostPhrase(core) {
     const pieces = [];
-    if (core.activationCost?.parts?.length) {
-        const rawCardText = String(cardText || core.raw || '');
-        const prefix = rawCardText.match(/^\s*([^:\n]+)\s*:/);
-        const naturalCost = prefix ? compareNaturalActivationCost(prefix[1]) : '';
-        pieces.push(naturalCost || `has activation cost ${compareFormatList(core.activationCost.parts)}`);
-    } else if (core.payCost && !/^mana$/.test(core.payCost)) {
-        pieces.push(`requires ${core.payCost}`);
-    }
+    if (core.activationCost?.parts?.length) pieces.push(`activation costs ${compareFormatList(core.activationCost.parts)}`);
+    else if (core.payCost && !/^mana$/.test(core.payCost)) pieces.push(`requires ${core.payCost}`);
     const condition = compareConditionPhrase(core);
     if (condition && core.condition === 'unless_pay') pieces.push(condition);
     return pieces.join('; ');
 }
 
-function compareDifferenceSentences(cardA, cardB, af, bf, skipQuantityDifference = false) {
+function compareDifferenceSentences(cardA, cardB, af, bf) {
     const a = compareEffectCore(af), b = compareEffectCore(bf), out = [];
     const aName = cardA.name, bName = cardB.name;
 
-    if (!skipQuantityDifference && a.quantity !== null && b.quantity !== null && a.quantity !== b.quantity) {
-        const actionA = compareNaturalEffectAction(af), actionB = compareNaturalEffectAction(bf);
-        if (actionA && actionB && a.fn === b.fn) out.push(`${aName} ${actionA.replace(/^(draw|create|gain|lose|deal|mill|discard|add|destroy|exile|counter)\b/, (verb) => ({ draw: 'draws', create: 'creates', gain: 'gains', lose: 'loses', deal: 'deals', mill: 'mills', discard: 'discards', add: 'adds', destroy: 'destroys', exile: 'exiles', counter: 'counters' }[verb] || verb))}, while ${bName} ${actionB.replace(/^(draw|create|gain|lose|deal|mill|discard|add|destroy|exile|counter)\b/, (verb) => ({ draw: 'draws', create: 'creates', gain: 'gains', lose: 'loses', deal: 'deals', mill: 'mills', discard: 'discards', add: 'adds', destroy: 'destroys', exile: 'exiles', counter: 'counters' }[verb] || verb))}.`);
-        else out.push(`The amount differs: ${aName} uses ${a.quantity}, while ${bName} uses ${b.quantity}.`);
+    if (a.quantity !== null && b.quantity !== null && a.quantity !== b.quantity) {
+        const descA = compareEffectDescription(af), descB = compareEffectDescription(bf);
+        const unit = /damage|life|draw|mill|discard|token|counter|mana/.test(descA + ' ' + descB) ? '' : ' units';
+        out.push(`The amount differs: ${aName} uses ${a.quantity}${unit}, while ${bName} uses ${b.quantity}${unit}.`);
     }
 
-    const counterTargetRestrictionExplained = a.fn === 'counter' && b.fn === 'counter' && a.target && b.target && a.target !== b.target && (a.restriction || b.restriction);
     if (a.target && b.target && a.target !== b.target) {
-        if (counterTargetRestrictionExplained) {
-            const restricted = (core, name) => {
-                const target = String(core.target || 'spells').replace(/^(?:a|an)\s+/i, '').replace(/\bspell\b/i, 'spells');
-                const hasRestriction = Boolean(core.restriction) || /\b(?:noncreature|creature|artifact|enchantment|instant|sorcery|permanent)\b/i.test(target);
-                return hasRestriction ? `${name} is limited to ${target}` : `${name} can counter any spell`;
-            };
-            if (!a.restriction && b.restriction) out.push(`The targeting differs: ${aName} can counter any spell, while ${restricted(b, bName)}.`);
-            else if (a.restriction && !b.restriction) out.push(`The targeting differs: ${bName} can counter any spell, while ${restricted(a, aName)}.`);
-            else out.push(`The targeting differs: ${aName} can counter ${a.target}, while ${bName} can counter ${b.target}.`);
-        } else {
-            out.push(`The targeting differs: ${aName} can affect ${a.target}, while ${bName} can affect ${b.target}.`);
-        }
+        out.push(`The targeting differs: ${aName} can affect ${a.target}, while ${bName} can affect ${b.target}.`);
     } else if (a.target && !b.target) {
         out.push(`${aName} specifies ${a.target}, while ${bName} uses a different targeting structure.`);
     } else if (!a.target && b.target) {
         out.push(`${bName} specifies ${b.target}, while ${aName} uses a different targeting structure.`);
     }
 
-    if (a.restriction !== b.restriction && !counterTargetRestrictionExplained) {
+    if (a.restriction !== b.restriction) {
         if (a.restriction && !b.restriction) out.push(`${aName} has an additional restriction: it is limited to ${a.restriction}.`);
         else if (b.restriction && !a.restriction) out.push(`${bName} has an additional restriction: it is limited to ${b.restriction}.`);
         else if (a.restriction && b.restriction) out.push(`The restrictions differ: ${aName} is limited to ${a.restriction}, while ${bName} is limited to ${b.restriction}.`);
@@ -26688,11 +20828,11 @@ function compareDifferenceSentences(cardA, cardB, af, bf, skipQuantityDifference
         else if (cb && !ca) out.push(`${bName} has an additional condition: ${cb}.`);
     }
 
-    const costA = compareCostPhrase(a, cardA?.oracle_text || cardA?.card_faces?.map(f => f.oracle_text || '').join(' ') || ''), costB = compareCostPhrase(b, cardB?.oracle_text || cardB?.card_faces?.map(f => f.oracle_text || '').join(' ') || '');
+    const costA = compareCostPhrase(a), costB = compareCostPhrase(b);
     if (costA !== costB) {
-        if (costA && costB) out.push(`Their activation requirements differ: ${aName} ${costA}, while ${bName} ${costB}.`);
-        else if (costA) out.push(`${aName} ${costA}.`);
-        else if (costB) out.push(`${bName} ${costB}.`);
+        if (costA && costB) out.push(`The costs or requirements differ: ${aName} ${costA}, while ${bName} ${costB}.`);
+        else if (costA) out.push(`${aName} has an additional cost or requirement: ${costA}.`);
+        else if (costB) out.push(`${bName} has an additional cost or requirement: ${costB}.`);
     }
 
     if (a.effectMode !== b.effectMode && (a.effectMode || b.effectMode)) out.push(`The rules structure differs: ${aName} uses a ${a.effectMode || 'normal'} effect, while ${bName} uses a ${b.effectMode || 'normal'} effect.`);
@@ -26700,25 +20840,8 @@ function compareDifferenceSentences(cardA, cardB, af, bf, skipQuantityDifference
     if (a.subtype !== b.subtype && (a.subtype || b.subtype)) out.push(`The subtype restriction differs: ${aName} specifies ${a.subtype || 'no subtype restriction'}, while ${bName} specifies ${b.subtype || 'no subtype restriction'}.`);
     if (a.scope !== b.scope && (a.scope || b.scope)) out.push(`The scope differs: ${aName} affects ${a.scope || 'the default scope'}, while ${bName} affects ${b.scope || 'the default scope'}.`);
     if (a.magnitude && b.magnitude && a.magnitude !== b.magnitude && a.quantity === null && b.quantity === null) out.push(`The magnitude differs: ${aName} uses ${a.magnitude}, while ${bName} uses ${b.magnitude}.`);
-    if (a.fn === 'token_multiplier' && b.fn === 'token_multiplier') {
-        const multiplierA = compareNaturalThirdPerson(compareNaturalEffectAction(af));
-        const multiplierB = compareNaturalThirdPerson(compareNaturalEffectAction(bf));
-        if (multiplierA && multiplierB && multiplierA !== multiplierB) {
-            out.push(`${aName} ${multiplierA}, while ${bName} ${multiplierB.replace(/the tokens you would create/i, 'them')}.`);
-        }
-    }
 
-    let extraA = compareFormatList(a.additionalEffects), extraB = compareFormatList(b.additionalEffects);
-    const normalizeEffectForDuplicateCheck = value => compareClean(value).toLowerCase()
-        .replace(/_/g, ' ')
-        .replace(/\b(?:a|an|the|that|those|this|these|one|two|three|four|five|six|seven|eight|nine|ten)\b/g, ' ')
-        .replace(/\b\d+\b/g, ' ')
-        .replace(/\bcards?\b/g, 'card')
-        .replace(/\s+/g, ' ').trim();
-    const baseEffectA = normalizeEffectForDuplicateCheck(compareEffectDescription(af));
-    const baseEffectB = normalizeEffectForDuplicateCheck(compareEffectDescription(bf));
-    if (extraA && baseEffectA && normalizeEffectForDuplicateCheck(extraA) === baseEffectA) extraA = '';
-    if (extraB && baseEffectB && normalizeEffectForDuplicateCheck(extraB) === baseEffectB) extraB = '';
+    const extraA = compareFormatList(a.additionalEffects), extraB = compareFormatList(b.additionalEffects);
     if (extraA !== extraB && (extraA || extraB)) {
         if (extraA && extraB) out.push(`The follow-up effects differ: ${aName} also has ${extraA}, while ${bName} also has ${extraB}.`);
         else if (extraA) out.push(`${aName} also has a follow-up effect: ${extraA}.`);
@@ -26743,44 +20866,14 @@ function compareMatchScore(af, bf) {
     if (a.condition === b.condition && a.condition) score += 4;
     if (a.effectMode === b.effectMode) score += 3;
     if (a.duration === b.duration) score += 3;
-    const repeatability = repeatabilityProfileSimilarity(a.repeatabilityProfile, b.repeatabilityProfile);
-    if (repeatability < 0.50) score -= 18 * (1 - repeatability);
     return score;
-}
-
-// A draw-related trigger is not itself a card-draw effect. For example,
-// "Whenever you draw a card, this creature gets +2/+2" reacts to a draw performed
-// elsewhere; it does not draw a card. The canonical parser can otherwise mistake
-// the event condition for the clause's outcome, which creates false Compare matches.
-function isDrawEventTriggerOnlyEffect(effect) {
-    if (String(effect?.function || '') !== 'card_draw') return false;
-    const p = effect?.params || {};
-    const raw = String(p.raw || effect?.raw || p.clause || p.sourceText || '').replace(/\s+/g, ' ').trim();
-    if (!raw) return false;
-    const lower = raw.toLowerCase();
-    const reactsToDraw = /\b(?:whenever|when|each time|every time)\b[^.;:]*\byou draw (?:a|one|two|three|four|five|\d+|cards?)\b/i.test(raw)
-        || /\b(?:whenever|when|each time|every time)\b[^.;:]*\bdraw a card\b/i.test(raw);
-    if (!reactsToDraw) return false;
-
-    // If the clause contains an actual draw instruction after the trigger comma,
-    // retain it as a draw effect. Otherwise, the draw is merely the triggering event.
-    const triggerAt = lower.search(/\b(?:whenever|when|each time|every time)\b/);
-    const comma = triggerAt >= 0 ? lower.indexOf(',', triggerAt) : -1;
-    const outcome = comma >= 0 ? lower.slice(comma + 1) : lower;
-    const explicitlyDrawsAsOutcome = /\b(?:draw|draws)\s+(?:a|an|one|two|three|four|five|\d+|x|that many|cards?)\s+cards?\b/i.test(outcome)
-        || /\bdraw a card\b/i.test(outcome);
-    const reactsThenDoesSomethingElse = /\b(?:gets?|get|gains?|gain|loses?|lose|deals?|deal|creates?|create|puts?|put|becomes?|become|has|have|is|are|enters?|exiles?|sacrifices?|sacrifice|taps?|tap|untaps?|untap)\b/i.test(outcome);
-    return !explicitlyDrawsAsOutcome && reactsThenDoesSomethingElse;
 }
 
 function compareCompoundEffects(cardA, cardB, a, b) {
     const matches = [];
     const usedB = new Set();
-    // Keep trigger events distinct from their outcomes: "whenever you draw" is not
-    // equivalent to "draw a card". Filter only the false-positive comparison node;
-    // the original parsed records and search-ranking pipeline remain untouched.
-    const aEffects = (a.canonical || []).filter(effect => !isDrawEventTriggerOnlyEffect(effect));
-    const bEffects = (b.canonical || []).filter(effect => !isDrawEventTriggerOnlyEffect(effect));
+    const aEffects = a.canonical || [];
+    const bEffects = b.canonical || [];
 
     // Match every meaningful effect independently. This is deliberately one-to-one so a card with
     // three effects cannot make the same candidate effect appear to match all three.
@@ -27016,27 +21109,17 @@ function compareModalAlternativeSentences(cardA, cardB, a, b, matches) {
 function compareMechanicalSentences(cardA, cardB, a, b) {
     const compound = compareCompoundEffects(cardA, cardB, a, b);
     const sentences = [];
-    const repeatabilityMismatchMatch = findRepeatabilityMismatchMatch(compound.matches);
-    const repeatabilitySentence = compareRepeatabilitySentence(cardA, cardB, compound.matches);
-    if (repeatabilitySentence) sentences.push(repeatabilitySentence);
     sentences.push(...compareModalAlternativeSentences(cardA, cardB, a, b, compound.matches));
     sentences.push(...compareSequenceSentences(cardA, cardB, a, b));
     compound.matches.slice(0, 8).forEach(({ af, bf }) => {
         const aDesc = compareEffectDescription(af), bDesc = compareEffectDescription(bf);
         if (aDesc && bDesc && aDesc === bDesc) {
-            if (af?.function === 'token_multiplier' && bf?.function === 'token_multiplier') {
-                const multiplierA = compareNaturalThirdPerson(compareNaturalEffectAction(af));
-                const multiplierB = compareNaturalThirdPerson(compareNaturalEffectAction(bf));
-                if (multiplierA && multiplierB && multiplierA !== multiplierB) {
-                    sentences.push(`${cardA.name} ${multiplierA}, while ${cardB.name} ${multiplierB.replace(/the tokens you would create/i, 'them')}.`);
-                } else sentences.push(`Both ${cardA.name} and ${cardB.name} ${aDesc}.`);
-            } else sentences.push(`Both ${cardA.name} and ${cardB.name} ${aDesc}.`);
+            sentences.push(`Both ${cardA.name} and ${cardB.name} ${aDesc}.`);
         } else {
-            const sameRepeatabilityMismatch = Boolean(repeatabilityMismatchMatch && repeatabilityMismatchMatch.af === af && repeatabilityMismatchMatch.bf === bf);
-            const differences = compareDifferenceSentences(cardA, cardB, af, bf, sameRepeatabilityMismatch);
+            const differences = compareDifferenceSentences(cardA, cardB, af, bf);
             sentences.push(...compareConditionCostSentences(cardA, cardB, af, bf));
             if (differences.length) sentences.push(...differences);
-            else if (aDesc && bDesc && !sameRepeatabilityMismatch) sentences.push(`Both cards have a related effect: ${cardA.name} ${aDesc}, while ${cardB.name} ${bDesc}.`);
+            else if (aDesc && bDesc) sentences.push(`Both cards have a related effect: ${cardA.name} ${aDesc}, while ${cardB.name} ${bDesc}.`);
         }
     });
 
@@ -27065,24 +21148,23 @@ function compareAdditionalEffectSentence(cardName, cf) {
     const fn = String(cf?.function || '');
     switch (fn) {
         case 'direct_damage': return `${cardName} additionally deals ${description.replace(/^\\s*damage/i, 'damage')}.`;
-        case 'card_draw': return `${cardName} also ${compareNaturalThirdPerson(description)}.`;
-        case 'mill': return `${cardName} also ${compareNaturalThirdPerson(description)}.`;
-        case 'discard': return `${cardName} also ${compareNaturalThirdPerson(description)}.`;
-        case 'gain_life': return `${cardName} also ${compareNaturalThirdPerson(description)}.`;
-        case 'lose_life': return `${cardName} also makes its controller ${description}.`;
-        case 'mana_ability': return `${cardName} also ${compareNaturalThirdPerson(description)}.`;
-        case 'token_creation': return `${cardName} also ${compareNaturalThirdPerson(description)}.`;
-        case 'place_counter': return `${cardName} also ${compareNaturalThirdPerson(description)}.`;
-        case 'self_sacrifice': return `${cardName} also ${compareNaturalThirdPerson(description)}.`;
-        case 'tap': return `${cardName} also ${compareNaturalThirdPerson(description)}.`;
-        case 'untap': return `${cardName} also ${compareNaturalThirdPerson(description)}.`;
-        default: return `${cardName} also ${compareNaturalThirdPerson(description)}.`;
+        case 'card_draw': return `${cardName} additionally ${description}.`;
+        case 'mill': return `${cardName} additionally ${description}.`;
+        case 'discard': return `${cardName} additionally ${description}.`;
+        case 'gain_life': return `${cardName} additionally ${description}.`;
+        case 'lose_life': return `${cardName} additionally causes its controller to ${description}.`;
+        case 'mana_ability': return `${cardName} additionally ${description}.`;
+        case 'token_creation': return `${cardName} additionally ${description}.`;
+        case 'place_counter': return `${cardName} additionally ${description}.`;
+        case 'self_sacrifice': return `${cardName} additionally must ${description}.`;
+        case 'tap': return `${cardName} additionally ${description}.`;
+        case 'untap': return `${cardName} additionally ${description}.`;
+        default: return `${cardName} additionally ${description}.`;
     }
 }
 
 function compareAdditionalEffects(cardName, effects) {
     return (effects || [])
-        .filter(cf => !(cf?.isCostEffect || cf?.params?.isCostEffect))
         .slice(0, 6)
         .map(cf => compareAdditionalEffectSentence(cardName, cf))
         .filter(Boolean);
@@ -27094,12 +21176,8 @@ function buildCompareExplanation(cardA, cardB) {
     const mechanical = compareMechanicalSentences(cardA, cardB, a, b);
     const { matches, onlyA, onlyB } = mechanical;
     const archetypes = compareArchetypeSentences(cardA, cardB, a, b);
-    const distinctEffectDetails = [
-        ...compareAdditionalEffects(cardA.name, onlyA),
-        ...compareAdditionalEffects(cardB.name, onlyB)
-    ];
 
-    const detail = [...mechanical.sentences, ...archetypes.shared, ...distinctEffectDetails];
+    const detail = [...mechanical.sentences, ...archetypes.shared];
 
     const evidence = [];
     matches.slice(0, 8).forEach(({ af, bf }) => {
@@ -27112,6 +21190,9 @@ function buildCompareExplanation(cardA, cardB) {
     differences.push(...compareAdditionalEffects(cardA.name, onlyA));
     differences.push(...compareAdditionalEffects(cardB.name, onlyB));
     differences.push(...archetypes.differences);
+    if (onlyA.length || onlyB.length) {
+        differences.push(`${cardA.name} has ${onlyA.length} unmatched parsed effect${onlyA.length === 1 ? '' : 's'}, while ${cardB.name} has ${onlyB.length} unmatched parsed effect${onlyB.length === 1 ? '' : 's'}.`);
+    }
 
     let summary;
     if (matches.length) {
@@ -27156,26 +21237,11 @@ function buildCompareExplanation(cardA, cardB) {
 }
 
 // --- COMPARISON & EXPORT LOGIC ---
-function syncCompareButtonFeedback() {
-    const comparedId = compareQueue.length > 1 ? String(compareQueue[1]?.id || '') : '';
-    document.querySelectorAll('.card-item .compare-btn').forEach(button => {
-        const card = button.closest('.card-item')?._resultCardData;
-        const isComparing = Boolean(comparedId && String(card?.id || '') === comparedId);
-        button.textContent = isComparing ? 'Compared' : 'Compare';
-        button.classList.toggle('is-comparing', isComparing);
-        button.setAttribute('aria-pressed', isComparing ? 'true' : 'false');
-        if (card?.name) button.setAttribute('aria-label', isComparing
-            ? `Currently comparing ${card.name} with the source card`
-            : `Compare ${card.name} with the source card`);
-    });
-}
-
 function addToCompare(card) {
     if (!currentSourceCard || !card || card.id === currentSourceCard.id) return;
     // Every Compare button is a direct comparison against the current source card.
     // Reusing the previous compareQueue made later Compare clicks appear to do nothing.
     compareQueue = [currentSourceCard, card];
-    syncCompareButtonFeedback();
     renderComparison();
 }
 
@@ -27231,14 +21297,9 @@ function buildCompareInsightModel(cardA, cardB, explanation) {
         if (a.condition !== b.condition || a.conditionDetail !== b.conditionDetail) {
             pushDifference('Condition', compareConditionPhrase(a), compareConditionPhrase(b));
         }
-        const costA = compareCostPhrase(a, cardA?.oracle_text || cardA?.card_faces?.map(f => f.oracle_text || '').join(' ') || ''), costB = compareCostPhrase(b, cardB?.oracle_text || cardB?.card_faces?.map(f => f.oracle_text || '').join(' ') || '');
+        const costA = compareCostPhrase(a), costB = compareCostPhrase(b);
         if (costA !== costB) pushDifference('Requirement', costA, costB);
         if (a.duration !== b.duration && (a.duration || b.duration)) pushDifference('Duration', a.duration, b.duration);
-        const repeatA = compareRepeatabilityLabel(a.repeatabilityProfile);
-        const repeatB = compareRepeatabilityLabel(b.repeatabilityProfile);
-        if (repeatA && repeatB && repeatabilityProfileSimilarity(a.repeatabilityProfile, b.repeatabilityProfile) < 0.72) {
-            pushDifference('Repeatability', repeatA, repeatB);
-        }
         if (a.subtype !== b.subtype && (a.subtype || b.subtype)) pushDifference('Subtype', a.subtype, b.subtype);
         if (a.scope !== b.scope && (a.scope || b.scope)) pushDifference('Scope', a.scope, b.scope);
         if (a.magnitude !== b.magnitude && (a.magnitude || b.magnitude) && a.quantity === null && b.quantity === null) {
@@ -27272,7 +21333,6 @@ function buildCompareInsightModel(cardA, cardB, explanation) {
 function renderComparison() {
     if (!compareModal || !compareContainer) return;
     ensureComparePresentationStyles();
-    syncCompareButtonFeedback();
     compareModal.classList.remove('hidden');
     compareContainer.innerHTML = '';
     compareStatus.textContent = compareQueue.length === 1 ? 'Select one more card from the results to compare.' : '';
