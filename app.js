@@ -1,6 +1,6 @@
-/* ManaSearch build 20261016-89 */
+/* ManaSearch build 20261016-92 */
 // ManaSearch deployment build marker. Bump this whenever app.js changes so cached-module issues are easy to diagnose.
-const MANASEARCH_APP_BUILD = '20261016-91';
+const MANASEARCH_APP_BUILD = '20261016-92';
 console.info(`[ManaSearch] app.js build ${MANASEARCH_APP_BUILD}`);
 
 // State Management
@@ -6356,6 +6356,32 @@ function annotateEffectArray(effects) {
     return effects;
 }
 
+function parseCastTimingPermissionEffect(text) {
+    const raw = String(text || '').trim().replace(/[’]/g, "'");
+    if (!raw) return null;
+    const grantsCastingPermission = /\b(?:you|each player|players)\s+(?:may|can)\s+cast\b/i.test(raw);
+    const grantsInstantTiming = /\bas though\s+(?:they|it|those spells?)\s+(?:had|have)\s+flash\b|\bany time\s+(?:that\s+)?(?:you|they|a player|that player)\s+could cast an instant\b/i.test(raw);
+    if (!grantsCastingPermission || !grantsInstantTiming) return null;
+
+    // Capture the scope that precedes “spells”; a blank scope means all spells. Keep qualifiers
+    // such as historic, artifact, creature, or noncreature as explicit mechanical restrictions.
+    const scopeMatch = raw.match(/\bcast\s+([\s\S]{0,80}?)\bspells?\b/i);
+    const scope = String(scopeMatch?.[1] || '').trim().replace(/^(?:a|an|any|the)\s+/i, '').replace(/\s+/g, ' ').toLowerCase();
+    const normalizedScope = scope || 'all';
+    const restriction = scope ? [scope.replace(/\s+/g, '_')] : [];
+    return {
+        raw: String(text || '').trim(),
+        action: 'cast_permission',
+        object: 'spell',
+        target: null,
+        restriction,
+        castingScope: normalizedScope,
+        timingPermission: 'instant_speed',
+        isStatic: true,
+        effectMode: 'normal'
+    };
+}
+
 function parseMTGEffect(oracleText) {
     if (!oracleText) return [];
 
@@ -6393,6 +6419,7 @@ function parseMTGEffect(oracleText) {
         const { costText, effectText } = splitActivationCost(clause);
 
         const parsed =
+            parseCastTimingPermissionEffect(effectText) ||
             parseCostReductionEffect(effectText) ||
             parseCounterEffect(effectText) ||
             parseSearchEffect(effectText) ||
@@ -6531,6 +6558,7 @@ const ACTION_TAXONOMY = {
     // different outcome - a one-shot targeted counter is structurally very different from a
     // continuous team-wide anthem, even though both are "stats go up/down" in spirit.
     place_counter: { family: "stat_buff",            outcome: "stats_changed_one_shot" },
+    cast_permission: { family: "casting_permission", outcome: "instant_speed_cast_permission" },
     // Tap and untap share a family (both change a permanent's tapped state) but opposite
     // outcomes - tapping down a blocker and untapping your own permanent for an extra activation
     // serve opposite strategic purposes despite the shared verb family.
@@ -6587,7 +6615,8 @@ const FUNCTION_OUTCOMES = {
     lose_life:        "life_total_decreased",
     place_counter:    "stats_changed_one_shot",
     tap:              "permanent_tapped",
-    untap:            "permanent_untapped"
+    untap: "permanent_untapped",
+    cast_timing_permission: "instant_speed_cast_permission"
 };
 
 /**
@@ -6660,6 +6689,9 @@ function deriveCanonicalFunction(effect) {
         // rather than one "tap_state_change" that would score a Falter effect and an Untap-all
         // ramp effect as equivalent.
         fn = a;
+    } else if (a === "cast_permission") {
+        // A real static rules permission to cast a class of spells at instant speed.
+        fn = "cast_timing_permission";
     } else {
         return null;
     }
@@ -6706,6 +6738,8 @@ function deriveCanonicalFunction(effect) {
             target: effect.target || null,
             subtype: effect.subtype && effect.subtype !== "all" ? effect.subtype : null,
             scope: effect.isOther === true ? "other" : (effect.isOther === false ? "all" : null),
+            castingScope: effect.castingScope || null,
+            timingPermission: effect.timingPermission || null,
             magnitude,
             quantity,
             manaOutputAmount: fn === 'mana_ability' && Number.isFinite(Number(effect.manaOutputAmount)) ? Number(effect.manaOutputAmount) : null,
@@ -6761,6 +6795,8 @@ function canonicalFunctionToText(canonicalFunctions) {
         if (p.magnitude) bits.push(p.magnitude);
         if (typeof p.quantity === 'number') bits.push(`${p.quantity}`);
         if (p.duration) bits.push(p.duration);
+        if (p.castingScope) bits.push(`scope ${p.castingScope} spells`);
+        if (p.timingPermission) bits.push(p.timingPermission.replace(/_/g, ' '));
         bits.push(cf.outcome.replace(/_/g, ' '));
         return bits.join(' ');
     }).join('; ');
@@ -6782,6 +6818,7 @@ const FUNCTION_IMPORTANCE = {
     // one-shot anthem. Tap/untap are usually a supporting piece of a bigger card (a Falter effect,
     // an untap-lands ramp trick) rather than the point of the card on their own, so they sit lower.
     place_counter: 0.7, tap: 0.5, untap: 0.5,
+    cast_timing_permission: 0.98,
     zone_change: 0.4
 };
 
@@ -7520,7 +7557,7 @@ const FUNCTION_LABELS = [
     'reanimate', 'recursion', 'cheat_into_play', 'token_creation', 'token_multiplier',
     'card_draw', 'tutor', 'ramp_tutor', 'counter', 'cost_reduction', 'stat_buff', 'tribal_anthem',
     'direct_damage', 'lose_life', 'gain_life', 'discard', 'mill', 'mana_ability',
-    'tap', 'untap', 'anthem'
+    'tap', 'untap', 'anthem', 'cast_timing_permission'
 ];
 const FUNCTION_INDEX = new Map(FUNCTION_LABELS.map((name, i) => [name, i]));
 const FUNCTION_AFFINITY_MATRIX = Array.from({ length: FUNCTION_LABELS.length }, () => Array(FUNCTION_LABELS.length).fill(0));
@@ -7674,6 +7711,14 @@ if (typeof effA.quantity === 'number' || typeof effB.quantity === 'number') {
         (a,b) => Math.max(0, 1 - Math.abs(a-b) / Math.max(Math.abs(a), Math.abs(b), 1))));
 } else if (effA.quantity != null || effB.quantity != null) {
     parts.push(fieldSimilarity(5, effA.quantity, effB.quantity));
+}
+
+if (fnA === 'cast_timing_permission' && fnB === 'cast_timing_permission') {
+    const scopeA = String(cfA.params?.castingScope || 'all').toLowerCase();
+    const scopeB = String(cfB.params?.castingScope || 'all').toLowerCase();
+    const scopeSimilarity = scopeA === scopeB ? 1 : (scopeA === 'all' || scopeB === 'all' ? 0.72 : 0.20);
+    parts.push({ weight: 10, value: scopeSimilarity });
+    parts.push(fieldSimilarity(8, cfA.params?.timingPermission, cfB.params?.timingPermission));
 }
 
 if (fnA === 'mana_ability' && fnB === 'mana_ability') {
@@ -9305,6 +9350,7 @@ const MECHANIC_FAMILY_MAP = {
     mill: 'disruption', counter: 'interaction', direct_damage: 'interaction', gain_control: 'control',
     cost_reduction: 'cost_modification', token_creation: 'tokens', token_multiplier: 'tokens',
     tribal_anthem: 'combat', anthem: 'combat', place_counter: 'stats', mana_ability: 'resources',
+    cast_timing_permission: 'casting_permission',
     gain_life: 'life', lose_life: 'life', tap: 'board_state', untap: 'board_state',
     copy: 'copy', clone: 'copy', phase: 'zone_or_state', transform: 'zone_or_state'
 };
@@ -12771,7 +12817,7 @@ function readConstraintFilters() {
         toughness: (document.getElementById('filter-toughness')?.value || '').trim(),
         set: (document.getElementById('filter-set')?.value || '').trim(),
         extraOracle: (document.getElementById('filter-extra-oracle')?.value || '').trim(),
-        constraintModes: Object.fromEntries(Array.from(document.querySelectorAll('[data-constraint-mode]')).map(el => [el.dataset.constraintMode, el.value === 'prefer' ? 'prefer' : 'hard']))
+        constraintModes: Object.fromEntries(Array.from(document.querySelectorAll('[data-constraint-mode]')).map(el => [el.dataset.constraintMode, ['prefer', 'exclude'].includes(el.value) ? el.value : 'hard']))
     };
 }
 
@@ -12888,14 +12934,25 @@ function escapeScryfallValue(value) {
     return String(value || '').replace(/(["\\])/g, '\\$1');
 }
 
+function getConstraintMode(filters, key) {
+    const value = filters?.constraintModes?.[key];
+    return value === 'prefer' || value === 'exclude' ? value : 'hard';
+}
+
 function buildScryfallConstraintParts(filters) {
     const parts = [];
-    const hard = key => filters?.constraintModes?.[key] !== 'prefer';
-    if (hard('types')) (filters?.types || []).forEach(type => parts.push(`type:${escapeScryfallValue(type)}`));
-    // Supertypes and subtypes can be hard filters or ranking preferences; preferred values must
-    // not be inserted into the remote query because that would exclude non-matching cards early.
-    if (hard('supertype')) (filters?.supertypes || []).forEach(supertype => parts.push(`type:${escapeScryfallValue(supertype)}`));
-    if (hard('subtype')) (filters?.subtypes || []).forEach(subtype => parts.push(`subtype:"${escapeScryfallValue(subtype)}"`));
+    const hard = key => getConstraintMode(filters, key) === 'hard';
+    const addTypedTerms = (key, values, makeTerm) => {
+        const mode = getConstraintMode(filters, key);
+        if (mode === 'prefer') return; // keep other cards eligible for the ranking preference
+        const prefix = mode === 'exclude' ? '-' : '';
+        (values || []).forEach(value => parts.push(`${prefix}${makeTerm(value)}`));
+    };
+    addTypedTerms('types', filters?.types, value => `type:${escapeScryfallValue(value)}`);
+    // Exclusion uses Scryfall's negated field syntax; preferences stay out of remote retrieval
+    // and are applied only as a bounded ranking bonus after candidates are found.
+    addTypedTerms('supertype', filters?.supertypes, value => `type:${escapeScryfallValue(value)}`);
+    addTypedTerms('subtype', filters?.subtypes, value => `type:"${escapeScryfallValue(value)}"`);
     (filters?.keywords || []).forEach(keyword => parts.push(`keyword:"${escapeScryfallValue(keyword)}"`));
     if (filters?.format && hard('format')) parts.push(`f:${filters.format}`);
     if (filters?.rarity && hard('rarity')) parts.push(`r:${filters.rarity}`);
@@ -12907,7 +12964,11 @@ function buildScryfallConstraintParts(filters) {
     if (powerQuery) parts.push(powerQuery);
     const toughnessQuery = hard('toughness') ? comparisonFilterToScryfallQuery('tou', parseComparisonFilter(filters?.toughness)) : null;
     if (toughnessQuery) parts.push(toughnessQuery);
-    if (filters?.set && hard('set')) parts.push(`e:${escapeScryfallValue(filters.set)}`);
+    if (filters?.set) {
+        const setMode = getConstraintMode(filters, 'set');
+        if (setMode === 'hard') parts.push(`e:${escapeScryfallValue(filters.set)}`);
+        else if (setMode === 'exclude') parts.push(`-e:${escapeScryfallValue(filters.set)}`);
+    }
     if (filters?.extraOracle) parts.push(`o:"${escapeScryfallValue(filters.extraOracle)}"`);
     return parts;
 }
@@ -12983,21 +13044,29 @@ function initMultiConstraintFields(updateBadge) {
 
 function explainFilterFailures(card, filters, broadFallbackFilters) {
     const failures = [];
-    const hard = key => filters?.constraintModes?.[key] !== 'prefer';
+    const hard = key => getConstraintMode(filters, key) === 'hard';
     if (!card) return [{ field: 'card', expected: 'a card object', actual: 'null' }];
 
     const cardOracle = (card.oracle_text || (card.card_faces ? card.card_faces.map(f => f.oracle_text).join(' ') : '')).toLowerCase();
 
     const typeLineParts = getTypeLineParts(card);
-    if (hard('types')) for (const type of (filters.types || [])) {
-        if (!hasTypeLineToken(typeLineParts.left, type)) failures.push({ field: 'type', expected: type, actual: card.type_line || '(none)' });
-    }
-    if (hard('supertype')) for (const supertype of (filters.supertypes || [])) {
-        if (!hasTypeLineToken(typeLineParts.left, supertype)) failures.push({ field: 'supertype', expected: supertype, actual: card.type_line || '(none)' });
-    }
-    if (hard('subtype')) for (const subtype of (filters.subtypes || [])) {
-        if (!hasTypeLineToken(typeLineParts.subtypes, subtype)) failures.push({ field: 'subtype', expected: subtype, actual: card.type_line || '(none)' });
-    }
+    const modeOf = getConstraintMode;
+    const typeValues = filters.types || [];
+    const supertypeValues = filters.supertypes || [];
+    const subtypeValues = filters.subtypes || [];
+    const collectTypeFailures = (key, values, area, field) => {
+        const mode = modeOf(filters, key);
+        if (mode === 'prefer' || !values.length) return;
+        for (const value of values) {
+            const matches = hasTypeLineToken(area, value);
+            if ((mode === 'hard' && !matches) || (mode === 'exclude' && matches)) {
+                failures.push({ field, expected: mode === 'exclude' ? `not include ${value}` : value, actual: card.type_line || '(none)' });
+            }
+        }
+    };
+    collectTypeFailures('types', typeValues, typeLineParts.left, 'type');
+    collectTypeFailures('supertype', supertypeValues, typeLineParts.left, 'supertype');
+    collectTypeFailures('subtype', subtypeValues, typeLineParts.subtypes, 'subtype');
     for (const keyword of (filters.keywords || [])) {
         if (!cardHasKeyword(card, keyword)) failures.push({ field: 'keyword', expected: keyword, actual: (card.keywords || []).join(', ') || '(none)' });
     }
@@ -13047,8 +13116,12 @@ function explainFilterFailures(card, filters, broadFallbackFilters) {
             failures.push({ field: 'toughness', expected: String(filters.toughness), actual: card.toughness ?? '(none)' });
         }
     }
-    if (filters.set && hard('set') && (card.set || '').toLowerCase() !== filters.set.toLowerCase()) {
-        failures.push({ field: 'set', expected: filters.set, actual: card.set || '(none)' });
+    if (filters.set) {
+        const setMatches = String(card.set || '').toLowerCase() === String(filters.set).toLowerCase();
+        const setMode = getConstraintMode(filters, 'set');
+        if ((setMode === 'hard' && !setMatches) || (setMode === 'exclude' && setMatches)) {
+            failures.push({ field: 'set', expected: setMode === 'exclude' ? `not include set ${filters.set}` : filters.set, actual: card.set || '(none)' });
+        }
     }
     if (filters.extraOracle && !cardOracle.includes(filters.extraOracle.toLowerCase())) {
         failures.push({ field: 'extraOracle', expected: `oracle contains "${filters.extraOracle}"`, actual: '(not present)' });
@@ -13078,10 +13151,14 @@ function matchesActiveFilters(card, filters, broadFallbackFilters) {
     if (!card) return false;
 
     const typeLineParts = getTypeLineParts(card);
-    const hard = key => filters?.constraintModes?.[key] !== 'prefer';
+    const hard = key => getConstraintMode(filters, key) === 'hard';
+    const excludes = key => getConstraintMode(filters, key) === 'exclude';
     if (hard('types') && (filters.types || []).some(type => !hasTypeLineToken(typeLineParts.left, type))) return false;
+    if (excludes('types') && (filters.types || []).some(type => hasTypeLineToken(typeLineParts.left, type))) return false;
     if (hard('supertype') && (filters.supertypes || []).some(supertype => !hasTypeLineToken(typeLineParts.left, supertype))) return false;
+    if (excludes('supertype') && (filters.supertypes || []).some(supertype => hasTypeLineToken(typeLineParts.left, supertype))) return false;
     if (hard('subtype') && (filters.subtypes || []).some(subtype => !hasTypeLineToken(typeLineParts.subtypes, subtype))) return false;
+    if (excludes('subtype') && (filters.subtypes || []).some(subtype => hasTypeLineToken(typeLineParts.subtypes, subtype))) return false;
     if ((filters.keywords || []).some(keyword => !cardHasKeyword(card, keyword))) return false;
 
     if (filters.format && hard('format') && card.legalities) {
@@ -13128,8 +13205,10 @@ function matchesActiveFilters(card, filters, broadFallbackFilters) {
         if (!toughnessFilter || !matchesComparisonFilter(getComparableCardField(card, 'toughness'), toughnessFilter)) return false;
     }
 
-    if (filters.set && hard('set')) {
-        if ((card.set || '').toLowerCase() !== filters.set.toLowerCase()) return false;
+    if (filters.set) {
+        const setMatches = String(card.set || '').toLowerCase() === String(filters.set).toLowerCase();
+        if (hard('set') && !setMatches) return false;
+        if (excludes('set') && setMatches) return false;
     }
 
     if (filters.extraOracle) {
@@ -21024,6 +21103,16 @@ function initSourceTypeEditor() {
         // Type offsets are no longer reliable after a type-line edit. The shared updater removes
         // only type-line highlights, preserves Oracle highlights, and refreshes the companion fields.
         applySourceCardTypeLine(corrected);
+        // The Highlight-area Type editor also configures the active search constraint. It updates
+        // the same hidden field used by Card Constraints, so these two editing surfaces stay in sync.
+        const typeParts = splitSourceCardTypeLine(corrected);
+        const typeFilter = document.getElementById('filter-type');
+        if (typeFilter) {
+            typeFilter.value = typeParts.types.join('|');
+            typeFilter.dispatchEvent(new Event('input', { bubbles: true }));
+            if (typeof syncConstraintChipField === 'function') syncConstraintChipField('filter-type', 'filter-type-chips');
+            if (typeof updateCardConstraintsBadge === 'function') updateCardConstraintsBadge();
+        }
         closeEditor();
     };
     openBtn.addEventListener('click', () => editor.classList.contains('hidden') ? showEditor() : closeEditor());
@@ -22352,6 +22441,18 @@ function extractPrimaryCardType(typeLine) {
 //   otag          - Scryfall oracle-tag, where one exists for the mechanic
 //   paramTemplate - builds a query from the canonical params (subtype, magnitude, object, ...)
 const FUNCTION_RETRIEVAL_VOCAB = {
+    cast_timing_permission: {
+        phrases: [
+            'you may cast spells as though they had flash',
+            'you may cast historic spells as though they had flash',
+            'you may cast spells any time you could cast an instant'
+        ],
+        paramTemplate: (p) => {
+            const scope = String(p.castingScope || '').trim().toLowerCase();
+            if (scope && scope !== 'all') return `o:"${escapeScryfallValue(scope)} spells" o:"flash"`;
+            return 'o:"as though they had flash"';
+        }
+    },
     reanimate: {
         phrases: ["from your graveyard to the battlefield", "from a graveyard to the battlefield", "onto the battlefield from your graveyard"],
         otag: "reanimate",
@@ -22842,6 +22943,7 @@ const SEARCH_INTENT_FUNCTION_LABELS = Object.freeze({
     tribal_anthem: 'boost a creature type', stat_buff: 'change power or toughness',
     gain_life: 'gain life', lose_life: 'cause life loss', discard: 'discard cards', mill: 'mill cards',
     tap: 'tap permanents', untap: 'untap permanents', cost_reduction: 'reduce costs',
+    cast_timing_permission: 'grant permission to cast spells at instant speed',
     gain_control: 'gain control of permanents', destroy: 'destroy permanents',
     self_sacrifice: 'sacrifice a permanent as a cost', zone_change: 'move objects between zones',
     tuck: 'put cards into libraries'
@@ -22869,6 +22971,7 @@ function searchIntentFunctionLabel(effect) {
         else if (fn === 'direct_damage') details.push(`${p.quantity} damage`);
     }
     if (p.subtype && !['all', 'other'].includes(p.subtype)) details.push(`subtype: ${p.subtype}`);
+    if (fn === 'cast_timing_permission' && p.castingScope && p.castingScope !== 'all') details.push(`scope: ${p.castingScope} spells`);
     return { label: base, detail: details.join(' · '), canonical };
 }
 
@@ -23149,6 +23252,48 @@ function runManaSearchIntentRegressionSuite() {
     const source = currentSourceCard;
     const oldHighlights = manualHighlights;
     try {
+        // Highlight-area constraint modes must operate through the same shared search fields.
+        const legendaryHumanCard = { type_line: 'Legendary Creature — Human Wizard', set: 'dom' };
+        const otherCreatureCard = { type_line: 'Creature — Elf Warrior', set: 'm21' };
+        const hardSubtypeFilters = { types: [], supertypes: [], subtypes: ['Human'], constraintModes: { subtype: 'hard' } };
+        const excludeSubtypeFilters = { types: [], supertypes: [], subtypes: ['Human'], constraintModes: { subtype: 'exclude' } };
+        const preferSubtypeFilters = { types: [], supertypes: [], subtypes: ['Human'], constraintModes: { subtype: 'prefer' } };
+        check('highlight-subtype-hard-filter-requires-match', matchesActiveFilters(legendaryHumanCard, hardSubtypeFilters) && !matchesActiveFilters(otherCreatureCard, hardSubtypeFilters), 'Hard filter includes matching subtype only');
+        check('highlight-subtype-not-include-excludes-match', !matchesActiveFilters(legendaryHumanCard, excludeSubtypeFilters) && matchesActiveFilters(otherCreatureCard, excludeSubtypeFilters), 'Not include excludes matching subtype');
+        check('highlight-subtype-prefer-keeps-nonmatches-eligible-and-boosts-matches', matchesActiveFilters(legendaryHumanCard, preferSubtypeFilters) && matchesActiveFilters(otherCreatureCard, preferSubtypeFilters) && calculateConstraintPreferenceBonus(legendaryHumanCard, preferSubtypeFilters) > calculateConstraintPreferenceBonus(otherCreatureCard, preferSubtypeFilters), 'Prefer ranks matching subtype higher without excluding others');
+        const hardTypeFilters = { types: ['Creature'], supertypes: [], subtypes: [], constraintModes: { types: 'hard' } };
+        const excludeTypeFilters = { types: ['Creature'], supertypes: [], subtypes: [], constraintModes: { types: 'exclude' } };
+        check('highlight-type-hard-and-not-include-filter-correctly', matchesActiveFilters(legendaryHumanCard, hardTypeFilters) && !matchesActiveFilters({ type_line: 'Enchantment', set: 'm21' }, hardTypeFilters) && !matchesActiveFilters(legendaryHumanCard, excludeTypeFilters) && matchesActiveFilters({ type_line: 'Enchantment', set: 'm21' }, excludeTypeFilters), 'Type hard/exclusion modes use the card type line');
+        const hardSetFilters = { set: 'dom', constraintModes: { set: 'hard' } };
+        const excludeSetFilters = { set: 'dom', constraintModes: { set: 'exclude' } };
+        const preferSetFilters = { set: 'dom', constraintModes: { set: 'prefer' } };
+        check('highlight-set-code-hard-exclude-and-prefer-filter-correctly', matchesActiveFilters(legendaryHumanCard, hardSetFilters) && !matchesActiveFilters(otherCreatureCard, hardSetFilters) && !matchesActiveFilters(legendaryHumanCard, excludeSetFilters) && matchesActiveFilters(otherCreatureCard, excludeSetFilters) && matchesActiveFilters(legendaryHumanCard, preferSetFilters) && matchesActiveFilters(otherCreatureCard, preferSetFilters) && calculateConstraintPreferenceBonus(legendaryHumanCard, preferSetFilters) > calculateConstraintPreferenceBonus(otherCreatureCard, preferSetFilters), 'Set code modes filter, exclude, or boost matching printings');
+        const subtypeExcludeQuery = buildScryfallConstraintParts({ types: [], supertypes: [], subtypes: ['Human Wizard'], constraintModes: { subtype: 'exclude' } }).join(' ');
+        check('highlight-subtype-query-uses-scryfall-type-line-field', subtypeExcludeQuery.includes('-type:\"Human Wizard\"') && !subtypeExcludeQuery.includes('subtype:'), subtypeExcludeQuery);
+        const hardTypeQuery = buildScryfallConstraintParts({ types: ['creature'], supertypes: [], subtypes: [], constraintModes: { types: 'hard' } }).join(' ');
+        const excludeTypeQuery = buildScryfallConstraintParts({ types: ['creature'], supertypes: [], subtypes: [], constraintModes: { types: 'exclude' } }).join(' ');
+        const preferTypeQuery = buildScryfallConstraintParts({ types: ['creature'], supertypes: [], subtypes: [], constraintModes: { types: 'prefer' } }).join(' ');
+        check('highlight-type-modes-build-correct-retrieval-queries', hardTypeQuery.includes('type:creature') && !hardTypeQuery.includes('-type:creature') && excludeTypeQuery.includes('-type:creature') && !preferTypeQuery.includes('type:creature'), JSON.stringify({ hardTypeQuery, excludeTypeQuery, preferTypeQuery }));
+        const hardSetQuery = buildScryfallConstraintParts({ set: 'dom', constraintModes: { set: 'hard' } }).join(' ');
+        const excludeSetQuery = buildScryfallConstraintParts({ set: 'dom', constraintModes: { set: 'exclude' } }).join(' ');
+        const preferSetQuery = buildScryfallConstraintParts({ set: 'dom', constraintModes: { set: 'prefer' } }).join(' ');
+        check('highlight-set-code-modes-build-correct-retrieval-queries', hardSetQuery.includes('e:dom') && !hardSetQuery.includes('-e:dom') && excludeSetQuery.includes('-e:dom') && !preferSetQuery.includes('e:dom'), JSON.stringify({ hardSetQuery, excludeSetQuery, preferSetQuery }));
+
+        const raff = {
+            name: "Raff Capashen, Ship's Mage",
+            type_line: 'Legendary Creature — Human Wizard',
+            keywords: ['Flash', 'Flying'],
+            oracle_text: 'Flash\nFlying\nYou may cast historic spells as though they had flash. (Artifacts, legendaries, and Sagas are historic.)'
+        };
+        const raffEffects = parseMTGEffect(raff.oracle_text);
+        const raffCastPermission = raffEffects.find(effect => effect?.canonical?.function === 'cast_timing_permission');
+        check('raff-historic-spell-flash-permission-has-canonical-action', Boolean(raffCastPermission) && raffCastPermission.canonical.outcome === 'instant_speed_cast_permission' && raffCastPermission.canonical.params.castingScope === 'historic', JSON.stringify(raffCastPermission?.canonical || null));
+        const raffModel = buildSearchIntentPresentationModel(raff, []);
+        check('raff-live-search-intent-explains-instant-speed-casting', (raffModel?.canonicalEffectCount || 0) > 0 && /instant speed/i.test(raffModel?.summary || '') && /historic spells/i.test(raffModel?.effectViews?.map(view => `${view.label} ${view.detail}`).join(' ') || ''), raffModel?.summary || '');
+        const allSpellPermission = parseMTGEffect('You may cast spells as though they had flash.').find(effect => effect?.canonical?.function === 'cast_timing_permission');
+        const irrelevantRaffAlternative = parseMTGEffect('Whenever a creature attacks, you gain 1 life.').find(effect => effect?.canonical);
+        check('raff-casting-permission-matches-broader-flash-casting-analogues', Boolean(allSpellPermission) && Boolean(raffCastPermission) && calculateMechanicalSimilarityDetailed([raffCastPermission], [allSpellPermission]).score > calculateMechanicalSimilarityDetailed([raffCastPermission], irrelevantRaffAlternative ? [irrelevantRaffAlternative] : []).score, JSON.stringify({ sameMechanic: allSpellPermission?.canonical, unrelated: irrelevantRaffAlternative?.canonical }));
+
         const rhystic = { name: 'Rhystic Study', type_line: 'Enchantment', oracle_text: 'Whenever an opponent casts a spell, you may draw a card unless that player pays {1}.' };
         currentSourceCard = rhystic;
         manualHighlights = [];

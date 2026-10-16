@@ -7522,3 +7522,43 @@ body.light-theme .card-actions .edhrec-link-btn:hover {
 #source-card-loaded .source-meta-editor .source-type-help[role="alert"] { color: var(--danger-color, #ef4444); }
 #source-card-loaded .source-card-stats-row .source-meta-field { flex: 0 1 auto; }
 #source-card-loaded .source-card-extra-meta-row .source-meta-editor { min-width: min(100%, 260px); }
+
+
+/* v92: generous, consistent tap targets for the three source-card actions on desktop and mobile. */
+#source-card-loaded .source-card-actions button,
+#source-card-loaded .source-card-actions #favorite-btn,
+#source-card-loaded .source-card-actions #add-source-card-btn,
+#source-card-loaded .source-card-actions #discard-source-card-btn {
+    min-height: 46px !important;
+    padding: 11px 15px !important;
+    font-size: 13px !important;
+    line-height: 1.2 !important;
+    border-radius: 9px !important;
+    touch-action: manipulation;
+}
+#source-card-loaded .source-card-actions #favorite-btn,
+#source-card-loaded .source-card-actions #discard-source-card-btn { min-width: 88px !important; }
+#source-card-loaded .source-card-actions #add-source-card-btn { min-width: 124px !important; }
+#source-card-loaded .source-card-actions { gap: 8px; flex-wrap: wrap; max-width: 100%; }
+@media (max-width: 700px) {
+    #source-card-loaded .source-card-actions { gap: 7px; flex-wrap: wrap; max-width: 100%; }
+    #source-card-loaded .source-card-actions button,
+    #source-card-loaded .source-card-actions #favorite-btn,
+    #source-card-loaded .source-card-actions #add-source-card-btn,
+    #source-card-loaded .source-card-actions #discard-source-card-btn {
+        min-height: 44px !important;
+        padding: 10px 12px !important;
+        font-size: 13px !important;
+    }
+}
+@media (max-width: 480px) {
+    #source-card-loaded .source-card-actions { justify-content: flex-start; flex-wrap: wrap; max-width: 100%; }
+    #source-card-loaded .source-card-actions button,
+    #source-card-loaded .source-card-actions #favorite-btn,
+    #source-card-loaded .source-card-actions #add-source-card-btn,
+    #source-card-loaded .source-card-actions #discard-source-card-btn {
+        min-height: 44px !important;
+        padding: 10px 11px !important;
+        font-size: 12px !important;
+    }
+}

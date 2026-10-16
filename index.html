@@ -5,7 +5,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>ManaSearch</title>
-    <link rel="stylesheet" href="style.css?v=20261016-91">
+    <link rel="stylesheet" href="style.css?v=20261016-92">
 </head>
 <body>
     <header class="site-header">
@@ -152,14 +152,14 @@
                                             <input id="source-supertype-input" type="text" autocomplete="off" spellcheck="true" aria-describedby="source-supertype-help" placeholder="e.g. Legendary, Snow (blank for none)" aria-label="Source card supertype">
                                             <div id="source-supertype-suggestions" class="source-type-suggestions hidden" role="listbox" aria-label="Suggested MTG supertypes"></div>
                                             <label for="source-supertype-mode" class="source-meta-editor-secondary-label">Use as a search constraint</label>
-                                            <select id="source-supertype-mode" data-constraint-mode="supertype" aria-label="Supertype constraint mode"><option value="hard" selected>Hard filter</option><option value="prefer">Prefer in ranking</option></select>
-                                            <p id="source-supertype-help" class="source-type-help">Applying this value also adds it to search constraints. Hard filter is the default; Prefer ranks matching cards higher without excluding others.</p>
+                                            <select id="source-supertype-mode" data-constraint-mode="supertype" aria-label="Supertype constraint mode"><option value="hard" selected>Hard filter</option><option value="prefer">Prefer</option><option value="exclude">Not include</option></select>
+                                            <p id="source-supertype-help" class="source-type-help">Hard filter requires this supertype. Prefer ranks matches higher. Not include excludes cards with this supertype.</p>
                                             <div class="source-type-editor-actions"><button type="button" id="apply-source-supertype-btn">Apply</button><button type="button" id="cancel-source-supertype-btn" class="secondary-preference-btn">Cancel</button></div>
                                         </div>
                                     </div>
                                     <div class="source-meta-field source-meta-field-type">
                                         <p class="source-card-meta-line source-type-row"><strong>Type:</strong> <span id="source-card-type" class="selectable-text type-line-selectable" title="Select a card type to highlight it"></span> <button type="button" id="edit-source-type-btn" class="source-type-edit-btn" aria-expanded="false" aria-controls="source-type-editor">Edit</button></p>
-                                        <div id="source-type-editor" class="source-type-editor hidden"><label for="source-type-input">Edit type line</label><input id="source-type-input" type="text" autocomplete="off" spellcheck="true" aria-describedby="source-type-help" placeholder="e.g. Legendary Creature — Elf Druid"><div id="source-type-suggestions" class="source-type-suggestions hidden" role="listbox" aria-label="Suggested MTG types"></div><p id="source-type-help" class="source-type-help">Suggestions appear as you type. Press Tab or → to accept a completion; common misspellings are corrected when you apply.</p><div class="source-type-editor-actions"><button type="button" id="apply-source-type-btn">Apply type line</button><button type="button" id="cancel-source-type-btn" class="secondary-preference-btn">Cancel</button></div></div>
+                                        <div id="source-type-editor" class="source-type-editor hidden"><label for="source-type-input">Edit type line</label><input id="source-type-input" type="text" autocomplete="off" spellcheck="true" aria-describedby="source-type-help" placeholder="e.g. Legendary Creature — Elf Druid"><div id="source-type-suggestions" class="source-type-suggestions hidden" role="listbox" aria-label="Suggested MTG types"></div><label for="source-type-mode" class="source-meta-editor-secondary-label">Use card type as a search constraint</label><select id="source-type-mode" data-constraint-mode="types" aria-label="Type constraint mode"><option value="hard" selected>Hard filter</option><option value="prefer">Prefer</option><option value="exclude">Not include</option></select><p id="source-type-help" class="source-type-help">Hard filter requires these card types. Prefer ranks matching cards higher. Not include excludes cards with any selected type.</p><div class="source-type-editor-actions"><button type="button" id="apply-source-type-btn">Apply type line</button><button type="button" id="cancel-source-type-btn" class="secondary-preference-btn">Cancel</button></div></div>
                                     </div>
                                     <div class="source-meta-field">
                                         <p class="source-card-meta-line"><strong>Subtype:</strong> <span id="source-card-subtype">None</span> <button type="button" id="edit-source-subtype-btn" class="source-type-edit-btn" aria-expanded="false" aria-controls="source-subtype-editor">Edit</button></p>
@@ -168,8 +168,8 @@
                                             <input id="source-subtype-input" type="text" autocomplete="off" spellcheck="true" aria-describedby="source-subtype-help" placeholder="e.g. Elf Druid (blank for none)" aria-label="Source card subtype">
                                             <div id="source-subtype-suggestions" class="source-type-suggestions hidden" role="listbox" aria-label="Suggested MTG subtypes"></div>
                                             <label for="source-subtype-mode" class="source-meta-editor-secondary-label">Use as a search constraint</label>
-                                            <select id="source-subtype-mode" data-constraint-mode="subtype" aria-label="Subtype constraint mode"><option value="hard" selected>Hard filter</option><option value="prefer">Prefer in ranking</option></select>
-                                            <p id="source-subtype-help" class="source-type-help">Applying this value also adds it to search constraints. Hard filter is the default; Prefer ranks matching cards higher without excluding others.</p>
+                                            <select id="source-subtype-mode" data-constraint-mode="subtype" aria-label="Subtype constraint mode"><option value="hard" selected>Hard filter</option><option value="prefer">Prefer</option><option value="exclude">Not include</option></select>
+                                            <p id="source-subtype-help" class="source-type-help">Hard filter requires this subtype. Prefer ranks matches higher. Not include excludes cards with this subtype.</p>
                                             <div class="source-type-editor-actions"><button type="button" id="apply-source-subtype-btn">Apply</button><button type="button" id="cancel-source-subtype-btn" class="secondary-preference-btn">Cancel</button></div>
                                         </div>
                                     </div>
@@ -202,7 +202,9 @@
                                         <div id="source-set-code-editor" class="source-meta-editor hidden">
                                             <label for="source-set-code-input">Find cards from set code</label>
                                             <input id="source-set-code-input" type="text" maxlength="8" autocapitalize="characters" autocomplete="off" spellcheck="false" placeholder="e.g. lea, khm" aria-label="Set code search constraint">
-                                            <p class="source-type-help">Enter a set code to restrict results to that printing set, or clear it to remove the constraint.</p>
+                                            <label for="source-set-code-mode" class="source-meta-editor-secondary-label">Use set code as a search constraint</label>
+                                            <select id="source-set-code-mode" data-constraint-mode="set" aria-label="Set code constraint mode"><option value="hard" selected>Hard filter</option><option value="prefer">Prefer</option><option value="exclude">Not include</option></select>
+                                            <p class="source-type-help">Hard filter restricts results to this set. Prefer ranks this set higher. Not include excludes printings from this set.</p>
                                             <div class="source-type-editor-actions"><button type="button" id="apply-source-set-code-btn">Apply</button><button type="button" id="cancel-source-set-code-btn" class="secondary-preference-btn">Cancel</button></div>
                                         </div>
                                     </div>
@@ -1017,7 +1019,7 @@
         import * as transformers from "https://cdn.jsdelivr.net/npm/@xenova/transformers@2.16.0";
         window.transformers = transformers;
     </script>
-    <script src="pako.min.js?v=20261016-91"></script>
-    <script type="module" src="app.js?v=20261016-91"></script>
+    <script src="pako.min.js?v=20261016-92"></script>
+    <script type="module" src="app.js?v=20261016-92"></script>
 </body>
 </html>
