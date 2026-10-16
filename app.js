@@ -1,6 +1,6 @@
 /* ManaSearch build 20261016-89 */
 // ManaSearch deployment build marker. Bump this whenever app.js changes so cached-module issues are easy to diagnose.
-const MANASEARCH_APP_BUILD = '20261016-90';
+const MANASEARCH_APP_BUILD = '20261016-91';
 console.info(`[ManaSearch] app.js build ${MANASEARCH_APP_BUILD}`);
 
 // State Management
@@ -12892,21 +12892,22 @@ function buildScryfallConstraintParts(filters) {
     const parts = [];
     const hard = key => filters?.constraintModes?.[key] !== 'prefer';
     if (hard('types')) (filters?.types || []).forEach(type => parts.push(`type:${escapeScryfallValue(type)}`));
-    // Supertypes such as legendary are searchable through Scryfall's type: syntax.
-    (filters?.supertypes || []).forEach(supertype => parts.push(`type:${escapeScryfallValue(supertype)}`));
-    (filters?.subtypes || []).forEach(subtype => parts.push(`subtype:"${escapeScryfallValue(subtype)}"`));
+    // Supertypes and subtypes can be hard filters or ranking preferences; preferred values must
+    // not be inserted into the remote query because that would exclude non-matching cards early.
+    if (hard('supertype')) (filters?.supertypes || []).forEach(supertype => parts.push(`type:${escapeScryfallValue(supertype)}`));
+    if (hard('subtype')) (filters?.subtypes || []).forEach(subtype => parts.push(`subtype:"${escapeScryfallValue(subtype)}"`));
     (filters?.keywords || []).forEach(keyword => parts.push(`keyword:"${escapeScryfallValue(keyword)}"`));
-    if (filters?.format) parts.push(`f:${filters.format}`);
-    if (filters?.rarity) parts.push(`r:${filters.rarity}`);
+    if (filters?.format && hard('format')) parts.push(`f:${filters.format}`);
+    if (filters?.rarity && hard('rarity')) parts.push(`r:${filters.rarity}`);
     if (filters?.identity && hard('identity')) parts.push(`identity:${filters.identity}`);
     if (filters?.colors && hard('colors')) parts.push(`c:${filters.colors}`);
     const cmcQuery = hard('cmc') ? comparisonFilterToScryfallQuery('cmc', parseComparisonFilter(filters?.cmc)) : null;
     if (cmcQuery) parts.push(cmcQuery);
-    const powerQuery = comparisonFilterToScryfallQuery('pow', parseComparisonFilter(filters?.power));
+    const powerQuery = hard('power') ? comparisonFilterToScryfallQuery('pow', parseComparisonFilter(filters?.power)) : null;
     if (powerQuery) parts.push(powerQuery);
-    const toughnessQuery = comparisonFilterToScryfallQuery('tou', parseComparisonFilter(filters?.toughness));
+    const toughnessQuery = hard('toughness') ? comparisonFilterToScryfallQuery('tou', parseComparisonFilter(filters?.toughness)) : null;
     if (toughnessQuery) parts.push(toughnessQuery);
-    if (filters?.set) parts.push(`e:${escapeScryfallValue(filters.set)}`);
+    if (filters?.set && hard('set')) parts.push(`e:${escapeScryfallValue(filters.set)}`);
     if (filters?.extraOracle) parts.push(`o:"${escapeScryfallValue(filters.extraOracle)}"`);
     return parts;
 }
@@ -12982,24 +12983,25 @@ function initMultiConstraintFields(updateBadge) {
 
 function explainFilterFailures(card, filters, broadFallbackFilters) {
     const failures = [];
+    const hard = key => filters?.constraintModes?.[key] !== 'prefer';
     if (!card) return [{ field: 'card', expected: 'a card object', actual: 'null' }];
 
     const cardOracle = (card.oracle_text || (card.card_faces ? card.card_faces.map(f => f.oracle_text).join(' ') : '')).toLowerCase();
 
     const typeLineParts = getTypeLineParts(card);
-    for (const type of (filters.types || [])) {
+    if (hard('types')) for (const type of (filters.types || [])) {
         if (!hasTypeLineToken(typeLineParts.left, type)) failures.push({ field: 'type', expected: type, actual: card.type_line || '(none)' });
     }
-    for (const supertype of (filters.supertypes || [])) {
+    if (hard('supertype')) for (const supertype of (filters.supertypes || [])) {
         if (!hasTypeLineToken(typeLineParts.left, supertype)) failures.push({ field: 'supertype', expected: supertype, actual: card.type_line || '(none)' });
     }
-    for (const subtype of (filters.subtypes || [])) {
+    if (hard('subtype')) for (const subtype of (filters.subtypes || [])) {
         if (!hasTypeLineToken(typeLineParts.subtypes, subtype)) failures.push({ field: 'subtype', expected: subtype, actual: card.type_line || '(none)' });
     }
     for (const keyword of (filters.keywords || [])) {
         if (!cardHasKeyword(card, keyword)) failures.push({ field: 'keyword', expected: keyword, actual: (card.keywords || []).join(', ') || '(none)' });
     }
-    if (filters.format && card.legalities) {
+    if (filters.format && hard('format') && card.legalities) {
         const formatKey = filters.format.toLowerCase();
         const status = String(card.legalities[formatKey] || '').toLowerCase();
         // Restricted cards remain playable in their format (with a deck-building limit), so they
@@ -13008,7 +13010,7 @@ function explainFilterFailures(card, filters, broadFallbackFilters) {
             failures.push({ field: 'format', expected: `legal in ${filters.format}`, actual: card.legalities[formatKey] || '(unknown)' });
         }
     }
-    if (filters.rarity && (card.rarity || '').toLowerCase() !== filters.rarity.toLowerCase()) {
+    if (filters.rarity && hard('rarity') && (card.rarity || '').toLowerCase() !== filters.rarity.toLowerCase()) {
         failures.push({ field: 'rarity', expected: filters.rarity, actual: card.rarity || '(none)' });
     }
     if (filters.identity && hard('identity')) {
@@ -13033,19 +13035,19 @@ function explainFilterFailures(card, filters, broadFallbackFilters) {
             failures.push({ field: 'cmc', expected: String(filters.cmc), actual: String(card.cmc ?? '(none)') });
         }
     }
-    if (filters.power) {
+    if (filters.power && hard('power')) {
         const powerFilter = parseComparisonFilter(filters.power);
         if (powerFilter && !matchesComparisonFilter(getComparableCardField(card, 'power'), powerFilter)) {
             failures.push({ field: 'power', expected: String(filters.power), actual: card.power ?? '(none)' });
         }
     }
-    if (filters.toughness) {
+    if (filters.toughness && hard('toughness')) {
         const toughnessFilter = parseComparisonFilter(filters.toughness);
         if (toughnessFilter && !matchesComparisonFilter(getComparableCardField(card, 'toughness'), toughnessFilter)) {
             failures.push({ field: 'toughness', expected: String(filters.toughness), actual: card.toughness ?? '(none)' });
         }
     }
-    if (filters.set && (card.set || '').toLowerCase() !== filters.set.toLowerCase()) {
+    if (filters.set && hard('set') && (card.set || '').toLowerCase() !== filters.set.toLowerCase()) {
         failures.push({ field: 'set', expected: filters.set, actual: card.set || '(none)' });
     }
     if (filters.extraOracle && !cardOracle.includes(filters.extraOracle.toLowerCase())) {
@@ -13078,21 +13080,21 @@ function matchesActiveFilters(card, filters, broadFallbackFilters) {
     const typeLineParts = getTypeLineParts(card);
     const hard = key => filters?.constraintModes?.[key] !== 'prefer';
     if (hard('types') && (filters.types || []).some(type => !hasTypeLineToken(typeLineParts.left, type))) return false;
-    if ((filters.supertypes || []).some(supertype => !hasTypeLineToken(typeLineParts.left, supertype))) return false;
-    if ((filters.subtypes || []).some(subtype => !hasTypeLineToken(typeLineParts.subtypes, subtype))) return false;
+    if (hard('supertype') && (filters.supertypes || []).some(supertype => !hasTypeLineToken(typeLineParts.left, supertype))) return false;
+    if (hard('subtype') && (filters.subtypes || []).some(subtype => !hasTypeLineToken(typeLineParts.subtypes, subtype))) return false;
     if ((filters.keywords || []).some(keyword => !cardHasKeyword(card, keyword))) return false;
 
-    if (filters.format && card.legalities) {
+    if (filters.format && hard('format') && card.legalities) {
         const formatLower = filters.format.toLowerCase();
         const legality = String(card.legalities[formatLower] || '').toLowerCase();
         if (legality !== 'legal' && legality !== 'restricted') return false;
     }
 
-    if (filters.rarity) {
+    if (filters.rarity && hard('rarity')) {
         if ((card.rarity || '').toLowerCase() !== filters.rarity.toLowerCase()) return false;
     }
 
-    if (filters.identity) {
+    if (filters.identity && hard('identity')) {
         const allowedColors = filters.identity.toLowerCase().replace(/[^wubrgc]/g, '').split('');
         const cardIdentity = (card.color_identity || []).map(c => c.toLowerCase());
         for (const color of cardIdentity) {
@@ -13100,7 +13102,7 @@ function matchesActiveFilters(card, filters, broadFallbackFilters) {
         }
     }
 
-    if (filters.colors) {
+    if (filters.colors && hard('colors')) {
         const requiredColors = filters.colors.toLowerCase().replace(/[^wubrgc]/g, '').split('').sort().join('');
         const cardColors = (card.colors || []).map(c => c.toLowerCase()).sort().join('');
         // In Exact Colors, C means exactly colorless. It must not be treated as a fifth/sixth
@@ -13109,24 +13111,24 @@ function matchesActiveFilters(card, filters, broadFallbackFilters) {
         if (!matchesColorless && cardColors !== requiredColors) return false;
     }
 
-    if (filters.cmc) {
+    if (filters.cmc && hard('cmc')) {
         const cmcFilter = parseComparisonFilter(filters.cmc);
         if (!cmcFilter || !matchesComparisonFilter(card.cmc, cmcFilter)) return false;
     }
 
-    if (filters.power) {
+    if (filters.power && hard('power')) {
         const powerFilter = parseComparisonFilter(filters.power);
         // Invalid filter syntax should fail closed, matching CMC behavior. A dynamic/non-numeric
         // card value also cannot satisfy a numeric comparison.
         if (!powerFilter || !matchesComparisonFilter(getComparableCardField(card, 'power'), powerFilter)) return false;
     }
 
-    if (filters.toughness) {
+    if (filters.toughness && hard('toughness')) {
         const toughnessFilter = parseComparisonFilter(filters.toughness);
         if (!toughnessFilter || !matchesComparisonFilter(getComparableCardField(card, 'toughness'), toughnessFilter)) return false;
     }
 
-    if (filters.set) {
+    if (filters.set && hard('set')) {
         if ((card.set || '').toLowerCase() !== filters.set.toLowerCase()) return false;
     }
 
@@ -13160,6 +13162,29 @@ function calculateConstraintPreferenceBonus(card, filters) {
     if (modes.types === 'prefer' && (filters.types || []).length) {
         const left = getTypeLineParts(card).left;
         checks.push((filters.types || []).every(type => hasTypeLineToken(left, type)));
+    }
+    if (modes.supertype === 'prefer' && (filters.supertypes || []).length) {
+        const left = getTypeLineParts(card).left;
+        checks.push((filters.supertypes || []).every(supertype => hasTypeLineToken(left, supertype)));
+    }
+    if (modes.subtype === 'prefer' && (filters.subtypes || []).length) {
+        const subtypes = getTypeLineParts(card).subtypes;
+        checks.push((filters.subtypes || []).every(subtype => hasTypeLineToken(subtypes, subtype)));
+    }
+    if (modes.format === 'prefer' && filters.format) {
+        const status = String(card?.legalities?.[String(filters.format).toLowerCase()] || '').toLowerCase();
+        checks.push(status === 'legal' || status === 'restricted');
+    }
+    if (modes.set === 'prefer' && filters.set) {
+        checks.push(String(card?.set || '').toLowerCase() === String(filters.set).toLowerCase());
+    }
+    if (modes.power === 'prefer' && filters.power) {
+        const parsed = parseComparisonFilter(filters.power);
+        checks.push(Boolean(parsed && matchesComparisonFilter(getComparableCardField(card, 'power'), parsed)));
+    }
+    if (modes.toughness === 'prefer' && filters.toughness) {
+        const parsed = parseComparisonFilter(filters.toughness);
+        checks.push(Boolean(parsed && matchesComparisonFilter(getComparableCardField(card, 'toughness'), parsed)));
     }
     if (modes.identity === 'prefer' && filters.identity) {
         const allowed = String(filters.identity).toLowerCase().replace(/[^wubrgc]/g, '').split('');
@@ -17405,7 +17430,8 @@ function initApp() {
                 syncConstraintChipField(id, `${id}-chips`);
             }
         }
-        document.querySelectorAll('#card-constraints-modal .color-pip.active').forEach(pip => pip.classList.remove('active'));
+        document.querySelectorAll('[data-constraint-mode]').forEach(mode => { mode.value = 'hard'; mode.dispatchEvent(new Event('change', { bubbles: true })); });
+        document.querySelectorAll('#card-constraints-modal .color-pip.active, #source-card-loaded .color-pip.active').forEach(pip => pip.classList.remove('active'));
         document.querySelectorAll('#card-constraints-modal .constraint-chips').forEach(chips => chips.replaceChildren());
         const autofillStatus = document.getElementById('constraint-autofill-status');
         if (autofillStatus) { autofillStatus.textContent = ''; autofillStatus.classList.add('hidden'); }
@@ -20665,6 +20691,16 @@ function correctSourceMetadataWords(value, vocabulary) {
 
 function initSourceMetadataEditors() {
     const byId = id => document.getElementById(id);
+    const setConstraintField = (id, value, { list = false } = {}) => {
+        const field = byId(id);
+        if (!field) return false;
+        field.value = String(value ?? '').trim();
+        field.dispatchEvent(new Event('input', { bubbles: true }));
+        if (field.tagName === 'SELECT') field.dispatchEvent(new Event('change', { bubbles: true }));
+        if (list && typeof syncConstraintChipField === 'function') syncConstraintChipField(id, `${id}-chips`);
+        if (typeof updateCardConstraintsBadge === 'function') updateCardConstraintsBadge();
+        return true;
+    };
     const bindEditor = ({ buttonId, editorId, inputId, applyId, cancelId, readValue, saveValue, allowBlank = true,
         suggestionsId = null, getWords = null, normalizeBeforeSave = null, onOpen = null }) => {
         const button = byId(buttonId), editor = byId(editorId), input = byId(inputId), apply = byId(applyId), cancel = byId(cancelId);
@@ -20783,9 +20819,12 @@ function initSourceMetadataEditors() {
         normalizeBeforeSave: raw => correctSourceMetadataWords(raw, SOURCE_CARD_SUPERTYPE_WORDS),
         readValue: () => splitSourceCardTypeLine(getSourceCardTypeLine()).supertypes.join(' '),
         saveValue: raw => {
+            const supertypeValues = cleanSourceSupertypeInput(raw);
             const parsed = splitSourceCardTypeLine(getSourceCardTypeLine());
-            const next = composeSourceCardTypeLine({ supertypes: cleanSourceSupertypeInput(raw), types: parsed.types, subtypes: parsed.subtypes });
-            return applySourceCardTypeLine(next);
+            const next = composeSourceCardTypeLine({ supertypes: supertypeValues, types: parsed.types, subtypes: parsed.subtypes });
+            if (!applySourceCardTypeLine(next)) return false;
+            setConstraintField('filter-supertype', supertypeValues.join('|'), { list: true });
+            return true;
         }
     });
     bindEditor({
@@ -20798,7 +20837,9 @@ function initSourceMetadataEditors() {
             const parsed = splitSourceCardTypeLine(getSourceCardTypeLine());
             const value = /^none$/i.test(String(raw || '').trim()) ? '' : String(raw || '').trim().replace(/\s+/g, ' ');
             const next = composeSourceCardTypeLine({ supertypes: parsed.supertypes, types: parsed.types, subtypes: value });
-            return applySourceCardTypeLine(next);
+            if (!applySourceCardTypeLine(next)) return false;
+            setConstraintField('filter-subtype', value, { list: true });
+            return true;
         }
     });
     bindEditor({
@@ -20817,6 +20858,85 @@ function initSourceMetadataEditors() {
             return true;
         }
     });
+    bindEditor({
+        buttonId: 'edit-source-legality-constraint-btn', editorId: 'source-legality-editor', inputId: 'source-format-input',
+        applyId: 'apply-source-format-btn', cancelId: 'cancel-source-format-btn',
+        readValue: () => String(byId('filter-format')?.value || ''),
+        saveValue: raw => setConstraintField('filter-format', String(raw || '').toLowerCase())
+    });
+    bindEditor({
+        buttonId: 'edit-source-set-code-btn', editorId: 'source-set-code-editor', inputId: 'source-set-code-input',
+        applyId: 'apply-source-set-code-btn', cancelId: 'cancel-source-set-code-btn',
+        readValue: () => String(byId('filter-set')?.value || currentSourceCard?.set || currentSourceCard?.set_code || '').trim(),
+        saveValue: raw => {
+            const value = String(raw || '').trim().toLowerCase().replace(/\s+/g, '');
+            if (value && !/^[a-z0-9]{2,8}$/.test(value)) {
+                byId('source-set-code-input')?.setAttribute('aria-invalid', 'true');
+                return false;
+            }
+            byId('source-set-code-input')?.removeAttribute('aria-invalid');
+            return setConstraintField('filter-set', value);
+        }
+    });
+    const bindStatConstraintEditor = (field, buttonId, editorId, inputId, comparisonId, applyId, cancelId, helpId) => {
+        bindEditor({
+            buttonId, editorId, inputId, applyId, cancelId, allowBlank: true,
+            readValue: () => {
+                const face = currentSourceCard?.card_faces?.[currentSourceCardFaceIndex] || currentSourceCard?.card_faces?.[0];
+                return String(face?.[field] ?? currentSourceCard?.[field] ?? '').trim();
+            },
+            onOpen: () => {
+                const activeFilter = parseComparisonFilter(byId(`filter-${field}`)?.value || '');
+                const comparison = byId(comparisonId);
+                const input = byId(inputId);
+                const help = byId(helpId);
+                if (comparison) comparison.value = activeFilter?.operator || 'none';
+                if (input) {
+                    if (activeFilter) input.value = String(activeFilter.value);
+                    else {
+                        const face = currentSourceCard?.card_faces?.[currentSourceCardFaceIndex] || currentSourceCard?.card_faces?.[0];
+                        const sourceValue = String(face?.[field] ?? currentSourceCard?.[field] ?? '').trim();
+                        input.value = /^-?\d+(?:\.\d+)?$/.test(sourceValue) ? sourceValue : '';
+                    }
+                    input.removeAttribute('aria-invalid');
+                }
+                if (help) {
+                    help.removeAttribute('role');
+                    help.textContent = `Choose a comparison to use this value as a search constraint. Variable ${field} such as * cannot be used as a numeric value.`;
+                }
+            },
+            saveValue: raw => {
+                const comparator = byId(comparisonId)?.value || 'none';
+                const fieldInput = byId(inputId);
+                const help = byId(helpId);
+                if (comparator === 'none') {
+                    fieldInput?.removeAttribute('aria-invalid');
+                    help?.removeAttribute('role');
+                    return setConstraintField(`filter-${field}`, '');
+                }
+                const normalized = String(raw ?? '').trim();
+                if (!/^-?\d+(?:\.\d+)?$/.test(normalized) || !Number.isFinite(Number(normalized))) {
+                    fieldInput?.setAttribute('aria-invalid', 'true');
+                    if (help) {
+                        help.setAttribute('role', 'alert');
+                        help.textContent = `Enter a numeric ${field} value before applying this comparison.`;
+                    }
+                    if (fieldInput) fieldInput.focus();
+                    return false;
+                }
+                fieldInput?.removeAttribute('aria-invalid');
+                if (help) {
+                    help.removeAttribute('role');
+                    help.textContent = `Choose a comparison to use this value as a search constraint. Variable ${field} such as * cannot be used as a numeric value.`;
+                }
+                const value = String(Number(normalized));
+                return setConstraintField(`filter-${field}`, `${comparator}${value}`);
+            }
+        });
+    };
+    bindStatConstraintEditor('power', 'edit-source-power-btn', 'source-power-editor', 'source-power-input', 'source-power-comparison', 'apply-source-power-btn', 'cancel-source-power-btn', 'source-power-help');
+    bindStatConstraintEditor('toughness', 'edit-source-toughness-btn', 'source-toughness-editor', 'source-toughness-input', 'source-toughness-comparison', 'apply-source-toughness-btn', 'cancel-source-toughness-btn', 'source-toughness-help');
+
     const sourceLegalityButton = byId('source-card-legality-btn');
     if (sourceLegalityButton && !sourceLegalityButton.dataset.bound) {
         sourceLegalityButton.dataset.bound = 'true';

@@ -7514,3 +7514,11 @@ body.light-theme .card-actions .edhrec-link-btn:hover {
         font-size: 10.5px;
     }
 }
+
+
+/* v91: make the source-card metadata editors' search-constraint controls clearly usable. */
+#source-card-loaded .source-meta-editor select[data-constraint-mode] { margin-bottom: 4px; }
+#source-card-loaded .source-meta-editor input[aria-invalid="true"] { border-color: var(--danger-color, #ef4444); outline-color: var(--danger-color, #ef4444); }
+#source-card-loaded .source-meta-editor .source-type-help[role="alert"] { color: var(--danger-color, #ef4444); }
+#source-card-loaded .source-card-stats-row .source-meta-field { flex: 0 1 auto; }
+#source-card-loaded .source-card-extra-meta-row .source-meta-editor { min-width: min(100%, 260px); }
