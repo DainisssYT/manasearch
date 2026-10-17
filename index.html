@@ -5,7 +5,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>ManaSearch</title>
-    <link rel="stylesheet" href="style.css?v=20261017-99">
+    <link rel="stylesheet" href="style.css?v=20261017-100">
 </head>
 <body>
     <header class="site-header">
@@ -130,16 +130,14 @@
                                         <div id="source-mana-value-editor" class="source-meta-editor hidden">
                                             <label for="source-mana-value-input">Edit mana value</label>
                                             <input id="source-mana-value-input" type="number" min="0" max="999" step="any" inputmode="decimal" required aria-label="Source card mana value">
-                                            <label for="source-mana-value-comparison" class="source-meta-editor-secondary-label">Find cards with mana value</label>
-                                            <select id="source-mana-value-comparison" aria-label="Mana value comparison">
-                                                <option value="none">Don't filter by mana value</option>
-                                                <option value="&lt;">Less than</option>
-                                                <option value="=">Equal to</option>
-                                                <option value="&gt;">More than</option>
-                                                <option value="&lt;=">Less than or equal to</option>
-                                                <option value="&gt;=">More than or equal to</option>
+                                            <label class="source-meta-editor-secondary-label">Find cards with mana value</label>
+                                            <div class="source-comparison-radio-group" role="radiogroup" aria-label="Mana value comparison" data-comparison-radios-for="source-mana-value-comparison"><label class="source-comparison-radio" title="No comparison"><input type="radio" name="source-mana-value-comparison-radio" value="none" aria-label="No comparison" checked><span aria-hidden="true">—</span></label><label class="source-comparison-radio" title="Less than"><input type="radio" name="source-mana-value-comparison-radio" value="&lt;" aria-label="Less than"><span aria-hidden="true">&lt;</span></label><label class="source-comparison-radio" title="Equal to"><input type="radio" name="source-mana-value-comparison-radio" value="=" aria-label="Equal to"><span aria-hidden="true">=</span></label><label class="source-comparison-radio" title="Greater than"><input type="radio" name="source-mana-value-comparison-radio" value="&gt;" aria-label="Greater than"><span aria-hidden="true">&gt;</span></label><label class="source-comparison-radio" title="Less than or equal to"><input type="radio" name="source-mana-value-comparison-radio" value="&lt;=" aria-label="Less than or equal to"><span aria-hidden="true">≤</span></label><label class="source-comparison-radio" title="Greater than or equal to"><input type="radio" name="source-mana-value-comparison-radio" value="&gt;=" aria-label="Greater than or equal to"><span aria-hidden="true">≥</span></label><label class="source-comparison-radio" title="Not equal to"><input type="radio" name="source-mana-value-comparison-radio" value="!=" aria-label="Not equal to"><span aria-hidden="true">≠</span></label></div>
+                                            <select id="source-mana-value-comparison" class="source-comparison-native-select" aria-label="Mana value comparison" tabindex="-1" aria-hidden="true">
+                                                <option value="none">Don't filter by mana value</option><option value="&lt;">Less than</option><option value="=">Equal to</option><option value="&gt;">More than</option><option value="&lt;=">Less than or equal to</option><option value="&gt;=">More than or equal to</option><option value="!=">Not equal to</option>
                                             </select>
-                                            <p class="source-type-help">Choosing a comparison applies the same rule to search results. Leave it unfiltered to keep all mana values.</p>
+                                            <label for="source-mana-value-mode" class="source-meta-editor-secondary-label">Apply this constraint as</label>
+                                            <select id="source-mana-value-mode" data-constraint-mode="cmc" aria-label="Mana value constraint mode"><option value="hard">Hard filter</option><option value="prefer" selected>Prefer</option><option value="exclude">Not include</option></select>
+                                            <p class="source-type-help">Choose a comparison symbol, then choose whether to require, prefer, or exclude cards that match it.</p>
                                             <div class="source-type-editor-actions"><button type="button" id="apply-source-mana-value-btn">Apply</button><button type="button" id="cancel-source-mana-value-btn" class="secondary-preference-btn">Cancel</button></div>
                                         </div>
                                     </div>
@@ -159,7 +157,7 @@
                                     </div>
                                     <div class="source-meta-field source-meta-field-type">
                                         <p class="source-card-meta-line source-type-row"><strong>Type:</strong> <span id="source-card-type" class="selectable-text type-line-selectable" title="Select a card type to highlight it"></span> <button type="button" id="edit-source-type-btn" class="source-type-edit-btn" aria-expanded="false" aria-controls="source-type-editor">Edit</button></p>
-                                        <div id="source-type-editor" class="source-type-editor hidden"><label for="source-type-input">Edit type line</label><input id="source-type-input" type="text" autocomplete="off" spellcheck="true" aria-describedby="source-type-help" placeholder="e.g. Legendary Creature — Elf Druid"><div id="source-type-suggestions" class="source-type-suggestions hidden" role="listbox" aria-label="Suggested MTG types"></div><label for="source-type-mode" class="source-meta-editor-secondary-label">Use card type as a search constraint</label><select id="source-type-mode" data-constraint-mode="types" aria-label="Type constraint mode"><option value="hard">Hard filter</option><option value="prefer" selected>Prefer</option><option value="exclude">Not include</option></select><p id="source-type-help" class="source-type-help">Hard filter requires these card types. Prefer ranks matching cards higher. Not include excludes cards with any selected type.</p><div class="source-type-editor-actions"><button type="button" id="apply-source-type-btn">Apply type line</button><button type="button" id="cancel-source-type-btn" class="secondary-preference-btn">Cancel</button></div></div>
+                                        <div id="source-type-editor" class="source-type-editor hidden"><label for="source-type-input">Edit card type</label><input id="source-type-input" type="text" autocomplete="off" spellcheck="true" aria-describedby="source-type-help" placeholder="e.g. Creature, Artifact, Enchantment"><div id="source-type-suggestions" class="source-type-suggestions hidden" role="listbox" aria-label="Suggested MTG types"></div><label for="source-type-mode" class="source-meta-editor-secondary-label">Use card type as a search constraint</label><select id="source-type-mode" data-constraint-mode="types" aria-label="Type constraint mode"><option value="hard">Hard filter</option><option value="prefer" selected>Prefer</option><option value="exclude">Not include</option></select><p id="source-type-help" class="source-type-help">Edit card types only. Supertypes and subtypes are kept in their own fields. Hard filter requires these card types; Prefer ranks matches higher; Not include excludes matches.</p><div class="source-type-editor-actions"><button type="button" id="apply-source-type-btn">Apply card types</button><button type="button" id="cancel-source-type-btn" class="secondary-preference-btn">Cancel</button></div></div>
                                     </div>
                                     <div class="source-meta-field">
                                         <p class="source-card-meta-line"><strong>Subtype:</strong> <span id="source-card-subtype">None</span> <button type="button" id="edit-source-subtype-btn" class="source-type-edit-btn" aria-expanded="false" aria-controls="source-subtype-editor">Edit</button></p>
@@ -178,8 +176,11 @@
                                     <div class="source-meta-field">
                                         <p class="source-card-meta-line"><strong>Rarity:</strong> <span id="source-card-rarity">None</span> <button type="button" id="edit-source-rarity-btn" class="source-type-edit-btn" aria-expanded="false" aria-controls="source-rarity-editor">Edit</button></p>
                                         <div id="source-rarity-editor" class="source-meta-editor hidden">
-                                            <label for="source-rarity-input">Edit rarity</label>
-                                            <select id="source-rarity-input" aria-label="Source card rarity"><option value="common">Common</option><option value="uncommon">Uncommon</option><option value="rare">Rare</option><option value="mythic">Mythic</option><option value="special">Special</option><option value="bonus">Bonus</option><option value="unknown">None</option></select>
+                                            <label for="source-rarity-input">Card rarity</label>
+                                            <select id="source-rarity-input" aria-label="Source card rarity"><option value="common">Common</option><option value="uncommon">Uncommon</option><option value="rare">Rare</option><option value="mythic">Mythic</option><option value="special">Special</option><option value="bonus">Bonus</option></select>
+                                            <label for="source-rarity-mode" class="source-meta-editor-secondary-label">Apply rarity as</label>
+                                            <select id="source-rarity-mode" data-constraint-mode="rarity" aria-label="Rarity constraint mode"><option value="hard">Hard filter</option><option value="prefer" selected>Prefer</option><option value="exclude">Not include</option></select>
+                                            <p class="source-type-help">The selected rarity is used for source metadata and as a search constraint, using the mode above.</p>
                                             <div class="source-type-editor-actions"><button type="button" id="apply-source-rarity-btn">Apply</button><button type="button" id="cancel-source-rarity-btn" class="secondary-preference-btn">Cancel</button></div>
                                         </div>
                                     </div>
@@ -215,9 +216,12 @@
                                         <div id="source-power-editor" class="source-meta-editor hidden">
                                             <label for="source-power-input">Power value</label>
                                             <input id="source-power-input" type="number" min="-999" max="999" step="any" inputmode="decimal" aria-label="Power comparison value">
-                                            <label for="source-power-comparison" class="source-meta-editor-secondary-label">Find cards with power</label>
-                                            <select id="source-power-comparison" aria-label="Power comparison"><option value="none">Don't filter by power</option><option value="&lt;">Less than</option><option value="=">Equal to</option><option value="&gt;">More than</option><option value="&lt;=">Less than or equal to</option><option value="&gt;=">More than or equal to</option></select>
-                                            <p id="source-power-help" class="source-type-help">Choose a comparison to use this value as a search constraint. Variable power such as * cannot be used as a numeric value.</p>
+                                            <label class="source-meta-editor-secondary-label">Find cards with power</label>
+                                            <div class="source-comparison-radio-group" role="radiogroup" aria-label="Power comparison" data-comparison-radios-for="source-power-comparison"><label class="source-comparison-radio" title="No comparison"><input type="radio" name="source-power-comparison-radio" value="none" aria-label="No comparison" checked><span aria-hidden="true">—</span></label><label class="source-comparison-radio" title="Less than"><input type="radio" name="source-power-comparison-radio" value="&lt;" aria-label="Less than"><span aria-hidden="true">&lt;</span></label><label class="source-comparison-radio" title="Equal to"><input type="radio" name="source-power-comparison-radio" value="=" aria-label="Equal to"><span aria-hidden="true">=</span></label><label class="source-comparison-radio" title="Greater than"><input type="radio" name="source-power-comparison-radio" value="&gt;" aria-label="Greater than"><span aria-hidden="true">&gt;</span></label><label class="source-comparison-radio" title="Less than or equal to"><input type="radio" name="source-power-comparison-radio" value="&lt;=" aria-label="Less than or equal to"><span aria-hidden="true">≤</span></label><label class="source-comparison-radio" title="Greater than or equal to"><input type="radio" name="source-power-comparison-radio" value="&gt;=" aria-label="Greater than or equal to"><span aria-hidden="true">≥</span></label><label class="source-comparison-radio" title="Not equal to"><input type="radio" name="source-power-comparison-radio" value="!=" aria-label="Not equal to"><span aria-hidden="true">≠</span></label></div>
+                                            <select id="source-power-comparison" class="source-comparison-native-select" aria-label="Power comparison" tabindex="-1" aria-hidden="true"><option value="none">Don't filter by power</option><option value="&lt;">Less than</option><option value="=">Equal to</option><option value="&gt;">More than</option><option value="&lt;=">Less than or equal to</option><option value="&gt;=">More than or equal to</option><option value="!=">Not equal to</option></select>
+                                            <label for="source-power-mode" class="source-meta-editor-secondary-label">Apply this constraint as</label>
+                                            <select id="source-power-mode" data-constraint-mode="power" aria-label="Power constraint mode"><option value="hard">Hard filter</option><option value="prefer" selected>Prefer</option><option value="exclude">Not include</option></select>
+                                            <p id="source-power-help" class="source-type-help">Choose a comparison symbol and mode. Variable power such as * cannot be used as a numeric value.</p>
                                             <div class="source-type-editor-actions"><button type="button" id="apply-source-power-btn">Apply</button><button type="button" id="cancel-source-power-btn" class="secondary-preference-btn">Cancel</button></div>
                                         </div>
                                     </div>
@@ -226,9 +230,12 @@
                                         <div id="source-toughness-editor" class="source-meta-editor hidden">
                                             <label for="source-toughness-input">Toughness value</label>
                                             <input id="source-toughness-input" type="number" min="-999" max="999" step="any" inputmode="decimal" aria-label="Toughness comparison value">
-                                            <label for="source-toughness-comparison" class="source-meta-editor-secondary-label">Find cards with toughness</label>
-                                            <select id="source-toughness-comparison" aria-label="Toughness comparison"><option value="none">Don't filter by toughness</option><option value="&lt;">Less than</option><option value="=">Equal to</option><option value="&gt;">More than</option><option value="&lt;=">Less than or equal to</option><option value="&gt;=">More than or equal to</option></select>
-                                            <p id="source-toughness-help" class="source-type-help">Choose a comparison to use this value as a search constraint. Variable toughness such as * cannot be used as a numeric value.</p>
+                                            <label class="source-meta-editor-secondary-label">Find cards with toughness</label>
+                                            <div class="source-comparison-radio-group" role="radiogroup" aria-label="Toughness comparison" data-comparison-radios-for="source-toughness-comparison"><label class="source-comparison-radio" title="No comparison"><input type="radio" name="source-toughness-comparison-radio" value="none" aria-label="No comparison" checked><span aria-hidden="true">—</span></label><label class="source-comparison-radio" title="Less than"><input type="radio" name="source-toughness-comparison-radio" value="&lt;" aria-label="Less than"><span aria-hidden="true">&lt;</span></label><label class="source-comparison-radio" title="Equal to"><input type="radio" name="source-toughness-comparison-radio" value="=" aria-label="Equal to"><span aria-hidden="true">=</span></label><label class="source-comparison-radio" title="Greater than"><input type="radio" name="source-toughness-comparison-radio" value="&gt;" aria-label="Greater than"><span aria-hidden="true">&gt;</span></label><label class="source-comparison-radio" title="Less than or equal to"><input type="radio" name="source-toughness-comparison-radio" value="&lt;=" aria-label="Less than or equal to"><span aria-hidden="true">≤</span></label><label class="source-comparison-radio" title="Greater than or equal to"><input type="radio" name="source-toughness-comparison-radio" value="&gt;=" aria-label="Greater than or equal to"><span aria-hidden="true">≥</span></label><label class="source-comparison-radio" title="Not equal to"><input type="radio" name="source-toughness-comparison-radio" value="!=" aria-label="Not equal to"><span aria-hidden="true">≠</span></label></div>
+                                            <select id="source-toughness-comparison" class="source-comparison-native-select" aria-label="Toughness comparison" tabindex="-1" aria-hidden="true"><option value="none">Don't filter by toughness</option><option value="&lt;">Less than</option><option value="=">Equal to</option><option value="&gt;">More than</option><option value="&lt;=">Less than or equal to</option><option value="&gt;=">More than or equal to</option><option value="!=">Not equal to</option></select>
+                                            <label for="source-toughness-mode" class="source-meta-editor-secondary-label">Apply this constraint as</label>
+                                            <select id="source-toughness-mode" data-constraint-mode="toughness" aria-label="Toughness constraint mode"><option value="hard">Hard filter</option><option value="prefer" selected>Prefer</option><option value="exclude">Not include</option></select>
+                                            <p id="source-toughness-help" class="source-type-help">Choose a comparison symbol and mode. Variable toughness such as * cannot be used as a numeric value.</p>
                                             <div class="source-type-editor-actions"><button type="button" id="apply-source-toughness-btn">Apply</button><button type="button" id="cancel-source-toughness-btn" class="secondary-preference-btn">Cancel</button></div>
                                         </div>
                                     </div>
@@ -766,6 +773,8 @@
                             <option value="uncommon">Uncommon</option>
                             <option value="rare">Rare</option>
                             <option value="mythic">Mythic</option>
+                            <option value="special">Special</option>
+                            <option value="bonus">Bonus</option>
                         </select>
                     </div>
                     <div class="filter-group">
@@ -1019,7 +1028,7 @@
         import * as transformers from "https://cdn.jsdelivr.net/npm/@xenova/transformers@2.16.0";
         window.transformers = transformers;
     </script>
-    <script src="pako.min.js?v=20261017-99"></script>
-    <script type="module" src="app.js?v=20261017-99"></script>
+    <script src="pako.min.js?v=20261017-100"></script>
+    <script type="module" src="app.js?v=20261017-100"></script>
 </body>
 </html>

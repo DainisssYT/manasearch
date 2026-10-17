@@ -1,6 +1,6 @@
-/* ManaSearch build 20261017-99 */
+/* ManaSearch build 20261017-100 */
 // ManaSearch deployment build marker. Bump this whenever app.js changes so cached-module issues are easy to diagnose.
-const MANASEARCH_APP_BUILD = '20261017-99';
+const MANASEARCH_APP_BUILD = '20261017-100';
 console.info(`[ManaSearch] app.js build ${MANASEARCH_APP_BUILD}`);
 
 // State Management
@@ -12529,7 +12529,7 @@ function runManaSearchMasteryEdgeCaseRegressionSuite() {
     const alaundoText = 'Tap: Draw a card, then exile a card from your hand and put a number of time counters on it equal to its mana value.';
     const alaundo = parseMTGEffect(alaundoText).filter(effect => effect && effect.canonical);
     const handExile = alaundo.find(effect => /\bexile\b/i.test(String(effect.raw || '')) && /\bfrom your hand\b/i.test(String(effect.raw || effect.parentRuleText || '')));
-    check('Alaundo hand exile is not battlefield removal', Boolean(handExile) && handExile.canonical.function !== 'exile_removal' && handExile.canonical.params.from === 'hand', JSON.stringify(alaundo.map(effect => ({fn:effect.canonical.function,from:effect.canonical.params.from,to:effect.canonical.params.to,raw:effect.raw}))));
+    check('Alaundo hand exile preserves source zone', Boolean(handExile) && handExile.canonical.function !== 'exile_removal' && handExile.canonical.params.from === 'hand', JSON.stringify(alaundo.map(effect => ({fn:effect.canonical.function,from:effect.canonical.params.from,to:effect.canonical.params.to,raw:effect.raw}))));
     check('Alaundo hand-exile receives a distinct non-removal signature', classifyZoneTransitionIntent('Exile a card from your hand and put time counters on it.') === 'hand_exile', classifyZoneTransitionIntent('Exile a card from your hand and put time counters on it.'));
     check('Alaundo hand exile is strongly rejected as battlefield removal', computeMechanicalEffectNodeComparison({function:'zone_change', outcome:'card_changes_zone', from:'hand', to:'exile', action:'exile', object:'card'}, {function:'exile_removal', outcome:'permanent_exiled', from:'battlefield', to:'exile', action:'exile', object:'permanent'}).score <= 0.02, JSON.stringify(computeMechanicalEffectNodeComparison({function:'zone_change', outcome:'card_changes_zone', from:'hand', to:'exile', action:'exile', object:'card'}, {function:'exile_removal', outcome:'permanent_exiled', from:'battlefield', to:'exile', action:'exile', object:'permanent'})));
 
@@ -13266,13 +13266,17 @@ function getComparableCardField(card, field) {
     return Number.isFinite(num) ? num : undefined;
 }
 
-// Default modes for Highlight-area metadata constraints. These defaults are reflected in
+// Default modes for source-card metadata constraints. These defaults are reflected in
 // index.html and restored when the user clears all constraints.
 const DEFAULT_CONSTRAINT_MODES = Object.freeze({
     supertype: 'prefer',
     types: 'prefer',
     subtype: 'prefer',
-    set: 'prefer'
+    set: 'prefer',
+    rarity: 'prefer',
+    cmc: 'prefer',
+    power: 'prefer',
+    toughness: 'prefer'
 });
 
 function normalizeConstraintList(value) {
@@ -13337,9 +13341,9 @@ function readConstraintFilters() {
 }
 
 /**
- * Fill only currently empty hard-constraint fields from the selected source card. This is an
- * explicit user action rather than an automatic side effect of choosing a source: constraints are
- * hard filters and silently copying them during source selection would hide valid alternatives.
+ * Fill only currently empty constraint fields from the selected source card. This is an explicit
+ * user action rather than an automatic side effect of choosing a source; each field keeps its
+ * selected Hard filter / Prefer / Not include mode.
  * Set/rarity/format/oracle filters are intentionally excluded because they are deck/context choices
  * rather than card characteristics that should usually transfer to similar cards.
  */
@@ -13405,7 +13409,7 @@ function autofillEmptyConstraintsFromSource(source = currentSourceCard) {
     if (Array.isArray(source.colors) && isEmpty('filter-colors')) setInput('filter-colors', colors || 'c', 'exact colors');
 
     const rarity = String(source.rarity || '').toLowerCase();
-    if (['common', 'uncommon', 'rare', 'mythic'].includes(rarity) && isEmpty('filter-rarity')) {
+    if (['common', 'uncommon', 'rare', 'mythic', 'special', 'bonus'].includes(rarity) && isEmpty('filter-rarity')) {
         setInput('filter-rarity', rarity, 'rarity');
     }
     const setCode = String(source.set || '').trim().toLowerCase();
@@ -13427,7 +13431,7 @@ function autofillEmptyConstraintsFromSource(source = currentSourceCard) {
     const status = document.getElementById('constraint-autofill-status');
     if (status) {
         status.textContent = filled.length
-            ? `Filled empty fields from ${source.name}: ${filled.join(', ')}. These are hard filters; remove any that should not limit the search.`
+            ? `Filled empty fields from ${source.name}: ${filled.join(', ')}. Each field follows its selected constraint mode.`
             : `No empty constraint fields could be filled from ${source.name}. Existing values were left unchanged.`;
         status.classList.remove('hidden');
     }
@@ -13470,15 +13474,25 @@ function buildScryfallConstraintParts(filters) {
     addTypedTerms('subtype', filters?.subtypes, value => `type:"${escapeScryfallValue(value)}"`);
     (filters?.keywords || []).forEach(keyword => parts.push(`keyword:"${escapeScryfallValue(keyword)}"`));
     if (filters?.format && hard('format')) parts.push(`f:${filters.format}`);
-    if (filters?.rarity && hard('rarity')) parts.push(`r:${filters.rarity}`);
+    if (filters?.rarity) {
+        const rarityMode = getConstraintMode(filters, 'rarity');
+        if (rarityMode === 'hard') parts.push(`r:${escapeScryfallValue(filters.rarity)}`);
+        else if (rarityMode === 'exclude') parts.push(`-r:${escapeScryfallValue(filters.rarity)}`);
+    }
     if (filters?.identity && hard('identity')) parts.push(`identity:${filters.identity}`);
     if (filters?.colors && hard('colors')) parts.push(`c:${filters.colors}`);
-    const cmcQuery = hard('cmc') ? comparisonFilterToScryfallQuery('cmc', parseComparisonFilter(filters?.cmc)) : null;
-    if (cmcQuery) parts.push(cmcQuery);
-    const powerQuery = hard('power') ? comparisonFilterToScryfallQuery('pow', parseComparisonFilter(filters?.power)) : null;
-    if (powerQuery) parts.push(powerQuery);
-    const toughnessQuery = hard('toughness') ? comparisonFilterToScryfallQuery('tou', parseComparisonFilter(filters?.toughness)) : null;
-    if (toughnessQuery) parts.push(toughnessQuery);
+    const addNumericModeQuery = (key, scryfallField) => {
+        const raw = filters?.[key];
+        if (raw === undefined || raw === null || String(raw).trim() === '') return;
+        const mode = getConstraintMode(filters, key);
+        if (mode === 'prefer') return; // ranking preference: don't reduce the retrieval candidate pool
+        const query = comparisonFilterToScryfallQuery(scryfallField, parseComparisonFilter(raw));
+        if (!query) return;
+        parts.push(mode === 'exclude' ? `-${query}` : query);
+    };
+    addNumericModeQuery('cmc', 'cmc');
+    addNumericModeQuery('power', 'pow');
+    addNumericModeQuery('toughness', 'tou');
     if (filters?.set) {
         const setMode = getConstraintMode(filters, 'set');
         if (setMode === 'hard') parts.push(`e:${escapeScryfallValue(filters.set)}`);
@@ -13594,8 +13608,12 @@ function explainFilterFailures(card, filters, broadFallbackFilters) {
             failures.push({ field: 'format', expected: `legal in ${filters.format}`, actual: card.legalities[formatKey] || '(unknown)' });
         }
     }
-    if (filters.rarity && hard('rarity') && (card.rarity || '').toLowerCase() !== filters.rarity.toLowerCase()) {
-        failures.push({ field: 'rarity', expected: filters.rarity, actual: card.rarity || '(none)' });
+    if (filters.rarity) {
+        const rarityMode = getConstraintMode(filters, 'rarity');
+        const rarityMatches = (card.rarity || '').toLowerCase() === filters.rarity.toLowerCase();
+        if ((rarityMode === 'hard' && !rarityMatches) || (rarityMode === 'exclude' && rarityMatches)) {
+            failures.push({ field: 'rarity', expected: rarityMode === 'exclude' ? `not include ${filters.rarity}` : filters.rarity, actual: card.rarity || '(none)' });
+        }
     }
     if (filters.identity && hard('identity')) {
         const allowed = filters.identity.toLowerCase().replace(/[^wubrgc]/g, '').split('');
@@ -13611,26 +13629,24 @@ function explainFilterFailures(card, filters, broadFallbackFilters) {
         const exactColorlessMatch = required === 'c' && actual === '';
         if (!exactColorlessMatch && actual !== required) failures.push({ field: 'colors', expected: `{${required}}`, actual: actual ? `{${actual}}` : '{colorless}' });
     }
-    if (filters.cmc && hard('cmc')) {
-        const cmcFilter = parseComparisonFilter(filters.cmc);
-        if (!cmcFilter) {
-            failures.push({ field: 'cmc', expected: `a valid comparison (e.g. "3", "<=2", ">4")`, actual: filters.cmc });
-        } else if (!matchesComparisonFilter(card.cmc, cmcFilter)) {
-            failures.push({ field: 'cmc', expected: String(filters.cmc), actual: String(card.cmc ?? '(none)') });
+    const checkNumericConstraint = (key, actualValue) => {
+        const raw = filters[key];
+        if (raw === undefined || raw === null || String(raw).trim() === '') return;
+        const mode = getConstraintMode(filters, key);
+        if (mode === 'prefer') return;
+        const parsed = parseComparisonFilter(raw);
+        if (!parsed) {
+            if (mode === 'hard') failures.push({ field: key, expected: 'a valid numeric comparison (e.g. 3, <=2, >=4)', actual: String(raw) });
+            return;
         }
-    }
-    if (filters.power && hard('power')) {
-        const powerFilter = parseComparisonFilter(filters.power);
-        if (powerFilter && !matchesComparisonFilter(getComparableCardField(card, 'power'), powerFilter)) {
-            failures.push({ field: 'power', expected: String(filters.power), actual: card.power ?? '(none)' });
+        const matches = matchesComparisonFilter(actualValue, parsed);
+        if ((mode === 'hard' && !matches) || (mode === 'exclude' && matches)) {
+            failures.push({ field: key, expected: mode === 'exclude' ? `not include ${String(raw)}` : String(raw), actual: String(actualValue ?? '(none)') });
         }
-    }
-    if (filters.toughness && hard('toughness')) {
-        const toughnessFilter = parseComparisonFilter(filters.toughness);
-        if (toughnessFilter && !matchesComparisonFilter(getComparableCardField(card, 'toughness'), toughnessFilter)) {
-            failures.push({ field: 'toughness', expected: String(filters.toughness), actual: card.toughness ?? '(none)' });
-        }
-    }
+    };
+    checkNumericConstraint('cmc', card.cmc);
+    checkNumericConstraint('power', getComparableCardField(card, 'power'));
+    checkNumericConstraint('toughness', getComparableCardField(card, 'toughness'));
     if (filters.set) {
         const setMatches = String(card.set || '').toLowerCase() === String(filters.set).toLowerCase();
         const setMode = getConstraintMode(filters, 'set');
@@ -13682,8 +13698,10 @@ function matchesActiveFilters(card, filters, broadFallbackFilters) {
         if (legality !== 'legal' && legality !== 'restricted') return false;
     }
 
-    if (filters.rarity && hard('rarity')) {
-        if ((card.rarity || '').toLowerCase() !== filters.rarity.toLowerCase()) return false;
+    if (filters.rarity) {
+        const rarityMatches = (card.rarity || '').toLowerCase() === filters.rarity.toLowerCase();
+        const rarityMode = getConstraintMode(filters, 'rarity');
+        if ((rarityMode === 'hard' && !rarityMatches) || (rarityMode === 'exclude' && rarityMatches)) return false;
     }
 
     if (filters.identity && hard('identity')) {
@@ -13703,22 +13721,18 @@ function matchesActiveFilters(card, filters, broadFallbackFilters) {
         if (!matchesColorless && cardColors !== requiredColors) return false;
     }
 
-    if (filters.cmc && hard('cmc')) {
-        const cmcFilter = parseComparisonFilter(filters.cmc);
-        if (!cmcFilter || !matchesComparisonFilter(card.cmc, cmcFilter)) return false;
-    }
-
-    if (filters.power && hard('power')) {
-        const powerFilter = parseComparisonFilter(filters.power);
-        // Invalid filter syntax should fail closed, matching CMC behavior. A dynamic/non-numeric
-        // card value also cannot satisfy a numeric comparison.
-        if (!powerFilter || !matchesComparisonFilter(getComparableCardField(card, 'power'), powerFilter)) return false;
-    }
-
-    if (filters.toughness && hard('toughness')) {
-        const toughnessFilter = parseComparisonFilter(filters.toughness);
-        if (!toughnessFilter || !matchesComparisonFilter(getComparableCardField(card, 'toughness'), toughnessFilter)) return false;
-    }
+    const passesNumericConstraintMode = (key, actualValue) => {
+        const raw = filters[key];
+        if (raw === undefined || raw === null || String(raw).trim() === '') return true;
+        const mode = getConstraintMode(filters, key);
+        if (mode === 'prefer') return true;
+        const parsed = parseComparisonFilter(raw);
+        const matches = Boolean(parsed && matchesComparisonFilter(actualValue, parsed));
+        return mode === 'exclude' ? !matches : matches;
+    };
+    if (!passesNumericConstraintMode('cmc', card.cmc)) return false;
+    if (!passesNumericConstraintMode('power', getComparableCardField(card, 'power'))) return false;
+    if (!passesNumericConstraintMode('toughness', getComparableCardField(card, 'toughness'))) return false;
 
     if (filters.set) {
         const setMatches = String(card.set || '').toLowerCase() === String(filters.set).toLowerCase();
@@ -13768,6 +13782,9 @@ function calculateConstraintPreferenceBonus(card, filters) {
     if (modes.format === 'prefer' && filters.format) {
         const status = String(card?.legalities?.[String(filters.format).toLowerCase()] || '').toLowerCase();
         checks.push(status === 'legal' || status === 'restricted');
+    }
+    if (modes.rarity === 'prefer' && filters.rarity) {
+        checks.push(String(card?.rarity || '').toLowerCase() === String(filters.rarity).toLowerCase());
     }
     if (modes.set === 'prefer' && filters.set) {
         checks.push(String(card?.set || '').toLowerCase() === String(filters.set).toLowerCase());
@@ -21382,7 +21399,7 @@ function initSourceMetadataEditors() {
             const compare = byId('source-mana-value-comparison');
             const filterValue = byId('filter-cmc')?.value || '';
             const parsed = typeof parseComparisonFilter === 'function' ? parseComparisonFilter(filterValue) : null;
-            if (compare) compare.value = parsed?.operator || 'none';
+            if (compare) { compare.value = parsed?.operator || 'none'; compare.dispatchEvent(new Event('change', { bubbles: true })); }
         },
         readValue: () => String(currentSourceCard?.cmc ?? currentSourceCard?.mana_value ?? 0),
         saveValue: raw => {
@@ -21440,15 +21457,20 @@ function initSourceMetadataEditors() {
         buttonId: 'edit-source-rarity-btn', editorId: 'source-rarity-editor', inputId: 'source-rarity-input',
         applyId: 'apply-source-rarity-btn', cancelId: 'cancel-source-rarity-btn',
         readValue: () => {
-            const rarity = String(currentSourceCard?.rarity || 'unknown').toLowerCase();
-            return rarity === 'unknown' ? 'unknown' : rarity;
+            const rarity = String(currentSourceCard?.rarity || '').toLowerCase();
+            return ['common', 'uncommon', 'rare', 'mythic', 'special', 'bonus'].includes(rarity) ? rarity : 'common';
         },
         saveValue: raw => {
             if (!currentSourceCard) return false;
-            currentSourceCard.rarity = String(raw || 'unknown').toLowerCase();
+            const rarity = String(raw || 'common').toLowerCase();
+            if (!['common', 'uncommon', 'rare', 'mythic', 'special', 'bonus'].includes(rarity)) return false;
+            currentSourceCard.rarity = rarity;
             syncSourceCardMetadataDisplays();
+            // The source rarity and its explicit search constraint share one rarity value; mode is
+            // read live from source-rarity-mode by readConstraintFilters and ranking/retrieval.
+            setConstraintField('filter-rarity', rarity);
             reapplyTypeLineHighlights();
-            window.dispatchEvent(new CustomEvent('manasearch:source-metadata-changed', { detail: { field: 'rarity', value: currentSourceCard.rarity } }));
+            window.dispatchEvent(new CustomEvent('manasearch:source-metadata-changed', { detail: { field: 'rarity', value: rarity } }));
             return true;
         }
     });
@@ -21484,7 +21506,7 @@ function initSourceMetadataEditors() {
                 const comparison = byId(comparisonId);
                 const input = byId(inputId);
                 const help = byId(helpId);
-                if (comparison) comparison.value = activeFilter?.operator || 'none';
+                if (comparison) { comparison.value = activeFilter?.operator || 'none'; comparison.dispatchEvent(new Event('change', { bubbles: true })); }
                 if (input) {
                     if (activeFilter) input.value = String(activeFilter.value);
                     else {
@@ -21540,6 +21562,29 @@ function initSourceMetadataEditors() {
     }
 }
 
+function initSourceComparisonRadios() {
+    document.querySelectorAll('[data-comparison-radios-for]').forEach(group => {
+        if (group.dataset.bound === 'true') return;
+        group.dataset.bound = 'true';
+        const select = document.getElementById(group.dataset.comparisonRadiosFor);
+        if (!select) return;
+        const radios = [...group.querySelectorAll('input[type="radio"]')];
+        const syncFromSelect = () => {
+            const selected = String(select.value || 'none');
+            radios.forEach(radio => { radio.checked = radio.value === selected; });
+        };
+        group.addEventListener('change', event => {
+            const radio = event.target;
+            if (!radio || radio.type !== 'radio') return;
+            select.value = radio.value;
+            select.dispatchEvent(new Event('change', { bubbles: true }));
+        });
+        select.addEventListener('change', syncFromSelect);
+        syncFromSelect();
+    });
+}
+if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', initSourceComparisonRadios, { once: true }); else initSourceComparisonRadios();
+
 if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', initSourceMetadataEditors, { once: true }); else initSourceMetadataEditors();
 
 // Lightweight MTG type-line editor. This edits only the local source-card search context; it does
@@ -21564,6 +21609,11 @@ const MANA_TYPE_WORDS = [
     'Tentacle','Tetravite','Thalakos','Thopter','Thrull','Tiefling','Time Lord','Toy','Treefolk','Trilobite','Triskelavite','Troll','Turtle','Unicorn','Vampire','Vedalken','Villain','Volver','Wall','Walrus','Warlock','Warrior','Weird','Werewolf','Whale','Wizard','Wolf','Wolverine','Wombat','Worm','Wraith','Wurm','Yeti','Zombie','Zubera',
     'Power-Plant','Tower','Mine','Desert','Gate','Lair','Locus','Sphere','Urza’s','Urza\'s'
 ];
+const MANA_CARD_TYPE_WORDS = [
+    'Artifact', 'Battle', 'Creature', 'Conspiracy', 'Dungeon', 'Enchantment',
+    'Instant', 'Kindred', 'Land', 'Phenomenon', 'Plane', 'Planeswalker',
+    'Scheme', 'Sorcery', 'Tribal', 'Vanguard'
+];
 function initSourceTypeEditor() {
     const display = document.getElementById('source-card-type');
     const openBtn = document.getElementById('edit-source-type-btn');
@@ -21575,7 +21625,7 @@ function initSourceTypeEditor() {
     if (!display || !openBtn || !editor || !input || !suggestions || openBtn.dataset.bound) return;
     openBtn.dataset.bound = 'true';
     const showEditor = () => {
-        input.value = getSourceCardTypeLine() || display.dataset.originalTypeLine || display.textContent || '';
+        input.value = splitSourceCardTypeLine(getSourceCardTypeLine()).types.join(' ') || (display.dataset.originalText || display.textContent || '');
         editor.classList.remove('hidden'); openBtn.setAttribute('aria-expanded','true');
         updateSuggestions(); input.focus(); input.setSelectionRange(input.value.length,input.value.length);
     };
@@ -21589,7 +21639,7 @@ function initSourceTypeEditor() {
         suggestions.replaceChildren();
         if (!token || token.word.length < 2) { suggestions.classList.add('hidden'); return; }
         const q = token.word.toLowerCase();
-        const matches = [...new Set(MANA_TYPE_WORDS)].filter(word => word.toLowerCase().startsWith(q) && word.toLowerCase() !== q).slice(0,7);
+        const matches = [...new Set(MANA_CARD_TYPE_WORDS)].filter(word => word.toLowerCase().startsWith(q) && word.toLowerCase() !== q).slice(0,7);
         if (!matches.length) { suggestions.classList.add('hidden'); return; }
         for (const word of matches) {
             const btn = document.createElement('button'); btn.type='button'; btn.textContent=word; btn.setAttribute('role','option');
@@ -21601,29 +21651,39 @@ function initSourceTypeEditor() {
     };
     const distance = (a,b) => { a=a.toLowerCase(); b=b.toLowerCase(); let prev=Array.from({length:b.length+1},(_,i)=>i); for(let i=1;i<=a.length;i++){const row=[i];for(let j=1;j<=b.length;j++)row[j]=Math.min(row[j-1]+1,prev[j]+1,prev[j-1]+(a[i-1]===b[j-1]?0:1));prev=row;}return prev[b.length]; };
     const autocorrect = value => {
-        const allowed = new Map(MANA_TYPE_WORDS.map(w=>[w.toLowerCase(),w]));
+        const allowed = new Map(MANA_CARD_TYPE_WORDS.map(w=>[w.toLowerCase(),w]));
         // Correct known type words only. Preserve punctuation, unknown subtypes and all other words.
         return String(value).replace(/[A-Za-z][A-Za-z'’-]*/g, word => {
             if (allowed.has(word.toLowerCase())) return allowed.get(word.toLowerCase());
             if (word.length < 4) return word;
             let best=null, score=Infinity;
-            for (const candidate of MANA_TYPE_WORDS) { const d=distance(word,candidate); if(d<score){score=d;best=candidate;} }
+            for (const candidate of MANA_CARD_TYPE_WORDS) { const d=distance(word,candidate); if(d<score){score=d;best=candidate;} }
             return score <= (word.length >= 8 ? 2 : 1) ? best : word;
         });
     };
     const applyEdit = () => {
         const corrected = autocorrect(input.value.trim().replace(/\s+/g,' '));
         if (!corrected) return;
-        input.value = corrected;
-        // Type offsets are no longer reliable after a type-line edit. The shared updater removes
-        // only type-line highlights, preserves Oracle highlights, and refreshes the companion fields.
-        applySourceCardTypeLine(corrected);
-        // The Highlight-area Type editor also configures the active search constraint. It updates
-        // the same hidden field used by Card Constraints, so these two editing surfaces stay in sync.
-        const typeParts = splitSourceCardTypeLine(corrected);
+        const typeLookup = new Map(MANA_CARD_TYPE_WORDS.map(type => [type.toLowerCase(), type]));
+        const selectedTypes = [...new Set(corrected.split(/[\s,;/]+/).map(word => typeLookup.get(word.toLowerCase())).filter(Boolean))];
+        if (!selectedTypes.length) {
+            const help = document.getElementById('source-type-help');
+            if (help) { help.textContent = 'Enter one or more card types, such as Creature, Artifact, or Enchantment. Supertypes and subtypes are edited separately.'; help.setAttribute('role', 'alert'); }
+            input.focus();
+            return;
+        }
+        input.value = selectedTypes.join(' ');
+        const existingParts = splitSourceCardTypeLine(getSourceCardTypeLine());
+        const updatedTypeLine = composeSourceCardTypeLine({
+            supertypes: existingParts.supertypes,
+            types: selectedTypes,
+            subtypes: existingParts.subtypes
+        });
+        // Only update the card-type segment. Keep supertypes and subtypes intact in their own fields.
+        applySourceCardTypeLine(updatedTypeLine);
         const typeFilter = document.getElementById('filter-type');
         if (typeFilter) {
-            typeFilter.value = typeParts.types.join('|');
+            typeFilter.value = selectedTypes.join('|').toLowerCase();
             typeFilter.dispatchEvent(new Event('input', { bubbles: true }));
             if (typeof syncConstraintChipField === 'function') syncConstraintChipField('filter-type', 'filter-type-chips');
             if (typeof updateCardConstraintsBadge === 'function') updateCardConstraintsBadge();
@@ -23492,7 +23552,7 @@ function searchIntentFunctionLabel(effect) {
     const isFinisher = (fn === 'anthem' || fn === 'tribal_anthem') && p.combatFinisher && p.scalingProfile?.source === 'creatures_you_control';
     const isHandExile = fn === 'zone_change' && p.from === 'hand' && p.to === 'exile';
     const base = isFinisher ? 'buff your team by your creature count and grant flying (anthem/finisher)'
-        : isHandExile ? 'exile a card from hand (not battlefield removal)'
+        : isHandExile ? 'exile a card from hand'
         : (SEARCH_INTENT_FUNCTION_LABELS[fn] || String(fn).replace(/_/g, ' '));
     const details = [];
     if (p.scalingProfile?.source === 'creatures_you_control') details.push('power/toughness scales with your creature count');
@@ -28510,3 +28570,64 @@ function showLoading(isLoading) {
         loadingIndicator.classList.add('hidden');
     }
 }
+
+// v100 regression suite for shared constraint modes + source metadata editor controls.
+// Run from the browser console: runManaSearchConstraintModeRegressionSuite()
+function runManaSearchConstraintModeRegressionSuite({ log = true } = {}) {
+    const results = [];
+    const check = (name, condition, detail = '') => results.push({ name, passed: Boolean(condition), detail: condition ? '' : String(detail || 'Assertion failed') });
+    const parts = filters => buildScryfallConstraintParts(filters);
+    const has = (filters, term) => parts(filters).includes(term);
+    const mode = (key, value, raw) => ({ [key]: raw, constraintModes: { [key]: value } });
+    try {
+        check('rarity-hard-filter-builds-query', has(mode('rarity', 'hard', 'rare'), 'r:rare'), 'Hard rarity must constrain retrieval.');
+        check('rarity-prefer-does-not-restrict-retrieval', !parts(mode('rarity', 'prefer', 'rare')).some(term => /\br:rare\b/.test(term)), 'Prefer rarity must keep other rarities eligible.');
+        check('rarity-not-include-builds-negative-query', has(mode('rarity', 'exclude', 'rare'), '-r:rare'), 'Not include rarity must exclude matching rarity cards.');
+        check('mana-value-hard-comparison-builds-query', has(mode('cmc', 'hard', '<=3'), 'cmc<=3'), 'Hard mana-value comparison must reach Scryfall retrieval.');
+        check('mana-value-prefer-keeps-retrieval-broad', !parts(mode('cmc', 'prefer', '<=3')).some(term => /^-?cmc/.test(term)), 'Prefer mana value must be ranking-only.');
+        check('mana-value-not-include-builds-negative-query', has(mode('cmc', 'exclude', '<=3'), '-cmc<=3'), 'Not include numeric comparison must exclude matches.');
+        check('power-hard-comparison-builds-query', has(mode('power', 'hard', '>=4'), 'pow>=4'), 'Hard power comparison must reach retrieval.');
+        check('power-not-include-builds-negative-query', has(mode('power', 'exclude', '>=4'), '-pow>=4'), 'Not include power comparison must exclude matching stats.');
+        check('toughness-hard-comparison-builds-query', has(mode('toughness', 'hard', '<2'), 'tou<2'), 'Hard toughness comparison must reach retrieval.');
+        check('toughness-not-include-builds-negative-query', has(mode('toughness', 'exclude', '<2'), '-tou<2'), 'Not include toughness comparison must exclude matching stats.');
+
+        const small = { name: 'Small test creature', type_line: 'Creature — Human', rarity: 'rare', cmc: 2, power: '2', toughness: '1', color_identity: [], colors: [] };
+        const large = { name: 'Large test creature', type_line: 'Creature — Giant', rarity: 'common', cmc: 5, power: '5', toughness: '5', color_identity: [], colors: [] };
+        check('mana-value-hard-filters-local-candidates', matchesActiveFilters(small, mode('cmc', 'hard', '<=3')) && !matchesActiveFilters(large, mode('cmc', 'hard', '<=3')), 'Hard numeric modes must be applied locally too.');
+        check('mana-value-prefer-never-excludes-local-candidates', matchesActiveFilters(small, mode('cmc', 'prefer', '<=3')) && matchesActiveFilters(large, mode('cmc', 'prefer', '<=3')), 'Prefer numeric modes must keep both candidates.');
+        check('mana-value-not-include-excludes-only-matches', !matchesActiveFilters(small, mode('cmc', 'exclude', '<=3')) && matchesActiveFilters(large, mode('cmc', 'exclude', '<=3')), 'Not include numeric mode must remove only matches.');
+        check('power-not-include-local-candidates', !matchesActiveFilters(large, mode('power', 'exclude', '>=4')) && matchesActiveFilters(small, mode('power', 'exclude', '>=4')), 'Power exclusion must agree with retrieval.');
+        check('toughness-not-include-local-candidates', !matchesActiveFilters(small, mode('toughness', 'exclude', '<=1')) && matchesActiveFilters(large, mode('toughness', 'exclude', '<=1')), 'Toughness exclusion must agree with retrieval.');
+        check('rarity-not-include-local-candidates', !matchesActiveFilters(small, mode('rarity', 'exclude', 'rare')) && matchesActiveFilters(large, mode('rarity', 'exclude', 'rare')), 'Rarity exclusion must agree with retrieval.');
+        check('rarity-prefer-boosts-matching-rarity', calculateConstraintPreferenceBonus(small, mode('rarity', 'prefer', 'rare')) > calculateConstraintPreferenceBonus(large, mode('rarity', 'prefer', 'rare')), 'Rarity preference must influence final ranking.');
+
+        const typeParts = splitSourceCardTypeLine('Legendary Creature — Human Shaman');
+        check('type-line-splits-card-type-separately', typeParts.types.length === 1 && typeParts.types[0] === 'Creature' && typeParts.supertypes[0] === 'Legendary' && typeParts.subtypes === 'Human Shaman', JSON.stringify(typeParts));
+        check('card-type-autocomplete-excludes-supertypes-and-subtypes', MANA_CARD_TYPE_WORDS.includes('Creature') && !MANA_CARD_TYPE_WORDS.includes('Legendary') && !MANA_CARD_TYPE_WORDS.includes('Human') && !MANA_CARD_TYPE_WORDS.includes('Shaman'), 'Type editor vocabulary must contain card types only.');
+        const raritySelect = typeof document !== 'undefined' ? document.getElementById('source-rarity-input') : null;
+        check('source-rarity-selection-has-no-none-option', Boolean(raritySelect) && ![...raritySelect.options].some(option => option.value === 'unknown' || option.value === ''), 'Source rarity picker should have actual rarity values only.');
+        for (const id of ['source-rarity-mode', 'source-mana-value-mode', 'source-power-mode', 'source-toughness-mode']) {
+            const select = typeof document !== 'undefined' ? document.getElementById(id) : null;
+            check(`${id}-defaults-to-prefer`, Boolean(select) && select.value === 'prefer', 'The requested default mode is Prefer.');
+        }
+        for (const id of ['source-mana-value-comparison', 'source-power-comparison', 'source-toughness-comparison']) {
+            const group = typeof document !== 'undefined' ? document.querySelector(`[data-comparison-radios-for="${id}"]`) : null;
+            const values = group ? [...group.querySelectorAll('input[type="radio"]')].map(radio => radio.value) : [];
+            check(`${id}-has-all-comparison-circles`, ['none', '<', '=', '>', '<=', '>=', '!='].every(value => values.includes(value)), JSON.stringify(values));
+        }
+        if (typeof document !== 'undefined') {
+            const handZoneLabel = [...document.querySelectorAll('*')].some(el => el.children.length === 0 && /exile a card from hand\s*\([^)]*\)/i.test(el.textContent || ''));
+            check('hand-exile-label-avoids-parenthetical-explanation', !handZoneLabel, 'The user-facing label should simply say exile a card from hand.');
+        }
+    } catch (error) {
+        check('suite-execution', false, error?.stack || error?.message || error);
+    }
+    const passed = results.filter(result => result.passed).length;
+    const summary = { passed, total: results.length, ok: passed === results.length, results };
+    if (log) {
+        const logger = summary.ok ? console.info : console.warn;
+        logger.call(console, `[ManaSearch] Constraint/mode regression suite ${summary.ok ? 'passed' : 'failed'}: ${passed}/${results.length} checks.`, summary);
+    }
+    return summary;
+}
+try { window.runManaSearchConstraintModeRegressionSuite = runManaSearchConstraintModeRegressionSuite; } catch (_) {}

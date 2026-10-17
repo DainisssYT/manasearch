@@ -7586,3 +7586,74 @@ body.light-theme .card-actions .edhrec-link-btn:hover {
         font-size: 14px !important;
     }
 }
+
+
+/* v100: compact, accessible circular numeric-comparison controls for source metadata. */
+.source-comparison-native-select { display: none !important; }
+.source-comparison-radio-group {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 7px;
+    margin: 7px 0 9px;
+}
+.source-comparison-radio {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    flex: 0 0 auto;
+}
+.source-comparison-radio input {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    margin: 0;
+    opacity: 0;
+    cursor: pointer;
+}
+.source-comparison-radio span {
+    display: inline-flex;
+    width: 30px;
+    height: 30px;
+    align-items: center;
+    justify-content: center;
+    border: 1px solid var(--border-color, #41414a);
+    border-radius: 999px;
+    background: var(--input-bg, #111114);
+    color: var(--text-color, #f3f3f7);
+    font-size: 13px;
+    font-weight: 650;
+    line-height: 1;
+    transition: border-color .12s ease, background-color .12s ease, box-shadow .12s ease;
+}
+.source-comparison-radio input:checked + span {
+    border-color: var(--accent-color, #8b5cf6);
+    background: color-mix(in srgb, var(--accent-color, #8b5cf6) 22%, var(--input-bg, #111114));
+    box-shadow: inset 0 0 0 1px var(--accent-color, #8b5cf6);
+}
+.source-comparison-radio input:focus-visible + span {
+    outline: 2px solid var(--accent-color, #8b5cf6);
+    outline-offset: 3px;
+}
+.source-comparison-radio:hover span { border-color: var(--accent-color, #8b5cf6); }
+#source-rarity-editor > select[data-constraint-mode],
+#source-mana-value-editor > select[data-constraint-mode],
+#source-power-editor > select[data-constraint-mode],
+#source-toughness-editor > select[data-constraint-mode] {
+    width: 100%;
+    min-width: 0;
+    margin: 5px 0 8px;
+    padding: 8px 9px;
+    border: 1px solid var(--border-color, #41414a);
+    border-radius: 7px;
+    background: var(--input-bg, #111114);
+    color: var(--text-color, #f3f3f7);
+    font-size: 12px;
+}
+@media (max-width: 520px) {
+    .source-comparison-radio-group { gap: 6px; }
+    .source-comparison-radio span { width: 29px; height: 29px; }
+}
