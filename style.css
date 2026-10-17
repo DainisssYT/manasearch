@@ -5785,7 +5785,17 @@ body.mana-panel-open .card-item {
     pointer-events: none;
 }
 .mana-image-magnifier.visible { display: block; animation: mana-magnifier-in .12s ease-out both; }
-.mana-image-magnifier img { display: block; width: 100%; max-height: 78vh; object-fit: contain; border-radius: 8px; }
+.mana-image-magnifier img {
+    display: block;
+    width: 100%;
+    max-height: 78vh;
+    object-fit: contain;
+    border-radius: 4.8% / 3.2%;
+    /* Use the same scale-aware corner crop as the result-card art. Scryfall's full-size
+       scans can expose tiny white wedges at rounded card corners when shown outside .card-art-wrap. */
+    clip-path: inset(0.9% round 4.8% / 3.2%);
+    background: transparent;
+}
 @keyframes mana-magnifier-in { from { opacity: 0; transform: scale(.97) translateY(3px); } to { opacity: 1; transform: scale(1) translateY(0); } }
 .mana-feature-help-popover {
     position: fixed;
@@ -6205,7 +6215,10 @@ button:focus-visible { outline: 2px solid var(--accent-color); outline-offset: 2
     max-width: 100%;
     max-height: min(79dvh, calc(100dvh - 112px));
     object-fit: contain;
-    border-radius: 8px;
+    border-radius: 4.8% / 3.2%;
+    /* Touch preview is also outside .card-art-wrap, so clip the raw image corners here too. */
+    clip-path: inset(0.9% round 4.8% / 3.2%);
+    background: transparent;
 }
 .mana-card-preview-image.is-legacy-flip-rotated { transform: rotate(180deg); }
 .mana-card-preview-note { margin: 0; color: var(--text-muted); text-align: center; font-size: 11px; }

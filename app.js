@@ -1,6 +1,6 @@
-/* ManaSearch build 20261017-100 */
+/* ManaSearch build 20261017-102 */
 // ManaSearch deployment build marker. Bump this whenever app.js changes so cached-module issues are easy to diagnose.
-const MANASEARCH_APP_BUILD = '20261017-100';
+const MANASEARCH_APP_BUILD = '20261017-102';
 console.info(`[ManaSearch] app.js build ${MANASEARCH_APP_BUILD}`);
 
 // State Management
@@ -5736,6 +5736,26 @@ function parseDamageEffect(clause) {
  * @param {string} clause
  * @returns {Object|null}
  */
+// Rules classification is deliberately separate from strategic mana production. Millikin still
+// accelerates mana, but under the 2026 rules an ability that moves a card to/from the library as
+// part of its cost or effect is not a mana ability under CR 605.1a, even when it adds mana.
+function classifyManaAbilityRules(fullAbilityText, effectText = '') {
+    const full = String(fullAbilityText || '').replace(/[’]/g, "'");
+    const effect = String(effectText || '');
+    const reasons = [];
+    if (/\btarget\b/i.test(full)) reasons.push('requires_target');
+    if (/\bmill(?:s|ed)?\b|\b(?:search|shuffle|reveal|exile|put|return|move|draw)\b[\s\S]{0,100}\blibrary\b|\blibrary\b[\s\S]{0,100}\b(?:search|shuffle|reveal|exile|put|return|move)\b/i.test(full)) reasons.push('moves_cards_to_or_from_library');
+    if (/\b(?:loyalty ability|activate only as a sorcery)\b/i.test(full)) reasons.push('not_usable_as_mana_ability_timing');
+    const producesMana = /\badd\b[\s\S]{0,70}(?:\{[wubrgcs]\}|\bmana\b)/i.test(effect);
+    if (!producesMana) reasons.push('does_not_produce_mana');
+    return {
+        isRulesManaAbility: producesMana && reasons.length === 0,
+        strategicRole: producesMana ? 'mana_production' : null,
+        reasons,
+        ruleReference: 'CR 605.1a'
+    };
+}
+
 function parseManaAbilityEffect(clause) {
     const text = clause.toLowerCase();
     if (!/\badd\b/i.test(text)) return null;
@@ -6406,6 +6426,7 @@ function annotateEffectRelationships(effect, sourceText) {
         ]));
     }
     effect.quantityProfile = parseQuantityProfile(raw, effect.quantity);
+    effect.gameStateConditionProfile = parseGameStateConditionProfile(`${relationshipText} ${raw}`);
     effect.triggerProfile = parseTriggerProfile(relationshipText);
     effect.isTriggered = Boolean(effect.triggerProfile && (effect.triggerProfile.type === 'event' || effect.triggerProfile.type === 'turn_window'));
     effect.isConditional = Boolean(effect.condition || effect.triggerProfile?.conditional || /\bif\b/i.test(relationshipText));
@@ -6463,7 +6484,428 @@ function parseCastTimingPermissionEffect(text) {
     };
 }
 
-function parseMTGEffect(oracleText) {
+// Stateful/named mechanic profiles supplement the base clause parser. The profiles are attached
+// as synthetic canonical nodes so both the mechanical graph and retrieval planner can reason about
+// the mechanic as a connected rules package, while ordinary atoms still score each action.
+function appendNamedMechanicProfiles(results, oracleText, cardContext = null) {
+    const text = String(oracleText || '').replace(/[’]/g, "'");
+    const typeLine = String(cardContext?.type_line || '').replace(/[’]/g, "'");
+    const already = new Set((results || []).map(e => e?.mechanicProfile?.key).filter(Boolean));
+    const add = (key, label, summary, traits, opts = {}) => {
+        if (already.has(key)) return;
+        already.add(key);
+        const profile = {
+            key, label, summary,
+            family: opts.family || null,
+            traits: Array.from(new Set(traits || [])),
+            threshold: opts.threshold ?? null,
+            quantity: opts.quantity ?? null,
+            condition: opts.condition || '',
+            sequence: opts.sequence || [],
+            dimensions: opts.dimensions || [],
+            isStatic: Boolean(opts.isStatic)
+        };
+        results.push({
+            action: `mechanic_${key}`, object: null, target: null, restriction: [],
+            mechanicProfile: profile, isStatic: profile.isStatic,
+            raw: `[Named mechanic: ${label}] ${String(opts.evidence || text).slice(0, 420)}`,
+            parentRuleText: String(opts.evidence || text).slice(0, 420),
+            isSecondaryAtom: false, isCostEffect: false
+        });
+    };
+
+    if (/\brecruit\b/i.test(text)) {
+        const evidence = (text.match(/.{0,80}\brecruit\b.{0,240}/i) || [text])[0];
+        add('recruit', 'Recruit', 'Recruit: draw a card, discard a card, then create a 1/1 white Human Soldier token if a nonland card was discarded.',
+            ['keyword_action','draw','discard','conditional_token_creation','discarded_nonland','human_soldier_token','graveyard_setup'],
+            { evidence, condition: 'discarded_nonland', sequence: ['draw','discard','conditional_create_token'], isStatic: false });
+    }
+    if (/\bstoried\b|\benduring story\b/i.test(text)) {
+        const evidence = (text.match(/.{0,80}(?:storied|enduring story).{0,220}/i) || [text])[0];
+        add('storied', 'Storied / enduring story', 'Storied is a static condition: control a permanent with storied and at least three artifacts, legendary permanents, and/or Sagas to gain the lasting enduring-story designation.',
+            ['static_ability','condition_storied_permanent','count_artifacts_legendaries_sagas','threshold_three','persistent_player_designation','condition_is_not_lost','ward_one_reward'],
+            { evidence, threshold: 3, condition: 'control_storied_permanent_and_three_artifacts_legendaries_or_sagas', isStatic: true });
+    }
+    if (/\bhone counters?\b/i.test(text)) {
+        const evidence = (text.match(/.{0,90}\bhone counters?\b.{0,220}/i) || [text])[0];
+        add('hone_counter', 'Hone counters', 'Each hone counter on an Equipment gives the equipped creature +1/+0; the modifier belongs to the equipped creature through the Equipment-counter relationship.',
+            ['equipment_counter','equipped_creature','plus_one_power_per_hone_counter','continuous_rule_modifier','attachment_relationship'],
+            { evidence, quantity: 1, condition: 'equipment_attached_to_creature', isStatic: true });
+    }
+    const empowerMatch = text.match(/\bempower Jace(?:\s+(\d+|x))?\b/i);
+    if (empowerMatch) {
+        const quantity = /^\d+$/.test(empowerMatch[1] || '') ? Number(empowerMatch[1]) : (empowerMatch[1] ? 'X' : null);
+        const evidence = (text.match(/.{0,80}\bempower Jace(?:\s+(?:\d+|x))?.{0,220}/i) || [text])[0];
+        add('empower_jace', 'Empower Jace', 'Empower Jace: if you control a Jace planeswalker token, add the specified loyalty counters to one; otherwise create the defined blue Jace planeswalker token, then add those counters.',
+            ['keyword_action','conditional_token_creation','jace_planeswalker_token_only','loyalty_counter_placement','uses_existing_token_if_present','created_token_has_surveil_and_draw_abilities'],
+            { evidence, quantity, condition: 'create_jace_token_only_if_none_controlled', sequence: ['check_controlled_jace_token','create_if_absent','add_loyalty_counters'] });
+    }
+    if (/\bHeartwood token\b|\bcreate(?:s)? a Heartwood\b/i.test(text)) {
+        const evidence = (text.match(/.{0,90}\bHeartwood\b.{0,220}/i) || [text])[0];
+        add('heartwood_token', 'Heartwood token', 'Create a predefined red and green artifact token with the Heartwood subtype and {T}: add {R} or {G}; the token also increases artifact count.',
+            ['predefined_token','artifact','red','green','heartwood_subtype','tap_for_red_or_green','artifact_count_synergy'],
+            { evidence });
+    }
+    if (/\bplan counters?\b/i.test(text) || /(?:—|–|-)\s*Plan\b/i.test(typeLine)) {
+        const evidence = (text.match(/.{0,100}\bplan counters?\b.{0,250}/i) || [text])[0];
+        const thresholdMatch = text.match(/when the (\w+) plan counter is put|when (?:the )?(\d+)(?:st|nd|rd|th)? plan counter is put/i);
+        const wordNums = { first:1, second:2, third:3, fourth:4, fifth:5, sixth:6, seventh:7, eighth:8, ninth:9, tenth:10 };
+        const threshold = thresholdMatch ? (Number(thresholdMatch[2]) || wordNums[String(thresholdMatch[1] || '').toLowerCase()] || null) : null;
+        const traits = ['enchantment_subtype_plan','incremental_progress_counter','triggered_milestone_reward'];
+        if (/\bsacrifice (?:this|it|that enchantment)\b/i.test(text)) traits.push('sacrifice_plan_at_milestone');
+        if (/\bcontrol target opponent\b/i.test(text)) traits.push('control_opponent_next_turn_reward');
+        if (/\bcreate\b[\s\S]{0,100}\btoken\b/i.test(text)) traits.push('incremental_token_reward');
+        add('plan_progression', 'Plan progression', 'Plan enchantments are staged engines: triggers add plan counters and grant progress rewards, with a milestone trigger delivering a larger completion reward and sometimes sacrificing the Plan.',
+            traits, { evidence, threshold, condition: 'plan_counter_milestone', isStatic: true });
+    }
+    if (/\bworthy\b/i.test(text) || /\bequip\b[\s\S]{0,100}\blegendary\b[\s\S]{0,100}\b(?:red and\/or white|red or white)\b[\s\S]{0,100}\bnot a Villain\b/i.test(text)) {
+        const evidence = (text.match(/.{0,90}(?:worthy|equip).{0,220}/i) || [text])[0];
+        add('worthy_equip', 'Worthy equipment restriction', 'Equipment activation legality requires a legendary red and/or white creature that is not a Villain; this is an equip-cost restriction, not a continuous detach condition.',
+            ['equipment','equip_activation_restriction','legendary_creature','red_or_white','non_villain','restriction_checked_at_activation','existing_attachment_persists_if_condition_changes'],
+            { evidence, condition: 'legendary_red_or_white_non_villain' });
+    }
+    if (/\bVibranium token\b/i.test(text)) {
+        const evidence = (text.match(/.{0,90}\bVibranium token\b.{0,240}/i) || [text])[0];
+        add('vibranium_token', 'Vibranium token', 'Create a predefined tapped artifact token with indestructible and {T}: add {C}; that mana cannot be spent to cast a nonartifact spell.',
+            ['predefined_token','artifact','enters_tapped','indestructible','tap_for_colorless','mana_spend_restriction_nonartifact_spell','artifact_count_synergy'],
+            { evidence });
+    }
+    if (/\b(?:prepared|preparation)\b/i.test(text) && /\b(?:exile|cast|spell)\b/i.test(text)) {
+        const evidence = (text.match(/.{0,90}\b(?:prepared|preparation)\b.{0,220}/i) || [text])[0];
+        add('prepared_spell', 'Prepare / prepared spell', 'Preparation links a host permanent to a specific spell exiled with it; casting permission depends on the host remaining prepared and the paired exile relationship.',
+            ['paired_host_and_exiled_spell','prepared_designation','cast_permission_from_exile','host_state_dependency','relationship_must_not_be_flattened_to_generic_exile'],
+            { evidence, condition: 'host_remains_prepared' });
+    }
+    // Multi-clause cards often exile a card from hand, add time counters, then later grant
+    // permission to cast that same exiled card. Keep this linked as temporary hand processing,
+    // not battlefield removal or generic exile.
+    if (/\bexile\b[\s\S]{0,100}\bfrom (?:your|its owner's|that player's) hand\b/i.test(text) &&
+        /\btime counters?\b/i.test(text) && /\b(?:may|can) cast\b/i.test(text) && /\bexil(?:e|ed)\b/i.test(text)) {
+        add('delayed_hand_exile_cast_profile', 'Delayed hand-exile casting profile', 'Exile a card from hand, track it with time counters, and grant permission to cast that same card later from exile.',
+            ['exile_from_hand','source_zone_hand_not_battlefield','time_counters','delayed_cast_permission_from_exile','paired_exiled_card_lifecycle','alternate_cast_permission'],
+            { family: 'delayed_zone_access', evidence: text.slice(0,420), condition: 'hand_exile_time_counter_delayed_cast' });
+    }
+
+    // Aggregate high-level signatures for mechanics that share rules structure but should not
+    // collapse into identical effects. Scryfall's `keywords` field is the safest signal; narrow
+    // Oracle patterns supplement it for keyword actions and imported/test cards lacking metadata.
+    const keywordSet = new Set((Array.isArray(cardContext?.keywords) ? cardContext.keywords : [])
+        .map(k => normalizeMechanicBridgeKey(String(k || ''))).filter(Boolean));
+    const hasKeyword = names => names.some(n => keywordSet.has(normalizeMechanicBridgeKey(n)));
+    const detected = (defs) => defs.filter(d => hasKeyword(d.names || []) || (d.re && d.re.test(text)) || (d.typeRe && d.typeRe.test(typeLine)));
+    const profileTraits = (defs) => Array.from(new Set(defs.flatMap(d => [
+        `mechanic:${normalizeMechanicToken(d.key)}`,
+        ...(d.traits || [])
+    ])));
+
+    const castingDefs = [
+        { key:'flashback', names:['flashback'], re:/\bflashback\s*\{/i, traits:['cast_from_graveyard','alternate_cost'] },
+        { key:'jump_start', names:['jump-start','jump start'], re:/\bjump-start\s*\{/i, traits:['cast_from_graveyard','discard_as_additional_cost'] },
+        { key:'retrace', names:['retrace'], re:/\bretrace\s*\{/i, traits:['cast_from_graveyard','discard_land_as_additional_cost'] },
+        { key:'escape', names:['escape'], re:/\bescape\s*\{/i, traits:['cast_from_graveyard','alternate_cost','exile_graveyard_as_cost'] },
+        { key:'disturb', names:['disturb'], re:/\bdisturb\s*\{/i, traits:['cast_from_graveyard','transforms_or_two_face_lifecycle'] },
+        { key:'aftermath', names:['aftermath'], re:/\baftermath\b/i, traits:['cast_from_graveyard','split_spell_halves','cast_permission_after_first_half'] },
+        { key:'foretell', names:['foretell'], re:/\bforetell\s*\{/i, traits:['exile_face_down_from_hand','cast_later_from_exile','delayed_alternate_cost'] },
+        { key:'plot', names:['plot'], re:/\bplot\s*\{/i, traits:['exile_from_hand','cast_later_without_mana_cost','timing_restriction'] },
+        { key:'suspend', names:['suspend'], re:/\bsuspend\s+\d+\s*[—-]\s*\{/i, traits:['exile_from_hand_or_zone','time_counters','cast_when_last_counter_removed'] },
+        { key:'warp', names:['warp'], re:/\bwarp\s*\{/i, traits:['cast_from_zone_with_limited_window','delayed_zone_change'] },
+        { key:'madness', names:['madness'], re:/\bmadness\s*\{/i, traits:['discard_replacement','cast_from_exile_during_discard_resolution'] },
+        { key:'miracle', names:['miracle'], re:/\bmiracle\s*\{/i, traits:['first_card_drawn_this_turn','alternate_cost','timing_window'] },
+        { key:'rebound', names:['rebound'], re:/\brebound\b/i, traits:['cast_from_hand','exile_after_resolution','delayed_next_upkeep_cast_without_pay'] },
+        { key:'adventure', names:['adventure'], re:/\badventure\b/i, traits:['separate_spell_face','exile_after_adventure_resolution','later_cast_creature_from_exile'] },
+        { key:'overload', names:['overload'], re:/\boverload\s*\{/i, traits:['alternate_cost','changes_target_scope'] },
+        { key:'cleave', names:['cleave'], re:/\bcleave\s*\{/i, traits:['alternate_cost','removes_or_changes_text'] },
+        { key:'buyback', names:['buyback'], re:/\bbuyback\s*\{/i, traits:['additional_cost','return_spell_to_hand_instead_of_graveyard'] },
+        { key:'replicate', names:['replicate'], re:/\breplicate\s*\{/i, traits:['additional_cost','creates_spell_copies'] },
+        { key:'kicker', names:['kicker','multikicker'], re:/\b(?:multi)?kicker\s*\{/i, traits:['optional_additional_cost','enhanced_resolution'] },
+        { key:'conspire', names:['conspire'], re:/\bconspire\b/i, traits:['additional_cost','tap_two_creatures','copies_spell'] },
+        { key:'casualty', names:['casualty'], re:/\bcasualty\s*\{/i, traits:['additional_cost','sacrifice_creature','copies_spell_if_paid'] },
+        { key:'bargain', names:['bargain'], re:/\bbargain\b/i, traits:['optional_additional_cost','sacrifice_artifact_enchantment_or_token','enhanced_resolution'] },
+        { key:'spree', names:['spree'], re:/\bspree\s*\{/i, traits:['multiple_optional_cost_modes','choose_one_or_more_modes'] },
+        { key:'tiered', names:['tiered'], re:/\btiered\b/i, traits:['choose_cost_tiers','effect_scales_by_cost_tier'] },
+        { key:'offering', names:['offering'], re:/\boffering\s*\{/i, traits:['alternate_cost','sacrifice_creature_type','instant_speed_permission'] },
+        { key:'convoke', names:['convoke'], re:/\bconvoke\b/i, traits:['tap_creatures_as_cost_reduction'] },
+        { key:'improvise', names:['improvise'], re:/\bimprovise\b/i, traits:['tap_artifacts_as_cost_reduction'] },
+        { key:'delve', names:['delve'], re:/\bdelve\b/i, traits:['exile_graveyard_cards_as_cost_reduction'] },
+        { key:'emerge', names:['emerge'], re:/\bemerge\s*\{/i, traits:['sacrifice_creature_as_alternate_cost','cost_reduction_by_sacrificed_creature'] },
+        { key:'evoke', names:['evoke'], re:/\bevoke\s*\{/i, traits:['alternate_cost','sacrifice_on_entry_if_alternate_cost'] },
+        { key:'prototype', names:['prototype'], re:/\bprototype\s*\{/i, traits:['alternate_cost','alternate_characteristics'] },
+        { key:'mutate', names:['mutate'], re:/\bmutate\s*\{/i, traits:['alternate_cast_target_creature','merge_permanent_characteristics'] },
+        { key:'bestow', names:['bestow'], re:/\bbestow\s*\{/i, traits:['alternate_cost','aura_or_creature_mode'] },
+        { key:'morph', names:['morph','megamorph'], re:/\b(?:mega)?morph\s*\{/i, traits:['face_down_cast','turn_face_up_cost'] },
+        { key:'disguise', names:['disguise'], re:/\bdisguise\s*\{/i, traits:['face_down_cast','ward_on_face_down_creature','turn_face_up_cost'] },
+        { key:'cloak', names:['cloak'], re:/\bcloak\b/i, traits:['put_face_down','turn_face_up_if_ability_allows'] },
+        { key:'manifest', names:['manifest','manifest dread'], re:/\bmanifest(?: dread)?\b/i, traits:['put_card_face_down_as_permanent','may_turn_face_up_if_creature_card'] },
+        { key:'impending', names:['impending'], re:/\bimpending\s*\{/i, traits:['permanent_enters_without_creature_type','time_counters','becomes_creature_after_delay'] },
+        { key:'adventure_alt', names:['adventure'], re:/\binstant or sorcery adventure\b/i, traits:['separate_spell_face','exile_after_adventure_resolution','later_cast_creature_from_exile'] }
+    ];
+    const castingDetected = detected(castingDefs);
+    if (castingDetected.length) {
+        const tags = profileTraits(castingDetected);
+        for (const d of castingDetected) {
+            if (d.traits.some(t => /alternate_cost|additional_cost|cost_reduction/.test(t))) tags.push('cost:cast_cost_modified');
+            if (d.traits.some(t => /cast_from_graveyard|cast_from_exile/.test(t))) tags.push('zone:cast_from_nonhand_zone');
+            if (d.traits.some(t => /time_counters|delayed|later/.test(t))) tags.push('timing:delayed_or_limited');
+        }
+        const labels = castingDetected.map(d => d.key.replace(/_/g, ' '));
+        add('casting_mode_profile', 'Casting mode / alternate cost profile', `Casting-mechanic profile: ${labels.join(', ')}. The engine compares the cast zone, additional or alternate cost, timing window, and resulting spell/permanent lifecycle as separate traits.`,
+            [...new Set(tags)], { family: 'casting_mode', evidence: text.slice(0, 420), condition: 'casting_mode_rules_signature' });
+    }
+
+    const replayDefs = [
+        { key:'storm', names:['storm'], re:/\bstorm\s*\(\s*when you cast this spell/i, traits:['copy_spell','scale_with_spells_previously_cast_this_turn'] },
+        { key:'gravestorm', names:['gravestorm'], re:/\bgravestorm\s*\(/i, traits:['copy_spell','scale_with_permanents_put_into_graveyard_this_turn'] },
+        { key:'cascade', names:['cascade'], re:/\bcascade\b[\s\S]{0,180}exile cards from the top/i, traits:['library_reveal_until_mana_value_bound','cast_without_paying','remaining_cards_to_bottom'] },
+        { key:'discover', names:['discover'], re:/\bdiscover\s+\d+/i, traits:['library_reveal_until_mana_value_bound','choose_cast_without_paying_or_hand','remaining_cards_to_bottom'] },
+        { key:'rebound', names:['rebound'], re:/\brebound\b/i, traits:['exile_after_resolution','cast_at_next_upkeep_without_pay'] },
+        { key:'cipher', names:['cipher'], re:/\bcipher\b/i, traits:['exile_and_encode_on_creature','trigger_on_combat_damage_to_player','copy_then_cast_without_pay','paired_host_relationship'] },
+        { key:'epic', names:['epic'], re:/\bepic\b/i, traits:['repeat_spell_copy_each_turn','prohibit_casting_spells_for_rest_of_game'] },
+        { key:'ripple', names:['ripple'], re:/\bripple\s*\d+/i, traits:['reveal_top_n_on_cast','may_cast_matching_name'] },
+        { key:'replicate', names:['replicate'], re:/\breplicate\s*\{/i, traits:['additional_cost','copy_spell_for_each_payment'] },
+        { key:'demonstrate', names:['demonstrate'], re:/\bdemonstrate\b/i, traits:['copy_spell','opponent_also_gets_copy'] },
+        { key:'buyback', names:['buyback'], re:/\bbuyback\s*\{/i, traits:['spell_returns_to_hand_on_resolution_if_cost_paid'] },
+        { key:'encore', names:['encore'], re:/\bencore\s*\{/i, traits:['graveyard_activated_ability','create_attacking_copies','sacrifice_at_end_step'] }
+    ];
+    const replayDetected = detected(replayDefs);
+    if (replayDetected.length) {
+        const tags = profileTraits(replayDetected);
+        tags.push('spell:copy_or_delayed_recast_family');
+        const labels = replayDetected.map(d => d.key);
+        add('spell_replay_profile', 'Spell copy / replay profile', `Spell-copy and replay profile: ${labels.join(', ')}. The engine preserves what is copied, what event scales or triggers it, whether a copy is cast, and any exile or delayed-cast relation.`,
+            [...new Set(tags)], { family: 'spell_replay', evidence: text.slice(0, 420), condition: 'spell_copy_replay_rules_signature' });
+    }
+
+    const combatDefs = [
+        { key:'flying', names:['flying'], re:/\bflying\b/i, traits:['evasion_flying','harder_to_block_by_nonflying_without_reach'] },
+        { key:'reach', names:['reach'], re:/\breach\b/i, traits:['can_block_flying'] },
+        { key:'menace', names:['menace'], re:/\bmenace\b/i, traits:['requires_two_or_more_blockers'] },
+        { key:'first_strike', names:['first strike'], re:/\bfirst strike\b/i, traits:['first_combat_damage_step'] },
+        { key:'double_strike', names:['double strike'], re:/\bdouble strike\b/i, traits:['first_combat_damage_step','regular_combat_damage_step'] },
+        { key:'trample', names:['trample'], re:/\btrample\b/i, traits:['excess_combat_damage_to_defender_or_planeswalker'] },
+        { key:'vigilance', names:['vigilance'], re:/\bvigilance\b/i, traits:['does_not_tap_to_attack'] },
+        { key:'haste', names:['haste'], re:/\bhaste\b/i, traits:['ignore_summoning_sickness_attack_and_tap'] },
+        { key:'defender', names:['defender'], re:/\bdefender\b/i, traits:['cannot_attack_normally'] },
+        { key:'deathtouch', names:['deathtouch'], re:/\bdeathtouch\b/i, traits:['damage_lethal_to_creatures'] },
+        { key:'lifelink', names:['lifelink'], re:/\blifelink\b/i, traits:['damage_causes_controller_life_gain'] },
+        { key:'indestructible', names:['indestructible'], re:/\bindestructible\b/i, traits:['cannot_be_destroyed'] },
+        { key:'hexproof', names:['hexproof'], re:/\bhexproof\b/i, traits:['opponent_targeting_restriction'] },
+        { key:'ward', names:['ward'], re:/\bward\s*\{/i, traits:['targeting_cost_or_penalty'] },
+        { key:'shadow', names:['shadow'], re:/\bshadow\b/i, traits:['shadow_combat_blocking_restriction'] },
+        { key:'skulk', names:['skulk'], re:/\bskulk\b/i, traits:['cannot_be_blocked_by_higher_power_creatures'] },
+        { key:'landwalk', names:['islandwalk','swampwalk','mountainwalk','forestwalk','plainswalk','landwalk'], re:/\b(?:island|swamp|mountain|forest|plains)walk\b/i, traits:['landwalk_evasion','defending_player_controls_matching_land'] },
+        { key:'horsemanship', names:['horsemanship'], re:/\bhorsemanship\b/i, traits:['evasion_horsemanship','matching_horsemanship_block_rule'] },
+        { key:'fear', names:['fear'], re:/\bfear\b/i, traits:['evasion_artifact_or_black_block_restriction'] },
+        { key:'intimidate', names:['intimidate'], re:/\bintimidate\b/i, traits:['evasion_shared_color_or_artifact_block_restriction'] },
+        { key:'skulk', names:['skulk'], re:/\bskulk\b/i, traits:['cannot_be_blocked_by_higher_power_creatures'] },
+        { key:'space_sculptor', names:['space sculptor'], re:/\bspace sculptor\b/i, traits:['combat_blocking_rules_exception','spacecraft_creature_block_interaction'] },
+        { key:'must_be_blocked', names:['must be blocked'], re:/\b(?:must|must be)\s+blocked\b|\bif able,? (?:this|that) creature blocks\b/i, traits:['forced_blocking_requirement','attacking_or_blocking_condition'] },
+        { key:'banding', names:['banding'], re:/\bbanding\b/i, traits:['attack_block_assignment_rules','attacking_player_assigns_blocker_damage'] },
+        { key:'bushido', names:['bushido'], re:/\bbushido\s+\d+/i, traits:['combat_triggered_stat_bonus'] },
+        { key:'flanking', names:['flanking'], re:/\bflanking\s+\d+/i, traits:['blocker_stat_penalty'] },
+        { key:'provoke', names:['provoke'], re:/\bprovoke\b/i, traits:['force_creature_to_block','untap_defending_creature'] },
+        { key:'annihilator', names:['annihilator'], re:/\bannihilator\s+\d+/i, traits:['attacking_trigger_opponent_sacrifice'] },
+        { key:'myriad', names:['myriad'], re:/\bmyriad\b/i, traits:['attacking_copies_against_other_opponents','exile_copies_end_combat'] },
+        { key:'mobilize', names:['mobilize'], re:/\bmobilize\s+\d+/i, traits:['attack_trigger_tapped_attacking_token','sacrifice_token_end_combat'] },
+        { key:'toxic', names:['toxic'], re:/\btoxic\s+\d+/i, traits:['combat_damage_player_poison_counters'] },
+        { key:'decayed', names:['decayed'], re:/\bdecayed\b/i, traits:['cannot_block','sacrifice_after_attacking'] }
+    ];
+    const combatDetected = detected(combatDefs);
+    if (combatDetected.length) {
+        const tags = profileTraits(combatDetected);
+        const labels = combatDetected.map(d => d.key);
+        const subtypeTraits = [];
+        if (combatDetected.some(d => d.traits.some(t => /evasion|walk|cannot_be_blocked/.test(t)))) subtypeTraits.push('combat_family:evasion');
+        if (combatDetected.some(d => d.traits.some(t => /damage_step|damage_causes|lethal|excess_combat_damage/.test(t)))) subtypeTraits.push('combat_family:damage_rules');
+        if (combatDetected.some(d => d.traits.some(t => /attack|block|blocker|combat_triggered/.test(t)))) subtypeTraits.push('combat_family:attack_block_interaction');
+        add('combat_rules_profile', 'Combat rules profile', `Combat mechanic profile: ${labels.join(', ')}. Exact keyword rules are kept distinct; related combat functions share only their relevant subfamily traits.`,
+            [...new Set([...tags, ...subtypeTraits])], { family: 'combat_rules', evidence: text.slice(0, 420), condition: 'combat_keyword_rules_signature' });
+    }
+
+    const stateDefs = [
+        { key:'monarch', names:['monarch'], re:/\bbecome the monarch\b|\bthe monarch\b/i, traits:['player_designation','end_step_card_draw','combat_damage_can_change_designation'] },
+        { key:'initiative', names:['initiative'], re:/\btake the initiative\b|\bthe initiative\b/i, traits:['player_designation','venture_into_undercity','combat_damage_can_change_designation'] },
+        { key:'daybound', names:['daybound','nightbound'], re:/\bdaybound\b|\bnightbound\b/i, traits:['global_day_night_designation','transform_based_on_spells_cast'] },
+        { key:'ascend', names:['ascend'], re:/\bascend\b|\bcity's blessing\b/i, traits:['ten_permanents_threshold','persistent_city_blessing_designation'] },
+        { key:'venture_dungeon', names:['venture into the dungeon','venture into undercity'], re:/\bventure into (?:the )?(?:undercity|dungeon)\b/i, traits:['dungeon_room_progression','one_room_reward_per_venture'] },
+        { key:'ring_tempts_you', names:['the ring tempts you'], re:/\bthe ring tempts you\b/i, traits:['player_ring_designation','ring_bearer_choice','ring_level_progression'] },
+        { key:'attraction', names:['attraction','visit an attraction','assemble an attraction'], re:/\b(?:visit|assemble) (?:an? )?attraction\b/i, traits:['game_component_attraction','visit_by_die_roll','attraction-specific_rewards'] },
+        { key:'contraption', names:['contraption','assemble a contraption'], re:/\bassemble a contraption\b/i, traits:['game_component_contraption','sprocket_turn_progression'] },
+        { key:'the_ring_bearer', names:['ring-bearer','ring bearer'], re:/\bring bearer\b/i, traits:['chosen_creature_role','ring_level_grants_abilities'] }
+    ];
+    const stateDetected = detected(stateDefs);
+    if (stateDetected.length) {
+        const tags = profileTraits(stateDetected);
+        add('stateful_game_profile', 'Stateful game mechanic profile', `Stateful game mechanics: ${stateDetected.map(d => d.key.replace(/_/g,' ')).join(', ')}. The engine tracks designation, progression, and event hooks as distinct game-state concepts.`,
+            [...new Set(tags)], { family: 'stateful_game', evidence: text.slice(0, 420), condition: 'stateful_game_designation_or_progression' });
+    }
+
+    const progressionDefs = [
+        { key:'saga', names:['saga'], re:/\bchapter [ivx0-9]+\b|\bread ahead\b/i, typeRe:/\bSaga\b/i, traits:['chapter_counter','chapter_trigger','sacrifice_after_final_chapter'] },
+        { key:'class', names:['class'], re:/\blevel up\s*\{/i, typeRe:/—.*\bClass\b/i, traits:['level_counter','level_activated_abilities','incremental_level_unlock'] },
+        { key:'case', names:['case'], re:/\bsolved\b/i, typeRe:/—.*\bCase\b/i, traits:['unlock_condition','solved_designation','ongoing_ability_after_solved'] },
+        { key:'room', names:['room'], re:/\bunlock this door\b|\bdoors? you control\b/i, typeRe:/—.*\bRoom\b/i, traits:['unlockable_room','door_choice','room_ability_activation'] },
+        { key:'monstrosity', names:['monstrosity'], re:/\bmonstrosity\s+\d+/i, traits:['one_time_if_not_monster','counter_scaling','state_change_monster'] },
+        { key:'adapt', names:['adapt'], re:/\badapt\s+\d+/i, traits:['counter_addition_if_no_plus_counters'] },
+        { key:'level_up', names:['level up'], re:/\blevel up\s*\{/i, traits:['level_counter','incremental_ability_unlock'] },
+        { key:'craft', names:['craft'], re:/\bcraft with\b/i, traits:['exile_or_sacrifice_materials','transform_after_cost'] },
+        { key:'battle_siege', names:['battle','siege'], typeRe:/\bBattle\b/i, traits:['battle_permanent','defense_counter_tracking','protecting_player_condition','defeat_or_battle_state_transition'] },
+        { key:'spacecraft_station', names:['spacecraft','station'], typeRe:/—.*\b(?:Spacecraft|Station)\b/i, traits:['spacecraft_or_station_permanent','crew_or_station_progression','state_dependent_characteristics'] },
+        { key:'transform', names:['transform'], re:/\btransform this (?:creature|permanent|card)\b/i, traits:['two_faced_state_transition'] },
+        { key:'meld', names:['meld'], re:/\bmelds? with\b/i, traits:['combine_named_cards_into_single_permanent'] },
+        { key:'reconfigure', names:['reconfigure'], re:/\breconfigure\s*\{/i, traits:['equipment_or_creature_mode','attach_and_unattach_transition'] },
+        { key:'vehicle_crew', names:['crew','living metal'], re:/\bcrew\s*\d+/i, traits:['tap_creatures_by_total_power','becomes_artifact_creature_until_end_of_turn'] },
+        { key:'incubate', names:['incubate'], re:/\bincubate\s+\d+/i, traits:['create_incubator_token_with_counters','transform_token_to_phyrexian_creature'] },
+        { key:'earthbend', names:['earthbend'], re:/\bearthbend\s+\d+/i, traits:['land_becomes_creature','plus_one_counters','tapped_mana_ability'] },
+        { key:'blight', names:['blight'], re:/\bblight\s+\d+/i, traits:['opponent_places_minus_one_counters','opponent_chooses_creatures'] },
+        { key:'time_travel', names:['time travel','time travel action'], re:/\btime travel\b/i, traits:['modify_time_counters','suspended_or_related_card_progression'] }
+    ];
+    const progressionDetected = detected(progressionDefs);
+    if (progressionDetected.length) {
+        const tags = profileTraits(progressionDetected);
+        add('permanent_progression_profile', 'Permanent progression / state transition profile', `Permanent progression mechanics: ${progressionDetected.map(d => d.key.replace(/_/g,' ')).join(', ')}. Counter progression, unlocking, transforming, attaching, and final-state conditions remain separate traits.`,
+            [...new Set(tags)], { family: 'permanent_progression', evidence: text.slice(0, 420), condition: 'permanent_progression_state_transition' });
+    }
+
+    const politicalDefs = [
+        { key:'vote', names:['vote'], re:/\bvote\b|\bvotes\b/i, traits:['players_choose_between_options','vote_count_resolves_choice','opponent_choice_can_change_outcome'] },
+        { key:'council_dilemma', names:["council's dilemma","council's dilemma"], re:/\bcouncil's dilemma\b/i, traits:['each_player_chooses_option','choices_resolve_by_option_votes','multiplayer_choice'] },
+        { key:'join_forces', names:['join forces'], re:/\bjoin forces\b/i, traits:['optional_mana_contribution_by_players','shared_scaling_resource','multiplayer_choice'] },
+        { key:'tempting_offer', names:['tempting offer'], re:/\btempting offer\b/i, traits:['opponent_may_accept_offer','opponent_choice','repeatable_opponent_choice_trigger'] },
+        { key:'will_of_the_council', names:['will of the council'], re:/\bwill of the council\b/i, traits:['voting','majority_decides_effect','multiplayer_choice'] },
+        { key:'villainous_choice', names:['villainous choice'], re:/\bvillainous choice\b/i, traits:['each_opponent_selects_cost_or_effect','opponent_choice','multiplayer_choice'] },
+        { key:'parley', names:['parley'], re:/\bparley\b/i, traits:['reveal_top_card_per_player','shared_reveal_count','multiplayer_condition'] },
+        { key:'opponent_choice', names:['opponent choice'], re:/\b(?:an opponent|each opponent|target opponent)\s+(?:chooses?|may choose|votes?)\b/i, traits:['opponent_makes_choice','opponent_choice_affects_outcome'] }
+    ];
+    const politicalDetected = detected(politicalDefs);
+    if (politicalDetected.length) {
+        const tags = profileTraits(politicalDetected);
+        add('multiplayer_decision_profile', 'Multiplayer choice / politics profile', `Multiplayer decision mechanics: ${politicalDetected.map(d => d.key.replace(/_/g,' ')).join(', ')}. The model preserves who chooses, whether players vote or contribute resources, and whether opponent decisions change the outcome.`,
+            [...new Set(tags)], { family: 'multiplayer_decision', evidence: text.slice(0,420), condition: 'multiplayer_player_choice_or_vote' });
+    }
+
+    const auxiliaryDefs = [
+        { key:'planechase', names:['planeswalk','planechase'], re:/\bplaneswalk\b|\bplanechase\b/i, traits:['shared_plane_or_phenomenon_state','planeswalk_event','global_game_rule'] },
+        { key:'archenemy_scheme', names:['scheme','archenemy'], re:/\b(archenemy|scheme)\b/i, traits:['shared_scheme_zone','scheme_reveal_or_set_in_motion','asymmetric_multiplayer_role'] },
+        { key:'sticker_ticket', names:['sticker','ticket'], re:/\bstickers?\b|\btickets?\b/i, traits:['sticker_or_ticket_resource','object_attaches_sticker','ticket_payment_or_count'] },
+        { key:'conspiracy_hidden_agenda', names:['conspiracy','hidden agenda','double agenda'], re:/\b(hidden agenda|double agenda|conspiracy)\b/i, traits:['outside_deck_setup_choice','face_down_designation','deck_construction_or_start_game_rule'] }
+    ];
+    const auxiliaryDetected = detected(auxiliaryDefs);
+    if (auxiliaryDetected.length) {
+        const tags = profileTraits(auxiliaryDetected);
+        add('auxiliary_game_component_profile', 'Auxiliary game component profile', `Auxiliary game components: ${auxiliaryDetected.map(d => d.key.replace(/_/g,' ')).join(', ')}. The model records special zones, setup choices, physical game components, and global game-state effects separately from ordinary card actions.`,
+            [...new Set(tags)], { family: 'auxiliary_game_component', evidence: text.slice(0,420), condition: 'auxiliary_component_or_global_game_state' });
+    }
+
+    // Rules-changing effects need their own profile because replacement, prevention,
+    // phasing and regeneration are not interchangeable with destruction or ordinary stat buffs.
+    const rulesModificationDefs = [
+        { key:'replacement', re:/\binstead\b|\bwould\b[\s\S]{0,100}\binstead\b/i, traits:['replacement_effect','changes_would_happen_event','instead_replacement_wording'] },
+        { key:'damage_prevention', re:/\bprevent(?:s|ed|ing)?\b[\s\S]{0,90}\bdamage\b/i, traits:['damage_prevention_effect','damage_event_modified','not_damage_based_removal'] },
+        { key:'regeneration', re:/\bregenerate\b|\bregenerates\b/i, traits:['regeneration_shield','replace_destroy_event','tap_and_remove_damage'] },
+        { key:'phasing', re:/\bphases? out\b|\bphasing\b|\bphases? in\b/i, traits:['phasing_state_transition','temporary_out_of_phase','not_zone_change'] },
+        { key:'protection', re:/\bprotection from\b/i, traits:['protection_keyword_rules','damage_prevention','targeting_restriction','blocking_restriction'] },
+        { key:'ward', re:/\bward\s*\{/i, traits:['ward_keyword_rules','targeting_cost_trigger','targeted_spell_or_ability_tax'] },
+        { key:'hexproof', re:/\bhexproof\b/i, traits:['hexproof_keyword_rules','opponent_targeting_restriction'] },
+        { key:'shroud', re:/\bshroud\b/i, traits:['shroud_keyword_rules','all_targeting_restriction'] }
+    ];
+    const rulesModificationDetected = rulesModificationDefs.filter(d => d.re.test(text));
+    if (rulesModificationDetected.length) {
+        const tags = profileTraits(rulesModificationDetected);
+        add('rules_modification_profile', 'Replacement / prevention / rules-modification profile', `Rules-modification mechanics: ${rulesModificationDetected.map(d => d.key).join(', ')}. Replacement effects, damage prevention, regeneration, phasing, and targeting restrictions remain separate from destruction and zone movement.`,
+            [...new Set(tags)], { family: 'rules_modification', evidence: text.slice(0,420), condition: 'replacement_prevention_or_rule_restriction' });
+    }
+
+    const lowerConditionProfile = parseGameStateConditionProfile(text);
+    if (lowerConditionProfile?.conditions?.length) {
+        const conditionTraits = lowerConditionProfile.conditions.flatMap(c => [
+            `condition:${c.key}`, `dimension:${c.dimension}`, c.measure ? `measure:${c.measure}` : '',
+            c.zone ? `zone:${c.zone}` : '', c.scope ? `scope:${c.scope}` : '',
+            c.window ? `window:${c.window}` : '', c.operator ? `operator:${c.operator}` : '',
+            c.threshold != null ? `threshold:${c.threshold}` : '', c.qualifier ? `qualifier:${c.qualifier}` : ''
+        ].filter(Boolean));
+        add('game_state_condition_profile', 'Game-state condition signature', `Structured game-state conditions: ${lowerConditionProfile.conditions.map(c => `${c.key} (${c.dimension}${c.threshold == null ? '' : `, ${c.operator} ${c.threshold}`})`).join('; ')}. Conditions count the relevant resource, zone, event window, and threshold rather than serving as generic keywords.`,
+            [...new Set([...lowerConditionProfile.traits.map(t => `condition_name:${t}`), ...conditionTraits])],
+            { family: 'game_state_condition', threshold: lowerConditionProfile.threshold, dimensions: lowerConditionProfile.conditions, condition: lowerConditionProfile.conditions.map(c => c.key).join('|'), evidence: text.slice(0,420), isStatic: true });
+        results[results.length - 1].gameStateConditionProfile = lowerConditionProfile;
+    }
+}
+
+function parseGameStateConditionProfile(value) {
+    const text = String(value || '').replace(/[’]/g, "'");
+    const lower = text.toLowerCase();
+    const traits = [];
+    const conditions = [];
+    const add = (key, test, spec = {}) => {
+        if (!test.test(lower)) return;
+        traits.push(key);
+        conditions.push({
+            key,
+            dimension: spec.dimension || key,
+            measure: spec.measure || null,
+            zone: spec.zone || null,
+            scope: spec.scope || null,
+            window: spec.window || null,
+            operator: spec.operator || 'condition_met',
+            threshold: spec.threshold ?? null,
+            unit: spec.unit || null,
+            qualifier: spec.qualifier || null
+        });
+    };
+    const extractThreshold = (patterns, fallback = null) => {
+        for (const re of patterns) {
+            const m = lower.match(re);
+            if (m) {
+                const raw = m[1];
+                if (raw && /^\d+$/.test(raw)) return Number(raw);
+                const words = { zero:0, one:1, two:2, three:3, four:4, five:5, six:6, seven:7, eight:8, nine:9, ten:10 };
+                if (raw && words[raw] != null) return words[raw];
+            }
+        }
+        return fallback;
+    };
+    const graveyardThreshold = extractThreshold([/\b(\d+) or more cards? in your graveyard\b/, /\b(seven|six|five|four|three|two) or more cards? in your graveyard\b/]);
+    const artifactThreshold = extractThreshold([/\b(\d+) or more artifacts?\b/, /\b(three|four|five|six|seven) or more artifacts?\b/]);
+    const numbers = [...lower.matchAll(/\b(\d+)\s+or more\b/g)].map(m => Number(m[1]));
+
+    add('devotion', /\bdevotion to\b|\bfor each mana symbol of .* among permanents you control/, { dimension:'mana_symbols_among_controlled_permanents', measure:'colored_mana_symbols', scope:'you_control', qualifier:'color_specific' });
+    add('party', /\bparty\b|\bcleric\b[\s\S]{0,50}\brogue\b[\s\S]{0,50}\bwarrior\b/, { dimension:'distinct_party_roles', measure:'distinct_creature_roles', threshold:4, scope:'you_control' });
+    add('domain', /\bnumber of basic land types\b|\bdomain\b/, { dimension:'basic_land_types_among_controlled_lands', measure:'distinct_land_types', scope:'you_control' });
+    add('undergrowth', /\bcreature cards? in your graveyard\b/, { dimension:'graveyard_card_count', measure:'creature_cards', zone:'graveyard', scope:'you' });
+    add('fathomless_descent', /\bpermanent cards? in your graveyard\b/, { dimension:'graveyard_card_count', measure:'permanent_cards', zone:'graveyard', scope:'you' });
+    add('vivid', /\bcharge counters? on this permanent\b|\bvivid\b/, { dimension:'counter_count', measure:'charge_counters', scope:'this_permanent' });
+    add('coven', /\bthree or more creatures? with different powers\b|\bcoven\b/, { dimension:'controlled_creatures_different_powers', measure:'creatures', threshold:3, scope:'you_control', qualifier:'different_powers' });
+    add('metalcraft', /\bthree or more artifacts\b|\bmetalcraft\b/, { dimension:'controlled_artifact_count', measure:'artifacts', threshold:artifactThreshold ?? 3, scope:'you_control' });
+    add('ferocious', /\bcreature you control has power 4 or greater\b|\bferocious\b/, { dimension:'max_power_among_controlled_creatures', measure:'creature_power', threshold:4, operator:'greater_than_or_equal' });
+    add('formidable', /\btotal power 8 or greater\b|\bformidable\b/, { dimension:'total_power_controlled_creatures', measure:'power_sum', threshold:8, operator:'greater_than_or_equal' });
+    add('delirium', /\bfour or more card types among cards in your graveyard\b|\bdelirium\b/, { dimension:'distinct_card_types_in_graveyard', measure:'card_types', threshold:4, zone:'graveyard', scope:'you' });
+    add('spell_mastery', /\btwo or more instant and\/or sorcery cards? in your graveyard\b|\bspell mastery\b/, { dimension:'graveyard_card_count', measure:'instant_and_sorcery_cards', threshold:2, zone:'graveyard', scope:'you' });
+    add('threshold', /\bseven or more cards? in your graveyard\b|\bthreshold\b/, { dimension:'graveyard_card_count', measure:'cards', threshold:graveyardThreshold ?? 7, zone:'graveyard', scope:'you' });
+    add('descend', /\bpermanent card was put into your graveyard this turn\b|\bdescend\b/, { dimension:'zone_change_event_count', measure:'permanent_cards_put_into_graveyard', threshold:1, window:'this_turn', scope:'you' });
+    add('morbid', /\bcreature died this turn\b|\bcreature has died this turn\b|\bmorbid\b/, { dimension:'zone_change_event_count', measure:'creatures_died', threshold:1, window:'this_turn' });
+    add('raid', /\battacked this turn\b|\braid\b/, { dimension:'combat_event', measure:'you_attacked', threshold:1, window:'this_turn', scope:'you' });
+    add('revolt', /\ba permanent you controlled left the battlefield this turn\b|\brevolt\b/, { dimension:'zone_change_event_count', measure:'your_permanents_left_battlefield', threshold:1, window:'this_turn', scope:'you_control' });
+    add('celebration', /\btwo or more nonland permanents entered the battlefield\b|\bcelebration\b/, { dimension:'zone_change_event_count', measure:'nonland_permanents_entered_battlefield', threshold:2, window:'this_turn' });
+    add('expend', /\bspent \d+ or more mana to cast spells this turn\b|\bexpend\s*\d+\b|\bexpend\b/, { dimension:'mana_spent_casting_spells', measure:'mana', threshold:extractThreshold([/\bexpend\s*(\d+)/, /\bspent\s+(\d+) or more mana/]), window:'this_turn' });
+    add('infusion', /\bgained life this turn\b|\binfusion\b/, { dimension:'life_gain_event', measure:'life_gained', threshold:1, window:'this_turn', scope:'you' });
+    add('historic', /\bhistoric spell\b|\bhistoric permanent\b|\bhistoric\b/, { dimension:'historic_card_class', measure:'artifact_legendary_saga', qualifier:'card_type_or_supertype_group' });
+    add('modified', /\bmodified creature\b|\bmodified creatures\b|\bmodified\b/, { dimension:'permanent_modification_state', measure:'aura_equipment_or_counter', scope:'creature' });
+    add('commit_a_crime', /\bcommitted a crime this turn\b|\bcommit a crime\b/, { dimension:'crime_event', measure:'targeted_opponent_or_opponent_permanent_spell', threshold:1, window:'this_turn' });
+    add('outlaw', /\boutlaw\b|\bassassin, mercenary, pirate, rogue, and warlock\b/, { dimension:'controlled_creature_type_group', measure:'assassin_mercenary_pirate_rogue_warlock', scope:'you_control' });
+    add('hellbent', /\bno cards? in your hand\b|\bhellbent\b/, { dimension:'hand_card_count', measure:'cards', threshold:0, operator:'equal', zone:'hand', scope:'you' });
+    add('fateful_hour', /\bfive or less life\b|\bfateful hour\b/, { dimension:'life_total', measure:'life', threshold:5, operator:'less_than_or_equal', scope:'you' });
+    add('city_blessing', /\bcity's blessing\b|\bten or more permanents\b/, { dimension:'controlled_permanent_count', measure:'permanents', threshold:10, operator:'greater_than_or_equal', scope:'you_control', qualifier:'persistent_designation_once_gained' });
+    add('battalion', /\bwhenever this creature and at least two other creatures attack\b|\bbattalion\b/, { dimension:'attacking_creature_count', measure:'creatures', threshold:3, window:'this_attack' });
+    add('pack_tactics', /\btotal power 6 or greater\b|\bpack tactics\b/, { dimension:'attacking_creature_total_power', measure:'power_sum', threshold:6, window:'this_attack' });
+    add('poison_threshold', /\bthree or more poison counters?\b|\bten or more poison counters?\b|\bpoison counter threshold\b/, { dimension:'player_poison_counter_count', measure:'poison_counters', threshold:extractThreshold([/\b(\d+) or more poison counters?/]) });
+    add('corrupted', /\bcorrupted\b/, { dimension:'opponent_poison_counter_count', measure:'poison_counters', threshold:3, operator:'greater_than_or_equal', qualifier:'opponent_has_poison_counters' });
+
+    if (!traits.length) return null;
+    const uniqueConditions = Array.from(new Map(conditions.map(c => [c.key, c])).values());
+    const legacyThreshold = numbers.length ? Math.max(...numbers) : (graveyardThreshold ?? artifactThreshold ?? null);
+    return { traits: Array.from(new Set(traits)).sort(), threshold: legacyThreshold, conditions: uniqueConditions };
+}
+
+function parseMTGEffect(oracleText, cardContext = null) {
     if (!oracleText) return [];
 
     // Split on sentences, semicolons, bullet points, and rule keywords. Newlines are always a
@@ -6586,7 +7028,10 @@ function parseMTGEffect(oracleText) {
         // Mana production must be compared by NET mana when an activation itself costs mana.
         // Example: Boros Signet pays {1} to add {R}{W}; output is two mana, but the net increase
         // is one. Both values are retained so color-fixing and gross output remain visible.
-        if (parsed.action === 'add_mana') finalizeManaAbilityEffect(parsed);
+        if (parsed.action === 'add_mana') {
+            finalizeManaAbilityEffect(parsed);
+            parsed.manaAbilityRulesProfile = classifyManaAbilityRules(`${costText || ''} ${clause}`, effectText);
+        }
 
         if (activeModeGroup && isBulletLine) {
             parsed.isMode = true;
@@ -6655,6 +7100,11 @@ function parseMTGEffect(oracleText) {
             }
         }
     }
+
+    // Add dedicated structured signatures for the mechanic families that a flat keyword anchor
+    // cannot explain adequately. Existing parsed atoms remain untouched and continue to describe
+    // costs, zone movement, quantities, target scopes, triggers, and outcomes.
+    appendNamedMechanicProfiles(results, wholeOracleText, cardContext);
 
     // Add relationship metadata before canonicalization so the canonical representation can carry
     // target/quantity/trigger/dependency structure downstream.
@@ -6766,7 +7216,26 @@ const FUNCTION_OUTCOMES = {
     place_counter:    "stats_changed_one_shot",
     tap:              "permanent_tapped",
     untap: "permanent_untapped",
-    cast_timing_permission: "instant_speed_cast_permission"
+    cast_timing_permission: "instant_speed_cast_permission",
+    mechanic_recruit: "draw_discard_conditional_token_creation",
+    mechanic_storied: "persistent_player_designation",
+    mechanic_hone_counter: "equipped_creature_counter_scaled_power",
+    mechanic_empower_jace: "conditional_jace_token_and_loyalty",
+    mechanic_heartwood_token: "red_green_artifact_mana_token",
+    mechanic_plan_progression: "counter_milestone_plan_reward",
+    mechanic_worthy_equip: "conditional_equipment_target_legality",
+    mechanic_vibranium_token: "indestructible_colorless_artifact_mana_token",
+    mechanic_prepared_spell: "paired_exiled_spell_cast_permission",
+    mechanic_casting_mode_profile: "alternate_or_delayed_casting_mode",
+    mechanic_spell_replay_profile: "spell_copy_or_replay_rules",
+    mechanic_combat_rules_profile: "combat_keyword_rules",
+    mechanic_stateful_game_profile: "persistent_game_designation_or_progression",
+    mechanic_permanent_progression_profile: "permanent_state_transition_rules",
+    mechanic_game_state_condition_profile: "game_state_condition_signature",
+    mechanic_delayed_hand_exile_cast_profile: "delayed_hand_exile_cast_permission",
+    mechanic_multiplayer_decision_profile: "multiplayer_choice_or_voting_rules",
+    mechanic_auxiliary_game_component_profile: "auxiliary_game_component_rules",
+    mechanic_rules_modification_profile: "replacement_prevention_and_static_rule_modification"
 };
 
 /**
@@ -6776,6 +7245,37 @@ const FUNCTION_OUTCOMES = {
  */
 function deriveCanonicalFunction(effect) {
     if (!effect || !effect.action || effect.action === "generic") return null;
+
+    // Named mechanic signatures are first-class nodes in the same canonical graph as ordinary
+    // parsed effects. They supplement, rather than replace, the detailed action/zone/cost atoms.
+    // This is how multi-clause/stateful mechanics stay connected through retrieval and scoring.
+    if (effect.mechanicProfile?.key) {
+        const profile = effect.mechanicProfile;
+        const functionName = `mechanic_${String(profile.key).replace(/[^a-z0-9]+/gi, '_').replace(/^_|_$/g, '').toLowerCase()}`;
+        return {
+            function: functionName,
+            outcome: FUNCTION_OUTCOMES[functionName] || `named_mechanic_${normalizeMechanicToken(profile.key).replace(/[^a-z0-9]+/g, '_')}`,
+            params: {
+                object: null, target: null, from: null, to: null,
+                mechanicKey: normalizeMechanicToken(profile.key),
+                mechanicProfile: {
+                    key: normalizeMechanicToken(profile.key),
+                    family: normalizeMechanicToken(profile.family || profile.key),
+                    label: String(profile.label || profile.key),
+                    traits: Array.from(new Set((profile.traits || []).map(normalizeMechanicToken).filter(Boolean))).sort(),
+                    threshold: profile.threshold ?? null,
+                    quantity: profile.quantity ?? null,
+                    condition: normalizeMechanicToken(profile.condition || ''),
+                    sequence: (profile.sequence || []).map(normalizeMechanicToken),
+                    dimensions: Array.isArray(profile.dimensions) ? profile.dimensions : [],
+                    summary: String(profile.summary || '')
+                },
+                gameStateConditionProfile: effect.gameStateConditionProfile || null,
+                raw: effect.raw || null,
+                isStatic: Boolean(profile.isStatic)
+            }
+        };
+    }
 
     const a = effect.action;
     const localRuleContext = `${String(effect.parentRuleText || '')} ${String(effect.contextClause || '')} ${String(effect.raw || '')}`.replace(/[’]/g, "'");
@@ -6951,6 +7451,7 @@ function deriveCanonicalFunction(effect) {
             manaOutputMode: fn === 'mana_ability' ? (effect.manaOutputMode || effect.manaOutput?.mode || null) : null,
             manaOutputColors: fn === 'mana_ability' ? (effect.manaOutputColors || effect.manaOutput?.colors || []) : [],
             manaOutputColorCount: fn === 'mana_ability' ? (effect.manaOutputColorCount ?? effect.manaOutput?.uniqueColorCount ?? null) : null,
+            manaAbilityRulesProfile: effect.manaAbilityRulesProfile || null,
             duration: effect.isStatic === true ? "static" : (effect.isStatic === false ? "temporary" : null),
             controller: effect.controller || null,
             recipientScope,
@@ -6976,6 +7477,8 @@ function deriveCanonicalFunction(effect) {
             controlChangeDuration: effect.controlChangeDuration || null,
             condition: effect.condition || null,
             conditionDetail: effect.conditionDetail || null,
+            gameStateConditionProfile: effect.gameStateConditionProfile || parseGameStateConditionProfile(ruleContext),
+            manaAbilityRulesProfile: effect.manaAbilityRulesProfile || null,
             payCost: effect.payCost || null,
             activationCost: effect.activationCost || null,
             additionalEffects: effect.additionalEffects || [],
@@ -6997,20 +7500,21 @@ function canonicalFunctionToText(canonicalFunctions) {
     if (!canonicalFunctions || canonicalFunctions.length === 0) return "";
     return canonicalFunctions.map(cf => {
         const p = cf.params || {};
+        if (p.mechanicProfile?.summary) return p.mechanicProfile.summary;
         if ((cf.function === 'anthem' || cf.function === 'tribal_anthem') && p.combatFinisher && p.scalingProfile?.source === 'creatures_you_control') {
             const buffs = p.magnitude || '+X/+X';
             const keywords = (p.grantedKeywords || []).join(', ');
             return `combat anthem/finisher: creatures you control get ${buffs}, where X is the number of creatures you control${keywords ? `, and gain ${keywords}` : ''}${p.duration === 'temporary' ? ' until end of turn' : ''}`;
         }
         if (cf.function === 'zone_change' && p.from === 'hand' && p.to === 'exile') {
-            return 'exile a card from hand into exile for setup/future access; hand-zone change, not battlefield permanent removal';
+            return 'exile a card from hand';
         }
         if (cf.function === 'library_exile_access') {
             const libraryOwner = p.libraryOwnerScope === 'you' ? 'your' : p.libraryOwnerScope === 'opponent' ? "an opponent's" : p.libraryOwnerScope === 'affected_player' ? "that player's" : "a player's";
             const access = p.playFromExile || p.accessType === 'impulse_draw'
                 ? `impulse draw: exile the top card${typeof p.quantity === 'number' && p.quantity > 1 ? `s (${p.quantity})` : ''} of ${libraryOwner} library and may play/cast it from exile${p.playWindow ? ` ${p.playWindow}` : ''}`
                 : `exile the top card of ${libraryOwner} library for card access`;
-            return `${access}; library-card access (not battlefield permanent removal)`;
+            return `${access}; library-card access`;
         }
         if (cf.function === 'token_creation' && p.tokenType === 'clue') {
             return `repeatable Clue token engine from investigate; each Clue can be activated for {2}, sacrifice that Clue token: draw a card (repeatable card advantage when mana and Clues are available)`;
@@ -7072,6 +7576,25 @@ const FUNCTION_IMPORTANCE = {
     // an untap-lands ramp trick) rather than the point of the card on their own, so they sit lower.
     place_counter: 0.7, tap: 0.5, untap: 0.5,
     cast_timing_permission: 0.98,
+    mechanic_recruit: 0.90,
+    mechanic_storied: 0.88,
+    mechanic_hone_counter: 0.84,
+    mechanic_empower_jace: 0.94,
+    mechanic_heartwood_token: 0.82,
+    mechanic_plan_progression: 0.94,
+    mechanic_worthy_equip: 0.84,
+    mechanic_vibranium_token: 0.82,
+    mechanic_prepared_spell: 0.92,
+    mechanic_casting_mode_profile: 0.92,
+    mechanic_spell_replay_profile: 0.96,
+    mechanic_combat_rules_profile: 0.90,
+    mechanic_stateful_game_profile: 0.90,
+    mechanic_permanent_progression_profile: 0.90,
+    mechanic_game_state_condition_profile: 0.86,
+    mechanic_delayed_hand_exile_cast_profile: 0.95,
+    mechanic_multiplayer_decision_profile: 0.82,
+    mechanic_auxiliary_game_component_profile: 0.84,
+    mechanic_rules_modification_profile: 0.91,
     zone_change: 0.4
 };
 
@@ -7095,6 +7618,7 @@ function assignEffectImportance(effects) {
         }
 
         let score = FUNCTION_IMPORTANCE[eff.canonical.function] ?? 0.5;
+        if (eff.mechanicProfile?.key) score = Math.max(score, 0.84);
         // Investigate/Clue engines create a reusable resource whose built-in {2}, sacrifice-Clue
         // ability repeatedly draws cards. Treat a repeatable investigate trigger as a defining
         // card-advantage engine rather than generic token production.
@@ -7857,7 +8381,14 @@ const FUNCTION_LABELS = [
     'reanimate', 'recursion', 'cheat_into_play', 'token_creation', 'token_multiplier',
     'card_draw', 'tutor', 'ramp_tutor', 'counter', 'cost_reduction', 'stat_buff', 'tribal_anthem',
     'direct_damage', 'lose_life', 'gain_life', 'discard', 'mill', 'mana_ability',
-    'tap', 'untap', 'anthem', 'cast_timing_permission'
+    'tap', 'untap', 'anthem', 'cast_timing_permission',
+    'mechanic_recruit', 'mechanic_storied', 'mechanic_hone_counter', 'mechanic_empower_jace',
+    'mechanic_heartwood_token', 'mechanic_plan_progression', 'mechanic_worthy_equip',
+    'mechanic_vibranium_token', 'mechanic_prepared_spell', 'mechanic_casting_mode_profile',
+    'mechanic_spell_replay_profile', 'mechanic_combat_rules_profile', 'mechanic_stateful_game_profile',
+    'mechanic_permanent_progression_profile', 'mechanic_game_state_condition_profile',
+    'mechanic_delayed_hand_exile_cast_profile', 'mechanic_multiplayer_decision_profile',
+    'mechanic_auxiliary_game_component_profile', 'mechanic_rules_modification_profile'
 ];
 const FUNCTION_INDEX = new Map(FUNCTION_LABELS.map((name, i) => [name, i]));
 const FUNCTION_AFFINITY_MATRIX = Array.from({ length: FUNCTION_LABELS.length }, () => Array(FUNCTION_LABELS.length).fill(0));
@@ -7978,6 +8509,11 @@ function computeDirectionalMechanicalEffectPairSimilarity(effA, effB) {
 const cfA = effA.canonical || {}, cfB = effB.canonical || {};
 const fnA = cfA.function || null, fnB = cfB.function || null;
 const outcomeA = cfA.outcome || null, outcomeB = cfB.outcome || null;
+const namedA = String(fnA || '').startsWith('mechanic_'), namedB = String(fnB || '').startsWith('mechanic_');
+const profileA = cfA.params?.mechanicProfile || effA.mechanicProfile || null;
+const profileB = cfB.params?.mechanicProfile || effB.mechanicProfile || null;
+const namedFamiliesCompatible = Boolean(namedA && namedB && profileA?.family && profileA.family === profileB?.family);
+if ((namedA || namedB) && fnA !== fnB && !namedFamiliesCompatible) return 0.005;
 const taxA = effA.action ? ACTION_TAXONOMY[effA.action] : null;
 const taxB = effB.action ? ACTION_TAXONOMY[effB.action] : null;
 
@@ -7987,6 +8523,7 @@ const sameOutcome = outcomeA && outcomeB && outcomeA === outcomeB;
 const sameFamily = taxA?.family && taxB?.family && taxA.family === taxB.family;
 const coreAlignment = Math.max(
     affinity,
+    namedFamiliesCompatible ? 0.62 : 0,
     sameAction ? 0.96 : 0,
     sameOutcome ? 0.74 : 0,
     sameFamily ? 0.50 : 0
@@ -7994,6 +8531,8 @@ const coreAlignment = Math.max(
 if (coreAlignment <= 0) return 0;
 
 const parts = [];
+if (namedA && namedB) parts.push({ weight: 20, value: compareNamedMechanicProfiles(profileA, profileB) });
+parts.push({ weight: 10, value: compareGameStateConditionProfiles(effA.gameStateConditionProfile || cfA.params?.gameStateConditionProfile, effB.gameStateConditionProfile || cfB.params?.gameStateConditionProfile) });
 parts.push(fieldSimilarity(14, cfA.object ?? effA.object, cfB.object ?? effB.object));
 parts.push(fieldSimilarity(10, cfA.target ?? effA.target, cfB.target ?? effB.target));
 if (fnA === 'cost_reduction' || fnB === 'cost_reduction') {
@@ -8037,6 +8576,9 @@ if (fnA === 'mana_ability' && fnB === 'mana_ability') {
     if (outputSim != null) parts.push({ weight: 5, value: outputSim });
     if (colorSim != null) parts.push({ weight: 8, value: colorSim });
     if (activationSim != null) parts.push({ weight: 5, value: activationSim });
+    const rulesA = cfA.params?.manaAbilityRulesProfile || effA.manaAbilityRulesProfile || null;
+    const rulesB = cfB.params?.manaAbilityRulesProfile || effB.manaAbilityRulesProfile || null;
+    if (rulesA || rulesB) parts.push({ weight: 8, value: rulesA && rulesB ? (rulesA.isRulesManaAbility === rulesB.isRulesManaAbility ? 1 : 0.12) : 0.55 });
 }
 const tpA = effA.targetProfile || {}, tpB = effB.targetProfile || {};
 parts.push(fieldSimilarity(4, tpA.kind, tpB.kind));
@@ -9561,36 +10103,60 @@ function buildUniversalFunctionalText(card = null, text = '', parsedEffects = nu
 
 function calculateUniversalMechanicSimilarity(profileA, profileB) {
     if (!profileA || !profileB) return { score: 0, keywordCoverage: 0, keywordParameterCoverage: 0, actionCoverage: 0, parsedActionCoverage: 0, functionCoverage: 0, outcomeCoverage: 0, zoneCoverage: 0, targetCoverage: 0, scopeCoverage: 0, triggerCoverage: 0, costCoverage: 0, choiceCoverage: 0, resourceCoverage: 0, atomCoverage: 0, counterCoverage: 0, tokenCoverage: 0, statCoverage: 0, polaritySimilarity: 0, sharedKeywords: [] };
-    const keywordCoverage = weightedSymmetricCoverage(profileA.keywords, profileB.keywords, 1.0);
-    const keywordParameterCoverage = weightedSymmetricCoverage(profileA.keywordParameters, profileB.keywordParameters, 1.0);
-    const actionCoverage = weightedSymmetricCoverage(profileA.actions, profileB.actions, 0.90);
-    const parsedActionCoverage = weightedSymmetricCoverage(profileA.parsedActions, profileB.parsedActions, 0.92);
-    const functionCoverage = weightedSymmetricCoverage(profileA.canonicalFunctions, profileB.canonicalFunctions, 1.0);
-    const outcomeCoverage = weightedSymmetricCoverage(profileA.canonicalOutcomes, profileB.canonicalOutcomes, 1.0);
-    const zoneCoverage = weightedSymmetricCoverage(profileA.zones, profileB.zones, 0.95);
-    const targetCoverage = weightedSymmetricCoverage(profileA.context?.target, profileB.context?.target, 0.78);
-    const scopeCoverage = weightedSymmetricCoverage(profileA.context?.scope, profileB.context?.scope, 0.68);
-    const triggerCoverage = weightedSymmetricCoverage(profileA.context?.trigger, profileB.context?.trigger, 0.82);
-    const costCoverage = weightedSymmetricCoverage(profileA.context?.cost, profileB.context?.cost, 0.52);
-    const choiceCoverage = weightedSymmetricCoverage(profileA.context?.choice, profileB.context?.choice, 0.48);
-    const resourceCoverage = weightedSymmetricCoverage(profileA.resources, profileB.resources, 0.72);
-    const counterCoverage = weightedSymmetricCoverage(profileA.counters, profileB.counters, 0.88);
-    const tokenCoverage = weightedSymmetricCoverage(profileA.tokens, profileB.tokens, 0.84);
-    const statCoverage = weightedSymmetricCoverage(profileA.stats, profileB.stats, 0.65);
-    const atomCoverage = weightedSymmetricCoverage(profileA.atoms, profileB.atoms, 0.82);
+    const values = (set) => set instanceof Set ? [...set] : Array.isArray(set) ? set : set && typeof set === 'object' ? Object.keys(set) : [];
+    const size = set => values(set).length;
+    // No evidence on either card is missing information, not a perfect match. This is critical:
+    // the old empty/empty=1 behavior let unrelated unrecognized cards reach ~0.92 similarity.
+    const evidenceCoverage = (a, b, factor = 0.9) => size(a) === 0 && size(b) === 0 ? 0 : weightedSymmetricCoverage(a, b, factor);
+    const keywordCoverage = evidenceCoverage(profileA.keywords, profileB.keywords, 1.0);
+    const keywordParameterCoverage = evidenceCoverage(profileA.keywordParameters, profileB.keywordParameters, 1.0);
+    const actionCoverage = evidenceCoverage(profileA.actions, profileB.actions, 0.90);
+    const parsedActionCoverage = evidenceCoverage(profileA.parsedActions, profileB.parsedActions, 0.92);
+    const functionCoverage = evidenceCoverage(profileA.canonicalFunctions, profileB.canonicalFunctions, 1.0);
+    const outcomeCoverage = evidenceCoverage(profileA.canonicalOutcomes, profileB.canonicalOutcomes, 1.0);
+    const zoneCoverage = evidenceCoverage(profileA.zones, profileB.zones, 0.95);
+    const targetCoverage = evidenceCoverage(profileA.context?.target, profileB.context?.target, 0.78);
+    const scopeCoverage = evidenceCoverage(profileA.context?.scope, profileB.context?.scope, 0.68);
+    const triggerCoverage = evidenceCoverage(profileA.context?.trigger, profileB.context?.trigger, 0.82);
+    const costCoverage = evidenceCoverage(profileA.context?.cost, profileB.context?.cost, 0.52);
+    const choiceCoverage = evidenceCoverage(profileA.context?.choice, profileB.context?.choice, 0.48);
+    const resourceCoverage = evidenceCoverage(profileA.resources, profileB.resources, 0.72);
+    const counterCoverage = evidenceCoverage(profileA.counters, profileB.counters, 0.88);
+    const tokenCoverage = evidenceCoverage(profileA.tokens, profileB.tokens, 0.84);
+    const statCoverage = evidenceCoverage(profileA.stats, profileB.stats, 0.65);
+    const atomCoverage = evidenceCoverage(profileA.atoms, profileB.atoms, 0.82);
     const polaritySimilarity = comparePolarity(profileA.polarity || {}, profileB.polarity || {});
-    const sharedKeywords = [...profileA.keywords].filter(k => profileB.keywords.has(k));
+    const sharedKeywords = [...(profileA.keywords || [])].filter(k => (profileB.keywords || new Set()).has(k));
     const exactKeywordEvidence = keywordCoverage > 0
         ? Math.min(1, keywordCoverage * 0.78 + keywordParameterCoverage * 0.16)
         : 0;
     const weights = UNIVERSAL_FEATURE_WEIGHTS;
-    const numerator = actionCoverage * weights.actions + parsedActionCoverage * weights.parsedActions +
-        functionCoverage * weights.canonicalFunctions + outcomeCoverage * weights.canonicalOutcomes +
-        zoneCoverage * weights.zones + targetCoverage * weights.target + scopeCoverage * weights.scope +
-        triggerCoverage * weights.trigger + costCoverage * weights.cost + choiceCoverage * weights.choice +
-        resourceCoverage * weights.resources + counterCoverage * weights.counters + tokenCoverage * weights.tokens +
-        statCoverage * weights.stats + polaritySimilarity * weights.polarity;
-    const denominator = Object.values(weights).reduce((a, b) => a + b, 0);
+    const pairs = [
+        ['actions', profileA.actions, profileB.actions, actionCoverage, weights.actions],
+        ['parsedActions', profileA.parsedActions, profileB.parsedActions, parsedActionCoverage, weights.parsedActions],
+        ['canonicalFunctions', profileA.canonicalFunctions, profileB.canonicalFunctions, functionCoverage, weights.canonicalFunctions],
+        ['canonicalOutcomes', profileA.canonicalOutcomes, profileB.canonicalOutcomes, outcomeCoverage, weights.canonicalOutcomes],
+        ['zones', profileA.zones, profileB.zones, zoneCoverage, weights.zones],
+        ['target', profileA.context?.target, profileB.context?.target, targetCoverage, weights.target],
+        ['scope', profileA.context?.scope, profileB.context?.scope, scopeCoverage, weights.scope],
+        ['trigger', profileA.context?.trigger, profileB.context?.trigger, triggerCoverage, weights.trigger],
+        ['cost', profileA.context?.cost, profileB.context?.cost, costCoverage, weights.cost],
+        ['choice', profileA.context?.choice, profileB.context?.choice, choiceCoverage, weights.choice],
+        ['resources', profileA.resources, profileB.resources, resourceCoverage, weights.resources],
+        ['counters', profileA.counters, profileB.counters, counterCoverage, weights.counters],
+        ['tokens', profileA.tokens, profileB.tokens, tokenCoverage, weights.tokens],
+        ['stats', profileA.stats, profileB.stats, statCoverage, weights.stats],
+        ['polarity', null, null, polaritySimilarity, weights.polarity]
+    ];
+    let numerator = 0, denominator = 0;
+    for (const [key, a, b, coverage, weight] of pairs) {
+        const informative = key === 'polarity'
+            ? Object.values(profileA.polarity || {}).some(Boolean) || Object.values(profileB.polarity || {}).some(Boolean)
+            : size(a) > 0 || size(b) > 0;
+        if (!informative) continue;
+        numerator += (Number(coverage) || 0) * weight;
+        denominator += weight;
+    }
     const weightedTextEvidence = denominator ? numerator / denominator : 0;
     const signatureEvidence = Math.max(weightedTextEvidence, exactKeywordEvidence, atomCoverage * 0.72,
         keywordCoverage * 0.70 + counterCoverage * 0.15 + tokenCoverage * 0.15);
@@ -10200,8 +10766,15 @@ const SEMANTIC_MECHANIC_BRIDGE_GROUPS = [
     [['teamwork'], ['cost:tap_creatures_by_power', 'spell:bonus_if_teamwork_paid', 'spell:conditional_cast_mode']],
     [['prepare'], ['game_state:prepared_designation', 'card:paired_prepare_spell']],
     [['heal'], ['damage:remove_damage']],
-    [['recruit'], ['combat:tap_or_attack_condition']],
-    [['storied'], ['trigger:story_or_historic_count']],
+    [['recruit'], ['keyword_action:draw_then_discard', 'hand:discard', 'condition:discarded_nonland', 'token:conditional_human_soldier']],
+    [['storied'], ['ability:static_ability', 'game_state:enduring_story_designation', 'condition:three_historic_like_permanents', 'protection:ward_granted']],
+    [['hone counter', 'hone counters'], ['counter:hone', 'equipment:counter_scaled_power', 'stat:equipped_creature_plus_one_power']],
+    [['empower jace'], ['token:jace_planeswalker_if_none', 'counter:loyalty', 'game_state:conditional_existing_token']],
+    [['heartwood', 'heartwood token'], ['token:heartwood', 'token:red_green_artifact', 'mana:red_or_green']],
+    [['plan'], ['permanent:plan_subtype', 'counter:plan_progression', 'trigger:plan_milestone_reward']],
+    [['worthy'], ['attachment:conditional_equip_legality', 'condition:legendary_red_white_non_villain']],
+    [['vibranium', 'vibranium token'], ['token:vibranium', 'token:indestructible_artifact', 'mana:colorless_restricted']],
+    [['prepare', 'prepared', 'preparation'], ['game_state:prepared_designation', 'card:paired_spell_in_exile', 'cast:permission_while_prepared']],
 ];
 
 const SEMANTIC_MECHANIC_BRIDGE_INDEX = (() => {
@@ -10554,6 +11127,17 @@ function inferContextualSemanticMechanics(card, text, directKeywords = new Set()
 }
 
 const SEMANTIC_MECHANIC_BRIDGE_TEXT_RULES = [
+    // High-specificity named mechanic semantics (not just lexical keyword recognition).
+    [/\brecruit\b[\s\S]{0,240}\bdiscard\b[\s\S]{0,160}\b(?:nonland|land card|Human Soldier)\b/i, ['keyword_action:draw_then_discard', 'condition:discarded_nonland', 'token:conditional_human_soldier']],
+    [/\bstoried\b|\benduring story\b/i, ['ability:static_ability', 'game_state:enduring_story_designation', 'condition:three_historic_like_permanents']],
+    [/\bhone counters?\b/i, ['counter:hone', 'equipment:counter_scaled_power', 'stat:equipped_creature_plus_one_power']],
+    [/\bempower Jace(?: \d+)?\b/i, ['token:jace_planeswalker_if_none', 'counter:loyalty', 'game_state:conditional_existing_token']],
+    [/\bHeartwood token\b/i, ['token:heartwood', 'token:red_green_artifact', 'mana:red_or_green']],
+    [/\bplan counters?\b/i, ['permanent:plan_subtype', 'counter:plan_progression', 'trigger:plan_milestone_reward']],
+    [/\bequip\b[\s\S]{0,120}\blegendary\b[\s\S]{0,120}\b(?:red and\/or white|red or white)\b[\s\S]{0,100}\bnot a Villain\b/i, ['attachment:conditional_equip_legality', 'condition:legendary_red_white_non_villain']],
+    [/\bVibranium token\b/i, ['token:vibranium', 'token:indestructible_artifact', 'mana:colorless_restricted']],
+    [/\b(?:prepared|preparation)\b[\s\S]{0,140}\b(?:exile|cast|spell)\b/i, ['game_state:prepared_designation', 'card:paired_spell_in_exile', 'cast:permission_while_prepared']],
+
     // Casting/timing/cost templates
     [/\byou may cast (?:this spell|this card) any time you could cast an instant\b/i, ['cast:instant_timing']],
     [/\bas an additional cost to cast\b[\s\S]*\byou may pay\b/i, ['cost:optional_additional_cost']],
@@ -11043,6 +11627,9 @@ function buildMechanicalEffectNode(effect, index = 0, graphAnchors = new Set()) 
         function: normalizeMechanicToken(canonical?.function || ''),
         outcome: normalizeMechanicToken(canonical?.outcome || ''),
         family: normalizeMechanicToken(nodeFamily || ''),
+        mechanicKey: normalizeMechanicToken(p.mechanicKey || effect?.mechanicProfile?.key || ''),
+        mechanicFamily: normalizeMechanicToken(p.mechanicProfile?.family || effect?.mechanicProfile?.family || ''),
+        mechanicProfile: p.mechanicProfile || effect?.mechanicProfile || null,
         object: inferMechanicalObject(effect),
         from: normalizeMechanicToken(effect?.from || p.from || ''),
         to: normalizeMechanicToken(effect?.to || p.to || ''),
@@ -11068,6 +11655,8 @@ function buildMechanicalEffectNode(effect, index = 0, graphAnchors = new Set()) 
         triggerEvent: normalizeMechanicToken(triggerProfile.event || ''),
         condition: normalizeMechanicToken(effect?.condition || p.condition || ''),
         conditionDetail: normalizeMechanicalSet(effect?.conditionDetail || p.conditionDetail),
+        gameStateConditionProfile: effect?.gameStateConditionProfile || p.gameStateConditionProfile || null,
+        manaAbilityRulesProfile: effect?.manaAbilityRulesProfile || p.manaAbilityRulesProfile || null,
         costType: normalizeMechanicToken(effect?.activationCost?.type || ''),
         costs: new Set([...(effect?.activationCost?.parts || []), effect?.payCost, p.payCost].filter(Boolean).map(normalizeMechanicToken)),
         effectMode: mode,
@@ -11114,7 +11703,7 @@ function getCachedParsedEffects(card = null, text = '') {
         }
         return annotateEffectRepeatability(card, cached, oracle);
     }
-    const parsed = annotateEffectRepeatability(card, parseMTGEffect(oracle), oracle);
+    const parsed = annotateEffectRepeatability(card, parseMTGEffect(oracle, card), oracle);
     mechanicalProfileCache.set(cacheKey, parsed);
     while (mechanicalProfileCache.size > MECHANICAL_PROFILE_CACHE_MAX) {
         mechanicalProfileCache.delete(mechanicalProfileCache.keys().next().value);
@@ -11195,7 +11784,7 @@ function getCachedMechanicalEffectGraph(card = null, text = '', parsedEffects = 
 
 function buildMechanicalEffectGraph(card = null, text = '', parsedEffects = null) {
     const oracle = String(text || card?.oracle_text || (card?.card_faces ? card.card_faces.map(f => f.oracle_text || '').join('\n\n') : '') || '');
-    const effects = Array.isArray(parsedEffects) ? parsedEffects : parseMTGEffect(oracle);
+    const effects = Array.isArray(parsedEffects) ? parsedEffects : parseMTGEffect(oracle, card);
     const keywordAnchors = extractKeywordAnchorSet(card, oracle);
     const universalProfile = (effects?._mechanicProfile) || buildUniversalMechanicProfile(card, oracle, effects);
     universalProfile?.atoms?.forEach?.(a => keywordAnchors.add(a));
@@ -11394,8 +11983,78 @@ function compareMechanicalEffectNodes(a, b) {
     return detail;
 }
 
+function compareNamedMechanicProfiles(profileA, profileB) {
+    if (!profileA && !profileB) return 1;
+    if (!profileA || !profileB) return 0.52;
+    const keyA = normalizeMechanicToken(profileA.key || ''), keyB = normalizeMechanicToken(profileB.key || '');
+    const familyA = normalizeMechanicToken(profileA.family || ''), familyB = normalizeMechanicToken(profileB.family || '');
+    const sameKey = Boolean(keyA && keyA === keyB);
+    const sameFamily = Boolean(familyA && familyA === familyB);
+    if (!sameKey && !sameFamily) return 0;
+    const aa = new Set((profileA.traits || []).map(normalizeMechanicToken).filter(Boolean));
+    const bb = new Set((profileB.traits || []).map(normalizeMechanicToken).filter(Boolean));
+    const shared = [...aa].filter(x => bb.has(x)).length;
+    const union = new Set([...aa, ...bb]).size;
+    const traitScore = union ? shared / union : 1;
+    const thresholdScore = profileA.threshold == null || profileB.threshold == null
+        ? (profileA.threshold == null && profileB.threshold == null ? 1 : 0.65)
+        : (Number(profileA.threshold) === Number(profileB.threshold) ? 1 : Math.max(0, 1 - Math.abs(Number(profileA.threshold) - Number(profileB.threshold)) / Math.max(Number(profileA.threshold), Number(profileB.threshold), 1)));
+    const conditionScore = profileA.condition && profileB.condition
+        ? (normalizeMechanicToken(profileA.condition) === normalizeMechanicToken(profileB.condition) ? 1 : 0.35)
+        : 0.7;
+    const identityScore = sameKey ? 1 : 0.62;
+    const dimA = Array.isArray(profileA.dimensions) ? profileA.dimensions : [];
+    const dimB = Array.isArray(profileB.dimensions) ? profileB.dimensions : [];
+    const dimensionScore = (dimA.length || dimB.length)
+        ? compareGameStateConditionProfiles({ traits: profileA.traits || [], threshold: profileA.threshold, conditions: dimA }, { traits: profileB.traits || [], threshold: profileB.threshold, conditions: dimB })
+        : 1;
+    return Math.max(0, Math.min(1, traitScore * 0.48 + thresholdScore * 0.12 + conditionScore * 0.06 + identityScore * 0.08 + dimensionScore * 0.26));
+}
+
+function compareGameStateConditionProfiles(a, b) {
+    if (!a && !b) return 1;
+    if (!a || !b) return 0.62;
+    const aa = new Set((a.traits || []).map(normalizeMechanicToken));
+    const bb = new Set((b.traits || []).map(normalizeMechanicToken));
+    const union = new Set([...aa, ...bb]).size;
+    const shared = [...aa].filter(x => bb.has(x)).length;
+    const jaccard = union ? shared / union : 1;
+    const threshold = a.threshold == null || b.threshold == null ? (a.threshold == null && b.threshold == null ? 1 : 0.70)
+        : (Number(a.threshold) === Number(b.threshold) ? 1 : Math.max(0.1, 1 - Math.abs(Number(a.threshold) - Number(b.threshold)) / Math.max(Number(a.threshold), Number(b.threshold), 1)));
+    const ca = Array.isArray(a.conditions) ? a.conditions : [];
+    const cb = Array.isArray(b.conditions) ? b.conditions : [];
+    let structural = 1;
+    if (ca.length && cb.length) {
+        const byKeyA = new Map(ca.map(c => [normalizeMechanicToken(c.key), c]));
+        const byKeyB = new Map(cb.map(c => [normalizeMechanicToken(c.key), c]));
+        let best = 0;
+        for (const [key, x] of byKeyA) {
+            const y = byKeyB.get(key);
+            if (!y) continue;
+            const dimension = normalizeMechanicToken(x.dimension || x.measure || key) === normalizeMechanicToken(y.dimension || y.measure || key) ? 1 : 0.12;
+            const measure = normalizeMechanicToken(x.measure || '') === normalizeMechanicToken(y.measure || '') ? 1 : (!x.measure || !y.measure ? 0.6 : 0.15);
+            const zone = normalizeMechanicToken(x.zone || '') === normalizeMechanicToken(y.zone || '') ? 1 : (!x.zone || !y.zone ? 0.55 : 0.12);
+            const scope = normalizeMechanicToken(x.scope || '') === normalizeMechanicToken(y.scope || '') ? 1 : (!x.scope || !y.scope ? 0.6 : 0.2);
+            const window = normalizeMechanicToken(x.window || '') === normalizeMechanicToken(y.window || '') ? 1 : (!x.window || !y.window ? 0.65 : 0.15);
+            const operator = normalizeMechanicToken(x.operator || '') === normalizeMechanicToken(y.operator || '') ? 1 : (!x.operator || !y.operator ? 0.65 : 0.2);
+            const xt = x.threshold == null ? null : Number(x.threshold), yt = y.threshold == null ? null : Number(y.threshold);
+            const numeric = xt == null || yt == null ? (xt == null && yt == null ? 1 : 0.65) : (xt === yt ? 1 : Math.max(0, 1 - Math.abs(xt - yt) / Math.max(Math.abs(xt), Math.abs(yt), 1)));
+            best = Math.max(best, dimension * 0.28 + measure * 0.20 + zone * 0.10 + scope * 0.10 + window * 0.12 + operator * 0.08 + numeric * 0.12);
+        }
+        if (best > 0) structural = best;
+        else structural = 0.14;
+    }
+    return Math.max(0, Math.min(1, jaccard * 0.46 + threshold * 0.12 + structural * 0.42));
+}
+
 function computeMechanicalEffectNodeComparison(a, b) {
     if (!a || !b) return { score: 0, contradiction: 0, breakdown: {} };
+    const namedA = String(a.function || '').startsWith('mechanic_');
+    const namedB = String(b.function || '').startsWith('mechanic_');
+    const namedFamiliesCompatible = Boolean(namedA && namedB && a.mechanicFamily && a.mechanicFamily === b.mechanicFamily);
+    if ((namedA || namedB) && a.function !== b.function && !namedFamiliesCompatible) {
+        return { score: 0.005, contradiction: 0.88, breakdown: { core: 0, namedMechanicMismatch: 1 } };
+    }
     const sacrificeScopeA = normalizeMechanicToken(a.sacrificeScope || '');
     const sacrificeScopeB = normalizeMechanicToken(b.sacrificeScope || '');
     if (sacrificeScopeA && sacrificeScopeB && sacrificeScopeA !== sacrificeScopeB &&
@@ -11424,6 +12083,7 @@ function computeMechanicalEffectNodeComparison(a, b) {
         sameAction,
         sameOutcome,
         sameFamily,
+        namedFamiliesCompatible ? 0.62 : 0,
         anchorAffinity * 0.93,
         getFunctionAffinity(a.function, b.function)
     );
@@ -11457,6 +12117,13 @@ function computeMechanicalEffectNodeComparison(a, b) {
                 ? (a.scalingProfile.kind === b.scalingProfile.kind && a.scalingProfile.source === b.scalingProfile.source ? 1 : 0.18)
                 : 0.38)
             : 1,
+        namedMechanic: namedA || namedB ? compareNamedMechanicProfiles(a.mechanicProfile, b.mechanicProfile) : 1,
+        gameStateCondition: compareGameStateConditionProfiles(a.gameStateConditionProfile, b.gameStateConditionProfile),
+        manaAbilityRulesClass: a.manaAbilityRulesProfile || b.manaAbilityRulesProfile
+            ? (a.manaAbilityRulesProfile && b.manaAbilityRulesProfile
+                ? (a.manaAbilityRulesProfile.isRulesManaAbility === b.manaAbilityRulesProfile.isRulesManaAbility ? 1 : 0.20)
+                : 0.60)
+            : 1,
         // A creature-count-scaled team buff that also grants evasion is a combat finisher, not
         // merely a different-sized generic anthem. Make that strategic role materially affect the
         // graph score so rankings prefer full finisher analogues over fixed +1/+1 effects.
@@ -11468,7 +12135,8 @@ function computeMechanicalEffectNodeComparison(a, b) {
         [15, breakdown.object], [14, breakdown.target], [13, breakdown.zone], [10, breakdown.restriction],
         [9, breakdown.quantity], [10, breakdown.trigger], [8, breakdown.event], [7, breakdown.duration],
         [7, breakdown.mode], [16, breakdown.repeatability], [5, breakdown.cost], [5, breakdown.role], [5, breakdown.condition], [4, breakdown.stats],
-        [10, breakdown.tokenType], [8, breakdown.recipientScope], [12, breakdown.sacrificeScope], [16, breakdown.grantedKeywords], [16, breakdown.scaling], [12, breakdown.combatFinisher]
+        [10, breakdown.tokenType], [8, breakdown.recipientScope], [12, breakdown.sacrificeScope], [25, breakdown.grantedKeywords], [26, breakdown.scaling], [32, breakdown.combatFinisher],
+        [20, breakdown.namedMechanic], [16, breakdown.gameStateCondition], [6, breakdown.manaAbilityRulesClass]
     ];
     const fieldScore = fieldParts.reduce((sum, [w, v]) => sum + w * v, 0) / fieldParts.reduce((sum, [w]) => sum + w, 0);
     const contradiction = mechanicalNodeContradiction(a, b);
@@ -12524,7 +13192,7 @@ function runManaSearchMasteryEdgeCaseRegressionSuite() {
     check('Edward Kenway identifies Treasure as the recurring token type', recurringTreasure?.canonical.params.tokenType === 'treasure', JSON.stringify(recurringTreasure?.canonical.params || null));
     check('Edward Kenway records one Treasure per matching permanent', recurringTreasure?.canonical.params.quantityProfile?.relation === 'for_each', JSON.stringify(recurringTreasure?.canonical.params.quantityProfile || null));
     check('Edward Kenway classifies top-library exile as card access, not removal', Boolean(libraryAccess) && !edward.some(effect => effect.canonical.function === 'exile_removal' && /top card/i.test(String(effect.raw || ''))), JSON.stringify(edward.map(effect => ({fn:effect.canonical.function,from:effect.canonical.params.from,object:effect.canonical.params.object,tokenType:effect.canonical.params.tokenType,raw:effect.raw}))));
-    check('Edward Kenway distinguishes library exile in canonical text', /top card of that player's library[\s\S]*not battlefield permanent removal/i.test(edwardText), edwardText);
+    check('Edward Kenway distinguishes library exile in canonical text', /top card of that player's library[\s\S]*library-card access/i.test(edwardText) && !/not battlefield permanent removal/i.test(edwardText), edwardText);
 
     const alaundoText = 'Tap: Draw a card, then exile a card from your hand and put a number of time counters on it equal to its mana value.';
     const alaundo = parseMTGEffect(alaundoText).filter(effect => effect && effect.canonical);
@@ -23016,6 +23684,137 @@ function extractPrimaryCardType(typeLine) {
 //   otag          - Scryfall oracle-tag, where one exists for the mechanic
 //   paramTemplate - builds a query from the canonical params (subtype, magnitude, object, ...)
 const FUNCTION_RETRIEVAL_VOCAB = {
+    mechanic_recruit: {
+        phrases: ['recruit', 'draw a card, then discard a card', 'create a 1/1 white Human Soldier creature token'],
+        paramTemplate: () => 'o:"recruit" o:"discard"'
+    },
+    mechanic_storied: {
+        phrases: ['storied', 'enduring story', 'ward {1}'],
+        paramTemplate: () => 'o:"storied" o:"three or more"'
+    },
+    mechanic_hone_counter: {
+        phrases: ['hone counter', 'hone counters', 'equipped creature gets +1/+0'],
+        paramTemplate: () => 'o:"hone counter" o:"Equipment"'
+    },
+    mechanic_empower_jace: {
+        phrases: ['empower Jace', 'Jace planeswalker token'],
+        paramTemplate: (p) => p.mechanicProfile?.quantity != null ? `o:"empower Jace ${p.mechanicProfile.quantity}"` : 'o:"empower Jace"'
+    },
+    mechanic_heartwood_token: {
+        phrases: ['Heartwood token', 'add {R} or {G}'],
+        paramTemplate: () => 'o:"Heartwood token"'
+    },
+    mechanic_plan_progression: {
+        phrases: ['plan counter', 'when the seventh plan counter', 'when a plan counter is put'],
+        paramTemplate: () => 't:plan o:"plan counter"'
+    },
+    mechanic_worthy_equip: {
+        phrases: ['legendary red and/or white creature', 'not a Villain'],
+        paramTemplate: () => 'o:"equip" o:"legendary" o:"Villain"'
+    },
+    mechanic_vibranium_token: {
+        phrases: ['Vibranium token', 'This mana can’t be spent to cast a nonartifact spell'],
+        paramTemplate: () => 'o:"Vibranium token" o:"indestructible"'
+    },
+    mechanic_prepared_spell: {
+        phrases: ['prepared', 'preparation', 'cast the exiled card'],
+        paramTemplate: () => 'o:"prepared" o:"exile" o:"cast"'
+    },
+    mechanic_casting_mode_profile: {
+        phrases: ['cast from your graveyard', 'cast this card from exile', 'alternate cost', 'exile this card from your hand'],
+        paramTemplate: (p) => {
+            const traits = p.mechanicProfile?.traits || [];
+            if (traits.some(t => /flashback|escape|jump_start|retrace|disturb/.test(t))) return 'o:"graveyard" o:"cast"';
+            if (traits.some(t => /foretell|plot|suspend|warp/.test(t))) return 'o:"exile" o:"cast"';
+            return '(o:"additional cost" or o:"alternate cost" or o:"cast from your graveyard" or o:"exile this card from your hand")';
+        }
+    },
+    mechanic_spell_replay_profile: {
+        phrases: ['copy this spell', 'copy that spell', 'cast the copy without paying its mana cost', 'cast it without paying its mana cost'],
+        paramTemplate: (p) => {
+            const traits = p.mechanicProfile?.traits || [];
+            if (traits.some(t => /cascade|discover/.test(t))) return '(o:"cascade" or o:"discover")';
+            if (traits.some(t => /cipher|rebound/.test(t))) return '(o:"cipher" or o:"rebound")';
+            return '(o:"storm" or o:"gravestorm" or o:"copy this spell" or o:"copy that spell")';
+        }
+    },
+    mechanic_combat_rules_profile: {
+        phrases: ['flying', 'trample', 'first strike', 'double strike', 'menace', 'vigilance', 'reach'],
+        paramTemplate: (p) => {
+            const traits = p.mechanicProfile?.traits || [];
+            const keys = traits.filter(t => /^mechanic:/.test(t)).map(t => t.split(':').slice(1).join(':').replace(/_/g,' '));
+            return keys.length ? `(${keys.slice(0,3).map(k => `o:"${escapeScryfallValue(k)}"`).join(' or ')})` : '(o:"flying" or o:"trample" or o:"menace")';
+        }
+    },
+    mechanic_stateful_game_profile: {
+        phrases: ['become the monarch', 'take the initiative', "city's blessing", 'the Ring tempts you', 'venture into the dungeon'],
+        paramTemplate: () => "(o:\"monarch\" or o:\"take the initiative\" or o:\"city's blessing\" or o:\"the Ring tempts you\" or o:\"venture into the dungeon\")"
+    },
+    mechanic_permanent_progression_profile: {
+        phrases: ['chapter counter', 'level counter', 'unlock this door', 'craft with', 'transform this permanent'],
+        paramTemplate: () => '(o:"chapter" or o:"level up" or o:"unlock this door" or o:"craft with" or o:"transform")'
+    },
+    mechanic_game_state_condition_profile: {
+        phrases: ['if you have no cards in your hand', 'if there are seven or more cards in your graveyard', 'number of basic land types', 'devotion to', 'three or more artifacts'],
+        paramTemplate: (p) => {
+            const traits = p.mechanicProfile?.traits || [];
+            const queries = [];
+            if (traits.includes('condition:devotion')) queries.push('o:"devotion"');
+            if (traits.includes('condition:domain')) queries.push('o:"basic land types"');
+            if (traits.includes('condition:threshold')) queries.push('o:"seven or more cards" o:"graveyard"');
+            if (traits.includes('condition:hellbent')) queries.push('o:"no cards in your hand"');
+            if (traits.includes('condition:delirium')) queries.push('o:"card types" o:"graveyard"');
+            if (traits.includes('condition:metalcraft')) queries.push('o:"three or more artifacts"');
+            if (!queries.length) return '(o:"as long as" or o:"if you" or o:"if there are")';
+            return queries.length === 1 ? queries[0] : `(${queries.join(' or ')})`;
+        }
+    },
+    mechanic_delayed_hand_exile_cast_profile: {
+        phrases: ['exile a card from your hand', 'put time counters on it equal to its mana value', 'cast this card from exile without paying its mana cost'],
+        paramTemplate: () => '(o:"hand" o:"time counters" o:"cast" o:"exile")'
+    },
+    mechanic_multiplayer_decision_profile: {
+        phrases: ['vote', 'each player votes', 'each opponent chooses', 'join forces', "council's dilemma"],
+        paramTemplate: (p) => {
+            const traits = p.mechanicProfile?.traits || [];
+            const q = [];
+            if (traits.some(t => /mechanic:vote|mechanic:will_of_the_council|mechanic:council_dilemma/.test(t))) q.push('o:"vote"');
+            if (traits.some(t => /mechanic:join_forces/.test(t))) q.push('o:"join forces"');
+            if (traits.some(t => /mechanic:tempting_offer/.test(t))) q.push('o:"tempting offer"');
+            if (!q.length) q.push(`(o:"each opponent chooses" or o:"each player votes" or o:"council's dilemma")`);
+            return q.length === 1 ? q[0] : `(${q.join(' or ')})`;
+        }
+    },
+    mechanic_auxiliary_game_component_profile: {
+        phrases: ['assemble a contraption', 'visit an attraction', 'the scheme', 'planeswalk', 'ticket', 'sticker'],
+        paramTemplate: (p) => {
+            const traits = p.mechanicProfile?.traits || [];
+            const q = [];
+            if (traits.some(t => /mechanic:planechase/.test(t))) q.push('o:"planeswalk"');
+            if (traits.some(t => /mechanic:archenemy_scheme/.test(t))) q.push('o:"scheme"');
+            if (traits.some(t => /mechanic:sticker_ticket/.test(t))) q.push('(o:"ticket" or o:"sticker")');
+            if (traits.some(t => /mechanic:conspiracy_hidden_agenda/.test(t))) q.push('o:"hidden agenda"');
+            if (!q.length) q.push('(o:"assemble a contraption" or o:"visit an attraction" or o:"planeswalk")');
+            return q.length === 1 ? q[0] : `(${q.join(' or ')})`;
+        }
+    },
+    mechanic_rules_modification_profile: {
+        phrases: ['would be destroyed', 'instead', 'prevent all damage', 'regenerate', 'phases out', 'protection from'],
+        paramTemplate: (p) => {
+            const traits = p.mechanicProfile?.traits || [];
+            const q = [];
+            if (traits.some(t => /mechanic:replacement/.test(t))) q.push('o:"instead"');
+            if (traits.some(t => /mechanic:damage_prevention/.test(t))) q.push('o:"prevent" o:"damage"');
+            if (traits.some(t => /mechanic:regeneration/.test(t))) q.push('o:"regenerate"');
+            if (traits.some(t => /mechanic:phasing/.test(t))) q.push('o:"phases out"');
+            if (traits.some(t => /mechanic:protection/.test(t))) q.push('o:"protection from"');
+            if (traits.some(t => /mechanic:ward/.test(t))) q.push('o:"ward"');
+            if (traits.some(t => /mechanic:hexproof/.test(t))) q.push('o:"hexproof"');
+            if (traits.some(t => /mechanic:shroud/.test(t))) q.push('o:"shroud"');
+            if (!q.length) q.push('(o:"instead" or o:"prevent" or o:"phases out")');
+            return q.length === 1 ? q[0] : `(${q.join(' or ')})`;
+        }
+    },
     cast_timing_permission: {
         phrases: [
             'you may cast spells as though they had flash',
@@ -23118,7 +23917,12 @@ const FUNCTION_RETRIEVAL_VOCAB = {
     mill: { phrases: ["mill", "into their graveyard"] },
     discard: { phrases: ["discards a card", "discard a card"] },
     self_sacrifice: { phrases: ["sacrifice a creature", "sacrifice another creature", "sacrifice a permanent"] },
-    zone_change: { phrases: [] },
+    zone_change: {
+        phrases: ['exile a card from your hand', 'exile a card from hand', 'put time counters on it'],
+        paramTemplate: (p) => p.from === 'hand' && p.to === 'exile'
+            ? '(o:"hand" o:"exile" o:"time counters")'
+            : null
+    },
     direct_damage: {
         phrases: ["damage to any target", "damage to target creature", "damage to target player"],
         otag: "burn",
@@ -28572,6 +29376,196 @@ function showLoading(isLoading) {
 }
 
 // v100 regression suite for shared constraint modes + source metadata editor controls.
+// Run from the browser console: runManaSearchAdvancedMechanicsRegressionSuite()
+// Focuses on real rule structures that used to be represented by broad keywords only.
+function runManaSearchAdvancedMechanicsRegressionSuite({ log = true } = {}) {
+    const results = [];
+    const check = (id, pass, detail = '') => results.push({ id, pass: Boolean(pass), detail: String(detail || '') });
+    const get = (text, card = null) => parseMTGEffect(text, card).filter(e => e?.canonical);
+    const getNamed = (effects, key) => effects.find(e => e?.canonical?.function === `mechanic_${key}`);
+    try {
+        const recruitText = 'Recruit. (Draw a card, then discard a card. When you discard a nonland card this way, create a 1/1 white Human Soldier creature token.)';
+        const recruit = get(recruitText);
+        const recruitProfile = getNamed(recruit, 'recruit')?.canonical?.params?.mechanicProfile;
+        check('recruit-composite-action', Boolean(recruitProfile && recruitProfile.traits.includes('draw') && recruitProfile.traits.includes('discard') && recruitProfile.traits.includes('conditional_token_creation')), JSON.stringify(recruitProfile || null));
+        const wrongRecruitBridge = buildSemanticMechanicBridgeProfile(null, recruitText).anchors;
+        check('recruit-not-combat-tap-mapping', ![...wrongRecruitBridge].some(a => /combat:tap_or_attack_condition/.test(a)) && [...wrongRecruitBridge].some(a => /conditional_human_soldier/.test(a)), [...wrongRecruitBridge].join('|'));
+
+        const storied = get('Storied (Whenever you control a permanent with storied and three or more artifacts, legendary permanents, and/or Sagas, you have an enduring story for the rest of the game.)');
+        const storiedProfile = getNamed(storied, 'storied')?.canonical?.params?.mechanicProfile;
+        check('storied-persistent-not-trigger', Boolean(storiedProfile && storiedProfile.traits.includes('persistent_player_designation') && !storiedProfile.traits.includes('trigger')), JSON.stringify(storiedProfile || null));
+
+        const hone = get('Put a hone counter on target Equipment. Each hone counter on an Equipment gives the equipped creature +1/+0.');
+        const honeProfile = getNamed(hone, 'hone_counter')?.canonical?.params?.mechanicProfile;
+        check('hone-counter-equipment-link', Boolean(honeProfile && honeProfile.traits.includes('equipped_creature') && honeProfile.traits.includes('plus_one_power_per_hone_counter')), JSON.stringify(honeProfile || null));
+
+        const empower = get('Empower Jace 2. If you do not control a Jace planeswalker token, create a blue Jace planeswalker token. Put two loyalty counters on a Jace token you control.');
+        const empowerProfile = getNamed(empower, 'empower_jace')?.canonical?.params?.mechanicProfile;
+        check('empower-jace-conditional-token-and-loyalty', Boolean(empowerProfile && empowerProfile.quantity === 2 && empowerProfile.traits.includes('conditional_token_creation') && empowerProfile.traits.includes('loyalty_counter_placement')), JSON.stringify(empowerProfile || null));
+
+        const heartwood = get('When this creature enters or dies, create a Heartwood token. (It is a red and green artifact with "{T}: Add {R} or {G}.")');
+        const heartwoodProfile = getNamed(heartwood, 'heartwood_token')?.canonical?.params?.mechanicProfile;
+        check('heartwood-predefined-mana-token', Boolean(heartwoodProfile && heartwoodProfile.traits.includes('tap_for_red_or_green') && heartwoodProfile.traits.includes('artifact')), JSON.stringify(heartwoodProfile || null));
+
+        const planText = 'Whenever you draw your second card each turn, create a 2/1 black Villain creature token and put a plan counter on this enchantment. When the seventh plan counter is put on this enchantment, sacrifice it. When you do, you control target opponent during their next turn.';
+        const plan = get(planText, { type_line: 'Enchantment — Plan' });
+        const planProfile = getNamed(plan, 'plan_progression')?.canonical?.params?.mechanicProfile;
+        check('plan-staged-counter-milestone', Boolean(planProfile && planProfile.traits.includes('incremental_progress_counter') && planProfile.traits.includes('control_opponent_next_turn_reward') && planProfile.threshold === 7), JSON.stringify(planProfile || null));
+
+        const worthy = get('Equip legendary red and/or white creature that is not a Villain.');
+        const worthyProfile = getNamed(worthy, 'worthy_equip')?.canonical?.params?.mechanicProfile;
+        check('worthy-is-equip-legality-restriction', Boolean(worthyProfile && worthyProfile.traits.includes('equip_activation_restriction') && worthyProfile.traits.includes('non_villain')), JSON.stringify(worthyProfile || null));
+
+        const vibranium = get('Whenever this creature enters or attacks, create a tapped Vibranium token. (It is an artifact with indestructible and "{T}: Add {C}. This mana cannot be spent to cast a nonartifact spell.")');
+        const vibraniumProfile = getNamed(vibranium, 'vibranium_token')?.canonical?.params?.mechanicProfile;
+        check('vibranium-token-restricted-mana', Boolean(vibraniumProfile && vibraniumProfile.traits.includes('indestructible') && vibraniumProfile.traits.includes('mana_spend_restriction_nonartifact_spell')), JSON.stringify(vibraniumProfile || null));
+
+        const prepared = get('Exile an instant or sorcery card from your hand beneath this creature. It becomes prepared. As long as it remains prepared, you may cast the exiled card.');
+        const preparedProfile = getNamed(prepared, 'prepared_spell')?.canonical?.params?.mechanicProfile;
+        check('prepared-paired-spell-lifecycle', Boolean(preparedProfile && preparedProfile.traits.includes('paired_host_and_exiled_spell') && preparedProfile.traits.includes('host_state_dependency')), JSON.stringify(preparedProfile || null));
+
+        const millikin = get('Mill a card: Add {C}.');
+        const millikinMana = millikin.find(e => e.action === 'add_mana');
+        check('library-moving-mana-effect-not-rules-mana-ability', millikinMana?.canonical?.params?.manaAbilityRulesProfile?.isRulesManaAbility === false, JSON.stringify(millikinMana?.canonical?.params?.manaAbilityRulesProfile || null));
+        const solRing = get('{T}: Add {C}{C}.');
+        const solRingMana = solRing.find(e => e.action === 'add_mana');
+        check('ordinary-mana-ability-remains-rules-mana-ability', solRingMana?.canonical?.params?.manaAbilityRulesProfile?.isRulesManaAbility === true, JSON.stringify(solRingMana?.canonical?.params?.manaAbilityRulesProfile || null));
+
+        const threshold = get('If there are seven or more cards in your graveyard, draw a card.');
+        check('graveyard-threshold-profile', threshold.some(e => e.gameStateConditionProfile?.traits.includes('threshold')), JSON.stringify(threshold.map(e => e.gameStateConditionProfile || null)));
+        const domain = get('Domain — You gain life equal to the number of basic land types among lands you control.');
+        check('domain-condition-profile', domain.some(e => e.gameStateConditionProfile?.traits.includes('domain')), JSON.stringify(domain.map(e => e.gameStateConditionProfile || null)));
+
+        const recruitTwin = get(recruitText);
+        const nonRecruit = get('Tap target creature.');
+        const recruitNode = buildMechanicalEffectGraph({name:'Recruit A',keywords:['Recruit']}, recruitText, recruit).nodes.find(n => n.function === 'mechanic_recruit');
+        const recruitTwinNode = buildMechanicalEffectGraph({name:'Recruit B',keywords:['Recruit']}, recruitText, recruitTwin).nodes.find(n => n.function === 'mechanic_recruit');
+        const tapNode = buildMechanicalEffectGraph({name:'Tap fixture',keywords:[]}, 'Tap target creature.', nonRecruit).nodes.find(n => n.function === 'tap');
+        const sameMechanicScore = computeMechanicalEffectNodeComparison(recruitNode, recruitTwinNode).score;
+        const unrelatedScore = computeMechanicalEffectNodeComparison(recruitNode, tapNode).score;
+        check('named-mechanic-equivalence-scores-higher-than-unrelated-action', sameMechanicScore > unrelatedScore + 0.12, `same=${sameMechanicScore.toFixed(3)} unrelated=${unrelatedScore.toFixed(3)}`);
+
+        const recruitQueries = buildFunctionalRetrievalQueries({ oracle_text: recruitText }, recruit, ' -name:"Recruit test fixture"', 3);
+        check('named-mechanic-enters-retrieval-planner', recruitQueries.some(q => /recruit/i.test(q.query)), recruitQueries.map(q => q.query).join(' || '));
+    } catch (error) {
+        check('suite-execution', false, error?.stack || error?.message || String(error));
+    }
+    const passed = results.filter(r => r.pass).length;
+    const report = { passed, total: results.length, passRate: results.length ? passed / results.length : 0, ok: passed === results.length, results };
+    if (log) console[report.ok ? 'info' : 'warn'](`[ManaSearch] Advanced mechanics suite ${passed}/${results.length}`, report);
+    return report;
+}
+try { window.runManaSearchAdvancedMechanicsRegressionSuite = runManaSearchAdvancedMechanicsRegressionSuite; } catch (_) {}
+
+// Regression coverage for the expanded shared mechanics layer (not a claim of complete rules coverage).
+function runManaSearchDeepMechanicsRegressionSuite({ log = true } = {}) {
+    const results = [];
+    const check = (id, condition, detail = '') => results.push({ id, pass: Boolean(condition), detail: condition ? '' : String(detail || 'Assertion failed') });
+    const parse = (text, card = null) => parseMTGEffect(text, card).filter(e => e?.canonical);
+    const named = (effects, key) => effects.find(e => e.canonical?.function === `mechanic_${key}`);
+    try {
+        const storm = parse('Storm (When you cast this spell, copy it for each spell cast before it this turn.)', { keywords: ['Storm'] });
+        const stormProfile = named(storm, 'spell_replay_profile')?.canonical?.params?.mechanicProfile;
+        check('storm-replay-profile', Boolean(stormProfile && stormProfile.family === 'spell_replay' && stormProfile.traits.includes('scale_with_spells_previously_cast_this_turn')), JSON.stringify(stormProfile || null));
+        const rebound = parse('Rebound (If this spell was cast from your hand, exile it as it resolves. At the beginning of your next upkeep, you may cast this card from exile without paying its mana cost.)', { keywords: ['Rebound'] });
+        const reboundProfile = named(rebound, 'spell_replay_profile')?.canonical?.params?.mechanicProfile;
+        check('rebound-delayed-cast-profile', Boolean(reboundProfile && reboundProfile.traits.includes('cast_at_next_upkeep_without_pay')), JSON.stringify(reboundProfile || null));
+        const flashback = parse('Flashback {2}{B} (You may cast this card from your graveyard for its flashback cost. Then exile it.)', { keywords: ['Flashback'] });
+        const castProfile = named(flashback, 'casting_mode_profile')?.canonical?.params?.mechanicProfile;
+        check('flashback-graveyard-cast-profile', Boolean(castProfile && castProfile.traits.some(t => /cast_from_graveyard/.test(t))), JSON.stringify(castProfile || null));
+        const flying = parse('Flying', { keywords: ['Flying'] });
+        const flyingProfile = named(flying, 'combat_rules_profile')?.canonical?.params?.mechanicProfile;
+        const menace = parse('Menace', { keywords: ['Menace'] });
+        const menaceProfile = named(menace, 'combat_rules_profile')?.canonical?.params?.mechanicProfile;
+        check('combat-profile-distinguishes-rules', Boolean(flyingProfile && menaceProfile && flyingProfile.traits.includes('evasion_flying') && menaceProfile.traits.includes('requires_two_or_more_blockers')),
+            `flying=${JSON.stringify(flyingProfile || null)} menace=${JSON.stringify(menaceProfile || null)}`);
+        const monarch = parse('Whenever you become the monarch, draw a card.', { keywords: ['Monarch'] });
+        const monarchProfile = named(monarch, 'stateful_game_profile')?.canonical?.params?.mechanicProfile;
+        check('monarch-player-designation-profile', Boolean(monarchProfile && monarchProfile.traits.includes('player_designation')),
+            JSON.stringify(monarchProfile || null));
+        const saga = parse('Read ahead (As this Saga enters, choose a chapter number and put that many lore counters on it. When it has enough, sacrifice it.)', { type_line: 'Enchantment — Saga' });
+        const progressionProfile = named(saga, 'permanent_progression_profile')?.canonical?.params?.mechanicProfile;
+        check('saga-progression-profile', Boolean(progressionProfile && progressionProfile.traits.includes('chapter_counter') && progressionProfile.traits.includes('sacrifice_after_final_chapter')),
+            JSON.stringify(progressionProfile || null));
+        const devotion = parse('Your devotion to red is equal to the number of red mana symbols among permanents you control.');
+        const domain = parse('You gain life equal to the number of basic land types among lands you control.');
+        const dProfile = devotion.find(e => e.gameStateConditionProfile?.traits.includes('devotion'))?.gameStateConditionProfile;
+        const dmProfile = domain.find(e => e.gameStateConditionProfile?.traits.includes('domain'))?.gameStateConditionProfile;
+        check('condition-profiles-retain-different-dimensions', Boolean(dProfile?.conditions?.some(c => c.dimension === 'mana_symbols_among_controlled_permanents') && dmProfile?.conditions?.some(c => c.dimension === 'basic_land_types_among_controlled_lands') && compareGameStateConditionProfiles(dProfile, dmProfile) < 0.45),
+            `devotion=${JSON.stringify(dProfile || null)} domain=${JSON.stringify(dmProfile || null)}`);
+        const hellbent = parse('If you have no cards in your hand, draw two cards.');
+        const hellbentProfile = hellbent.find(e => e.gameStateConditionProfile?.traits.includes('hellbent'))?.gameStateConditionProfile;
+        check('hellbent-zero-hand-threshold', Boolean(hellbentProfile?.conditions?.some(c => c.operator === 'equal' && c.threshold === 0 && c.zone === 'hand')),
+            JSON.stringify(hellbentProfile || null));
+        const city = parse('You have the city\'s blessing as long as you control ten or more permanents.');
+        const cityProfile = city.find(e => e.gameStateConditionProfile?.traits.includes('city_blessing'))?.gameStateConditionProfile;
+        check('city-blessing-permanent-threshold', Boolean(cityProfile?.conditions?.some(c => c.measure === 'permanents' && c.threshold === 10)),
+            JSON.stringify(cityProfile || null));
+        const replayTwin = parse('Storm (When you cast this spell, copy it for each spell cast before it this turn.)', { keywords: ['Storm'] });
+        const unrelated = parse('Destroy target creature.');
+        const stormNodeA = buildMechanicalEffectGraph({ name:'Storm A', keywords:['Storm'] }, 'Storm (When you cast this spell, copy it for each spell cast before it this turn.)', storm).nodes.find(n => n.function === 'mechanic_spell_replay_profile');
+        const stormNodeB = buildMechanicalEffectGraph({ name:'Storm B', keywords:['Storm'] }, 'Storm (When you cast this spell, copy it for each spell cast before it this turn.)', replayTwin).nodes.find(n => n.function === 'mechanic_spell_replay_profile');
+        const destroyNode = buildMechanicalEffectGraph({ name:'Removal', keywords:[] }, 'Destroy target creature.', unrelated).nodes.find(n => n.function === 'removal');
+        const sameScore = computeMechanicalEffectNodeComparison(stormNodeA, stormNodeB).score;
+        const unrelatedScore = computeMechanicalEffectNodeComparison(stormNodeA, destroyNode).score;
+        check('same-replay-mechanic-outranks-unrelated-effect', sameScore > unrelatedScore + 0.12, `same=${sameScore.toFixed(3)} unrelated=${unrelatedScore.toFixed(3)}`);
+        const replayQueries = buildFunctionalRetrievalQueries({ oracle_text: 'Storm (When you cast this spell, copy it for each spell cast before it this turn.)', keywords: ['Storm'] }, storm, ' -name:"Storm test fixture"', 3);
+        check('replay-profile-enters-functional-retrieval', replayQueries.some(q => /storm|copy|replay/i.test(q.query)), replayQueries.map(q => q.query).join(' || '));
+
+        const devotionAll = parse('Your devotion to red is equal to the number of red mana symbols among permanents you control.');
+        const domainAll = parse('Domain — You gain life equal to the number of basic land types among lands you control.');
+        const devSig = devotionAll.find(e => e.gameStateConditionProfile?.traits.includes('devotion'))?.gameStateConditionProfile;
+        const domSig = domainAll.find(e => e.gameStateConditionProfile?.traits.includes('domain'))?.gameStateConditionProfile;
+        check('standalone-game-state-condition-is-a-scored-node', Boolean(named(devotionAll, 'game_state_condition_profile')?.canonical?.params?.mechanicProfile?.dimensions?.length && devSig?.conditions?.some(c => c.dimension === 'mana_symbols_among_controlled_permanents')), JSON.stringify({devotion:devSig, node:named(devotionAll,'game_state_condition_profile')?.canonical?.function}));
+        check('devotion-and-domain-are-distinct-structural-dimensions', Boolean(devSig?.conditions?.some(c => c.dimension === 'mana_symbols_among_controlled_permanents') && domSig?.conditions?.some(c => c.dimension === 'basic_land_types_among_controlled_lands') && compareGameStateConditionProfiles(devSig, domSig) < 0.45), JSON.stringify({devotion:devSig,domain:domSig}));
+        const devotionQueries = buildFunctionalRetrievalQueries({name:'Devotion fixture',oracle_text:'Your devotion to red is equal to the number of red mana symbols among permanents you control.'}, devotionAll, '-name:"Devotion fixture"', 4).map(q => q.query).join(' ').toLowerCase();
+        check('game-state-condition-profile-enters-retrieval-planner', /o:"devotion"/.test(devotionQueries), devotionQueries);
+
+        const alaundoText = "Draw a card, then exile a card from your hand and put time counters on it equal to its mana value. When the last time counter is removed from this card, you may cast it without paying its mana cost.";
+        const alaundoEffects = parseMTGEffect(alaundoText);
+        const alaundoProfile = named(alaundoEffects.filter(e => e.canonical), 'delayed_hand_exile_cast_profile')?.canonical?.params?.mechanicProfile;
+        const alaundoQs = buildFunctionalRetrievalQueries({name:'Alaundo fixture',oracle_text:alaundoText}, alaundoEffects, '-name:"Alaundo fixture"', 6).map(q => q.query).join(' ').toLowerCase();
+        check('delayed-hand-exile-is-its-own-structured-profile', Boolean(alaundoProfile && alaundoProfile.traits.includes('source_zone_hand_not_battlefield')), JSON.stringify(alaundoProfile || null));
+        check('delayed-hand-exile-profile-enters-retrieval', /o:"hand"[\s\S]*o:"exile"|o:"exile"[\s\S]*o:"hand"/.test(alaundoQs), alaundoQs);
+
+        const votes = parse('Will of the council — Starting with you, each player votes for a creature.');
+        const voteProfile = named(votes, 'multiplayer_decision_profile')?.canonical?.params?.mechanicProfile;
+        check('multiplayer-voting-is-a-distinct-profile', Boolean(voteProfile && voteProfile.family === 'multiplayer_decision' && voteProfile.traits.includes('multiplayer_choice')), JSON.stringify(voteProfile || null));
+        const plane = parse('Whenever you planeswalk, draw a card.', { keywords:['Planeswalk'] });
+        const auxiliary = named(plane, 'auxiliary_game_component_profile')?.canonical?.params?.mechanicProfile;
+        check('auxiliary-game-components-enter-canonical-scoring', Boolean(auxiliary && auxiliary.traits.some(t => /planechase/.test(t)) || auxiliary && auxiliary.traits.includes('mechanic:planechase')), JSON.stringify(auxiliary || null));
+
+        const replacement = parse('If a permanent would be put into a graveyard this turn, exile it instead.');
+        const prevention = parse('Prevent all damage that would be dealt to you this turn.');
+        const replacementProfile = named(replacement, 'rules_modification_profile')?.canonical?.params?.mechanicProfile;
+        const preventionProfile = named(prevention, 'rules_modification_profile')?.canonical?.params?.mechanicProfile;
+        check('replacement-and-prevention-have-distinct-rule-signatures', Boolean(replacementProfile?.traits.includes('replacement_effect') && preventionProfile?.traits.includes('damage_prevention_effect') && !preventionProfile.traits.includes('replacement_effect')), JSON.stringify({replacement:replacementProfile,prevention:preventionProfile}));
+        const ruleQueries = buildFunctionalRetrievalQueries({name:'Replacement fixture',oracle_text:'If a permanent would be put into a graveyard this turn, exile it instead.'}, replacement, '-name:"Replacement fixture"', 4).map(q => q.query).join(' ').toLowerCase();
+        check('rules-modification-profile-enters-retrieval-planner', /o:"instead"/.test(ruleQueries), ruleQueries);
+        const battle = parse('Battle — Siege. When this battle enters, an opponent protects it. When defeated, transform it.', {type_line:'Battle — Siege'});
+        const battleProfile = named(battle, 'permanent_progression_profile')?.canonical?.params?.mechanicProfile;
+        check('battle-siege-retains-defense-and-defeat-lifecycle', Boolean(battleProfile?.traits.includes('mechanic:battle_siege') && battleProfile.traits.includes('defense_counter_tracking') && battleProfile.traits.includes('defeat_or_battle_state_transition')), JSON.stringify(battleProfile || null));
+        const station = parse('Station {2}. (Tap another creature you control: Put charge counters on this permanent equal to that creature’s power.)', {type_line:'Artifact — Station'});
+        const stationProfile = named(station, 'permanent_progression_profile')?.canonical?.params?.mechanicProfile;
+        check('station-type-enters-permanent-progression-profile', Boolean(stationProfile?.traits.includes('mechanic:spacecraft_station') && stationProfile.traits.includes('spacecraft_or_station_permanent')), JSON.stringify(stationProfile || null));
+
+        const unrelatedA = parse('Storm (When you cast this spell, copy it for each spell cast before it this turn.)', {keywords:['Storm']});
+        const unrelatedB = parse('Destroy target creature.');
+        const calibratedScore = calculateMechanicalSimilarity(unrelatedA, unrelatedB);
+        const universalA = buildUniversalMechanicProfile({keywords:['Storm']}, 'Storm (When you cast this spell, copy it for each spell cast before it this turn.)', unrelatedA);
+        const universalB = buildUniversalMechanicProfile({keywords:[]}, 'Destroy target creature.', unrelatedB);
+        const universalScore = calculateUniversalMechanicSimilarity(universalA, universalB).score;
+        check('unrelated-universal-features-do-not-get-empty-set-perfect-match', universalScore < 0.70 && calibratedScore < 0.80, JSON.stringify({universalScore,calibratedScore}));
+    } catch (error) {
+        check('suite-execution', false, error?.stack || error?.message || String(error));
+    }
+    const passed = results.filter(r => r.pass).length;
+    const report = { passed, total: results.length, passRate: results.length ? passed / results.length : 0, ok: passed === results.length, results };
+    if (log) console[report.ok ? 'info' : 'warn'](`[ManaSearch] Deep mechanics regression suite ${passed}/${results.length}`, report);
+    return report;
+}
+try { window.runManaSearchDeepMechanicsRegressionSuite = runManaSearchDeepMechanicsRegressionSuite; } catch (_) {}
+
 // Run from the browser console: runManaSearchConstraintModeRegressionSuite()
 function runManaSearchConstraintModeRegressionSuite({ log = true } = {}) {
     const results = [];
