@@ -1,6 +1,6 @@
-/* ManaSearch build 20261017-102 */
+/* ManaSearch build 20261017-103 */
 // ManaSearch deployment build marker. Bump this whenever app.js changes so cached-module issues are easy to diagnose.
-const MANASEARCH_APP_BUILD = '20261017-102';
+const MANASEARCH_APP_BUILD = '20261017-103';
 console.info(`[ManaSearch] app.js build ${MANASEARCH_APP_BUILD}`);
 
 // State Management
@@ -1496,6 +1496,12 @@ async function downloadBenchmarkWorkbook(report) {
         { Metric: 'Tests successful', Value: report.structuredResults.filter(r => r.strict.testStatus === 'ok').length },
         { Metric: 'Tests errored', Value: report.structuredResults.filter(r => r.strict.testStatus === 'error').length },
         { Metric: 'Tests empty', Value: report.structuredResults.filter(r => r.strict.testStatus === 'empty').length },
+        ...(report.benchmarkConfiguration ? [
+            { Metric: 'Benchmark ranking', Value: report.benchmarkConfiguration.ranking || '' },
+            { Metric: 'Benchmark search methods', Value: report.benchmarkConfiguration.searchMethods || '' },
+            { Metric: 'Benchmark ordering features', Value: report.benchmarkConfiguration.orderingFeatures || '' },
+            { Metric: 'Benchmark weight offsets', Value: report.benchmarkConfiguration.userWeightOffsets || '' }
+        ] : []),
         { Metric: '', Value: '' },
         { Metric: 'Mean Recall@5', Value: pct(report.meanRecall5) },
         { Metric: 'Mean Recall@10', Value: pct(report.meanRecall10) },
@@ -1571,13 +1577,29 @@ async function downloadBenchmarkWorkbook(report) {
 
     // --- Sheet: Test Timing ---
     const timingRows = report.structuredResults.map(r => {
-        const t = r.strict.diagnostics?.timings || {};
+        const d = r.strict.diagnostics || {};
+        const t = d.timings || {};
+        const e = d.embeddingDiagnostics || {};
+        const inner = e.stageTimings || {};
         return {
             'Test ID': r.id, 'Source Card': r.source, 'Status': r.strict.testStatus,
             'Total Duration': durStr(r.durationMs),
             'Retrieval': durStr(t.retrievalMs), 'NLP + Scoring': durStr(t.scoringMs),
             'Ranking/Pruning': durStr(t.rankingMs), 'Rendering': durStr(t.renderMs),
             'Search Total (findSimilarCards)': durStr(t.totalMs),
+            'Candidate Count': e.totalCandidates ?? '',
+            'Semantic Candidates': e.semanticEligibleCount ?? '',
+            'Embedding Cache Hits': e.cacheHits ?? '',
+            'Embeddings Computed': e.computed ?? '',
+            'Embedding Failures': e.failed ?? '',
+            'Structural/Profile Pass': durStr(inner.structuralMs),
+            'Triage/Selection': durStr(inner.triageAndSelectionMs),
+            'Embedding Preparation': durStr(inner.embeddingTextPreparationMs),
+            'Embedding Cache Warm': durStr(inner.embeddingWarmCacheMs),
+            'Semantic Pass': durStr(inner.semanticPassMs),
+            'Calibration': durStr(inner.calibrationMs),
+            'Final Score Blend': durStr(inner.finalBlendMs),
+            'Unattributed Scoring': durStr(inner.unattributedMs),
             'Recall@20': pct(r.strict.recall20), 'MRR': num(r.strict.mrr)
         };
     });
@@ -1615,6 +1637,17 @@ async function downloadBenchmarkWorkbook(report) {
                 'Synergy Score': num(scores?.synergyScore, 3),
                 'Exactness Score': num(scores?.exactnessScore, 3),
                 'Category Score': num(scores?.categoryScore, 3),
+                'Role Score': num(scores?.roleScore, 3),
+                'Highlight Intent Score': num(scores?.highlightIntentScore, 3),
+                'Functional Similarity': num(scores?.functionalSimilarityScore, 3),
+                'Effect Coverage': num(scores?.effectCoverageScore, 3),
+                'Primary Effect Match': num(scores?.primaryEffectMatchScore, 3),
+                'Modal Mode Similarity': num(scores?.modalModeSimilarityScore, 3),
+                'Ranking Refinement Signal': num(scores?.rankingRefinementSignal, 3),
+                'Ranking Intent': scores?.rankingIntent || '',
+                'Ranking Intent Role': scores?.rankingIntentRole || '',
+                'Ranking Intent Confidence': num(scores?.rankingIntentConfidence, 3),
+                'Acquisition Cadence Factor': num(scores?.acquisitionCadenceRankFactor, 3),
                 'Overall Score': num(scores?.similarityScore, 3),
                 'Lost At Stage': diagnoseFailureStage(d, expCard, rankIndex),
                 'Filter Mismatch': (d?.filterFailureReasons?.get(n) || [])
@@ -1629,15 +1662,27 @@ async function downloadBenchmarkWorkbook(report) {
     });
 
     // --- Sheet: Pipeline Diagnostics ---
-    const pipelineRows = report.structuredResults.map(r => ({
-        'Test ID': r.id,
-        'Source Card': r.source,
-        'Retrieved': r.strict.diagnostics?.retrieved ?? '',
-        'Passed Filters (raw)': r.strict.diagnostics?.passedFiltersRaw ?? '',
-        'After Dedup': r.strict.diagnostics?.afterHardFilters ?? '',
-        'After Relevance Floor': r.strict.diagnostics?.afterRelevanceFloor ?? '',
-        'Final Results': r.strict.diagnostics?.finalResults ?? ''
-    }));
+    const pipelineRows = report.structuredResults.map(r => {
+        const d = r.strict.diagnostics || {};
+        const q = d.benchmarkSignals || {};
+        return {
+            'Test ID': r.id,
+            'Source Card': r.source,
+            'Retrieved': d.retrieved ?? '',
+            'Passed Filters (raw)': d.passedFiltersRaw ?? '',
+            'After Dedup': d.afterHardFilters ?? '',
+            'After Relevance Floor': d.afterRelevanceFloor ?? '',
+            'Final Results': d.finalResults ?? '',
+            'Ranking Mode': q.rankingMode || '',
+            'Search Methods': q.searchMethods || '',
+            'Ordering Features': q.orderingFeatures || '',
+            'Search Intent Text': q.searchIntentText || '',
+            'Search A Query': q.searchAQuery || '',
+            'Search B Query': q.searchBQuery || '',
+            'Functional Queries': q.functionalQueries || '',
+            'Source Canonical Functions': q.sourceCanonicalFunctions || ''
+        };
+    });
 
     // --- Sheet: Retrieval Cost (per-stream cost vs. haystack size, review Priority 4/10-4) ---
     const retrievalCostRows = report.retrievalCostRows || [];
@@ -1680,7 +1725,7 @@ async function downloadBenchmarkWorkbook(report) {
     // bold) are a SheetJS Pro feature and are silently ignored by the community build, so they're
     // set as a no-cost upgrade for style-capable builds but nothing depends on them. That's why
     // MAX_WIDTH is generous rather than relying on text wrapping to reveal long values.
-    const WRAP_COLUMNS = new Set(['Query', 'Filter Mismatch', 'Lost At Stage', 'Error', 'Card Ranks', 'Categories', 'Retrieved Via']);
+    const WRAP_COLUMNS = new Set(['Query', 'Filter Mismatch', 'Lost At Stage', 'Error', 'Card Ranks', 'Categories', 'Retrieved Via', 'Search A Query', 'Search B Query', 'Search Intent Text', 'Functional Queries', 'Source Canonical Functions', 'Search Methods']);
     const MIN_WIDTH = 12;
     const MAX_WIDTH = 40;
     // Long free-text columns get a much higher cap. Because wrapText is unavailable in the
@@ -1862,6 +1907,16 @@ async function runBenchmarkPass(searchFn, test) {
                 exactnessScore: card.exactnessScore ?? null,
                 categoryScore: card.categoryScore ?? null,
                 roleScore: card.roleScore ?? null,
+                highlightIntentScore: card.highlightIntentScore ?? null,
+                functionalSimilarityScore: card.functionalSimilarityScore ?? null,
+                effectCoverageScore: card.effectCoverageScore ?? null,
+                primaryEffectMatchScore: card.primaryEffectMatchScore ?? null,
+                modalModeSimilarityScore: card.modalModeSimilarityScore ?? null,
+                rankingRefinementSignal: card.rankingRefinementSignal ?? null,
+                rankingIntent: card.rankingIntent ?? card._rankingIntent?.kind ?? null,
+                rankingIntentRole: card.rankingEvidence?.rankingIntentRole ?? card._rankingIntent?.role ?? null,
+                rankingIntentConfidence: card.rankingIntentConfidence ?? card._rankingIntent?.confidence ?? null,
+                acquisitionCadenceRankFactor: card.acquisitionCadenceRankFactor ?? null,
                 relevanceEvidenceScore: card.relevanceEvidenceScore ?? null,
                 coreEvidenceScore: card.coreEvidenceScore ?? null,
                 supportingEvidenceScore: card.supportingEvidenceScore ?? null,
@@ -3127,7 +3182,8 @@ async function runBenchmarkSuite(searchFn) {
         totalTests: BENCHMARK_SUITE.length,
         benchmarkCompleted,
         benchmarkFullyMeasured,
-        scryfallRateLimited: scryfallConsecutiveRateLimits > 0
+        scryfallRateLimited: scryfallConsecutiveRateLimits > 0,
+        benchmarkConfiguration: currentBenchmarkConfiguration ? { ...currentBenchmarkConfiguration } : null
     };
 
     // Automatically download the full run as a spreadsheet.
@@ -3208,11 +3264,78 @@ async function loadBenchmarkSourceCard(sourceName) {
     return loadSourceCard(sourceName);
 }
 
+// Benchmark configuration is pinned during runLocalBenchmarkInApp so comparisons are reproducible.
+// Ranking mode, hidden search-method checkboxes, optional ordering modes, and user weight offsets
+// previously leaked into runs, making a benchmark compare different ranking systems by accident.
+let currentBenchmarkConfiguration = null;
+const BENCHMARK_METHOD_CONTROL_IDS = [
+    'broad-search', 'divergent-search', 'wording-search', 'functional-search',
+    'target-search', 'role-search', 'alternate-search', 'synergy-search'
+];
+const BENCHMARK_WEIGHT_CONTROL_IDS = ['weight-mechanical', 'weight-synergy', 'weight-context', 'weight-exactness', 'weight-category'];
+const BENCHMARK_ORDER_CONTROL_IDS = ['order-feature-matrix', 'order-feature-diverse'];
+function snapshotBenchmarkControlState() {
+    const values = {};
+    [...BENCHMARK_METHOD_CONTROL_IDS, ...BENCHMARK_WEIGHT_CONTROL_IDS, ...BENCHMARK_ORDER_CONTROL_IDS, 'sort-results']
+        .forEach(id => {
+            const el = document.getElementById(id);
+            if (!el) return;
+            values[id] = el.type === 'checkbox' ? Boolean(el.checked) : String(el.value ?? '');
+        });
+    return {
+        values,
+        activeSearchMethodFlags: { ...activeSearchMethodFlags },
+        activeOrderFeatureFlags: { ...activeOrderFeatureFlags }
+    };
+}
+function applyDeterministicBenchmarkControlState() {
+    const sort = document.getElementById('sort-results');
+    if (sort) sort.value = 'overall';
+    BENCHMARK_METHOD_CONTROL_IDS.forEach(id => {
+        const el = document.getElementById(id);
+        if (el) el.checked = false;
+    });
+    BENCHMARK_ORDER_CONTROL_IDS.forEach(id => {
+        const el = document.getElementById(id);
+        if (el) el.checked = false;
+    });
+    BENCHMARK_WEIGHT_CONTROL_IDS.forEach(id => {
+        const el = document.getElementById(id);
+        if (el) el.value = '0';
+    });
+    activeSearchMethodFlags = {
+        broad: false, divergent: false, wording: false, functional: false,
+        target: false, role: false, alternate: false, synergy: false
+    };
+    activeOrderFeatureFlags = { matrix: false, diverse: false };
+    currentBenchmarkConfiguration = {
+        ranking: 'Overall Match',
+        searchMethods: 'Standard (all optional method switches off)',
+        orderingFeatures: 'Matrix Sweep off; Diverse Spread off',
+        userWeightOffsets: '0 (default offsets for mechanical, context, synergy, exactness, category)'
+    };
+    console.info('[ManaSearch] Benchmark uses a deterministic baseline: Overall Match, Standard methods, Matrix/Diverse off, default weight offsets.');
+}
+function restoreBenchmarkControlState(snapshot) {
+    if (!snapshot) return;
+    for (const [id, value] of Object.entries(snapshot.values || {})) {
+        const el = document.getElementById(id);
+        if (!el) continue;
+        if (el.type === 'checkbox') el.checked = Boolean(value);
+        else el.value = String(value);
+        try { el.dispatchEvent(new Event(el.type === 'checkbox' ? 'change' : 'input', { bubbles: true })); } catch (_) {}
+    }
+    activeSearchMethodFlags = { ...(snapshot.activeSearchMethodFlags || activeSearchMethodFlags) };
+    activeOrderFeatureFlags = { ...(snapshot.activeOrderFeatureFlags || activeOrderFeatureFlags) };
+}
+
 // Example Integration Handler for browser environment (App context):
 let benchmarkRunPromise = null;
 
 async function runLocalBenchmarkInApp() {
     if (benchmarkRunPromise) return benchmarkRunPromise;
+    const originalBenchmarkControls = snapshotBenchmarkControlState();
+    applyDeterministicBenchmarkControlState();
 
     benchmarkRunPromise = runBenchmarkSuite(async (testCase) => {
         updateBenchmarkDashboard({
@@ -3254,6 +3377,8 @@ async function runLocalBenchmarkInApp() {
         
         return { results: lastSearchResults, diagnostics: lastSearchDiagnostics };
     }).finally(() => {
+        restoreBenchmarkControlState(originalBenchmarkControls);
+        currentBenchmarkConfiguration = null;
         benchmarkRunPromise = null;
     });
 
@@ -6947,7 +7072,7 @@ function parseMTGEffect(oracleText, cardContext = null) {
     // as separate bullet-prefixed lines. Track the active mode group across clauses so each
     // mode is tagged with which group and "choose how many" header it belongs to, instead of
     // looking like unrelated standalone effects (project spec: multiple simultaneous modes).
-    const modalHeaderRegex = /^\s*choose\s+(one|two|up to two|up to three|one or more|any number)\b.*[—-]\s*$/i;
+    const modalHeaderRegex = /^\s*choose\s+(one|two|three|four|up to two|up to three|up to four|one or more|any number)\b.*[—-]\s*$/i;
     const bulletPrefixRegex = /^[•●]\s*|^-\s+/;
     let activeModeGroup = null;
     let modeGroupCounter = 0;
@@ -8303,7 +8428,11 @@ function buildStrategicRoleFingerprint(card, parsedEffects = [], profile = []) {
 
 const STRATEGIC_INTENT_ROLES = new Set([
     'fast_mana', 'card_advantage_engine', 'token_multiplier', 'tribal_anthem',
-    'catch_up_ramp', 'land_ramp', 'token_engine'
+    'catch_up_ramp', 'land_ramp', 'token_engine',
+    // A highlighted clause narrows *which part* is being compared; it should not erase a strong
+    // archetype signal such as low-cost counter-magic, burn, reanimation, sweepers or modal utility.
+    'counterspell', 'burn', 'graveyard_recursion', 'board_wipe', 'combat_finisher',
+    'anthem', 'bounce', 'tutor', 'life_gain_engine', 'life_loss_engine'
 ]);
 
 function inferRankingIntent(sourceCard, parsedSourceEffects = [], targetText = '', sourceRoleProfile = [], highlights = []) {
@@ -12649,6 +12778,74 @@ function calculateEffectRelationshipMismatch(parsedA = [], parsedB = []) {
         maxMismatch = Math.max(maxMismatch, mismatch);
     }
     return maxMismatch;
+}
+
+function shouldUseModalModeIntent(sourceOracleText, hasEffectHighlight = false, highlights = [], effectHighlightCount = 0) {
+    const header = /\bchoose\s+(?:one|two|three|four|up to two|up to three|up to four|one or more|any number)\b[^\n]{0,60}[—-]/i;
+    if (!header.test(String(sourceOracleText || ''))) return false;
+    if (!hasEffectHighlight) return true;
+    // If the user highlighted the modal instruction itself, or intentionally selected multiple
+    // effect options, preserve the modal set context. A single isolated option remains focused on
+    // that option instead of silently widening back to the whole spell.
+    return (highlights || []).some(h => /\bchoose\s+(?:one|two|three|four|up to two|up to three|up to four|one or more|any number)\b/i.test(String(h?.text || '')))
+        || Number(effectHighlightCount) >= 2;
+}
+
+function getModalEffectGroups(parsedEffects) {
+    const groups = new Map();
+    (Array.isArray(parsedEffects) ? parsedEffects : []).forEach(effect => {
+        if (!effect?.isMode || effect?.isCostEffect || !effect?.canonical) return;
+        const key = String(effect.modeGroupId ?? 'modal-default');
+        if (!groups.has(key)) groups.set(key, []);
+        groups.get(key).push(effect);
+    });
+    return [...groups.values()].filter(group => group.length > 0);
+}
+
+// Modal choices are alternatives, not a list of effects that must all happen simultaneously.
+// Compare the choices as a set so Mystic Confluence can match a two-mode spell that shares its
+// counter/bounce/draw options without being penalized merely for having a different choice count.
+function calculateModalModeSimilarity(parsedA, parsedB) {
+    const groupsA = getModalEffectGroups(parsedA);
+    const groupsB = getModalEffectGroups(parsedB);
+    if (!groupsA.length || !groupsB.length) return null;
+    let best = null;
+    for (const a of groupsA) {
+        for (const b of groupsB) {
+            const coverage = calculateEffectCoverageProfile(a, b);
+            const countFit = Math.min(a.length, b.length) / Math.max(a.length, b.length, 1);
+            const score = Math.max(0, Math.min(1,
+                (Number(coverage.balancedCoverage || 0) * 0.76 + Number(coverage.sourceCoverage || 0) * 0.24) *
+                (0.92 + 0.08 * countFit)
+            ));
+            if (!best || score > best.score) best = {
+                score, sourceModeCount: a.length, candidateModeCount: b.length,
+                balancedCoverage: Number(coverage.balancedCoverage || 0),
+                sourceCoverage: Number(coverage.sourceCoverage || 0)
+            };
+        }
+    }
+    // Do not claim a useful modal match from a shared incidental mode word alone.
+    return best && best.score >= 0.24 ? best : null;
+}
+
+function blendCalibratedRankingEvidence(channelScore, agreement, refinementSignal, consensusAdjustment = 0) {
+    const clamp01 = value => Math.max(0, Math.min(1, Number(value) || 0));
+    // A convex blend prevents the old additive-bonus path from saturating the score at 1.0 for
+    // hundreds of loosely related cards. Refinement can influence order, but can't outweigh the
+    // independent structural/semantic/function channels that make a candidate genuinely relevant.
+    const core = clamp01(channelScore);
+    const agreementEvidence = clamp01(agreement);
+    const refinement = clamp01(refinementSignal);
+    const base = core * 0.80 + agreementEvidence * 0.08 + refinement * 0.12;
+    // Related-card consensus is directional evidence, not a free additive bonus. Scale its effect
+    // by the score's remaining headroom (or current score for a negative adjustment), so even a
+    // strong consensus cannot turn many near-equal candidates into a row of 1.000 scores.
+    const consensus = Math.max(-1, Math.min(1, (Number(consensusAdjustment) || 0) / 0.045));
+    const adjusted = consensus >= 0
+        ? base + consensus * (1 - base) * 0.15
+        : base + consensus * base * 0.15;
+    return clamp01(adjusted);
 }
 
 function calculateMechanicalSimilarityDetailed(parsedA, parsedB, profileA = null, profileB = null) {
@@ -22537,6 +22734,8 @@ async function scoreCardBatch({
     // times. The separate parsedSourceCard above remains unchanged for highlight-aware mechanics.
     const sourceSynergyText = strategicRoleCardText(sourceCard);
     const sourceSynergyEffects = getCachedParsedEffects(sourceCard, sourceSynergyText);
+    const sourceModalIntentActive = shouldUseModalModeIntent(sourceSynergyText, hasEffectHighlight, activeHighlights, effectHighlights.length);
+    const sourceModalEffectsForRanking = sourceModalIntentActive ? sourceSynergyEffects : [];
     // When the user has narrowed the search with an effect highlight, compare card-acquisition
     // cadence against that effective highlighted parse rather than unrelated draw abilities elsewhere
     // on the full source card. This prevents an edited outcome (e.g. replacing Rhystic's draw with an
@@ -22746,6 +22945,11 @@ async function scoreCardBatch({
             ? (effectHighlightScore * 0.85 + typeHighlightScore * 0.15)
             : (hasEffectHighlight ? effectHighlightScore : typeHighlightScore);
         card._parsedEffects = parsedCandidateCard;
+        const modalModeDetail = sourceModalIntentActive
+            ? calculateModalModeSimilarity(sourceModalEffectsForRanking, parsedCandidateCard)
+            : null;
+        card.modalModeSimilarityScore = modalModeDetail ? modalModeDetail.score : null;
+        card.modalModeSimilarityDetail = modalModeDetail;
         card.fieldConfidence = calculateCardFieldConfidence(parsedCandidateCard);
         card.parseConfidence = calculateParseConfidence(parsedCandidateCard);
         const candidateStructuralConfidence = Math.max(0, Math.min(1,
@@ -23062,7 +23266,23 @@ async function scoreCardBatch({
         strategic_role: { structural: 0.12, rawSemantic: 0.23, functionRole: 0.65 },
         highlighted_effect: { structural: 0.52, rawSemantic: 0.23, functionRole: 0.25 }
     };
-    const profile = channelWeights[rankingIntent.kind] || channelWeights.effect_match;
+    const baseProfile = channelWeights[rankingIntent.kind] || channelWeights.effect_match;
+    let profile = { ...baseProfile };
+    const roleAnchoredHighlight = rankingIntent.kind === 'highlighted_effect' &&
+        Boolean(rankingIntent.role) && STRATEGIC_INTENT_ROLES.has(rankingIntent.role) &&
+        (sourceRoleProfile || []).some(role => role.role === rankingIntent.role && Number(role.score) >= 0.74);
+    if (roleAnchoredHighlight) {
+        // Keep the selected text as a strong signal, but let the card's high-confidence role shape
+        // the comparison too. This specifically avoids losing fast-mana/card-advantage archetypes
+        // when users highlight only one clause of the engine.
+        const roleProfile = channelWeights.strategic_role;
+        const roleMix = 0.34;
+        profile = {
+            structural: baseProfile.structural * (1 - roleMix) + roleProfile.structural * roleMix,
+            rawSemantic: baseProfile.rawSemantic * (1 - roleMix) + roleProfile.rawSemantic * roleMix,
+            functionRole: baseProfile.functionRole * (1 - roleMix) + roleProfile.functionRole * roleMix
+        };
+    }
 
     const hasMeaningful = v => Number.isFinite(v) && v > 0;
     const methodStructuralBias = activeSearchMethodFlags.alternate ? 0.92 : 1;
@@ -23122,7 +23342,6 @@ async function scoreCardBatch({
         const agreement = independent.length >= 2
             ? Math.sqrt(independent[0] * independent[1])
             : 0;
-        const agreementBonus = Math.min(0.045, Math.max(0, agreement - 0.48) * 0.11);
 
         const effectCoverage = Math.max(0, Math.min(1, card.effectCoverageScore || 0));
         const balancedCoverage = Math.max(0, Math.min(1, card.balancedEffectCoverage || 0));
@@ -23195,17 +23414,49 @@ async function scoreCardBatch({
             ? Math.max(-0.055, Math.min(0.18, (relatedConsensus.score - 0.46) * (0.20 + 0.12 * (relatedIntentProfile?.confidence || 0))))
             : 0;
 
-        const rankingRefinement = compoundCoverageBonus + balancedCoverageBonus + primaryMatchBonus
-            + functionalSubstituteBonus + quantityBonus + methodBoost + relatedConsensusDelta;
+        const rankingRefinementRaw = compoundCoverageBonus + balancedCoverageBonus + primaryMatchBonus
+            + functionalSubstituteBonus + quantityBonus + methodBoost;
+        const modalSignal = Number.isFinite(Number(card.modalModeSimilarityScore))
+            ? Math.max(0, Math.min(1, Number(card.modalModeSimilarityScore)))
+            : null;
+        const signalParts = modalSignal !== null
+            ? [
+                [effectCoverage, 0.16], [balancedCoverage, 0.08], [primaryEffectMatch, 0.17],
+                [functionalSimilarity, 0.20], [quantitySimilarity, 0.05], [modalSignal, 0.34]
+            ]
+            : [
+                [effectCoverage, 0.24], [balancedCoverage, 0.12], [primaryEffectMatch, 0.24],
+                [functionalSimilarity, 0.29], [quantitySimilarity, 0.11]
+            ];
+        if (roleAnchoredHighlight) {
+            // A role fingerprint is especially useful when the highlight names an ability but the
+            // intended analogue differs in timing/cost wording (e.g. Arena vs. Dark Confidant).
+            const roleWeight = modalSignal !== null ? 0.12 : 0.18;
+            signalParts.forEach(part => { part[1] *= (1 - roleWeight); });
+            signalParts.push([Math.max(0, Math.min(1, Number(card.roleScore) || 0)), roleWeight]);
+        }
+        if (activeSearchMethodFlags.functional || activeSearchMethodFlags.target || activeSearchMethodFlags.role ||
+            activeSearchMethodFlags.alternate || activeSearchMethodFlags.synergy || activeSearchMethodFlags.wording) {
+            const methodSignal = Math.max(0, Math.min(1, methodBoost / 0.30));
+            signalParts.forEach(part => { part[1] *= 0.92; });
+            signalParts.push([methodSignal, 0.08]);
+        }
+        const refinementWeightTotal = signalParts.reduce((sum, part) => sum + part[1], 0) || 1;
+        const refinementSignal = Math.max(0, Math.min(1,
+            signalParts.reduce((sum, part) => sum + Math.max(0, Math.min(1, Number(part[0]) || 0)) * part[1], 0) / refinementWeightTotal
+        ));
 
-        card.rankingRefinementScore = rankingRefinement;
+        card.rankingRefinementScore = rankingRefinementRaw;
+        card.rankingRefinementSignal = refinementSignal;
+        card.modalModeSimilarityScore = modalSignal;
         const relatedConsensusGate = relatedConsensus && relatedIntentProfile?.confidence >= 0.52 && relatedIntentProfile?.functionSupportRatio >= 0.62
             ? (1 - (0.50 * (1 - relatedConsensus.score) * Math.max(0, Math.min(1, relatedIntentProfile.confidence))))
             : 1;
         card.relatedConsensusGate = relatedConsensusGate;
-        card.rankingEvidence = { mechanical: structural, mechanicalTrusted: structuralTrusted, mechanicalConfidence, rawSemantic, functionSemantic: functionSemanticAugmented, roleSemantic, highlightIntent: Number(card.highlightIntentScore) || 0, highlightIntentWeight: highlightBlend.weight, explicitUserIntent: highlightBlend.explicitUserIntent, baseChannelScore, effectCoverage, balancedCoverage, primaryEffectMatch, evidenceAgreement: agreement, retrievalSimilarity: Number(card._semanticRetrievalSimilarity) || 0, rankingIntent: rankingIntent.kind, rankingIntentConfidence: rankingIntent.confidence, relatedConsensus: relatedConsensus ? { score: relatedConsensus.score, functionMatch: relatedConsensus.functionMatch, quantityFit: relatedConsensus.quantityFit, roleFit: relatedConsensus.roleFit, artifactFit: relatedConsensus.artifactFit, dominantFunction: relatedIntentProfile?.dominantFunction || null, targetQuantity: relatedIntentProfile?.numericTarget ?? null, confidence: relatedIntentProfile?.confidence || 0 } : null };
+        card.rankingEvidence = { mechanical: structural, mechanicalTrusted: structuralTrusted, mechanicalConfidence, rawSemantic, functionSemantic: functionSemanticAugmented, roleSemantic, highlightIntent: Number(card.highlightIntentScore) || 0, highlightIntentWeight: highlightBlend.weight, explicitUserIntent: highlightBlend.explicitUserIntent, baseChannelScore, effectCoverage, balancedCoverage, primaryEffectMatch, rankingRefinementSignal: refinementSignal, modalModeSimilarity: modalSignal, evidenceAgreement: agreement, retrievalSimilarity: Number(card._semanticRetrievalSimilarity) || 0, rankingIntent: rankingIntent.kind, rankingIntentRole: rankingIntent.role || null, rankingIntentConfidence: rankingIntent.confidence, relatedConsensus: relatedConsensus ? { score: relatedConsensus.score, functionMatch: relatedConsensus.functionMatch, quantityFit: relatedConsensus.quantityFit, roleFit: relatedConsensus.roleFit, artifactFit: relatedConsensus.artifactFit, dominantFunction: relatedIntentProfile?.dominantFunction || null, targetQuantity: relatedIntentProfile?.numericTarget ?? null, confidence: relatedIntentProfile?.confidence || 0 } : null };
+        const consensusAdjustment = relatedConsensus ? relatedConsensusDelta * 0.22 : 0;
         const preCadenceSimilarityScore = Math.max(0, Math.min(1,
-            (channelScore + agreementBonus + rankingRefinement) * evidenceGate * contradictionPenalty * relatedConsensusGate
+            blendCalibratedRankingEvidence(channelScore, agreement, refinementSignal, consensusAdjustment) * evidenceGate * contradictionPenalty * relatedConsensusGate
         ));
         const acquisitionCadenceMismatch = calculateSourceAcquisitionCadenceMismatch(
             sourceAcquisitionCadence, card, candidateParsedEffects
@@ -23828,7 +24079,24 @@ const FUNCTION_RETRIEVAL_VOCAB = {
         }
     },
     reanimate: {
-        phrases: ["from your graveyard to the battlefield", "from a graveyard to the battlefield", "onto the battlefield from your graveyard"],
+        phrases: [
+            "from your graveyard to the battlefield",
+            "from a graveyard to the battlefield",
+            "from a graveyard onto the battlefield",
+            "from your graveyard onto the battlefield",
+            "from their graveyard onto the battlefield",
+            "from their graveyards onto the battlefield",
+            "return target creature card from your graveyard",
+            "return enchanted creature card to the battlefield"
+        ],
+        // Separate focused lanes are important: a single large OR query can crowd the retrieval
+        // cap with popular generic recursion cards while missing the exact zone transition needed
+        // for Exhume/Persist or the attachment-mediated return used by Animate Dead.
+        targetedQueries: [
+            'o:"creature card" o:"graveyard" o:"battlefield" (o:"put" or o:"return")',
+            'o:"enchanted creature card" o:"graveyard" o:"battlefield"',
+            'o:"graveyards" o:"creature" o:"battlefield" (o:"put" or o:"return")'
+        ],
         otag: "reanimate",
         paramTemplate: (p) => p.object ? `o:"${p.object}" o:"graveyard" o:"battlefield"` : null
     },
@@ -23925,6 +24193,14 @@ const FUNCTION_RETRIEVAL_VOCAB = {
     },
     direct_damage: {
         phrases: ["damage to any target", "damage to target creature", "damage to target player"],
+        // Query the target classes separately as well as together. On broad red-burn searches, a
+        // result-capped OR stream can otherwise fill with any-target burn while missing creature-
+        // only spells such as Fiery Impulse that still serve as useful damage analogues.
+        targetedQueries: [
+            'o:"damage to any target"',
+            'o:"damage to target creature"',
+            'o:"damage to target player"'
+        ],
         otag: "burn",
         paramTemplate: (p) => {
             const targetPhrase = p.object === 'any target' ? 'any target'
@@ -24177,6 +24453,12 @@ function buildFunctionalRetrievalQueries(sourceCard, parsedEffects, excludeSelf,
     for (const cf of canonicals) {
         const vocab = FUNCTION_RETRIEVAL_VOCAB[cf.function];
         const p = cf.params || {};
+
+        // Formulation 0 - targeted phrase lanes. They run before broad parameter/tag fallbacks so
+        // result caps don't starve a less common but genuinely equivalent wording variant.
+        if (Array.isArray(vocab?.targetedQueries)) {
+            for (const targetedQuery of vocab.targetedQueries) addQuery([targetedQuery], true);
+        }
 
         // Formulation 1 - canonical Oracle wording for this function (requires vocab).
         if (vocab?.phrases?.length) {
@@ -26422,6 +26704,16 @@ if (candidates.length > 0) {
             remainingQueuedForFinalPass: progressiveRankingPending.size
         },
         rankingEvidenceTop,
+        benchmarkSignals: {
+            rankingMode: priorityValue,
+            searchMethods: Object.entries(activeSearchMethodFlags).filter(([, enabled]) => enabled).map(([key]) => key).join(', ') || 'standard',
+            orderingFeatures: Object.entries(activeOrderFeatureFlags).filter(([, enabled]) => enabled).map(([key]) => key).join(', ') || 'none',
+            searchIntentText: String(targetTextForScoring || '').slice(0, 600),
+            searchAQuery: String(searchA_Query || '').slice(0, 1200),
+            searchBQuery: String(searchB_Query || '').slice(0, 1200),
+            functionalQueries: (functionalRetrievalPlans || []).map(q => q.query).join(' || ').slice(0, 2400),
+            sourceCanonicalFunctions: getCanonicalFunctions(sourceParsedEffects).slice(0, 8).map(cf => `${cf.function}${cf.params?.object ? `(${cf.params.object})` : ''}`).join(', ')
+        },
         highlightIntentDiagnostics: hasHighlight ? highlightProfilesForSearch.map(p => ({
             groupId: p.groupId, contextText: p.contextText, mode: p.mode, selections: p.selections,
             canonicalText: p.canonicalText, parserConfidence: p.parserConfidence,
@@ -26451,6 +26743,16 @@ if (candidates.length > 0) {
         searchFQueryDetail,
         exactHighlightQueryDetail,
         timings,
+        benchmarkSignals: {
+            rankingMode: priorityValue,
+            searchMethods: Object.entries(activeSearchMethodFlags).filter(([, enabled]) => enabled).map(([key]) => key).join(', ') || 'standard',
+            orderingFeatures: Object.entries(activeOrderFeatureFlags).filter(([, enabled]) => enabled).map(([key]) => key).join(', ') || 'none',
+            searchIntentText: String(targetTextForScoring || '').slice(0, 600),
+            searchAQuery: String(searchA_Query || '').slice(0, 1200),
+            searchBQuery: String(searchB_Query || '').slice(0, 1200),
+            functionalQueries: (functionalRetrievalPlans || []).map(q => q.query).join(' || ').slice(0, 2400),
+            sourceCanonicalFunctions: getCanonicalFunctions(sourceParsedEffects).slice(0, 8).map(cf => `${cf.function}${cf.params?.object ? `(${cf.params.object})` : ''}`).join(', ')
+        },
         // No candidates reached scoring, so no embedding calls were made this search.
         embeddingDiagnostics: null,
         rawCandidateNames,
@@ -29374,6 +29676,59 @@ function showLoading(isLoading) {
         loadingIndicator.classList.add('hidden');
     }
 }
+
+// v103 regressions for benchmark quality: calibrated score blending, targeted retrieval
+// lanes, strategic intent continuity, and modal option matching. Run from the browser console.
+function runManaSearchBenchmarkQualityRegressionSuite({ log = true } = {}) {
+    const results = [];
+    const check = (id, pass, detail = '') => results.push({ id, pass: Boolean(pass), detail: String(detail || '') });
+    try {
+        const strong = blendCalibratedRankingEvidence(0.92, 0.90, 0.88, 0.01);
+        const weak = blendCalibratedRankingEvidence(0.66, 0.40, 0.38, 0);
+        check('calibrated-score-is-monotonic-for-stronger-evidence', strong > weak, `strong=${strong.toFixed(3)} weak=${weak.toFixed(3)}`);
+        check('calibrated-score-does-not-saturate-without-perfect-evidence', strong < 1 && weak < 1, `strong=${strong.toFixed(3)} weak=${weak.toFixed(3)}`);
+        check('calibrated-consensus-is-bounded', blendCalibratedRankingEvidence(0.5, 0.5, 0.5, 1) >= 0.5 && blendCalibratedRankingEvidence(0.5, 0.5, 0.5, 1) < 0.58, String(blendCalibratedRankingEvidence(0.5, 0.5, 0.5, 1)));
+        check('strong-consensus-does-not-saturate-a-near-perfect-score', blendCalibratedRankingEvidence(0.99, 0.99, 0.99, 0.045) < 1, String(blendCalibratedRankingEvidence(0.99, 0.99, 0.99, 0.045)));
+        ['counterspell','burn','graveyard_recursion','board_wipe','combat_finisher','anthem','bounce','tutor'].forEach(role =>
+            check(`highlight-keeps-strategic-role-${role}`, STRATEGIC_INTENT_ROLES.has(role), role)
+        );
+
+        const reanimateVocab = FUNCTION_RETRIEVAL_VOCAB.reanimate;
+        check('reanimate-uses-targeted-query-lanes', Array.isArray(reanimateVocab.targetedQueries) && reanimateVocab.targetedQueries.length >= 3, JSON.stringify(reanimateVocab.targetedQueries || []));
+        check('reanimate-targeted-query-includes-enchanted-creature', (reanimateVocab.targetedQueries || []).some(q => /enchanted creature card/.test(q)), JSON.stringify(reanimateVocab.targetedQueries || []));
+        check('reanimate-vocabulary-includes-onto-battlefield-phrasing', reanimateVocab.phrases.some(p => /graveyard onto the battlefield/.test(p)), JSON.stringify(reanimateVocab.phrases));
+        check('burn-retrieval-targets-creature-only-spells', (FUNCTION_RETRIEVAL_VOCAB.direct_damage.targetedQueries || []).some(q => /damage to target creature/.test(q)), JSON.stringify(FUNCTION_RETRIEVAL_VOCAB.direct_damage.targetedQueries || []));
+
+        const reanimateOracle = 'Return target creature card from your graveyard to the battlefield.';
+        const reanimateQueries = buildFunctionalRetrievalQueries({ oracle_text: reanimateOracle }, parseMTGEffect(reanimateOracle), ' -name:"Reanimate test fixture"', 2);
+        check('reanimate-targeted-queries-are-emitted-by-planner', reanimateQueries.some(q => /enchanted creature card/.test(q.query)) && reanimateQueries.some(q => /graveyard/.test(q.query) && /battlefield/.test(q.query)), reanimateQueries.map(q => q.query).join(' || '));
+        const burnOracle = 'Lightning Bolt deals 3 damage to any target.';
+        const burnQueries = buildFunctionalRetrievalQueries({ oracle_text: burnOracle }, parseMTGEffect(burnOracle), ' -name:"Lightning Bolt test fixture"', 1);
+        check('burn-targeted-creature-lane-is-emitted-by-planner', burnQueries.some(q => /damage to target creature/.test(q.query)), burnQueries.map(q => q.query).join(' || '));
+
+        const modalSource = parseMTGEffect('Choose three —\n• Counter target spell unless its controller pays {3}.\n• Return target creature to its owner’s hand.\n• Draw a card.');
+        const modalCandidate = parseMTGEffect('Choose two —\n• Counter target spell.\n• Return target permanent to its owner’s hand.\n• Draw a card.');
+        const nonModalCandidate = parseMTGEffect('Counter target spell. Draw a card.');
+        const modal = calculateModalModeSimilarity(modalSource, modalCandidate);
+        check('three-choice-header-activates-modal-context', shouldUseModalModeIntent('Choose three —\n• Draw a card.', false, [], 0), 'Choose three modal header');
+        check('single-highlight-keeps-single-mode-focus', !shouldUseModalModeIntent('Choose three —\n• Draw a card.', true, [{text:'Draw a card'}], 1), 'single selected effect should not widen intent');
+        check('multi-highlight-preserves-modal-set-context', shouldUseModalModeIntent('Choose three —\n• Draw a card.', true, [{text:'Draw a card'}, {text:'Counter target spell'}], 2), 'multiple selected effects');
+        check('modal-effects-are-grouped', getModalEffectGroups(modalSource).length >= 1 && getModalEffectGroups(modalSource)[0].length >= 2, JSON.stringify(getModalEffectGroups(modalSource).map(g => g.length)));
+        check('modal-option-similarity-recognizes-shared-modes', Boolean(modal && modal.score >= 0.40), JSON.stringify(modal));
+        check('modal-score-does-not-invent-group-for-nonmodal-candidate', calculateModalModeSimilarity(modalSource, nonModalCandidate) === null, JSON.stringify(getModalEffectGroups(nonModalCandidate).map(g => g.length)));
+
+        const snapshot = snapshotBenchmarkControlState();
+        check('benchmark-control-snapshot-includes-ranking-mode', Object.prototype.hasOwnProperty.call(snapshot.values || {}, 'sort-results'), JSON.stringify(Object.keys(snapshot.values || {})));
+        check('benchmark-control-snapshot-includes-user-weight-offsets', BENCHMARK_WEIGHT_CONTROL_IDS.every(id => Object.prototype.hasOwnProperty.call(snapshot.values || {}, id)), BENCHMARK_WEIGHT_CONTROL_IDS.join(','));
+    } catch (error) {
+        check('suite-execution', false, error?.stack || error?.message || String(error));
+    }
+    const passed = results.filter(r => r.pass).length;
+    const report = { passed, total: results.length, passRate: results.length ? passed / results.length : 0, ok: passed === results.length, results };
+    if (log) console[report.ok ? 'info' : 'warn'](`[ManaSearch] Benchmark quality regression suite ${passed}/${results.length}`, report);
+    return report;
+}
+try { window.runManaSearchBenchmarkQualityRegressionSuite = runManaSearchBenchmarkQualityRegressionSuite; } catch (_) {}
 
 // v100 regression suite for shared constraint modes + source metadata editor controls.
 // Run from the browser console: runManaSearchAdvancedMechanicsRegressionSuite()
