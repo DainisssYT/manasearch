@@ -1,6 +1,6 @@
-/* ManaSearch build 20261017-104 */
+/* ManaSearch build 20261017-105 */
 // ManaSearch deployment build marker. Bump this whenever app.js changes so cached-module issues are easy to diagnose.
-const MANASEARCH_APP_BUILD = '20261017-104';
+const MANASEARCH_APP_BUILD = '20261017-105';
 console.info(`[ManaSearch] app.js build ${MANASEARCH_APP_BUILD}`);
 
 // State Management
@@ -1651,6 +1651,10 @@ async function downloadBenchmarkWorkbook(report) {
                 'Canonical Contradiction Penalty': num(scores?.contradictionPenalty, 3),
                 'Pre-Cadence Score': num(scores?.similarityBeforeCadenceAdjustment, 3),
                 'Relationship Mismatch': num(scores?.mechanicalBreakdown?.relationshipMismatch, 3),
+                'Mechanical Confidence': num(scores?.mechanicalConfidence, 3),
+                'Calibrated Blend Score': num(scores?.calibratedBlendScore, 3),
+                'Evidence Gate': num(scores?.evidenceGate, 3),
+                'Strategic Role Anchor Applied': scores?.strategicRoleAnchored === true ? 'Y' : (scores?.strategicRoleAnchored === false ? 'N' : ''),
                 'Ranking Intent': scores?.rankingIntent || '',
                 'Ranking Intent Role': scores?.rankingIntentRole || '',
                 'Ranking Intent Confidence': num(scores?.rankingIntentConfidence, 3),
@@ -1866,6 +1870,62 @@ const BENCHMARK_HISTORY_KEY = 'manamatch_benchmark_last_run';
  * @param {Object} test - a BENCHMARK_SUITE entry (or a relaxed clone of one)
  * @returns {Promise<Object>} everything needed for console output + the workbook
  */
+function createBenchmarkScoreSnapshot(card) {
+    if (!card || typeof card === 'string') return null;
+    return {
+        mechanicalScore: card.mechanicalScore ?? null,
+        contextScore: card.contextScore ?? null,
+        functionScore: card.functionScore ?? null,
+        synergyScore: card.synergyScore ?? null,
+        exactnessScore: card.exactnessScore ?? null,
+        categoryScore: card.categoryScore ?? null,
+        roleScore: card.roleScore ?? null,
+        highlightIntentScore: card.highlightIntentScore ?? null,
+        functionalSimilarityScore: card.functionalSimilarityScore ?? null,
+        effectCoverageScore: card.effectCoverageScore ?? null,
+        primaryEffectMatchScore: card.primaryEffectMatchScore ?? null,
+        modalModeSimilarityScore: card.modalModeSimilarityScore ?? null,
+        rankingRefinementSignal: card.rankingRefinementSignal ?? null,
+        deterministicFunctionalAnchor: card.deterministicFunctionalAnchor ?? card.rankingEvidence?.deterministicFunctionalAnchor ?? null,
+        primaryEffectRankingBoost: card.primaryEffectRankingBoost ?? card.rankingEvidence?.primaryEffectRankingBoost ?? null,
+        similarityBeforeCadenceAdjustment: card.similarityBeforeCadenceAdjustment ?? card.preCadenceSimilarityScore ?? null,
+        calibratedBlendScore: card.calibratedBlendScore ?? null,
+        mechanicalConfidence: card.mechanicalConfidence ?? null,
+        mechanicalBreakdown: card.mechanicalBreakdown ? { relationshipMismatch: card.mechanicalBreakdown.relationshipMismatch ?? null } : null,
+        evidenceGate: card.evidenceGate ?? card.rankingEvidence?.evidenceGate ?? null,
+        strategicRoleAnchored: card.strategicRoleAnchored ?? card.rankingEvidence?.strategicRoleAnchored ?? null,
+        rankingEvidence: card.rankingEvidence ? {
+            rankingIntentRole: card.rankingEvidence.rankingIntentRole ?? null,
+            deterministicFunctionalAnchor: card.rankingEvidence.deterministicFunctionalAnchor ?? null,
+            primaryEffectRankingBoost: card.rankingEvidence.primaryEffectRankingBoost ?? null,
+            relationshipMismatch: card.rankingEvidence.relationshipMismatch ?? null,
+            evidenceGate: card.rankingEvidence.evidenceGate ?? null,
+            strategicRoleAnchored: card.rankingEvidence.strategicRoleAnchored ?? null,
+            channelScore: card.rankingEvidence.channelScore ?? null
+        } : null,
+        rankingIntent: card.rankingIntent ?? card._rankingIntent?.kind ?? null,
+        rankingIntentRole: card.rankingEvidence?.rankingIntentRole ?? card._rankingIntent?.role ?? null,
+        rankingIntentConfidence: card.rankingIntentConfidence ?? card._rankingIntent?.confidence ?? null,
+        acquisitionCadenceRankFactor: card.acquisitionCadenceRankFactor ?? null,
+        relevanceEvidenceScore: card.relevanceEvidenceScore ?? null,
+        coreEvidenceScore: card.coreEvidenceScore ?? null,
+        supportingEvidenceScore: card.supportingEvidenceScore ?? null,
+        evidenceAgreement: card.evidenceAgreement ?? null,
+        contradictionPenalty: card.contradictionPenalty ?? null,
+        similarityScore: card.similarityScore ?? null
+    };
+}
+
+function mergeBenchmarkScoreSnapshots(scoreByName, snapshots) {
+    if (!(scoreByName instanceof Map) || !(snapshots instanceof Map)) return scoreByName;
+    snapshots.forEach((snapshot, name) => {
+        // Final-list card objects remain authoritative. Snapshots fill gaps for scored candidates
+        // that were removed by the relative relevance floor before final ranking.
+        if (!scoreByName.has(name)) scoreByName.set(name, snapshot);
+    });
+    return scoreByName;
+}
+
 async function runBenchmarkPass(searchFn, test) {
     let rankedResults = [];
     let diagnostics = null;
@@ -1920,6 +1980,14 @@ async function runBenchmarkPass(searchFn, test) {
                 primaryEffectMatchScore: card.primaryEffectMatchScore ?? null,
                 modalModeSimilarityScore: card.modalModeSimilarityScore ?? null,
                 rankingRefinementSignal: card.rankingRefinementSignal ?? null,
+                deterministicFunctionalAnchor: card.deterministicFunctionalAnchor ?? card.rankingEvidence?.deterministicFunctionalAnchor ?? null,
+                primaryEffectRankingBoost: card.primaryEffectRankingBoost ?? card.rankingEvidence?.primaryEffectRankingBoost ?? null,
+                similarityBeforeCadenceAdjustment: card.similarityBeforeCadenceAdjustment ?? card.preCadenceSimilarityScore ?? null,
+                calibratedBlendScore: card.calibratedBlendScore ?? null,
+                mechanicalConfidence: card.mechanicalConfidence ?? null,
+                mechanicalBreakdown: card.mechanicalBreakdown ?? null,
+                evidenceGate: card.evidenceGate ?? card.rankingEvidence?.evidenceGate ?? null,
+                strategicRoleAnchored: card.strategicRoleAnchored ?? card.rankingEvidence?.strategicRoleAnchored ?? null,
                 rankingIntent: card.rankingIntent ?? card._rankingIntent?.kind ?? null,
                 rankingIntentRole: card.rankingEvidence?.rankingIntentRole ?? card._rankingIntent?.role ?? null,
                 rankingIntentConfidence: card.rankingIntentConfidence ?? card._rankingIntent?.confidence ?? null,
@@ -1932,6 +2000,10 @@ async function runBenchmarkPass(searchFn, test) {
                 similarityScore: card.similarityScore ?? null
             });
         });
+
+        // Preserve per-candidate scoring diagnostics even for candidates later removed by
+        // the relevance floor. These snapshots are captured only during benchmark runs.
+        mergeBenchmarkScoreSnapshots(scoreByName, diagnostics?.benchmarkScoreByName);
 
         if (coverageRateLimited) {
             testStatus = 'blocked_rate_limit';
@@ -3338,11 +3410,13 @@ function restoreBenchmarkControlState(snapshot) {
 
 // Example Integration Handler for browser environment (App context):
 let benchmarkRunPromise = null;
+let benchmarkRunInProgress = false;
 
 async function runLocalBenchmarkInApp() {
     if (benchmarkRunPromise) return benchmarkRunPromise;
     const originalBenchmarkControls = snapshotBenchmarkControlState();
     applyDeterministicBenchmarkControlState();
+    benchmarkRunInProgress = true;
 
     benchmarkRunPromise = runBenchmarkSuite(async (testCase) => {
         updateBenchmarkDashboard({
@@ -3386,6 +3460,7 @@ async function runLocalBenchmarkInApp() {
     }).finally(() => {
         restoreBenchmarkControlState(originalBenchmarkControls);
         currentBenchmarkConfiguration = null;
+        benchmarkRunInProgress = false;
         benchmarkRunPromise = null;
     });
 
@@ -12860,14 +12935,14 @@ function calculateModalModeSimilarity(parsedA, parsedB) {
 
 function blendCalibratedRankingEvidence(channelScore, agreement, refinementSignal, consensusAdjustment = 0, functionalAnchor = undefined) {
     const clamp01 = value => Math.max(0, Math.min(1, Number(value) || 0));
-    // Functional embeddings can under-score familiar Oracle phrasing variants. Preserve the
-    // independent rule-graph/effect-coverage witness as a first-class channel instead of using it
-    // only as a small post-hoc refinement. Omitted anchor defaults to core for compatibility.
+    // The blend is anchored more firmly to effect-graph evidence than to broad semantic agreement.
+    // Oracle and function embeddings still matter, but they cannot drown out direct action/target/
+    // zone coverage when a candidate expresses the same mechanic with different wording.
     const core = clamp01(channelScore);
     const agreementEvidence = clamp01(agreement);
     const refinement = clamp01(refinementSignal);
     const anchor = functionalAnchor === undefined ? core : clamp01(functionalAnchor);
-    const base = core * 0.50 + agreementEvidence * 0.06 + refinement * 0.10 + anchor * 0.34;
+    const base = core * 0.44 + agreementEvidence * 0.05 + refinement * 0.08 + anchor * 0.43;
     // Related-card consensus is directional evidence, not a free additive bonus. Limit influence
     // by the score's remaining headroom so it cannot saturate many results to 1.000.
     const consensus = Math.max(-1, Math.min(1, (Number(consensusAdjustment) || 0) / 0.045));
@@ -12891,13 +12966,32 @@ function calculateDeterministicRankingAnchor({
     const confidenceFactor = 0.72 + 0.28 * clamp01(mechanicalConfidence);
     const mismatchFactor = 1 - 0.48 * clamp01(relationshipMismatch);
     let anchor = deterministic * confidenceFactor * mismatchFactor;
-    if (roleAnchored) anchor = Math.max(anchor, clamp01(roleScore) * 0.88);
+    // Strategic-role evidence is a floor only when it agrees with the relationship evidence.
+    // Previously the role floor was applied AFTER contradiction damping, allowing role similarity
+    // to bypass a target/zone/scope mismatch.
+    if (roleAnchored) {
+        const roleAnchor = clamp01(roleScore) * 0.88 * confidenceFactor * mismatchFactor;
+        anchor = Math.max(anchor, roleAnchor);
+    }
     if (sourceModal) {
         anchor = modalSimilarity !== null && modalSimilarity !== undefined && Number.isFinite(Number(modalSimilarity))
             ? anchor * 0.48 + clamp01(modalSimilarity) * 0.52
             : anchor * 0.58;
     }
     return clamp01(anchor);
+}
+
+function shouldUseStrategicRoleAnchor(rankingIntent, roleScore, relationshipMismatch = 0) {
+    const confidence = Math.max(0, Math.min(1, Number(rankingIntent?.confidence) || 0));
+    const role = rankingIntent?.role;
+    const kind = rankingIntent?.kind;
+    const score = Math.max(0, Math.min(1, Number(roleScore) || 0));
+    const mismatch = Math.max(0, Math.min(1, Number(relationshipMismatch) || 0));
+    return Boolean(
+        ['strategic_role', 'highlighted_effect', 'hybrid_effect'].includes(kind) &&
+        role && STRATEGIC_INTENT_ROLES.has(role) &&
+        confidence >= 0.76 && score >= 0.76 && mismatch < 0.42
+    );
 }
 
 function calculatePrimaryEffectRankingUplift({
@@ -12910,14 +13004,14 @@ function calculatePrimaryEffectRankingUplift({
     const primary = clamp01(primaryEffectMatch);
     const confidence = clamp01(mechanicalConfidence);
     const mismatch = clamp01(relationshipMismatch);
-    // Only award this signal when independent functional evidence agrees that the candidate
-    // really performs the main effect. Similar wording alone, a high role score alone, or a
-    // structurally contradictory target/zone/trigger cannot activate the lift.
-    if (functional < 0.74 || coverage < 0.88 || primary < 0.88 || confidence < 0.48 || mismatch >= 0.30) return 0;
+    // This is a strong but narrowly gated lift: all three independent direct-function signals must
+    // agree. A mediocre parser confidence alone must not suppress an excellent action/coverage match
+    // (e.g. a counterspell with an extra cost), but a real target/zone/scope contradiction still does.
+    if (functional < 0.74 || coverage < 0.88 || primary < 0.88 || confidence < 0.25 || mismatch >= 0.30) return 0;
     const directQuality = clamp01(functional * 0.40 + coverage * 0.30 + primary * 0.30);
-    const confidenceFactor = 0.82 + 0.18 * confidence;
-    const contradictionFactor = 1 - 0.85 * mismatch;
-    return Math.max(0, Math.min(0.045, (directQuality - 0.70) * 0.18 * confidenceFactor * contradictionFactor));
+    const confidenceFactor = 0.80 + 0.20 * confidence;
+    const contradictionFactor = 1 - 0.90 * mismatch;
+    return Math.max(0, Math.min(0.10, (directQuality - 0.65) * 0.34 * confidenceFactor * contradictionFactor));
 }
 
 function calculateMechanicalSimilarityDetailed(parsedA, parsedB, profileA = null, profileB = null) {
@@ -23535,9 +23629,10 @@ async function scoreCardBatch({
         card.rankingEvidence = { mechanical: structural, mechanicalTrusted: structuralTrusted, mechanicalConfidence, rawSemantic, functionSemantic: functionSemanticAugmented, roleSemantic, highlightIntent: Number(card.highlightIntentScore) || 0, highlightIntentWeight: highlightBlend.weight, explicitUserIntent: highlightBlend.explicitUserIntent, baseChannelScore, effectCoverage, balancedCoverage, primaryEffectMatch, rankingRefinementSignal: refinementSignal, modalModeSimilarity: modalSignal, evidenceAgreement: agreement, retrievalSimilarity: Number(card._semanticRetrievalSimilarity) || 0, rankingIntent: rankingIntent.kind, rankingIntentRole: rankingIntent.role || null, rankingIntentConfidence: rankingIntent.confidence, relatedConsensus: relatedConsensus ? { score: relatedConsensus.score, functionMatch: relatedConsensus.functionMatch, quantityFit: relatedConsensus.quantityFit, roleFit: relatedConsensus.roleFit, artifactFit: relatedConsensus.artifactFit, dominantFunction: relatedIntentProfile?.dominantFunction || null, targetQuantity: relatedIntentProfile?.numericTarget ?? null, confidence: relatedIntentProfile?.confidence || 0 } : null };
         const consensusAdjustment = relatedConsensus ? relatedConsensusDelta * 0.22 : 0;
         const relationshipMismatch = Math.max(0, Math.min(1, Number(card.mechanicalBreakdown?.relationshipMismatch) || 0));
-        const strategicRoleAnchored = roleAnchoredHighlight || (
-            rankingIntent.kind === 'strategic_role' && roleSemantic >= 0.74 && rankingIntent.confidence >= 0.74
+        const strategicRoleAnchored = roleAnchoredHighlight || shouldUseStrategicRoleAnchor(
+            rankingIntent, roleSemantic, relationshipMismatch
         );
+        card.strategicRoleAnchored = strategicRoleAnchored;
         const deterministicFunctionalAnchor = calculateDeterministicRankingAnchor({
             functionalSimilarity, effectCoverage, primaryEffectMatch,
             roleScore: roleSemantic, roleAnchored: strategicRoleAnchored,
@@ -23549,16 +23644,26 @@ async function scoreCardBatch({
             card.rankingEvidence.deterministicFunctionalAnchor = deterministicFunctionalAnchor;
             card.rankingEvidence.primaryEffectRankingBoost = 0;
         }
+        card.rankingEvidence.deterministicFunctionalAnchor = deterministicFunctionalAnchor;
+        card.rankingEvidence.primaryEffectRankingBoost = 0;
+        card.rankingEvidence.relationshipMismatch = relationshipMismatch;
+        card.rankingEvidence.evidenceGate = evidenceGate;
+        card.rankingEvidence.channelScore = channelScore;
+        card.rankingEvidence.strategicRoleAnchored = strategicRoleAnchored;
         const calibratedBlendScore = Math.max(0, Math.min(1,
             blendCalibratedRankingEvidence(channelScore, agreement, refinementSignal, consensusAdjustment, deterministicFunctionalAnchor)
                 * evidenceGate * contradictionPenalty * relatedConsensusGate
         ));
+        card.calibratedBlendScore = calibratedBlendScore;
+        card.evidenceGate = evidenceGate;
+        card.relatedConsensusGate = relatedConsensusGate;
         const primaryEffectRankingBoost = calculatePrimaryEffectRankingUplift({
             functionalSimilarity, effectCoverage, primaryEffectMatch, mechanicalConfidence, relationshipMismatch
         });
         card.primaryEffectRankingBoost = primaryEffectRankingBoost;
         if (card.rankingEvidence) card.rankingEvidence.primaryEffectRankingBoost = primaryEffectRankingBoost;
         const preCadenceSimilarityScore = Math.max(0, Math.min(1, calibratedBlendScore + primaryEffectRankingBoost));
+        card.preCadenceSimilarityScore = preCadenceSimilarityScore;
         const acquisitionCadenceMismatch = calculateSourceAcquisitionCadenceMismatch(
             sourceAcquisitionCadence, card, candidateParsedEffects
         );
@@ -26503,6 +26608,9 @@ if (candidates.length > 0) {
     // the true "scored" population - captured *before* the relevance floor prunes anything, so it
     // doesn't just duplicate the final-rank stage (project spec 2.11).
     const scoredNames = new Set(candidates.map(c => (c.name || '').toLowerCase()));
+    const benchmarkScoreByName = benchmarkRunInProgress
+        ? new Map(candidates.map(card => [(card.name || '').toLowerCase(), createBenchmarkScoreSnapshot(card)]).filter(([name]) => Boolean(name)))
+        : null;
 
     // Stage 3.5: which of those scored candidates actually got a meaningful (non-generic) rule
     // parse - a card that was retrieved, filtered, and scored, but whose text mostly fell back
@@ -26556,6 +26664,7 @@ if (candidates.length > 0) {
         const context = c.contextScore || 0;
         const rel = c.relevanceEvidenceScore || 0;
         const semanticHit = Number.isFinite(c._semanticRetrievalSimilarity) ? c._semanticRetrievalSimilarity : 0;
+        if (hasStrongPrimaryEffectEvidenceForFloor(c)) return true;
         if (sourceRankingIntentForFloor.kind === 'strategic_role' && role >= 0.72) return true;
         if (sourceRankingIntentForFloor.kind === 'highlighted_effect' && highlight >= 0.68) return true;
         if (mech >= 0.76) return true;
@@ -26805,6 +26914,7 @@ if (candidates.length > 0) {
             remainingQueuedForFinalPass: progressiveRankingPending.size
         },
         rankingEvidenceTop,
+        benchmarkScoreByName,
         benchmarkSignals: {
             rankingMode: priorityValue,
             searchMethods: Object.entries(activeSearchMethodFlags).filter(([, enabled]) => enabled).map(([key]) => key).join(', ') || 'standard',
@@ -29831,6 +29941,21 @@ function runManaSearchBenchmarkQualityRegressionSuite({ log = true } = {}) {
 }
 try { window.runManaSearchBenchmarkQualityRegressionSuite = runManaSearchBenchmarkQualityRegressionSuite; } catch (_) {}
 
+// Preserve a candidate that strongly matches the source's primary effect when extra rules text
+// dilutes the aggregate score. The absolute floor still applies, and relationship contradictions
+// prevent this from becoming an unrestricted relevance-floor bypass.
+function hasStrongPrimaryEffectEvidenceForFloor(card) {
+    const clamp01 = value => Math.max(0, Math.min(1, Number(value) || 0));
+    const primary = clamp01(card?.primaryEffectMatchScore);
+    const coverage = clamp01(card?.effectCoverageScore);
+    const mechanical = clamp01(card?.mechanicalScore);
+    const role = clamp01(card?.roleScore);
+    const functional = clamp01(card?.functionalSimilarityScore);
+    const mismatch = clamp01(card?.mechanicalBreakdown?.relationshipMismatch);
+    return primary >= 0.66 && coverage >= 0.62 && mismatch < 0.42 &&
+        (mechanical >= 0.30 || role >= 0.45 || functional >= 0.35);
+}
+
 // v104 ranking/scoring regressions. Checks deterministic effect evidence, strategic analogues,
 // contradiction damping, and real modal Oracle syntax (period header + instruction sentence).
 function runManaSearchRankingScoringRegressionSuite({ log = true } = {}) {
@@ -29851,9 +29976,40 @@ function runManaSearchRankingScoringRegressionSuite({ log = true } = {}) {
         const exactCounterBoost = calculatePrimaryEffectRankingUplift({ functionalSimilarity: 0.856, effectCoverage: 1, primaryEffectMatch: 1, mechanicalConfidence: 0.90, relationshipMismatch: 0 });
         const weakCounterBoost = calculatePrimaryEffectRankingUplift({ functionalSimilarity: 0.42, effectCoverage: 0.45, primaryEffectMatch: 0.30, mechanicalConfidence: 0.90, relationshipMismatch: 0 });
         const contradictedCounterBoost = calculatePrimaryEffectRankingUplift({ functionalSimilarity: 0.856, effectCoverage: 1, primaryEffectMatch: 1, mechanicalConfidence: 0.90, relationshipMismatch: 0.8 });
-        check('primary-effect-uplift-rewards-high-coverage-substitutes', exactCounterBoost > 0.025 && exactCounterBoost <= 0.045, `boost=${exactCounterBoost.toFixed(3)}`);
+        check('primary-effect-uplift-rewards-high-coverage-substitutes', exactCounterBoost > 0.06 && exactCounterBoost <= 0.10, `boost=${exactCounterBoost.toFixed(3)}`);
         check('primary-effect-uplift-ignores-weak-matches', weakCounterBoost === 0, `boost=${weakCounterBoost.toFixed(3)}`);
+        const moderateConfidenceDirect = calculatePrimaryEffectRankingUplift({ functionalSimilarity: 0.856, effectCoverage: 1, primaryEffectMatch: 1, mechanicalConfidence: 0.30, relationshipMismatch: 0 });
+        check('strong-direct-match-survives-moderate-parser-confidence', moderateConfidenceDirect > 0.06, `boost=${moderateConfidenceDirect.toFixed(3)}`);
+        const highlightedRoleAnchor = shouldUseStrategicRoleAnchor({ kind: 'highlighted_effect', role: 'card_advantage_engine', confidence: 0.94 }, 0.967, 0);
+        check('high-confidence-role-anchors-highlighted-strategic-analogue', highlightedRoleAnchor, `apply=${highlightedRoleAnchor}`);
+        const contradictedRoleAnchor = shouldUseStrategicRoleAnchor({ kind: 'highlighted_effect', role: 'card_advantage_engine', confidence: 0.94 }, 0.967, 0.80);
+        check('strategic-role-anchor-rejects-strong-relationship-mismatch', !contradictedRoleAnchor, `apply=${contradictedRoleAnchor}`);
+        const directPrimaryFloorCase = hasStrongPrimaryEffectEvidenceForFloor({ mechanicalScore: 0.418, roleScore: 0.643, functionalSimilarityScore: 0.797, effectCoverageScore: 0.763, primaryEffectMatchScore: 0.763, mechanicalBreakdown: { relationshipMismatch: 0.10 } });
+        const weakPrimaryFloorCase = hasStrongPrimaryEffectEvidenceForFloor({ mechanicalScore: 0.20, roleScore: 0.15, functionalSimilarityScore: 0.25, effectCoverageScore: 0.30, primaryEffectMatchScore: 0.25, mechanicalBreakdown: { relationshipMismatch: 0 } });
+        const contradictedPrimaryFloorCase = hasStrongPrimaryEffectEvidenceForFloor({ mechanicalScore: 0.50, roleScore: 0.70, functionalSimilarityScore: 0.80, effectCoverageScore: 0.80, primaryEffectMatchScore: 0.80, mechanicalBreakdown: { relationshipMismatch: 0.80 } });
+        check('strong-primary-effect-candidate-can-survive-relative-floor', directPrimaryFloorCase, String(directPrimaryFloorCase));
+        check('weak-primary-effect-candidate-does-not-get-floor-protection', !weakPrimaryFloorCase, String(weakPrimaryFloorCase));
+        check('contradictory-primary-effect-candidate-does-not-get-floor-protection', !contradictedPrimaryFloorCase, String(contradictedPrimaryFloorCase));
+        const traceSnapshot = createBenchmarkScoreSnapshot({
+            name: 'Merrow Reejerey', mechanicalScore: 0.418, functionalSimilarityScore: 0.797,
+            effectCoverageScore: 0.763, primaryEffectMatchScore: 0.763, similarityScore: 0.391,
+            deterministicFunctionalAnchor: 0.712, primaryEffectRankingBoost: 0.026,
+            calibratedBlendScore: 0.365, mechanicalConfidence: 0.82, strategicRoleAnchored: false,
+            mechanicalBreakdown: { relationshipMismatch: 0.10 },
+            rankingEvidence: { deterministicFunctionalAnchor: 0.712, primaryEffectRankingBoost: 0.026, relationshipMismatch: 0.10, evidenceGate: 0.88, strategicRoleAnchored: false }
+        });
+        check('benchmark-score-snapshot-captures-primary-function-signals', traceSnapshot?.deterministicFunctionalAnchor === 0.712 && traceSnapshot?.primaryEffectRankingBoost === 0.026, JSON.stringify({ anchor: traceSnapshot?.deterministicFunctionalAnchor, boost: traceSnapshot?.primaryEffectRankingBoost }));
+        check('benchmark-score-snapshot-retains-relationship-mismatch', traceSnapshot?.mechanicalBreakdown?.relationshipMismatch === 0.10, String(traceSnapshot?.mechanicalBreakdown?.relationshipMismatch));
+        const traceScoreMap = new Map([['ranked card', { similarityScore: 0.91 }]]);
+        mergeBenchmarkScoreSnapshots(traceScoreMap, new Map([
+            ['ranked card', { similarityScore: 0.80 }],
+            ['pruned card', { similarityScore: 0.39, deterministicFunctionalAnchor: 0.71 }]
+        ]));
+        check('benchmark-score-snapshot-preserves-final-score-for-ranked-card', traceScoreMap.get('ranked card')?.similarityScore === 0.91, String(traceScoreMap.get('ranked card')?.similarityScore));
+        check('benchmark-score-snapshot-fills-pruned-card-trace', traceScoreMap.get('pruned card')?.similarityScore === 0.39 && traceScoreMap.get('pruned card')?.deterministicFunctionalAnchor === 0.71, JSON.stringify(traceScoreMap.get('pruned card')));
         check('primary-effect-uplift-refuses-contradicted-targets', contradictedCounterBoost === 0, `boost=${contradictedCounterBoost.toFixed(3)}`);
+        const partialMismatchBoost = calculatePrimaryEffectRankingUplift({ functionalSimilarity: 0.856, effectCoverage: 1, primaryEffectMatch: 1, mechanicalConfidence: 0.9, relationshipMismatch: 0.20 });
+        check('primary-effect-uplift-is-damped-by-partial-mismatch', partialMismatchBoost > 0 && partialMismatchBoost < exactCounterBoost, `clean=${exactCounterBoost.toFixed(3)} mismatch=${partialMismatchBoost.toFixed(3)}`);
         const calibratedExpectedMatch = blendCalibratedRankingEvidence(0.71, 0.90, 0.589, 0, strongAnchor);
         check('calibration-prioritizes-independent-primary-mechanics', calibratedExpectedMatch >= 0.76, `score=${calibratedExpectedMatch.toFixed(3)}`);
 
