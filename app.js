@@ -1,6 +1,6 @@
-/* ManaSearch build 20261017-105 */
+/* ManaSearch build 20261017-106 */
 // ManaSearch deployment build marker. Bump this whenever app.js changes so cached-module issues are easy to diagnose.
-const MANASEARCH_APP_BUILD = '20261017-105';
+const MANASEARCH_APP_BUILD = '20261017-106';
 console.info(`[ManaSearch] app.js build ${MANASEARCH_APP_BUILD}`);
 
 // State Management
@@ -160,7 +160,9 @@ const MANASEARCH_INPUT_PRIORITY_YIELD_MS = 12;
 const MANASEARCH_UI_PRIORITY_WINDOW_MS = 900;
 const MANASEARCH_UI_PRIORITY_YIELD_MS = 8;
 const MANASEARCH_UI_RENDER_QUIET_WINDOW_MS = 180;
-const MANASEARCH_BACKGROUND_SLICE_BUDGET_MS = 8;
+const MANASEARCH_BACKGROUND_SLICE_BUDGET_MS = 14;
+const MANASEARCH_EMBED_ACTIVE_EDIT_BATCH = 4;
+const MANASEARCH_EMBED_RECENT_ACTIVITY_BATCH = 12;
 const MANASEARCH_UI_PRIORITY_SLICE_BUDGET_MS = 3;
 let lastEditableUserActivityAt = 0;
 let lastManaUiActivityAt = 0;
@@ -8879,6 +8881,72 @@ function directionalMechanicalSimilarity(parsedA, parsedB) {
     return sourceWeight > 0 ? Math.max(0, Math.min(1, weightedSource / sourceWeight)) : 0;
 }
 
+// A candidate is compared to the same source effects in multiple stages: directional coverage,
+// candidate-only excess, and the one-to-one effect-coverage assignment. Build the directional
+// pair matrices once and share them across those stages. Pair values are the exact same cached
+// primitive comparisons used by the legacy paths; this removes repeated nested loops, temporary
+// one-element arrays, filtering, and WeakMap lookups without changing scoring semantics.
+function normalizeSingleEffectDirectionalScore(effect, bestPairScore) {
+    // Match directionalMechanicalSimilarity([effect], otherEffects) exactly, including its
+    // multiply/divide sequence. Though mathematically redundant, preserving that sequence preserves
+    // the previous floating-point values and deterministic tie ordering bit-for-bit.
+    const weight = Math.max(0.05, effect?.importance ?? 0.05);
+    const weightedSource = bestPairScore * weight;
+    const sourceWeight = weight;
+    return sourceWeight > 0 ? Math.max(0, Math.min(1, weightedSource / sourceWeight)) : 0;
+}
+
+function createMechanicalPairComparisonWorkspace(parsedSource, parsedCandidate) {
+    const sourceEffects = (Array.isArray(parsedSource) ? parsedSource : []).filter(effect => effect?.canonical);
+    const candidateEffects = (Array.isArray(parsedCandidate) ? parsedCandidate : []).filter(effect => effect?.canonical);
+    const forward = sourceEffects.map(sourceEffect => candidateEffects.map(candidateEffect =>
+        getDirectionalMechanicalEffectPairSimilarity(sourceEffect, candidateEffect)));
+    const coverageForward = sourceEffects.map((sourceEffect, i) => candidateEffects.map((candidateEffect, j) =>
+        normalizeSingleEffectDirectionalScore(sourceEffect, forward[i][j])));
+    const reverse = candidateEffects.map(candidateEffect => sourceEffects.map(sourceEffect =>
+        getDirectionalMechanicalEffectPairSimilarity(candidateEffect, sourceEffect)));
+    return {
+        parsedSource, parsedCandidate, sourceEffects, candidateEffects, forward, coverageForward, reverse,
+        sourceIndex: new Map(sourceEffects.map((effect, index) => [effect, index])),
+        candidateIndex: new Map(candidateEffects.map((effect, index) => [effect, index]))
+    };
+}
+
+function directionalMechanicalSimilarityFromWorkspace(workspace) {
+    if (!workspace?.sourceEffects?.length || !workspace?.candidateEffects?.length) return 0;
+    let weightedSource = 0, sourceWeight = 0;
+    for (let i = 0; i < workspace.sourceEffects.length; i++) {
+        const effect = workspace.sourceEffects[i];
+        const row = workspace.forward[i];
+        let best = 0;
+        for (let j = 0; j < row.length; j++) if (row[j] > best) best = row[j];
+        const weight = Math.max(0.05, effect.importance ?? 0.05);
+        weightedSource += best * weight;
+        sourceWeight += weight;
+    }
+    return sourceWeight > 0 ? Math.max(0, Math.min(1, weightedSource / sourceWeight)) : 0;
+}
+
+function calculateCandidateMechanicalExcessFromWorkspace(workspace) {
+    if (!workspace?.parsedCandidate || !Array.isArray(workspace.parsedCandidate) || workspace.parsedCandidate.length === 0) return 1;
+    let weightedExcess = 0, weightTotal = 0;
+    const sourceCount = workspace.sourceEffects.length;
+    for (const effect of workspace.parsedCandidate) {
+        const baseImportance = Math.max(0.05, effect.importance ?? (effect.isPrimary ? 1 : 0.35));
+        const importance = baseImportance * (baseImportance >= 0.70 ? 1.20 : 0.80);
+        let bestCoverage = 0;
+        const candidateIndex = effect?.canonical ? workspace.candidateIndex.get(effect) : undefined;
+        if (candidateIndex !== undefined) {
+            const row = workspace.reverse[candidateIndex];
+            for (let i = 0; i < sourceCount; i++) if (row[i] > bestCoverage) bestCoverage = row[i];
+            bestCoverage = normalizeSingleEffectDirectionalScore(effect, bestCoverage);
+        }
+        weightedExcess += Math.max(0, 1 - bestCoverage) * importance;
+        weightTotal += importance;
+    }
+    return weightTotal > 0 ? Math.min(1, weightedExcess / weightTotal) : 1;
+}
+
 // ---------------------------------------------------------------------------
 // Reconstruct highlighted text from the source card's original Oracle text instead of
 // inserting synthetic sentence boundaries between separately selected spans. A user can highlight
@@ -9772,7 +9840,10 @@ function calculateHighlightIntentRetrievalText(profiles) {
  * that fails to map back to the source, weight it by effect importance, and apply only a bounded
  * penalty. Secondary riders therefore cost much less than an unrelated primary function.
  */
-function calculateCandidateMechanicalExcess(parsedSource, parsedCandidate) {
+function calculateCandidateMechanicalExcess(parsedSource, parsedCandidate, pairWorkspace = null) {
+    if (pairWorkspace?.parsedSource === parsedSource && pairWorkspace?.parsedCandidate === parsedCandidate) {
+        return calculateCandidateMechanicalExcessFromWorkspace(pairWorkspace);
+    }
     if (!parsedSource || !parsedCandidate || parsedCandidate.length === 0) return 1;
 
     let weightedExcess = 0;
@@ -9812,7 +9883,7 @@ function calculateCandidateMechanicalExcess(parsedSource, parsedCandidate) {
  * those distinctions separate from the legacy mechanicalScore so the existing score presentation
  * remains stable while the final ordering gets better evidence.
  */
-function calculateEffectCoverageProfile(parsedSource, parsedCandidate) {
+function calculateEffectCoverageProfile(parsedSource, parsedCandidate, pairWorkspace = null) {
     const source = (parsedSource || []).filter(e => e?.canonical);
     const candidate = (parsedCandidate || []).filter(e => e?.canonical);
     if (!source.length || !candidate.length) {
@@ -9830,7 +9901,13 @@ function calculateEffectCoverageProfile(parsedSource, parsedCandidate) {
     // recursive DP recomputed these expensive structural comparisons in many different branches.
     // Compute the exact same pair scores once and share them between the small-card DP and the
     // large-card polynomial assignment path.
-    const pairScores = source.map(a => candidate.map(b => directionalMechanicalSimilarity([a], [b])));
+    const reusableWorkspace = pairWorkspace?.parsedSource === parsedSource && pairWorkspace?.parsedCandidate === parsedCandidate &&
+        pairWorkspace.sourceEffects.length === source.length && pairWorkspace.candidateEffects.length === candidate.length &&
+        source.every((effect, index) => effect === pairWorkspace.sourceEffects[index]) &&
+        candidate.every((effect, index) => effect === pairWorkspace.candidateEffects[index]);
+    const pairScores = reusableWorkspace
+        ? pairWorkspace.coverageForward
+        : source.map(a => candidate.map(b => directionalMechanicalSimilarity([a], [b])));
     const pairScore = (i, j) => pairScores[i][j];
 
     const n = source.length;
@@ -10333,8 +10410,11 @@ function buildUniversalFunctionalText(card = null, text = '', parsedEffects = nu
     return parts.join('. ');
 }
 
+const universalMechanicSimilarityPairCache = new WeakMap();
 function calculateUniversalMechanicSimilarity(profileA, profileB) {
     if (!profileA || !profileB) return { score: 0, keywordCoverage: 0, keywordParameterCoverage: 0, actionCoverage: 0, parsedActionCoverage: 0, functionCoverage: 0, outcomeCoverage: 0, zoneCoverage: 0, targetCoverage: 0, scopeCoverage: 0, triggerCoverage: 0, costCoverage: 0, choiceCoverage: 0, resourceCoverage: 0, atomCoverage: 0, counterCoverage: 0, tokenCoverage: 0, statCoverage: 0, polaritySimilarity: 0, sharedKeywords: [] };
+    let profileRow = universalMechanicSimilarityPairCache.get(profileA);
+    if (profileRow?.has(profileB)) return profileRow.get(profileB);
     const values = (set) => set instanceof Set ? [...set] : Array.isArray(set) ? set : set && typeof set === 'object' ? Object.keys(set) : [];
     const size = set => values(set).length;
     // No evidence on either card is missing information, not a perfect match. This is critical:
@@ -10392,12 +10472,18 @@ function calculateUniversalMechanicSimilarity(profileA, profileB) {
     const weightedTextEvidence = denominator ? numerator / denominator : 0;
     const signatureEvidence = Math.max(weightedTextEvidence, exactKeywordEvidence, atomCoverage * 0.72,
         keywordCoverage * 0.70 + counterCoverage * 0.15 + tokenCoverage * 0.15);
-    return {
+    const result = {
         score: Math.max(0, Math.min(1, signatureEvidence)), keywordCoverage, keywordParameterCoverage,
         actionCoverage, parsedActionCoverage, functionCoverage, outcomeCoverage, zoneCoverage,
         targetCoverage, scopeCoverage, triggerCoverage, costCoverage, choiceCoverage, resourceCoverage,
         atomCoverage, counterCoverage, tokenCoverage, statCoverage, polaritySimilarity, sharedKeywords
     };
+    if (!profileRow) {
+        profileRow = new WeakMap();
+        universalMechanicSimilarityPairCache.set(profileA, profileRow);
+    }
+    profileRow.set(profileB, result);
+    return result;
 }
 
 // ---------------------------------------------------------------------------
@@ -13014,14 +13100,17 @@ function calculatePrimaryEffectRankingUplift({
     return Math.max(0, Math.min(0.10, (directQuality - 0.65) * 0.34 * confidenceFactor * contradictionFactor));
 }
 
-function calculateMechanicalSimilarityDetailed(parsedA, parsedB, profileA = null, profileB = null) {
+function calculateMechanicalSimilarityDetailed(parsedA, parsedB, profileA = null, profileB = null, pairWorkspace = null) {
     const safeA = Array.isArray(parsedA) ? parsedA : [];
     const safeB = Array.isArray(parsedB) ? parsedB : [];
 
+    const hasPairWorkspace = pairWorkspace?.parsedSource === parsedA && pairWorkspace?.parsedCandidate === parsedB;
     const structural = (() => {
-        const sourceCoverage = directionalMechanicalSimilarity(safeA, safeB);
+        const sourceCoverage = hasPairWorkspace
+            ? directionalMechanicalSimilarityFromWorkspace(pairWorkspace)
+            : directionalMechanicalSimilarity(safeA, safeB);
         if (sourceCoverage <= 0) return 0;
-        const candidateExcess = calculateCandidateMechanicalExcess(safeA, safeB);
+        const candidateExcess = calculateCandidateMechanicalExcess(safeA, safeB, hasPairWorkspace ? pairWorkspace : null);
         const excessPenalty = 0.18 * Math.pow(candidateExcess, 1.25);
         return Math.max(0, Math.min(1, sourceCoverage * (1 - excessPenalty)));
     })();
@@ -13109,6 +13198,49 @@ function calculateMechanicalSimilarity(parsedA, parsedB, profileA = null, profil
     return calculateMechanicalSimilarityDetailed(parsedA, parsedB, profileA, profileB).score;
 }
 
+
+// Deterministic performance-path regression suite. It verifies that shared pair workspaces and
+// universal-profile pair caching preserve the exact numeric results produced by the legacy path.
+function runManaSearchPerformanceOptimizationRegressionSuite({ log = true } = {}) {
+    const results = [];
+    const check = (id, pass, detail = '') => results.push({ id, pass: Boolean(pass), detail: pass ? '' : String(detail || 'Assertion failed') });
+    const close = (a, b, eps = 1e-12) => Number.isFinite(a) && Number.isFinite(b) && Math.abs(a - b) <= eps;
+    try {
+        const fixtures = [
+            ['counterspell', 'Counter target spell.', 'Counter target noncreature spell unless its controller pays {2}.'],
+            ['hand-exile', 'Exile a card from your hand.', 'Exile target creature.'],
+            ['repeatable-draw', 'At the beginning of your upkeep, draw a card.', 'Whenever you cast a noncreature spell, investigate.'],
+            ['multi-effect', 'Destroy target creature. Draw a card.', 'Exile target creature. Its controller creates a Treasure token. Draw a card.'],
+            ['modal', 'Choose three. You may choose the same mode more than once.\n• Counter target spell.\n• Return target creature to its owner’s hand.\n• Draw a card.', 'Choose two —\n• Counter target spell.\n• Draw a card.']
+        ];
+        for (const [name, aText, bText] of fixtures) {
+            const a = parseMTGEffect(aText);
+            const b = parseMTGEffect(bText);
+            const profileA = buildUniversalMechanicProfile(null, '', a);
+            const profileB = buildUniversalMechanicProfile(null, '', b);
+            const legacy = calculateMechanicalSimilarityDetailed(a, b, profileA, profileB);
+            const workspace = createMechanicalPairComparisonWorkspace(a, b);
+            const optimized = calculateMechanicalSimilarityDetailed(a, b, profileA, profileB, workspace);
+            const legacyCoverage = calculateEffectCoverageProfile(a, b);
+            const optimizedCoverage = calculateEffectCoverageProfile(a, b, workspace);
+            check(`${name}-mechanical-score-identical`, close(legacy.score, optimized.score), `legacy=${legacy.score} optimized=${optimized.score}`);
+            check(`${name}-structural-score-identical`, close(legacy.structuralScore, optimized.structuralScore), `legacy=${legacy.structuralScore} optimized=${optimized.structuralScore}`);
+            check(`${name}-coverage-identical`, JSON.stringify(legacyCoverage) === JSON.stringify(optimizedCoverage), `legacy=${JSON.stringify(legacyCoverage)} optimized=${JSON.stringify(optimizedCoverage)}`);
+            const universalLegacy = calculateUniversalMechanicSimilarity(profileA, profileB);
+            const universalCached = calculateUniversalMechanicSimilarity(profileA, profileB);
+            check(`${name}-universal-cache-stable`, universalLegacy === universalCached && close(universalLegacy.score, universalCached.score), `score=${universalCached.score}`);
+        }
+        check('embedding-adaptive-batch-configuration-present', MANASEARCH_EMBED_ACTIVE_EDIT_BATCH === 4 && MANASEARCH_EMBED_RECENT_ACTIVITY_BATCH === 12, 'adaptive batch caps');
+        check('background-yield-budget-remains-cooperative', MANASEARCH_BACKGROUND_SLICE_BUDGET_MS >= 10 && MANASEARCH_BACKGROUND_SLICE_BUDGET_MS <= 16, String(MANASEARCH_BACKGROUND_SLICE_BUDGET_MS));
+    } catch (error) {
+        check('suite-execution', false, error?.stack || error?.message || String(error));
+    }
+    const passed = results.filter(r => r.pass).length;
+    const report = { passed, total: results.length, passRate: results.length ? passed / results.length : 0, ok: passed === results.length, results };
+    if (log) console[report.ok ? 'info' : 'warn'](`[ManaSearch] Performance optimization regression suite ${passed}/${results.length}`, report);
+    return report;
+}
+try { window.runManaSearchPerformanceOptimizationRegressionSuite = runManaSearchPerformanceOptimizationRegressionSuite; } catch (_) {}
 
 // V22: mechanical regression/invariant layer. These checks are intentionally deterministic and
 // operate on the same parser/profile/ranker used by live searches. They are exposed as a small
@@ -14060,7 +14192,7 @@ try { window.runManaSearchBenchmarkHighlightSuite = runManaSearchBenchmarkHighli
 // Cache tag extraction to prevent running ~70 regex operations repeatedly per card
 function calculateCategoryScore(targetCard, tags, sourceCard = null, sourceEffects = null, precomputed = null) {
     if (!targetCard) return 0;
-    const sourceTags = new Set((tags || []).map(t => normalizeMechanicToken(t)).filter(Boolean));
+    const sourceTags = precomputed?.sourceTagSet || new Set((tags || []).map(t => normalizeMechanicToken(t)).filter(Boolean));
     if (!sourceTags.size && !sourceCard) return 0;
     if (!targetCard._cachedTags) targetCard._cachedTags = generateTags(targetCard, tags || []).map(normalizeMechanicToken);
     const targetTags = new Set(targetCard._cachedTags.filter(Boolean));
@@ -17474,10 +17606,10 @@ async function warmEmbeddingCache(texts, extractor, diagnostics, batchSize = 32,
     // its longest input, so mixing a very long rules text with many short function summaries wastes
     // inference time and memory. Sorting is stable and affects only batching order, never scores.
     unique.sort((a, b) => a.length - b.length);
-    // The normal batch is 32 for throughput, with a smaller cap as text length rises. Length-sorting
-    // above keeps padding efficient, while the adaptive caps below avoid large activation buffers
-    // for long Oracle text. If the runtime still rejects a chunk, it is bisected recursively until
-    // it succeeds, so larger batches do not compromise support for slower devices.
+    // The normal batch is 32 for throughput, with bounded medium batches for long texts. Length-
+    // sorting above keeps padding efficient. Batches for longer text are larger than the earlier
+    // conservative 4/8/16 caps, but the fallback below bisects any backend-incompatible chunk until
+    // it succeeds, retaining support for slower devices without forcing every card into scalar calls.
     // Crucially, mere focus on an input is NOT active typing. During real keyboard edits, use
     // singleton batches to minimize uninterrupted model work; immediately after other UI activity
     // use smaller batches, while idle searches recover full batching throughput. Every batch yields.
@@ -17506,11 +17638,14 @@ async function warmEmbeddingCache(texts, extractor, diagnostics, batchSize = 32,
     while (i < unique.length) {
         throwIfSearchCancelled(isCancelled);
         const nextTextLength = String(unique[i] || '').length;
-        const textBatchCap = nextTextLength > 1600 ? 4
-            : (nextTextLength > 1000 ? 8 : (nextTextLength > 600 ? 16 : batchSize));
+        const textBatchCap = nextTextLength > 1600 ? 8
+            : (nextTextLength > 1000 ? 16 : (nextTextLength > 600 ? 24 : batchSize));
+        // Keep cooperative inference responsive without collapsing model throughput to scalar calls.
+        // A four-vector batch still yields after completion during active editing; recent UI activity
+        // uses a medium batch, and idle searches use the full length-bounded throughput batch.
         const interactionBatchCap = isManaUserActivelyEditing()
-            ? 1
-            : (isManaUiInteractionRecentlyActive(250) ? 4 : batchSize);
+            ? MANASEARCH_EMBED_ACTIVE_EDIT_BATCH
+            : (isManaUiInteractionRecentlyActive(250) ? MANASEARCH_EMBED_RECENT_ACTIVITY_BATCH : batchSize);
         const effectiveBatchSize = Math.max(1, Math.min(batchSize, textBatchCap, interactionBatchCap));
         const chunk = unique.slice(i, i + effectiveBatchSize);
         i += chunk.length;
@@ -17954,6 +18089,27 @@ function calculateRankingStability(card, coreEvidence, supportingEvidence) {
     return Math.max(0.955, Math.min(1, 1 - Math.max(0, concentration - 0.70) * 0.08));
 }
 
+// Cache immutable normalized metadata shared by Synergy for source/candidate cards. A signature
+// guard permits callers to edit a card fixture or metadata in-place without serving stale Sets.
+const synergyCardMetadataCache = new WeakMap();
+function getCachedSynergyCardMetadata(card) {
+    if (!card || typeof card !== 'object') return { colorIdentitySet: new Set(), keywordSet: new Set(), typeTokenSet: new Set(), signature: '' };
+    const colors = Array.isArray(card.color_identity) ? card.color_identity : [];
+    const keywords = Array.isArray(card.keywords) ? card.keywords : [];
+    const typeLine = String(card.type_line || '');
+    const signature = `${colors.join(',')}\u001f${keywords.join(',')}\u001f${typeLine}`;
+    const cached = synergyCardMetadataCache.get(card);
+    if (cached?.signature === signature) return cached;
+    const metadata = {
+        signature,
+        colorIdentitySet: new Set(colors),
+        keywordSet: new Set(keywords.map(normalizeMechanicToken).filter(Boolean)),
+        typeTokenSet: new Set((getTypeLineParts(typeLine) || []).map(normalizeMechanicToken).filter(Boolean))
+    };
+    synergyCardMetadataCache.set(card, metadata);
+    return metadata;
+}
+
 // --- ENGINE 3: SYNERGY (Filter-Aware) ---
 function calculateSynergyScore(sourceCard, targetCard, activeFilters = {}, precomputed = null) {
     if (!sourceCard || !targetCard) return 0;
@@ -17961,8 +18117,10 @@ function calculateSynergyScore(sourceCard, targetCard, activeFilters = {}, preco
     const identityConstrained = Boolean(activeFilters.identity || activeFilters.colors);
     if (!identityConstrained) {
         max += 2;
-        const a = new Set(sourceCard.color_identity || []);
-        const b = new Set(targetCard.color_identity || []);
+        const sourceMeta = precomputed?.sourceSignals || getCachedSynergyCardMetadata(sourceCard);
+        const targetMeta = getCachedSynergyCardMetadata(targetCard);
+        const a = sourceMeta.colorIdentitySet;
+        const b = targetMeta.colorIdentitySet;
         if (a.size === 0 && b.size === 0) score += 2;
         else if (a.size === 0 || b.size === 0) score += 0.55;
         else {
@@ -17983,8 +18141,10 @@ function calculateSynergyScore(sourceCard, targetCard, activeFilters = {}, preco
     }
 
     max += 2;
-    const sourceKeywords = new Set((sourceCard.keywords || []).map(normalizeMechanicToken).filter(Boolean));
-    const targetKeywords = new Set((targetCard.keywords || []).map(normalizeMechanicToken).filter(Boolean));
+    const sourceMeta = precomputed?.sourceSignals || getCachedSynergyCardMetadata(sourceCard);
+    const targetMeta = getCachedSynergyCardMetadata(targetCard);
+    const sourceKeywords = sourceMeta.keywordSet;
+    const targetKeywords = targetMeta.keywordSet;
     if (!sourceKeywords.size && !targetKeywords.size) {
         max -= 2;
     } else {
@@ -17995,7 +18155,9 @@ function calculateSynergyScore(sourceCard, targetCard, activeFilters = {}, preco
     if (!typeConstrained) {
         max += 1.5;
         const typeTokens = card => new Set((getTypeLineParts(card.type_line || '') || []).map(normalizeMechanicToken).filter(Boolean));
-        const a = typeTokens(sourceCard), b = typeTokens(targetCard);
+        const sourceMeta = precomputed?.sourceSignals || getCachedSynergyCardMetadata(sourceCard);
+        const targetMeta = getCachedSynergyCardMetadata(targetCard);
+        const a = sourceMeta.typeTokenSet, b = targetMeta.typeTokenSet;
         if (a.size && b.size) score += weightedSymmetricCoverage(a, b, 0.90) * 1.5;
         else if (!a.size && !b.size) score += 0.6;
     }
@@ -22900,6 +23062,12 @@ async function scoreCardBatch({
     // times. The separate parsedSourceCard above remains unchanged for highlight-aware mechanics.
     const sourceSynergyText = strategicRoleCardText(sourceCard);
     const sourceSynergyEffects = getCachedParsedEffects(sourceCard, sourceSynergyText);
+    const sourceSynergySignals = {
+        colorIdentitySet: new Set(sourceCard.color_identity || []),
+        keywordSet: new Set((sourceCard.keywords || []).map(normalizeMechanicToken).filter(Boolean)),
+        typeTokenSet: new Set((getTypeLineParts(sourceCard.type_line || '') || []).map(normalizeMechanicToken).filter(Boolean)),
+        normalizedTagSet: new Set((tags || []).map(tag => normalizeMechanicToken(tag)).filter(Boolean))
+    };
     const sourceModalIntentActive = shouldUseModalModeIntent(sourceSynergyText, hasEffectHighlight, activeHighlights, effectHighlights.length);
     const sourceModalEffectsForRanking = sourceModalIntentActive ? sourceSynergyEffects : [];
     // When the user has narrowed the search with an effect highlight, compare card-acquisition
@@ -22988,7 +23156,8 @@ async function scoreCardBatch({
             sourceEffects: sourceSynergyEffects,
             targetEffects: parsedCandidateCard,
             sourceRoles: sourceSynergyRoleProfile,
-            targetRoles: categoryTargetRoleProfile
+            targetRoles: categoryTargetRoleProfile,
+            sourceSignals: sourceSynergySignals
         });
         __structuralDetailTimings.profileGraphSynergyMs += __scoreNow() - __detailStageStartedAt;
         __detailStageStartedAt = __scoreNow();
@@ -23001,13 +23170,17 @@ async function scoreCardBatch({
         // this path is meant to avoid. The ordinary one-card search has a single reference and is
         // therefore numerically unchanged.
         let bestMechanical = null;
+        const candidatePairWorkspaces = new Array(referenceEffectSets.length);
         for (let referenceIndex = 0; referenceIndex < referenceEffectSets.length; referenceIndex++) {
             const referenceEffects = referenceEffectSets[referenceIndex];
+            const pairWorkspace = createMechanicalPairComparisonWorkspace(referenceEffects, parsedCandidateCard);
+            candidatePairWorkspaces[referenceIndex] = pairWorkspace;
             const mechanicalDetail = calculateMechanicalSimilarityDetailed(
                 referenceEffects,
                 parsedCandidateCard,
                 referenceMechanicProfiles[referenceIndex],
-                candidateMechanicProfile
+                candidateMechanicProfile,
+                pairWorkspace
             );
             const mechanical = mechanicalDetail.score;
             // calculateMechanicalSimilarityDetailed already compared these exact graph objects.
@@ -23017,7 +23190,7 @@ async function scoreCardBatch({
                 candidateMechanicalGraph
             );
             const graphAwareMechanical = Math.max(mechanical, graphDetail.score);
-            const coverage = calculateEffectCoverageProfile(referenceEffects, parsedCandidateCard);
+            const coverage = calculateEffectCoverageProfile(referenceEffects, parsedCandidateCard, pairWorkspace);
             const functional = calculateFunctionalSimilarity(referenceEffects, parsedCandidateCard, mechanicalDetail);
             const quantity = calculateAggregateQuantitySimilarity(referenceEffects, parsedCandidateCard, coverage);
             if (!bestMechanical || graphAwareMechanical > bestMechanical.mechanical ||
@@ -23031,7 +23204,8 @@ async function scoreCardBatch({
             if (!bestMechanical || consensusDetail.score > bestMechanical.mechanical) {
                 const consensusCoverage = calculateEffectCoverageProfile(
                     referenceEffectSets[0] || parsedSourceCard,
-                    parsedCandidateCard
+                    parsedCandidateCard,
+                    candidatePairWorkspaces[0] || null
                 );
                 const consensusUniversal = candidateMechanicProfile
                     ? calculateUniversalMechanicSimilarity((consensusMechanicalGraph.universalProfile || sourceMechanicProfile), candidateMechanicProfile)
@@ -23140,7 +23314,8 @@ async function scoreCardBatch({
             sourceProfile: categorySourceProfile,
             targetProfile: categoryTargetProfile,
             sourceRole: categorySourceRoleProfile,
-            targetRole: categoryTargetRoleProfile
+            targetRole: categoryTargetRoleProfile,
+            sourceTagSet: sourceSynergySignals.normalizedTagSet
         });
         __structuralDetailTimings.categoryMs += __scoreNow() - __detailStageStartedAt;
 
