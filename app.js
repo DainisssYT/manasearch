@@ -1,6 +1,6 @@
-/* ManaSearch build 20261017-95 */
+/* ManaSearch build 20261017-96 */
 // ManaSearch deployment build marker. Bump this whenever app.js changes so cached-module issues are easy to diagnose.
-const MANASEARCH_APP_BUILD = '20261017-95';
+const MANASEARCH_APP_BUILD = '20261017-96';
 console.info(`[ManaSearch] app.js build ${MANASEARCH_APP_BUILD}`);
 
 // State Management
@@ -5533,6 +5533,12 @@ function parseZoneMovementEffect(clause) {
     else if (/\ball\b/i.test(text)) effect.target = "all";
 
     const topLibrarySource = /\btop\s+(?:(?:one|two|three|four|five|six|seven|eight|nine|ten|\d+)\s+)?cards?\s+of\s+(?:your|their|that player(?:'s|’s)|that opponent(?:'s|’s)|an opponent(?:'s|’s)|a player(?:'s|’s))\s+library\b/i.test(text);
+    const topCountMatch = text.match(/\btop\s+(one|two|three|four|five|six|seven|eight|nine|ten|\d+)\s+cards?\b/i);
+    if (topCountMatch) {
+        const countWord = topCountMatch[1].toLowerCase();
+        const counts = {one:1,two:2,three:3,four:4,five:5,six:6,seven:7,eight:8,nine:9,ten:10};
+        effect.quantity = counts[countWord] ?? Number(countWord);
+    }
     const fromMatch = text.match(/\bfrom\s+(?:a|an|the|your|their|any|all|top of your|top of their)?\s*(graveyard|battlefield|hand|library|exile|command zone)\b/i);
     if (topLibrarySource) effect.from = 'library';
     else if (fromMatch) effect.from = fromMatch[1].toLowerCase();
@@ -5853,7 +5859,17 @@ function parseSearchEffect(clause) {
  */
 function parseTokenEffect(clause) {
     const text = clause.toLowerCase();
-    
+
+    // "Investigate" is rules text for creating a Clue token. Preserve the clue identity so
+    // retrieval/ranking can recognize repeatable Clue engines, not merely generic token makers.
+    if (/\binvestigates?\b/i.test(text)) {
+        return {
+            action: "create", object: "token", to: "battlefield", quantity: null,
+            tokenType: "clue", recipientScope: /\bunder\s+(?:an?\s+)?opponent(?:'s|’s)\s+control\b/i.test(text) ? 'opponent' : 'you',
+            clueDrawEngine: true, isReplacement: false
+        };
+    }
+
     if (/\bif\b.*?\btokens?\b.*?\bwould be created\b/i.test(text) || text.includes("twice that many")) {
         return {
             action: "multiply",
@@ -6563,6 +6579,21 @@ function parseMTGEffect(oracleText) {
 
         results.push(parsed);
 
+        // Investigate creates a Clue token, whose rules text supplies a repeatable activated draw
+        // ability. Add that derived card-advantage node to the source card's mechanical graph so
+        // retrieval/scoring can match repeatable draw engines, rather than relying on prose alone.
+        if (parsed.clueDrawEngine && parsed.tokenType === 'clue') {
+            results.push({
+                raw: 'Clue token ability: Pay {2}, sacrifice a Clue token: draw a card.',
+                parentRuleText: parentRuleText,
+                action: 'draw', object: 'card', from: null, to: 'hand', target: null,
+                restriction: [], quantity: 1, isSecondaryAtom: true,
+                derivedFromTokenAbility: true,
+                activationCost: { type: 'clue_sacrifice_draw', parts: ['pay {2}', 'sacrifice a Clue token'] },
+                repeatabilityContextOverride: 'Clue token ability: Pay {2}, sacrifice a Clue token: draw a card.'
+            });
+        }
+
         // A compound clause contributes every effect it contains, not only its dominant verb.
         const extraAtoms = extractClauseAtoms(effectText, parsed.action);
         for (const atom of extraAtoms) {
@@ -6586,6 +6617,22 @@ function parseMTGEffect(oracleText) {
                 costAtom.parentRuleText = parentRuleText;
                 costAtom.isCostEffect = true;
                 results.push(costAtom);
+            }
+        }
+    }
+
+    // Link adjacent Oracle sentences for impulse draw (e.g. Reckless Impulse: exile top two,
+    // then "You may play those cards until the end of your next turn"). The permission often
+    // lives in a separate sentence, so clause-local parsing alone loses the defining mechanic.
+    const wholeOracleText = String(oracleText).replace(/[’]/g, "'");
+    const hasPlayPermissionForExiledCards = /\b(?:you may|you can)\s+(?:play|cast)\s+(?:those cards|that card|the exiled cards|cards exiled this way|that card)\b/i.test(wholeOracleText) ||
+        /\bplay those cards until\b/i.test(wholeOracleText) || /\bplay that card for as long as it remains exiled\b/i.test(wholeOracleText);
+    if (hasPlayPermissionForExiledCards && /\bexiles?\b[\s\S]{0,100}\b(?:top|from the top)\b[\s\S]{0,80}\blibrary\b/i.test(wholeOracleText)) {
+        for (const effect of results) {
+            if (effect?.action === 'exile' && (effect.from === 'library' || /\btop\b[\s\S]{0,80}\blibrary\b/i.test(String(effect.parentRuleText || effect.raw || '')))) {
+                effect.playFromExile = true;
+                effect.accessType = 'impulse_draw';
+                effect.playWindow = (wholeOracleText.match(/\buntil the end of (?:your|that player's) next turn\b/i) || [])[0] || null;
             }
         }
     }
@@ -6676,6 +6723,7 @@ const FUNCTION_OUTCOMES = {
     zone_change:      "card_changes_zone",
     removal:          "permanent_to_graveyard",
     self_sacrifice:   "own_permanent_to_graveyard",
+    sacrifice_other:  "another_permanent_to_graveyard",
     exile_removal:    "permanent_exiled",
     counter:          "spell_or_ability_stopped",
     gain_control:     "permanent_control_changed",
@@ -6764,8 +6812,12 @@ function deriveCanonicalFunction(effect) {
         // answer to an opponent's threat. Treating both as plain "removal" made Birthing Pod look
         // like a removal spell and let its sacrifice clause outrank the tutor that actually
         // defines the card.
-        const isSelfSacrifice = (a === "sacrifice") && effect.target !== "target" && !restriction.includes('controlledbyopponent');
-        fn = isSelfSacrifice ? "self_sacrifice" : "removal";
+        const sacrificeText = `${String(effect.raw || '')} ${String(effect.parentRuleText || '')}`.replace(/[’]/g, "'");
+        const explicitlySacrificesSource = /\bsacrifice\s+(?:this(?: creature| artifact| enchantment| permanent| planeswalker| land| card)?|the source|~)\b/i.test(sacrificeText);
+        const namedCard = String(effect.cardName || '').trim();
+        const namesSource = namedCard && new RegExp(`\\bsacrifice\\s+${namedCard.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i').test(sacrificeText);
+        const isSelfSacrifice = (a === "sacrifice") && (explicitlySacrificesSource || namesSource) && !restriction.includes('controlledbyopponent');
+        fn = isSelfSacrifice ? "self_sacrifice" : (a === "sacrifice" ? "sacrifice_other" : "removal");
     } else if (a === "exile") {
         // Exiling a library card for later play is card access/impulse draw, not removing a
         // battlefield permanent. Likewise, exiling a card FROM HAND (Alaundo the Seer) is a
@@ -6855,6 +6907,7 @@ function deriveCanonicalFunction(effect) {
             object: obj,
             from,
             to,
+            sacrificeScope: fn === 'self_sacrifice' ? 'source_permanent' : (fn === 'sacrifice_other' ? 'another_or_unspecified_permanent' : null),
             target: effect.target || null,
             subtype: effect.subtype && effect.subtype !== "all" ? effect.subtype : null,
             scope: effect.isOther === true ? "other" : (effect.isOther === false ? "all" : null),
@@ -6875,6 +6928,11 @@ function deriveCanonicalFunction(effect) {
             isOpponentBenefit: Boolean(effect.isOpponentBenefit || recipientScope === 'opponent'),
             tokenType: effect.tokenType && effect.tokenType !== 'token' ? String(effect.tokenType).toLowerCase().trim() : null,
             libraryOwnerScope: libraryTopExile ? libraryOwnerScope : null,
+            accessType: libraryTopExile ? (effect.playFromExile || /\b(?:you may|you can)\s+(?:play|cast)\b/i.test(ruleContext) ? 'impulse_draw' : 'exile_access') : null,
+            playFromExile: Boolean(effect.playFromExile || (libraryTopExile && /\b(?:you may|you can)\s+(?:play|cast)\b/i.test(ruleContext))),
+            playWindow: effect.playWindow || null,
+            clueDrawEngine: Boolean(effect.clueDrawEngine || (String(effect.raw || '').match(/\binvestigate\b/i) && obj === 'token')),
+            derivedFromTokenAbility: Boolean(effect.derivedFromTokenAbility),
             restriction,
             targetProfile: effect.targetProfile || null,
             quantityProfile: effect.quantityProfile || null,
@@ -6912,10 +6970,21 @@ function canonicalFunctionToText(canonicalFunctions) {
         const p = cf.params || {};
         if (cf.function === 'library_exile_access') {
             const libraryOwner = p.libraryOwnerScope === 'you' ? 'your' : p.libraryOwnerScope === 'opponent' ? "an opponent's" : p.libraryOwnerScope === 'affected_player' ? "that player's" : "a player's";
-            return `exile the top card of ${libraryOwner} library for optional play from exile; library-card access (not battlefield permanent removal)`;
+            const access = p.playFromExile || p.accessType === 'impulse_draw'
+                ? `impulse draw: exile the top card${typeof p.quantity === 'number' && p.quantity > 1 ? `s (${p.quantity})` : ''} of ${libraryOwner} library and may play/cast it from exile${p.playWindow ? ` ${p.playWindow}` : ''}`
+                : `exile the top card of ${libraryOwner} library for card access`;
+            return `${access}; library-card access (not battlefield permanent removal)`;
+        }
+        if (cf.function === 'token_creation' && p.tokenType === 'clue') {
+            return `repeatable Clue token engine from investigate; each Clue can be activated for {2}, sacrifice that Clue token: draw a card (repeatable card advantage when mana and Clues are available)`;
+        }
+        if (cf.function === 'card_draw' && p.derivedFromTokenAbility) {
+            return 'repeatable activated card draw from a Clue token: pay {2}, sacrifice that Clue token, draw a card';
         }
         if (cf.function === 'opponent_ramp') return "put a land onto the battlefield under an opponent's control; this is opponent ramp and grants the opponent a resource, not your own ramp";
-        if (cf.function === 'opponent_gift') return `put a permanent onto the battlefield under an opponent's control; this grants the opponent a resource`;
+        if (cf.function === 'opponent_gift') return "put a permanent onto the battlefield under an opponent's control; this grants the opponent a resource";
+        if (cf.function === 'self_sacrifice') return 'sacrifice this source permanent itself; a one-time self-sacrifice is not sacrificing another permanent as a repeatable cost';
+        if (cf.function === 'sacrifice_other') return 'sacrifice another or unspecified permanent; this is not the source permanent sacrificing itself';
         if (cf.function === 'token_creation' && p.tokenType) {
             const tokenName = `${p.tokenType} token`;
             const quantityText = typeof p.quantity === 'number'
@@ -6956,7 +7025,7 @@ const FUNCTION_IMPORTANCE = {
     reanimate: 1.0, counter: 1.0, token_multiplier: 1.0, tribal_anthem: 1.0, gain_control: 0.85,
     removal: 0.9, exile_removal: 0.9, library_exile_access: 0.82, tutor: 0.9, ramp_tutor: 0.85,
     opponent_ramp: 0.82, opponent_gift: 0.72, direct_damage: 0.9,
-    self_sacrifice: 0.4,
+    self_sacrifice: 0.4, sacrifice_other: 0.48,
     cheat_into_play: 0.85, recursion: 0.75, anthem: 0.75, token_creation: 0.7, mana_ability: 0.85,
     bounce: 0.65, tuck: 0.6, mill: 0.55, discard: 0.5, card_draw: 0.45, cost_reduction: 0.90,
     gain_life: 0.55, lose_life: 0.55,
@@ -6989,6 +7058,13 @@ function assignEffectImportance(effects) {
         }
 
         let score = FUNCTION_IMPORTANCE[eff.canonical.function] ?? 0.5;
+        // Investigate/Clue engines create a reusable resource whose built-in {2}, sacrifice-Clue
+        // ability repeatedly draws cards. Treat a repeatable investigate trigger as a defining
+        // card-advantage engine rather than generic token production.
+        if (eff.canonical.function === 'token_creation' && eff.canonical.params?.tokenType === 'clue' &&
+            /\binvestigate\b/i.test(String(eff.raw || '')) && /\b(?:whenever|when)\b/i.test(String(eff.raw || eff.parentRuleText || ''))) {
+            score = Math.max(score, 0.92);
+        }
 
         // An effect extracted as a trailing atom of a compound clause ("..., then draw a card")
         // is by construction a follow-on, not the headline.
@@ -7143,7 +7219,7 @@ function findRepeatabilityContextClause(effectRaw, fullText) {
 function inferEffectRepeatabilityProfile(card, effect, fullText = '') {
     if (!effect || effect.isCostEffect) return { kind: 'unknown', group: 'unknown', strength: null, confidence: 0 };
     const raw = String(effect.raw || effect.canonical?.params?.raw || '').trim();
-    const contextSeed = String(effect.contextClause || effect.parentClauseRaw || raw).trim();
+    const contextSeed = String(effect.repeatabilityContextOverride || effect.contextClause || effect.parentClauseRaw || raw).trim();
     const context = effect.searchIntentContextOverride
         ? contextSeed
         : findRepeatabilityContextClause(contextSeed, fullText || strategicRoleCardText(card));
@@ -10906,6 +10982,7 @@ function buildMechanicalEffectNode(effect, index = 0, graphAnchors = new Set()) 
         targetObject: normalizeMechanicalObject(targetProfile.object || p.object || effect?.object),
         targetScope: normalizeMechanicToken(targetScope || ''),
         recipientScope: normalizeMechanicToken(effect?.recipientScope || p.recipientScope || ''),
+        sacrificeScope: normalizeMechanicToken(p.sacrificeScope || ''),
         scope: normalizeMechanicToken(p.scope || effect?.scope || ''),
         restriction: restrictions,
         quantityProfile: {
@@ -11191,6 +11268,9 @@ function mechanicalNodeContradiction(a, b) {
     const tokenTypeA = normalizeMechanicToken(a?.tokenType || '');
     const tokenTypeB = normalizeMechanicToken(b?.tokenType || '');
     if (a?.function === 'token_creation' && b?.function === 'token_creation' && tokenTypeA && tokenTypeB && tokenTypeA !== tokenTypeB) penalty += 0.25;
+    const sacrificeScopeA = normalizeMechanicToken(a?.sacrificeScope || '');
+    const sacrificeScopeB = normalizeMechanicToken(b?.sacrificeScope || '');
+    if (sacrificeScopeA && sacrificeScopeB && sacrificeScopeA !== sacrificeScopeB) penalty += 0.30;
     const recipientA = normalizeMechanicToken(a?.recipientScope || '');
     const recipientB = normalizeMechanicToken(b?.recipientScope || '');
     if (recipientA && recipientB && recipientA !== recipientB && ['you','opponent'].includes(recipientA) && ['you','opponent'].includes(recipientB)) penalty += 0.28;
@@ -11244,6 +11324,13 @@ function compareMechanicalEffectNodes(a, b) {
 
 function computeMechanicalEffectNodeComparison(a, b) {
     if (!a || !b) return { score: 0, contradiction: 0, breakdown: {} };
+    const sacrificeScopeA = normalizeMechanicToken(a.sacrificeScope || '');
+    const sacrificeScopeB = normalizeMechanicToken(b.sacrificeScope || '');
+    if (sacrificeScopeA && sacrificeScopeB && sacrificeScopeA !== sacrificeScopeB &&
+        [sacrificeScopeA, sacrificeScopeB].some(scope => scope === 'source_permanent') &&
+        [sacrificeScopeA, sacrificeScopeB].some(scope => scope === 'another_or_unspecified_permanent')) {
+        return { score: 0.015, contradiction: 0.95, breakdown: { core: 0, incompatibleSelfSacrificeAndSacrificeCost: 1 } };
+    }
     const libraryAccessVsRemoval = (a.function === 'library_exile_access' && b.function === 'exile_removal') || (a.function === 'exile_removal' && b.function === 'library_exile_access');
     if (libraryAccessVsRemoval) return { score: 0.015, contradiction: 0.95, breakdown: { core: 0, incompatibleLibraryAccessAndRemoval: 1 } };
 
@@ -11284,13 +11371,14 @@ function computeMechanicalEffectNodeComparison(a, b) {
         stats: a.stats || b.stats ? (a.stats === b.stats ? 1 : 0.45) : 1,
         tokenType: a.tokenType || b.tokenType ? (a.tokenType && b.tokenType ? (a.tokenType === b.tokenType ? 1 : 0.05) : 0.58) : 1,
         recipientScope: a.recipientScope || b.recipientScope ? (a.recipientScope && b.recipientScope ? (a.recipientScope === b.recipientScope ? 1 : 0.12) : 0.62) : 1,
+        sacrificeScope: a.sacrificeScope || b.sacrificeScope ? (a.sacrificeScope && b.sacrificeScope ? (a.sacrificeScope === b.sacrificeScope ? 1 : 0.08) : 0.52) : 1,
         keywords: compareMechanicalSets(a.keywordAnchors, b.keywordAnchors, 1)
     };
     const fieldParts = [
         [15, breakdown.object], [14, breakdown.target], [13, breakdown.zone], [10, breakdown.restriction],
         [9, breakdown.quantity], [10, breakdown.trigger], [8, breakdown.event], [7, breakdown.duration],
         [7, breakdown.mode], [16, breakdown.repeatability], [5, breakdown.cost], [5, breakdown.role], [5, breakdown.condition], [4, breakdown.stats],
-        [10, breakdown.tokenType], [8, breakdown.recipientScope]
+        [10, breakdown.tokenType], [8, breakdown.recipientScope], [12, breakdown.sacrificeScope]
     ];
     const fieldScore = fieldParts.reduce((sum, [w, v]) => sum + w * v, 0) / fieldParts.reduce((sum, [w]) => sum + w, 0);
     const contradiction = mechanicalNodeContradiction(a, b);
@@ -12360,6 +12448,35 @@ function runManaSearchMasteryEdgeCaseRegressionSuite() {
     const sampleAccess = { function: 'library_exile_access', family: 'card_advantage', outcome: 'card_access_from_exile', action: 'exile', object: 'card', from: 'library', to: 'exile', keywordAnchors: new Set() };
     const accessVsRemoval = computeMechanicalEffectNodeComparison(sampleAccess, sampleRemoval);
     check('Library-card exile has near-zero mechanical match to permanent removal', accessVsRemoval.score <= 0.02, JSON.stringify(accessVsRemoval));
+
+    // v96 regressions: exact requested cards/mechanics must be reflected in canonical effects
+    // consumed by the graph/scoring pipeline, not just a preview string.
+    const ballOther = parse('Sacrifice a creature: Draw a card.');
+    const ballOtherSac = ballOther.find(effect => ['sacrifice_other','self_sacrifice'].includes(effect.canonical.function));
+    check('Ball Lightning self-sacrifice differs from sacrificing another creature', ballSacrifice?.canonical?.function === 'self_sacrifice' && ballOtherSac?.canonical?.function === 'sacrifice_other', JSON.stringify({self:ballSacrifice?.canonical?.function,other:ballOtherSac?.canonical?.function}));
+    const selfSacNode = { function:'self_sacrifice', action:'sacrifice', outcome:'own_permanent_to_graveyard', sacrificeScope:'source_permanent', keywordAnchors:new Set() };
+    const otherSacNode = { function:'sacrifice_other', action:'sacrifice', outcome:'another_permanent_to_graveyard', sacrificeScope:'another_or_unspecified_permanent', keywordAnchors:new Set() };
+    check('Scoring strongly rejects self-sacrifice versus sacrificing another permanent', computeMechanicalEffectNodeComparison(selfSacNode, otherSacNode).score <= 0.02, JSON.stringify(computeMechanicalEffectNodeComparison(selfSacNode, otherSacNode)));
+    const impulse = parse('Exile the top two cards of your library. You may play those cards until the end of your next turn.');
+    const impulseEffect = impulse.find(effect => effect.canonical.function === 'library_exile_access');
+    const impulseText = canonicalText(impulse);
+    check('Reckless Impulse exile is explicitly classified as impulse draw', Boolean(impulseEffect) && impulseEffect.canonical.params.accessType === 'impulse_draw' && impulseEffect.canonical.params.playFromExile === true, JSON.stringify(impulseEffect?.canonical?.params || null));
+    check('Impulse draw canonical representation preserves play window', /impulse draw/i.test(impulseText) && /end of your next turn/i.test(impulseText), impulseText);
+    const alaundoActual = parse('Tap: Draw a card, then exile a card from your hand and put a number of time counters on it equal to its mana value.');
+    const alaundoActualExile = alaundoActual.find(effect => /\bexile\b/i.test(String(effect.raw || '')) && /\bfrom your hand\b/i.test(String(effect.raw || effect.parentRuleText || '')));
+    check('Alaundo actual parsed hand exile remains non-removal in graph fields', Boolean(alaundoActualExile) && alaundoActualExile.canonical.function === 'zone_change' && alaundoActualExile.canonical.params.from === 'hand', JSON.stringify(alaundoActualExile?.canonical || null));
+    const ingeniousActual = parse('If {W}{U} was paid, draw three cards, then an opponent creates two Treasure tokens.');
+    const ingeniousActualTreasure = ingeniousActual.find(effect => effect.canonical.function === 'token_creation' && effect.canonical.params.tokenType === 'treasure');
+    check('Ingenious Mastery opponent Treasure tokens retain opponent recipient in canonical fields', Boolean(ingeniousActualTreasure) && ingeniousActualTreasure.canonical.params.recipientScope === 'opponent' && ingeniousActualTreasure.canonical.params.isOpponentBenefit, JSON.stringify(ingeniousActualTreasure?.canonical?.params || null));
+    const trail = { name: 'Trail of Evidence', type_line: 'Enchantment', oracle_text: 'Whenever you cast an instant or sorcery spell, investigate.' };
+    const trailEffects = annotateEffectRepeatability(trail, parseMTGEffect(trail.oracle_text), trail.oracle_text);
+    const trailClue = trailEffects.find(effect => effect.canonical?.function === 'token_creation' && effect.canonical.params.tokenType === 'clue');
+    const trailProfile = getEffectRepeatabilityProfile(trailClue);
+    check('Trail of Evidence investigate is a repeatable Clue token engine', Boolean(trailClue) && trailProfile?.group === 'repeatable_engine' && ['repeatable_trigger','periodic_trigger'].includes(trailProfile?.kind), JSON.stringify({canonical:trailClue?.canonical,profile:trailProfile}));
+    check('Trail of Evidence Clue engine is eligible to be the primary mechanic', Boolean(trailClue?.isPrimary) && trailClue.importance >= 0.9, JSON.stringify({primary:trailClue?.isPrimary,importance:trailClue?.importance}));
+    const trailDraw = trailEffects.find(effect => effect.canonical?.function === 'card_draw' && effect.canonical.params.derivedFromTokenAbility);
+    check('Trail of Evidence exposes the Clue token activated draw as a graph effect', Boolean(trailDraw) && getEffectRepeatabilityProfile(trailDraw)?.kind === 'repeatable_activation', JSON.stringify({canonical:trailDraw?.canonical,profile:getEffectRepeatabilityProfile(trailDraw)}));
+    check('Trail of Evidence canonical Clue engine explains repeatable card draw', /repeatable Clue token engine/i.test(canonicalText(trailEffects.map(effect => effect.canonical).filter(Boolean))) && /repeatable activated card draw from a Clue token/i.test(canonicalText(trailEffects.map(effect => effect.canonical).filter(Boolean))), canonicalText(trailEffects.map(effect => effect.canonical).filter(Boolean)));
 
     const passed = cases.filter(item => item.passed).length;
     return { passed, total: cases.length, ok: passed === cases.length, results: cases };
