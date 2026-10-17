@@ -1,6 +1,6 @@
-/* ManaSearch build 20261016-93 */
+/* ManaSearch build 20261017-95 */
 // ManaSearch deployment build marker. Bump this whenever app.js changes so cached-module issues are easy to diagnose.
-const MANASEARCH_APP_BUILD = '20261016-93';
+const MANASEARCH_APP_BUILD = '20261017-95';
 console.info(`[ManaSearch] app.js build ${MANASEARCH_APP_BUILD}`);
 
 // State Management
@@ -3308,6 +3308,9 @@ const CANONICAL_FUNCTION_TAG_NAMES = {
     exile_removal: "Removal",
     counter: "Counterspell",
     tutor: "Tutor",
+    library_exile_access: "Impulse Draw",
+    opponent_ramp: "Opponent Ramp",
+    opponent_gift: "Opponent Gift",
     token_creation: "Token",
     token_multiplier: "Token Doubler",
     tribal_anthem: "Anthem",
@@ -5529,11 +5532,18 @@ function parseZoneMovementEffect(clause) {
     else if (/\beach\b/i.test(text)) effect.target = "each";
     else if (/\ball\b/i.test(text)) effect.target = "all";
 
+    const topLibrarySource = /\btop\s+(?:(?:one|two|three|four|five|six|seven|eight|nine|ten|\d+)\s+)?cards?\s+of\s+(?:your|their|that player(?:'s|’s)|that opponent(?:'s|’s)|an opponent(?:'s|’s)|a player(?:'s|’s))\s+library\b/i.test(text);
     const fromMatch = text.match(/\bfrom\s+(?:a|an|the|your|their|any|all|top of your|top of their)?\s*(graveyard|battlefield|hand|library|exile|command zone)\b/i);
-    if (fromMatch) effect.from = fromMatch[1].toLowerCase();
+    if (topLibrarySource) effect.from = 'library';
+    else if (fromMatch) effect.from = fromMatch[1].toLowerCase();
 
     const toMatch = text.match(/\b(?:to|onto|into)\s+(?:a|an|the|your|their|its owner's|top of your|bottom of your|top of their)?\s*(battlefield|graveyard|hand|library|exile|command zone)\b/i);
     if (toMatch) effect.to = toMatch[1].toLowerCase();
+
+    // A land/permanent entering under an opponent's control is opponent resource gain, not our own
+    // ramp or a generic zone change. Store the recipient/controller explicitly for ranking.
+    if (/\bunder\s+(?:an?\s+)?opponent(?:'s|’s)\s+control\b/i.test(text)) effect.recipientScope = 'opponent';
+    else if (/\bunder\s+your\s+control\b/i.test(text)) effect.recipientScope = 'you';
 
     if (/\b(returns?|puts?|moves?)\b/i.test(text)) {
         effect.action = /\breturns?\b/i.test(text) ? "return" : "put";
@@ -5830,6 +5840,8 @@ function parseSearchEffect(clause) {
     } else if (text.includes("onto the battlefield")) {
         effect.to = "battlefield";
     }
+    if (/\bput\b[^.]{0,220}\bunder\s+(?:an?\s+)?opponent(?:'s|’s)\s+control\b/i.test(text)) effect.recipientScope = 'opponent';
+    else if (/\bput\b[^.]{0,220}\bunder\s+your\s+control\b/i.test(text)) effect.recipientScope = 'you';
 
     return effect;
 }
@@ -5860,8 +5872,15 @@ function parseTokenEffect(clause) {
         };
     }
 
-    if (!/\bcreate\b/i.test(text)) return null;
+    // Oracle grammar uses both imperative "create" and third-person "creates" (e.g.
+    // "an opponent creates two Treasure tokens"). Recognize both so opponent-gift clauses don't
+    // silently fall through to a generic effect.
+    if (!/\b(?:create|creates|creating)\b/i.test(text)) return null;
 
+    const opponentCreates = /\b(?:(?:an?|each|target)\s+)?opponents?\s+creates?\b/i.test(text);
+    const underOpponentControl = /\bunder\s+(?:an?\s+)?opponent(?:'s|’s)\s+control\b/i.test(text);
+    const underYourControl = /\bunder\s+your\s+control\b/i.test(text);
+    const recipientScope = opponentCreates || underOpponentControl ? 'opponent' : (underYourControl ? 'you' : null);
     const effect = {
         action: "create",
         object: "token",
@@ -5870,11 +5889,13 @@ function parseTokenEffect(clause) {
         stats: null,
         keywords: [],
         tokenType: "token",
+        recipientScope,
+        controller: opponentCreates ? 'opponent' : null,
         isReplacement: false
     };
 
     const qtyMap = { 'a': 1, 'an': 1, 'one': 1, 'two': 2, 'three': 3, 'four': 4, 'five': 5, 'six': 6, 'x': 'X' };
-    const qtyMatch = text.match(/\bcreate\s+(a|an|one|two|three|four|five|six|x|\d+)\b/i);
+    const qtyMatch = text.match(/\bcreates?\s+(a|an|one|two|three|four|five|six|x|\d+)\b/i);
     if (qtyMatch) {
         const rawQty = qtyMatch[1].toLowerCase();
         effect.quantity = qtyMap[rawQty] !== undefined ? qtyMap[rawQty] : (isNaN(rawQty) ? rawQty : parseInt(rawQty, 10));
@@ -5890,10 +5911,13 @@ function parseTokenEffect(clause) {
     const keywordCheck = ['flying', 'haste', 'trample', 'lifelink', 'deathtouch', 'vigilance', 'menace'];
     effect.keywords = keywordCheck.filter(kw => text.includes(kw));
 
-    const typeMatch = text.match(/\bcreate\s+(?:a|an|one|two|three|four|five|six|x|\d+)\s+([a-z0-9\/\s\-]+?)\s*token/i);
+    const typeMatch = text.match(/\bcreates?\s+(?:a|an|one|two|three|four|five|six|x|\d+)\s+([a-z0-9\/\s\-]+?)\s*token/i);
     if (typeMatch) {
-        effect.tokenType = typeMatch[1].trim();
+        effect.tokenType = typeMatch[1].trim().replace(/\s+/g, ' ');
     }
+    // "for each" describes a variable count, not a one-token effect. Keep the relation without
+    // pretending the token quantity is fixed at one.
+    if (/\bfor each\b/i.test(text)) effect.quantity = null;
 
     return effect;
 }
@@ -6101,7 +6125,7 @@ function calculateCardFieldConfidence(parsedEffects) {
 // (puts?, returns?, destroys?) included for the same reason as parseZoneMovementEffect's own
 // gate - a third-person "each player puts..." construction needs the same recognition as the
 // imperative "put target..." form.
-const ATOM_VERBS = 'returns?|puts?|sacrifices?|destroys?|exiles?|discards?|mills?|draws?|search|create|counter|deals?|gains?|loses?|taps?|untaps?';
+const ATOM_VERBS = 'returns?|puts?|sacrifices?|destroys?|exiles?|discards?|mills?|draws?|search|creates?|creating|counter|deals?|gains?|loses?|taps?|untaps?';
 
 /**
  * Extracts EVERY effect atom in one clause, not just its dominant verb.
@@ -6121,7 +6145,10 @@ function extractClauseAtoms(effectText, primaryAction) {
     if (!effectText) return [];
 
     const atoms = [];
-    const seenActions = new Set(primaryAction ? [primaryAction] : []);
+    // Skip only the first atom that repeats the whole-clause parser's dominant action. Further
+    // occurrences must survive: Verdant Mastery has two distinct "put ... onto the battlefield"
+    // actions with different recipients, and both are strategically meaningful.
+    const primaryActionPending = new Set(primaryAction ? [primaryAction] : []);
     const verbRegex = new RegExp(`\\b(${ATOM_VERBS})\\b`, 'gi');
 
     let match;
@@ -6141,8 +6168,11 @@ function extractClauseAtoms(effectText, primaryAction) {
             parseLifeEffect(slice) ||
             parseZoneMovementEffect(slice);
 
-        if (atom && atom.action && !seenActions.has(atom.action)) {
-            seenActions.add(atom.action);
+        if (atom && atom.action) {
+            if (primaryActionPending.has(atom.action)) {
+                primaryActionPending.delete(atom.action);
+                continue;
+            }
             atom.raw = slice.trim();
             atom.contextClause = String(effectText || '').trim();
             atom.isSecondaryAtom = true;
@@ -6313,10 +6343,26 @@ function annotateEffectRelationships(effect, sourceText) {
     // Secondary action atoms retain their parent clause. Use that clause for trigger semantics so
     // "At the beginning of your upkeep, draw a card and lose 1 life" gives both atoms the upkeep
     // cadence, while keeping the atom's own raw text for action/target/quantity parsing.
-    const relationshipText = String(effect.contextClause || '').trim() || raw;
+    const relationshipText = String(effect.parentRuleText || effect.contextClause || '').trim() || raw;
     const targetProfile = parseStructuredTarget(raw);
     effect.targetProfile = targetProfile;
     if (!effect.target && targetProfile.kind) effect.target = targetProfile.kind;
+    // Recipient/beneficiary scope is action-local. Reading the whole printed sentence here made
+    // earlier actions inherit a later opponent benefit (e.g. Ingenious Mastery's draw three cards
+    // was incorrectly labeled as an opponent resource because the next action gives Treasure).
+    const recipientText = `${raw} ${String(effect.contextClause || '')}`.replace(/[’]/g, "'");
+    if (!effect.recipientScope) {
+        if (/\b(?:(?:an?|each|target)\s+)?opponents?\s+creates?\b/i.test(recipientText) || /\bunder\s+(?:an?\s+)?opponent's\s+control\b/i.test(recipientText)) effect.recipientScope = 'opponent';
+        else if (/\bunder\s+your\s+control\b/i.test(recipientText)) effect.recipientScope = 'you';
+    }
+    // Opponent creators and opponent-controlled destinations are beneficiaries/recipients, not
+    // target objects. Keep that information in recipientScope rather than polluting target data.
+    const recipientMentionIsNotTarget = /\bunder\s+(?:an?\s+)?opponent's\s+control\b|\b(?:(?:an?|each|target)\s+)?opponents?\s+creates?\b/i.test(recipientText);
+    if (recipientMentionIsNotTarget && !/\btarget opponent\b/i.test(raw)) {
+        if (targetProfile.scope === 'opponent' || targetProfile.scope === 'opponent_control') targetProfile.scope = null;
+        if (targetProfile.object === 'opponent') targetProfile.object = null;
+    }
+    if (effect.recipientScope === 'opponent') effect.isOpponentBenefit = true;
     if (targetProfile.scope) {
         effect.controllerScope = targetProfile.scope;
         effect.restriction = Array.from(new Set([...(effect.restriction || []),
@@ -6389,10 +6435,36 @@ function parseMTGEffect(oracleText) {
     // hard boundary (not just when preceded by sentence punctuation) - otherwise a modal header
     // ending in an em dash ("Choose one —") never separates from its first bullet line, since
     // "—" isn't sentence punctuation.
-    const clauses = oracleText
-        .split(/\n+|(?<=[.!?;])\s+|\b(?:then|otherwise)\b/i)
+    // Keep the printed rule/sentence that owns each split clause. Splitting on "then" is useful
+    // for extracting separate actions, but those actions still share semantic context: for example,
+    // "look at the top card of that player's library, then exile it" is library access, not removal.
+    const ruleGroups = String(oracleText)
+        .split(/\n+|(?<=[.!?;])\s+/)
         .map(s => s.trim())
         .filter(Boolean);
+    const clauses = [];
+    const parentRuleTexts = [];
+    const previousRuleTexts = [];
+    let mostRecentLandSearch = '';
+    let mostRecentLandSearchIndex = -100;
+    for (let ruleGroupIndex = 0; ruleGroupIndex < ruleGroups.length; ruleGroupIndex++) {
+        const ruleGroupText = ruleGroups[ruleGroupIndex];
+        const isSearchForLandGroup = /\bsearch(?:es)?\s+(?:your|the|a|target player's|target opponent's)?\s*library\b[\s\S]{0,180}\b(?:basic\s+)?land cards?\b/i.test(ruleGroupText);
+        const distanceToLandSearch = ruleGroupIndex - mostRecentLandSearchIndex;
+        const relatedLandSearchContext = mostRecentLandSearch && distanceToLandSearch > 0 && distanceToLandSearch <= 3
+            ? mostRecentLandSearch
+            : (ruleGroupIndex > 0 ? ruleGroups[ruleGroupIndex - 1] : '');
+        const ruleClauses = ruleGroupText.split(/\b(?:then|otherwise)\b/i).map(s => s.trim()).filter(Boolean);
+        for (const ruleClause of ruleClauses) {
+            clauses.push(ruleClause);
+            parentRuleTexts.push(ruleGroupText);
+            previousRuleTexts.push(relatedLandSearchContext);
+        }
+        if (isSearchForLandGroup) {
+            mostRecentLandSearch = ruleGroupText;
+            mostRecentLandSearchIndex = ruleGroupIndex;
+        }
+    }
 
     // Modal spells ("Choose one —" / "Choose two —" / "Choose one or more —") list their modes
     // as separate bullet-prefixed lines. Track the active mode group across clauses so each
@@ -6405,7 +6477,10 @@ function parseMTGEffect(oracleText) {
 
     const results = [];
 
-    for (const rawClause of clauses) {
+    for (let clauseIndex = 0; clauseIndex < clauses.length; clauseIndex++) {
+        const rawClause = clauses[clauseIndex];
+        const parentRuleText = parentRuleTexts[clauseIndex] || rawClause;
+        const previousRuleText = previousRuleTexts[clauseIndex] || '';
         const modalHeaderMatch = rawClause.match(modalHeaderRegex);
         if (modalHeaderMatch) {
             modeGroupCounter++;
@@ -6440,6 +6515,8 @@ function parseMTGEffect(oracleText) {
                 restriction: extractMTGRestrictions(effectText)
             };
         parsed.raw = parsed.raw || clause;
+        parsed.parentRuleText = parsed.parentRuleText || parentRuleText;
+        parsed.previousRuleText = parsed.previousRuleText || previousRuleText;
 
         // The sub-parsers capture restrictions from the text BEFORE the noun ("destroy target
         // [artifact] creature"), so a qualifier that trails the noun - "destroy target creature
@@ -6489,6 +6566,8 @@ function parseMTGEffect(oracleText) {
         // A compound clause contributes every effect it contains, not only its dominant verb.
         const extraAtoms = extractClauseAtoms(effectText, parsed.action);
         for (const atom of extraAtoms) {
+            atom.parentRuleText = atom.parentRuleText || parentRuleText;
+            atom.previousRuleText = atom.previousRuleText || previousRuleText;
             if (parsed.isMode) {
                 atom.isMode = true;
                 atom.modeGroupId = parsed.modeGroupId;
@@ -6504,6 +6583,7 @@ function parseMTGEffect(oracleText) {
             const costAtom = parseZoneMovementEffect(costText);
             if (costAtom && costAtom.action) {
                 costAtom.raw = costText;
+                costAtom.parentRuleText = parentRuleText;
                 costAtom.isCostEffect = true;
                 results.push(costAtom);
             }
@@ -6602,6 +6682,9 @@ const FUNCTION_OUTCOMES = {
     cost_reduction:   "spell_cost_reduced",
     tutor:            "card_found",
     ramp_tutor:       "resources_increase",
+    opponent_ramp:    "opponent_resources_increase",
+    opponent_gift:    "opponent_gains_permanent",
+    library_exile_access: "card_access_from_exile",
     token_creation:   "new_permanent",
     token_multiplier: "new_permanent",
     tribal_anthem:    "stats_or_keywords_changed",
@@ -6628,17 +6711,50 @@ function deriveCanonicalFunction(effect) {
     if (!effect || !effect.action || effect.action === "generic") return null;
 
     const a = effect.action;
-    const from = effect.from || null;
-    const to = effect.to || null;
-    const obj = effect.object || null;
+    const localRuleContext = `${String(effect.parentRuleText || '')} ${String(effect.contextClause || '')} ${String(effect.raw || '')}`.replace(/[’]/g, "'");
+    const previousRuleText = String(effect.previousRuleText || '').replace(/[’]/g, "'");
+    const previousRuleSearchesForLands = /\bsearch(?:es)?\b[\s\S]{0,180}\b(?:basic\s+)?land cards?\b/i.test(previousRuleText);
+    // Some modal/ramp spells put the searched-for object onto the battlefield in the next printed
+    // sentence (Verdant Mastery). Import only the immediately preceding sentence when it clearly
+    // searches a library for land cards and this atom is a battlefield put; don't blend whole-card
+    // text into every effect and contaminate unrelated mechanics.
+    const ruleContext = `${localRuleContext} ${a === 'put' && effect.to === 'battlefield' && previousRuleSearchesForLands ? previousRuleText : ''}`.trim();
+    const lowerRuleContext = ruleContext.toLowerCase();
+    const topLibraryPattern = /\btop\s+(?:(?:one|two|three|four|five|six|seven|eight|nine|ten|\d+)\s+)?cards?\s+of\s+(?:your|their|that player(?:'s)?|that opponent(?:'s)?|an opponent(?:'s)?|a player(?:'s)?)\s+library\b/i;
+    const directlyExilesTopLibrary = /\bexiles?\s+(?:the\s+)?top\s+(?:(?:one|two|three|four|five|six|seven|eight|nine|ten|\d+)\s+)?cards?\s+of\s+(?:your|their|that player(?:'s)?|that opponent(?:'s)?|an opponent(?:'s)?|a player(?:'s)?)\s+library\b/i.test(ruleContext);
+    const looksAtThenExilesLibraryCard = /\b(?:look at|reveal)\b[\s\S]{0,140}\btop\s+(?:(?:one|two|three|four|five|six|seven|eight|nine|ten|\d+)\s+)?cards?\s+of\s+(?:your|their|that player(?:'s)?|that opponent(?:'s)?|an opponent(?:'s)?|a player(?:'s)?)\s+library\b[\s\S]{0,170}\bexiles?\s+(?:it|that card)\b/i.test(ruleContext);
+    const libraryTopExile = a === 'exile' && (effect.from === 'library' || directlyExilesTopLibrary || looksAtThenExilesLibraryCard);
+    const from = effect.from || (libraryTopExile ? 'library' : null);
+    const to = effect.to || (libraryTopExile ? 'exile' : null);
+    const inferredSearchedLand = a === 'put' && to === 'battlefield' && previousRuleSearchesForLands && /\bsearch(?:es)?\b[\s\S]{0,180}\b(?:basic\s+)?land cards?\b/i.test(ruleContext);
+    const obj = inferredSearchedLand || (effect.object === 'card' && to === 'battlefield' && /\bland cards?\b/i.test(ruleContext))
+        ? 'land' : (effect.object || (libraryTopExile ? 'card' : null));
     const restriction = effect.restriction || [];
+    const recipientContext = `${String(effect.raw || '')} ${String(effect.contextClause || '')}`.replace(/[’]/g, "'");
+    const recipientScope = effect.recipientScope || (
+        /\bunder\s+(?:an?\s+)?opponent's\s+control\b|\b(?:(?:an?|each|target)\s+)?opponents?\s+creates?\b/i.test(recipientContext) ? 'opponent' :
+        /\bunder\s+your\s+control\b/i.test(recipientContext) ? 'you' : null
+    );
+    const libraryOwnerScope = /\byour(?: own)?\s+library\b/i.test(ruleContext) ? 'you'
+        : /\b(?:an opponent|target opponent|that opponent)(?:'s)?\s+library\b/i.test(ruleContext) ? 'opponent'
+        : /\bthat player(?:'s)?\s+library\b/i.test(ruleContext) ? 'affected_player' : 'unspecified';
 
     let fn = null;
 
     if (a === "return" || a === "put") {
+        const searchesLibrary = /\bsearch(?:es)?\s+(?:your|the|a|target player's|target opponent's)?\s*library\b/i.test(ruleContext);
+        const putsIntoHand = /\b(?:put|place)\b[\s\S]{0,140}\b(?:into|to)\s+(?:your|their|the player's|the opponent's)?\s*hand\b/i.test(ruleContext);
         if (from === "graveyard" && to === "battlefield") fn = "reanimate";
         else if (from === "graveyard" && to === "hand") fn = "recursion";
-        else if (to === "hand") fn = "bounce";
+        // Cards fetched from a library and placed into hand are tutors, not bounce. In particular,
+        // Fervent Mastery says "Search your library ... put them into your hand" and never returns
+        // permanents from the battlefield.
+        else if (to === "hand" && (from === "library" || (searchesLibrary && putsIntoHand))) fn = "tutor";
+        else if (to === "hand" && (from === "battlefield" || a === "return" || /\b(?:target|all|each|a|an)\s+(?:permanent|creature|artifact|enchantment|planeswalker|land)\b/i.test(ruleContext))) fn = "bounce";
+        else if (to === "hand") fn = "zone_change";
+        else if (to === "battlefield" && obj === 'land' && recipientScope === 'opponent') fn = 'opponent_ramp';
+        else if (to === "battlefield" && obj === 'land') fn = 'ramp_tutor';
+        else if (to === "battlefield" && recipientScope === 'opponent') fn = 'opponent_gift';
         else if (to === "battlefield") fn = "cheat_into_play";
         else if (to === "library") fn = "tuck";
         else fn = "zone_change";
@@ -6651,7 +6767,11 @@ function deriveCanonicalFunction(effect) {
         const isSelfSacrifice = (a === "sacrifice") && effect.target !== "target" && !restriction.includes('controlledbyopponent');
         fn = isSelfSacrifice ? "self_sacrifice" : "removal";
     } else if (a === "exile") {
-        fn = "exile_removal";
+        // Exiling a library card for later play is card access/impulse draw, not removing a
+        // battlefield permanent. Likewise, exiling a card FROM HAND (Alaundo the Seer) is a
+        // hand-zone setup/processing action, not removal. The parser used to default every other
+        // exile verb to battlefield removal even when the source zone was explicitly the hand.
+        fn = libraryTopExile ? "library_exile_access" : (from === "hand" ? "zone_change" : "exile_removal");
     } else if (a === "counter") {
         fn = "counter";
     } else if (a === "gain_control") {
@@ -6751,6 +6871,10 @@ function deriveCanonicalFunction(effect) {
             manaOutputColorCount: fn === 'mana_ability' ? (effect.manaOutputColorCount ?? effect.manaOutput?.uniqueColorCount ?? null) : null,
             duration: effect.isStatic === true ? "static" : (effect.isStatic === false ? "temporary" : null),
             controller: effect.controller || null,
+            recipientScope,
+            isOpponentBenefit: Boolean(effect.isOpponentBenefit || recipientScope === 'opponent'),
+            tokenType: effect.tokenType && effect.tokenType !== 'token' ? String(effect.tokenType).toLowerCase().trim() : null,
+            libraryOwnerScope: libraryTopExile ? libraryOwnerScope : null,
             restriction,
             targetProfile: effect.targetProfile || null,
             quantityProfile: effect.quantityProfile || null,
@@ -6786,14 +6910,36 @@ function canonicalFunctionToText(canonicalFunctions) {
     if (!canonicalFunctions || canonicalFunctions.length === 0) return "";
     return canonicalFunctions.map(cf => {
         const p = cf.params || {};
+        if (cf.function === 'library_exile_access') {
+            const libraryOwner = p.libraryOwnerScope === 'you' ? 'your' : p.libraryOwnerScope === 'opponent' ? "an opponent's" : p.libraryOwnerScope === 'affected_player' ? "that player's" : "a player's";
+            return `exile the top card of ${libraryOwner} library for optional play from exile; library-card access (not battlefield permanent removal)`;
+        }
+        if (cf.function === 'opponent_ramp') return "put a land onto the battlefield under an opponent's control; this is opponent ramp and grants the opponent a resource, not your own ramp";
+        if (cf.function === 'opponent_gift') return `put a permanent onto the battlefield under an opponent's control; this grants the opponent a resource`;
+        if (cf.function === 'token_creation' && p.tokenType) {
+            const tokenName = `${p.tokenType} token`;
+            const quantityText = typeof p.quantity === 'number'
+                ? `${p.quantity} ${tokenName}${p.quantity === 1 ? '' : 's'}`
+                : p.quantityProfile?.relation === 'for_each'
+                    ? `a ${tokenName} for each matching permanent`
+                    : `${tokenName}s`;
+            const actorText = p.recipientScope === 'opponent' ? 'an opponent creates' : p.recipientScope === 'you' ? 'you create' : 'create';
+            const recipientContext = p.recipientScope === 'opponent'
+                ? ' (opponent benefit/resources; potentially a downside for your side or a deliberate political effect)'
+                : '';
+            return `${actorText} ${quantityText}${recipientContext}`;
+        }
         const bits = [cf.function.replace(/_/g, ' ')];
-        if (p.object) bits.push(p.object);
+        if (p.tokenType) bits.push(`${p.tokenType} token`);
+        else if (p.object) bits.push(p.object);
         if (p.subtype) bits.push(p.subtype);
         if (p.scope === "other") bits.push("other");
         if (p.from) bits.push(`from ${p.from}`);
         if (p.to) bits.push(`to ${p.to}`);
         if (p.magnitude) bits.push(p.magnitude);
         if (typeof p.quantity === 'number') bits.push(`${p.quantity}`);
+        else if (p.quantityProfile?.relation === 'for_each') bits.push('for each matching permanent');
+        if (p.recipientScope === 'opponent') bits.push('under opponent control; opponent receives the resource');
         if (p.duration) bits.push(p.duration);
         if (p.castingScope) bits.push(`scope ${p.castingScope} spells`);
         if (p.timingPermission) bits.push(p.timingPermission.replace(/_/g, ' '));
@@ -6808,7 +6954,8 @@ function canonicalFunctionToText(canonicalFunctions) {
 // draw - and neither is simply "whichever effect was parsed first" (review Priority 1).
 const FUNCTION_IMPORTANCE = {
     reanimate: 1.0, counter: 1.0, token_multiplier: 1.0, tribal_anthem: 1.0, gain_control: 0.85,
-    removal: 0.9, exile_removal: 0.9, tutor: 0.9, ramp_tutor: 0.85, direct_damage: 0.9,
+    removal: 0.9, exile_removal: 0.9, library_exile_access: 0.82, tutor: 0.9, ramp_tutor: 0.85,
+    opponent_ramp: 0.82, opponent_gift: 0.72, direct_damage: 0.9,
     self_sacrifice: 0.4,
     cheat_into_play: 0.85, recursion: 0.75, anthem: 0.75, token_creation: 0.7, mana_ability: 0.85,
     bounce: 0.65, tuck: 0.6, mill: 0.55, discard: 0.5, card_draw: 0.45, cost_reduction: 0.90,
@@ -7027,7 +7174,16 @@ function inferEffectRepeatabilityProfile(card, effect, fullText = '') {
     const indefiniteCastReuse = /\b(?:buyback|retrace|escape)\b/i.test(strategicRoleCardText(card) || fullText || '');
 
     let kind = 'one_shot', confidence = 0.82, eventText = '';
-    if (isInstantSorceryOnly) {
+    // Ball Lightning-style text is a delayed, one-time expiration of this specific source.
+    // Its end-step timing must NOT make it a repeatable trigger/engine, and the self-sacrifice
+    // must not be conflated with an activation cost such as "Sacrifice a creature: ...".
+    const oneTimeSelfSacrifice = isPermanent && consumesSource && /\bsacrifice\s+(?:this(?: creature| artifact| enchantment| permanent| planeswalker| land| card)?|the source|~|[\w'’-]+)\b/i.test(combined) &&
+        /\bat the beginning of (?:your|the) end step\b|\bat (?:your|the) end step\b/i.test(combined);
+    if (oneTimeSelfSacrifice) {
+        kind = 'self_event';
+        confidence = 0.96;
+        eventText = 'this permanent is sacrificed once at the end step';
+    } else if (isInstantSorceryOnly) {
         kind = indefiniteCastReuse ? 'repeatable_spell' : (spellReuse ? 'recastable_spell' : 'one_shot');
         confidence = spellReuse ? 0.76 : 0.88;
     } else if (periodicTiming && (isPermanent || !typeLine)) {
@@ -9346,7 +9502,7 @@ const MECHANIC_OBJECT_PARENTS = {
 const MECHANIC_FAMILY_MAP = {
     destruction: 'removal', exile: 'removal', sacrifice: 'removal', bounce: 'tempo', tuck: 'tempo',
     reanimate: 'recursion', recursion: 'recursion', cheat_into_play: 'recursion',
-    tutor: 'selection', ramp_tutor: 'acceleration', card_draw: 'card_advantage', discard: 'disruption',
+    tutor: 'selection', ramp_tutor: 'acceleration', opponent_ramp: 'opponent_advantage', opponent_gift: 'opponent_advantage', library_exile_access: 'card_advantage', card_draw: 'card_advantage', discard: 'disruption',
     mill: 'disruption', counter: 'interaction', direct_damage: 'interaction', gain_control: 'control',
     cost_reduction: 'cost_modification', token_creation: 'tokens', token_multiplier: 'tokens',
     tribal_anthem: 'combat', anthem: 'combat', place_counter: 'stats', mana_ability: 'resources',
@@ -10749,6 +10905,7 @@ function buildMechanicalEffectNode(effect, index = 0, graphAnchors = new Set()) 
         targetKind: normalizeMechanicToken(targetProfile.kind || p.target || effect?.target || ''),
         targetObject: normalizeMechanicalObject(targetProfile.object || p.object || effect?.object),
         targetScope: normalizeMechanicToken(targetScope || ''),
+        recipientScope: normalizeMechanicToken(effect?.recipientScope || p.recipientScope || ''),
         scope: normalizeMechanicToken(p.scope || effect?.scope || ''),
         restriction: restrictions,
         quantityProfile: {
@@ -10784,7 +10941,7 @@ function buildMechanicalEffectNode(effect, index = 0, graphAnchors = new Set()) 
     };
     if (effect?.stats) node.stats = normalizeMechanicToken(effect.stats);
     if (effect?.keywords) node.grantedKeywords = normalizeMechanicalSet(effect.keywords);
-    if (effect?.tokenType) node.tokenType = normalizeMechanicToken(effect.tokenType);
+    if (effect?.tokenType || p.tokenType) node.tokenType = normalizeMechanicToken(effect?.tokenType || p.tokenType);
     if (effect?.multiplier != null) node.multiplier = Number(effect.multiplier) || null;
     return node;
 }
@@ -11031,6 +11188,15 @@ function hasOppositeMechanicalSignature(a, b) {
 
 function mechanicalNodeContradiction(a, b) {
     let penalty = 0;
+    const tokenTypeA = normalizeMechanicToken(a?.tokenType || '');
+    const tokenTypeB = normalizeMechanicToken(b?.tokenType || '');
+    if (a?.function === 'token_creation' && b?.function === 'token_creation' && tokenTypeA && tokenTypeB && tokenTypeA !== tokenTypeB) penalty += 0.25;
+    const recipientA = normalizeMechanicToken(a?.recipientScope || '');
+    const recipientB = normalizeMechanicToken(b?.recipientScope || '');
+    if (recipientA && recipientB && recipientA !== recipientB && ['you','opponent'].includes(recipientA) && ['you','opponent'].includes(recipientB)) penalty += 0.28;
+    // Library-card exile is access/impulse draw, while battlefield exile is removal. They share
+    // the raw verb but are not meaningful substitutes.
+    if ((a?.function === 'library_exile_access' && b?.function === 'exile_removal') || (a?.function === 'exile_removal' && b?.function === 'library_exile_access')) penalty += 0.55;
     if (hasOppositeMechanicalSignature(a, b)) penalty += 0.30;
 
     const zoneOpposite = a?.from && a?.to && b?.from && b?.to && a.from === b.to && a.to === b.from && a.from !== a.to;
@@ -11078,6 +11244,8 @@ function compareMechanicalEffectNodes(a, b) {
 
 function computeMechanicalEffectNodeComparison(a, b) {
     if (!a || !b) return { score: 0, contradiction: 0, breakdown: {} };
+    const libraryAccessVsRemoval = (a.function === 'library_exile_access' && b.function === 'exile_removal') || (a.function === 'exile_removal' && b.function === 'library_exile_access');
+    if (libraryAccessVsRemoval) return { score: 0.015, contradiction: 0.95, breakdown: { core: 0, incompatibleLibraryAccessAndRemoval: 1 } };
 
     const functionExact = a.function && b.function && a.function === b.function;
     const outcomeExact = a.outcome && b.outcome && a.outcome === b.outcome;
@@ -11114,12 +11282,15 @@ function computeMechanicalEffectNodeComparison(a, b) {
         role: mechanicalRoleSimilarity(a, b),
         condition: a.condition || b.condition ? (a.condition === b.condition ? 1 : 0.45) : 1,
         stats: a.stats || b.stats ? (a.stats === b.stats ? 1 : 0.45) : 1,
+        tokenType: a.tokenType || b.tokenType ? (a.tokenType && b.tokenType ? (a.tokenType === b.tokenType ? 1 : 0.05) : 0.58) : 1,
+        recipientScope: a.recipientScope || b.recipientScope ? (a.recipientScope && b.recipientScope ? (a.recipientScope === b.recipientScope ? 1 : 0.12) : 0.62) : 1,
         keywords: compareMechanicalSets(a.keywordAnchors, b.keywordAnchors, 1)
     };
     const fieldParts = [
         [15, breakdown.object], [14, breakdown.target], [13, breakdown.zone], [10, breakdown.restriction],
         [9, breakdown.quantity], [10, breakdown.trigger], [8, breakdown.event], [7, breakdown.duration],
-        [7, breakdown.mode], [16, breakdown.repeatability], [5, breakdown.cost], [5, breakdown.role], [5, breakdown.condition], [4, breakdown.stats]
+        [7, breakdown.mode], [16, breakdown.repeatability], [5, breakdown.cost], [5, breakdown.role], [5, breakdown.condition], [4, breakdown.stats],
+        [10, breakdown.tokenType], [8, breakdown.recipientScope]
     ];
     const fieldScore = fieldParts.reduce((sum, [w, v]) => sum + w * v, 0) / fieldParts.reduce((sum, [w]) => sum + w, 0);
     const contradiction = mechanicalNodeContradiction(a, b);
@@ -11490,6 +11661,10 @@ function mechanicalEffectFamily(signature) {
 // leaves it in exile. Both contain "exile", but they have different outcomes and play patterns.
 function classifyZoneTransitionIntent(text) {
     const input = String(text || '').toLowerCase().replace(/[’]/g, "'");
+    // A card exiled from hand is not a permanent being removed from the battlefield.
+    // Return no removal intent for this zone-specific action before the generic exile fallback.
+    if (/\bexile\s+(?:(?:a|an|the|target|one|another|that)\s+)?(?:card|spell)\s+from\s+(?:your|their|its owner's|that player's|a player's)?\s*hand\b/i.test(input) ||
+        /\bfrom\s+(?:your|their|its owner's|that player's|a player's)?\s*hand\b[\s\S]{0,100}\bexile\b/i.test(input)) return 'none';
     const exileAt = input.search(/\bexile\b/);
     if (exileAt < 0) return 'none';
     const tail = input.slice(exileAt);
@@ -11593,6 +11768,8 @@ function calculateEffectRelationshipMismatch(parsedA = [], parsedB = []) {
             trigger: params.triggerProfile || effect?.triggerProfile || null,
             target: params.targetProfile || effect?.targetProfile || null,
             scope: params.controllerScope || effect?.controllerScope || params.targetProfile?.scope || effect?.targetProfile?.scope || null,
+            recipientScope: params.recipientScope || effect?.recipientScope || null,
+            tokenType: params.tokenType || effect?.tokenType || null,
             condition: String(params.condition || effect?.condition || '').toLowerCase().replace(/\s+/g, ' ').trim(),
             raw: String(params.raw || canonical?.raw || effect?.raw || '')
         };
@@ -11612,6 +11789,8 @@ function calculateEffectRelationshipMismatch(parsedA = [], parsedB = []) {
         if (ls && rs && ((ls === 'you_control' && rs === 'opponent_control') || (ls === 'opponent_control' && rs === 'you_control') || (ls === 'you' && rs === 'opponent') || (ls === 'opponent' && rs === 'you'))) {
             mismatch = Math.max(mismatch, 0.82);
         }
+        if (left.recipientScope && right.recipientScope && left.recipientScope !== right.recipientScope) mismatch = Math.max(mismatch, 0.62);
+        if (left.tokenType && right.tokenType && normalizeMechanicToken(left.tokenType) !== normalizeMechanicToken(right.tokenType)) mismatch = Math.max(mismatch, 0.40);
         if (left.condition && right.condition && left.condition !== right.condition) mismatch = Math.max(mismatch, 0.22);
         maxMismatch = Math.max(maxMismatch, mismatch);
     }
@@ -12126,6 +12305,67 @@ function runManaSearchMechanicalRegressionSuite({ log = true } = {}) {
 }
 
 // Available for development/benchmark diagnostics without changing the public UI.
+function runManaSearchMasteryEdgeCaseRegressionSuite() {
+    const cases = [];
+    const check = (name, condition, detail = '') => cases.push({ name, passed: Boolean(condition), detail: String(detail || '') });
+    const parse = text => parseMTGEffect(text).filter(effect => effect && effect.canonical);
+    const canonicalText = effects => canonicalFunctionToText(effects.map(effect => effect.canonical));
+
+    const fervent = parse('Search your library for up to three cards, put them into your hand, shuffle, then discard three cards at random.');
+    const ferventFns = fervent.map(effect => effect.canonical.function);
+    check('Fervent Mastery library search is a tutor, not bounce', ferventFns.includes('tutor') && !ferventFns.includes('bounce'), JSON.stringify(ferventFns));
+
+    const ingenious = parse('If {2}{U} was paid, draw three cards, then an opponent creates two Treasure tokens and they scry 2.');
+    const treasure = ingenious.find(effect => effect.canonical.function === 'token_creation' && effect.canonical.params.tokenType === 'treasure');
+    const ingeniousText = canonicalText(ingenious);
+    check('Ingenious Mastery opponent Treasure creation is recognized', Boolean(treasure), ingeniousText);
+    check('Ingenious Mastery keeps opponent as the Treasure recipient', treasure?.canonical.params.recipientScope === 'opponent' && treasure?.canonical.params.isOpponentBenefit === true, JSON.stringify(treasure?.canonical.params || null));
+    const drawAction = ingenious.find(effect => effect.canonical.function === 'card_draw');
+    check('Ingenious Mastery draw does not inherit opponent-benefit scope', drawAction?.canonical.params.recipientScope !== 'opponent', JSON.stringify(drawAction?.canonical.params || null));
+    check('Ingenious Mastery canonical text names Treasure and opponent benefit', /opponent creates 2 treasure tokens/i.test(ingeniousText) && /opponent benefit|potential downside/i.test(ingeniousText), ingeniousText);
+
+    const verdant = parse('Search your library for up to four basic land cards and reveal them. Put one onto the battlefield tapped under an opponent\'s control if {3}{G} was paid this way. Put two onto the battlefield tapped under your control and the rest into your hand. Then shuffle.');
+    const opponentLand = verdant.find(effect => effect.canonical.function === 'opponent_ramp');
+    const ownLand = verdant.find(effect => effect.canonical.function === 'ramp_tutor' && effect.canonical.params.recipientScope === 'you');
+    check('Verdant Mastery opponent land entry is recognized as opponent ramp', Boolean(opponentLand), JSON.stringify(verdant.map(effect => ({fn:effect.canonical.function,object:effect.canonical.params.object,recipient:effect.canonical.params.recipientScope,raw:effect.raw}))));
+    check('Verdant Mastery own land entry remains own ramp', Boolean(ownLand), JSON.stringify(verdant.map(effect => ({fn:effect.canonical.function,object:effect.canonical.params.object,recipient:effect.canonical.params.recipientScope,raw:effect.raw}))));
+    check('Verdant Mastery opponent ramp canonical text spells out downside', /opponent ramp[\s\S]*not your own ramp/i.test(canonicalText(verdant)), canonicalText(verdant));
+
+    const edward = parse('At the beginning of your end step, create a Treasure token for each tapped Assassin, Pirate, and/or Vehicle you control. Whenever a Vehicle you control deals combat damage to a player, look at the top card of that player\'s library, then exile it face down. You may play that card for as long as it remains exiled.');
+    const recurringTreasure = edward.find(effect => effect.canonical.function === 'token_creation' && effect.canonical.params.tokenType === 'treasure');
+    const libraryAccess = edward.find(effect => effect.canonical.function === 'library_exile_access');
+    const edwardText = canonicalText(edward);
+    check('Edward Kenway identifies Treasure as the recurring token type', recurringTreasure?.canonical.params.tokenType === 'treasure', JSON.stringify(recurringTreasure?.canonical.params || null));
+    check('Edward Kenway records one Treasure per matching permanent', recurringTreasure?.canonical.params.quantityProfile?.relation === 'for_each', JSON.stringify(recurringTreasure?.canonical.params.quantityProfile || null));
+    check('Edward Kenway classifies top-library exile as card access, not removal', Boolean(libraryAccess) && !edward.some(effect => effect.canonical.function === 'exile_removal' && /top card/i.test(String(effect.raw || ''))), JSON.stringify(edward.map(effect => ({fn:effect.canonical.function,from:effect.canonical.params.from,object:effect.canonical.params.object,tokenType:effect.canonical.params.tokenType,raw:effect.raw}))));
+    check('Edward Kenway distinguishes library exile in canonical text', /top card of that player's library[\s\S]*not battlefield permanent removal/i.test(edwardText), edwardText);
+
+    const alaundoText = 'Tap: Draw a card, then exile a card from your hand and put a number of time counters on it equal to its mana value.';
+    const alaundo = parseMTGEffect(alaundoText).filter(effect => effect && effect.canonical);
+    const handExile = alaundo.find(effect => /\bexile\b/i.test(String(effect.raw || '')) && /\bfrom your hand\b/i.test(String(effect.raw || effect.parentRuleText || '')));
+    check('Alaundo hand exile is not battlefield removal', Boolean(handExile) && handExile.canonical.function !== 'exile_removal' && handExile.canonical.params.from === 'hand', JSON.stringify(alaundo.map(effect => ({fn:effect.canonical.function,from:effect.canonical.params.from,to:effect.canonical.params.to,raw:effect.raw}))));
+    check('Alaundo hand-exile contrast does not imply removal', classifyZoneTransitionIntent('Exile a card from your hand and put time counters on it.') === 'none', classifyZoneTransitionIntent('Exile a card from your hand and put time counters on it.'));
+
+    const ballLightning = { name: 'Ball Lightning', type_line: 'Creature — Elemental', oracle_text: 'Trample. Haste. At the beginning of the end step, sacrifice this creature.' };
+    const ballEffects = annotateEffectRepeatability(ballLightning, parseMTGEffect(ballLightning.oracle_text));
+    const ballSacrifice = ballEffects.find(effect => effect.canonical?.function === 'self_sacrifice');
+    const ballProfile = getEffectRepeatabilityProfile(ballSacrifice);
+    check('Ball Lightning self-sacrifice is a single-use self event, not an engine', Boolean(ballSacrifice) && ballProfile?.kind === 'self_event' && ballProfile?.group === 'single_use', JSON.stringify({fn:ballSacrifice?.canonical?.function,raw:ballSacrifice?.raw,profile:ballProfile}));
+    const bombardment = { name: 'Goblin Bombardment', type_line: 'Enchantment', oracle_text: 'Sacrifice a creature: Goblin Bombardment deals 1 damage to any target.' };
+    const bombardmentEffects = annotateEffectRepeatability(bombardment, parseMTGEffect(bombardment.oracle_text));
+    const bombardmentDamage = bombardmentEffects.find(effect => effect.canonical?.function === 'direct_damage');
+    check('Sacrifice-as-activation-cost remains a repeatable activation', getEffectRepeatabilityProfile(bombardmentDamage)?.kind === 'repeatable_activation', JSON.stringify(getEffectRepeatabilityProfile(bombardmentDamage)));
+
+    const sampleRemoval = { function: 'exile_removal', family: 'removal', outcome: 'permanent_exiled', action: 'exile', object: 'permanent', from: 'battlefield', to: 'exile', keywordAnchors: new Set() };
+    const sampleAccess = { function: 'library_exile_access', family: 'card_advantage', outcome: 'card_access_from_exile', action: 'exile', object: 'card', from: 'library', to: 'exile', keywordAnchors: new Set() };
+    const accessVsRemoval = computeMechanicalEffectNodeComparison(sampleAccess, sampleRemoval);
+    check('Library-card exile has near-zero mechanical match to permanent removal', accessVsRemoval.score <= 0.02, JSON.stringify(accessVsRemoval));
+
+    const passed = cases.filter(item => item.passed).length;
+    return { passed, total: cases.length, ok: passed === cases.length, results: cases };
+}
+try { window.runManaSearchMasteryEdgeCaseRegressionSuite = runManaSearchMasteryEdgeCaseRegressionSuite; } catch (_) {}
+
 try { window.runManaSearchMechanicalRegressionSuite = runManaSearchMechanicalRegressionSuite; } catch (_) {}
 
 // V74: curated real-card benchmark. The fixture corpus lives in tests/fixtures/ so card additions
@@ -26673,7 +26913,7 @@ function compareFunctionLabel(fn) {
 function compareFunctionKey(cf) {
     if (!cf) return '';
     const p = cf.params || {};
-    return [cf.function, cf.outcome, p.object, p.subtype, p.from, p.to, p.scope, p.duration].filter(Boolean).join('|').toLowerCase();
+    return [cf.function, cf.outcome, p.object, p.subtype, p.tokenType, p.recipientScope, p.libraryOwnerScope, p.from, p.to, p.scope, p.duration].filter(Boolean).join('|').toLowerCase();
 }
 
 function compareFunctionFamily(cf) {
@@ -26833,6 +27073,9 @@ function compareEffectDescription(cf) {
         case 'direct_damage': return q ? `${q} damage${target ? ` to ${target}` : ''}` : `damage${target ? ` to ${target}` : ''}`;
         case 'removal': return `destroy ${target || object || 'the relevant permanent'}`;
         case 'exile_removal': return `exile ${target || object || 'the relevant permanent'}`;
+        case 'library_exile_access': return `exile the top card of ${p.libraryOwnerScope === 'you' ? 'your' : p.libraryOwnerScope === 'opponent' ? "an opponent's" : p.libraryOwnerScope === 'affected_player' ? "the damaged player's" : "a player's"} library for optional play`;
+        case 'opponent_ramp': return `give an opponent a land onto the battlefield`;
+        case 'opponent_gift': return `give an opponent a permanent onto the battlefield`;
         case 'self_sacrifice': return `sacrifice${object ? ` ${object}` : ''}`;
         case 'bounce': return `return${object ? ` ${object}` : ''}${from ? ` from ${from}` : ''}${to ? ` to ${to}` : ''}`;
         case 'reanimate': return `return${object ? ` ${object}` : ''} from the graveyard to the battlefield`;
@@ -26851,7 +27094,13 @@ function compareEffectDescription(cf) {
         case 'gain_life': return q ? `gain ${q} life` : 'gain life';
         case 'lose_life': return q ? `lose ${q} life` : 'lose life';
         case 'mana_ability': return magnitude || (q ? `add ${q} mana` : 'add mana');
-        case 'token_creation': return q ? `create ${q} ${comparePlural('token', p.quantity)}${subtype ? ` (${subtype})` : ''}` : `create tokens${subtype ? ` (${subtype})` : ''}`;
+        case 'token_creation': {
+            const tokenName = p.tokenType ? `${compareClean(p.tokenType)} token` : 'token';
+            const quantityPhrase = q ? `${q} ${comparePlural(tokenName, p.quantity)}` : (p.quantityProfile?.relation === 'for_each' ? `a ${tokenName} for each matching permanent` : `${tokenName}s`);
+            const creatorPhrase = p.recipientScope === 'opponent' ? 'an opponent creates' : p.recipientScope === 'you' ? 'you create' : 'create';
+            const opponentNote = p.recipientScope === 'opponent' ? ' (opponent resource / potential downside)' : '';
+            return `${creatorPhrase} ${quantityPhrase}${subtype ? ` (${subtype})` : ''}${opponentNote}`;
+        }
         case 'token_multiplier': return 'multiply or copy tokens';
         case 'place_counter': return q ? `put ${q} ${magnitude || 'counter'}${Number(p.quantity) === 1 ? '' : 's'}` : `put ${magnitude || 'counters'}`;
         case 'stat_buff':
