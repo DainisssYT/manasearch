@@ -1,6 +1,6 @@
-/* ManaSearch build 20261017-106 */
+/* ManaSearch build 20261017-107 */
 // ManaSearch deployment build marker. Bump this whenever app.js changes so cached-module issues are easy to diagnose.
-const MANASEARCH_APP_BUILD = '20261017-106';
+const MANASEARCH_APP_BUILD = '20261017-107';
 console.info(`[ManaSearch] app.js build ${MANASEARCH_APP_BUILD}`);
 
 // State Management
@@ -57,9 +57,18 @@ const mechanicalProfileCache = new Map();
 // stable signature rather than only on the individual card object. This does not cache scores or
 // source-dependent comparisons; it only reuses the deterministic graph representation.
 const mechanicalGraphCache = new Map();
-const MECHANICAL_GRAPH_CACHE_MAX = 4600;
+// Keep cross-search mechanic caches large enough to cover a typical multi-test session. The prior
+// limits were smaller than the union of cards in a benchmark, forcing profile/graph rebuild churn.
+// Device-aware caps retain a conservative memory footprint on low-memory phones/tablets.
+const MANASEARCH_LOW_MEMORY_DEVICE = typeof navigator !== 'undefined' && (
+    (Number(navigator.deviceMemory) > 0 && Number(navigator.deviceMemory) <= 4) ||
+    (Number(navigator.hardwareConcurrency) > 0 && Number(navigator.hardwareConcurrency) <= 4)
+);
+const MECHANICAL_GRAPH_CACHE_MAX = MANASEARCH_LOW_MEMORY_DEVICE ? 5200 : 10000;
 const SEARCH_INTENT_CACHE_MAX = 96;
-const MECHANICAL_PROFILE_CACHE_MAX = 9000;
+// This is a combined cache for parsed| and profile| entries, so the old 9000 limit effectively
+// retained fewer than 4500 complete card signatures. Raise the ceiling for desktop-class devices.
+const MECHANICAL_PROFILE_CACHE_MAX = MANASEARCH_LOW_MEMORY_DEVICE ? 10000 : 20000;
 // Session semantic corpus: every card this session has actually scored (plus each search's
 // source card) gets its function/oracle embedding vectors kept here, keyed by name. A new
 // retrieval stream (Search G) queries this corpus by cosine similarity against the CURRENT
@@ -1595,9 +1604,33 @@ async function downloadBenchmarkWorkbook(report) {
             'Embeddings Computed': e.computed ?? '',
             'Embedding Failures': e.failed ?? '',
             'Structural/Profile Pass': durStr(inner.structuralMs),
+            'Parse': durStr(inner.structuralDetails?.parseMs),
+            'Exactness': durStr(inner.structuralDetails?.exactnessMs),
+            'Profile/Graph/Synergy': durStr(inner.structuralDetails?.profileGraphSynergyMs),
+            'Mechanical Pairing': durStr(inner.structuralDetails?.mechanicalPairingMs),
+            'Role/Highlight/Confidence': durStr(inner.structuralDetails?.roleHighlightConfidenceMs),
+            'Category': durStr(inner.structuralDetails?.categoryMs),
             'Triage/Selection': durStr(inner.triageAndSelectionMs),
             'Embedding Preparation': durStr(inner.embeddingTextPreparationMs),
             'Embedding Cache Warm': durStr(inner.embeddingWarmCacheMs),
+            'Embedding Batch Calls': e.inferenceBatchCalls ?? '',
+            'Embedding Batch Items': e.inferenceBatchItems ?? '',
+            'Embedding Max Batch Size': e.inferenceBatchMaxSize ?? '',
+            'Embedding Batch Time': durStr(e.inferenceBatchMs),
+            'Embedding Batch Failures': e.inferenceBatchFailures ?? '',
+            'Embedding Fallback Splits': e.inferenceFallbackSplits ?? '',
+            'Graph Similarity Cache Hits': inner.reuseCaches?.graphSimilarityHits ?? '',
+            'Graph Similarity Computed': inner.reuseCaches?.graphSimilarityComputed ?? '',
+            'Strategic Role Cache Hits': inner.reuseCaches?.strategicRoleHits ?? '',
+            'Strategic Role Computed': inner.reuseCaches?.strategicRoleComputed ?? '',
+            'Role Fingerprint Cache Hits': inner.reuseCaches?.roleFingerprintHits ?? '',
+            'Role Fingerprints Computed': inner.reuseCaches?.roleFingerprintComputed ?? '',
+            'Keyword Regex Cache Hits': inner.reuseCaches?.keywordRegexHits ?? '',
+            'Keyword Regex Compiled': inner.reuseCaches?.keywordRegexComputed ?? '',
+            'Keyword Regex Evictions': inner.reuseCaches?.keywordRegexEvictions ?? '',
+            'Token Normalize Cache Hits': inner.reuseCaches?.tokenNormalizationHits ?? '',
+            'Token Normalize Computed': inner.reuseCaches?.tokenNormalizationComputed ?? '',
+            'Token Normalize Evictions': inner.reuseCaches?.tokenNormalizationEvictions ?? '',
             'Semantic Pass': durStr(inner.semanticPassMs),
             'Calibration': durStr(inner.calibrationMs),
             'Final Score Blend': durStr(inner.finalBlendMs),
@@ -7772,6 +7805,17 @@ function canonicalFunctionToText(canonicalFunctions) {
     }).join('; ');
 }
 
+// Canonical function text is immutable for a parsed-effects array in normal scoring. Warming the
+// embedding cache and the semantic pass previously regenerated the same canonical string twice.
+const canonicalFunctionTextByEffects = new WeakMap();
+function getCachedCanonicalFunctionText(parsedEffects) {
+    if (!Array.isArray(parsedEffects)) return '';
+    if (canonicalFunctionTextByEffects.has(parsedEffects)) return canonicalFunctionTextByEffects.get(parsedEffects);
+    const value = canonicalFunctionToText(getCanonicalFunctions(parsedEffects));
+    canonicalFunctionTextByEffects.set(parsedEffects, value);
+    return value;
+}
+
 // How strategically defining each canonical function tends to be. Used by the importance model
 // below to pick a card's PRIMARY function: on "Sacrifice a creature: Draw a card, then return a
 // creature from your graveyard", the reanimation is what defines the card, not the incidental
@@ -7923,9 +7967,16 @@ const STRATEGIC_ROLE_GROUPS = {
 
 const STRATEGIC_ROLE_MIN_SCORE = 0.62;
 
+const strategicRoleTextCacheByCard = new WeakMap();
 function strategicRoleCardText(card) {
-    if (!card) return '';
-    return String(card.oracle_text || (card.card_faces ? card.card_faces.map(f => f.oracle_text || '').join(' ') : '') || '').trim();
+    if (!card || typeof card !== 'object') return '';
+    const directText = card.oracle_text || '';
+    const faces = card.card_faces || null;
+    const cached = strategicRoleTextCacheByCard.get(card);
+    if (cached && cached.directText === directText && cached.faces === faces) return cached.value;
+    const value = String(directText || (faces ? faces.map(f => f.oracle_text || '').join(' ') : '') || '').trim();
+    strategicRoleTextCacheByCard.set(card, { directText, faces, value });
+    return value;
 }
 
 function strategicRoleFunctions(parsedEffects) {
@@ -8285,7 +8336,7 @@ function strategicRoleAdd(out, role, score, anchors, confidenceBoost = 0) {
     }
 }
 
-function inferStrategicRoleProfile(card, parsedEffects = [], intentText = '') {
+function inferStrategicRoleProfileUncached(card, parsedEffects = [], intentText = '') {
     const text = strategicRoleCardText(card);
     const lower = `${text} ${String(intentText || '')}`.toLowerCase();
     const typeLine = String(card?.type_line || '').toLowerCase();
@@ -8430,6 +8481,39 @@ function inferStrategicRoleProfile(card, parsedEffects = [], intentText = '') {
     return roles.slice(0, 4);
 }
 
+
+// Strategic-role inference scans the full Oracle text with many regular expressions. The scoring
+// pipeline requests both an intrinsic profile (empty intent text) and an intent-conditioned profile
+// for the same card, and benchmark runs revisit many of the same parsed card texts. Parsed-effect
+// arrays are immutable in their mechanical meaning after parsing/annotation, so cache by that array
+// identity plus the explicit card context and intent. WeakMap ownership avoids retaining old arrays.
+const strategicRoleProfileCacheByEffects = new WeakMap();
+const strategicRoleProfileCacheStats = { hits: 0, computed: 0 };
+function inferStrategicRoleProfile(card, parsedEffects = [], intentText = '') {
+    if (!card || typeof card !== 'object' || !Array.isArray(parsedEffects)) {
+        return inferStrategicRoleProfileUncached(card, parsedEffects, intentText);
+    }
+    const oracle = strategicRoleCardText(card);
+    const keywords = Array.isArray(card.keywords) ? card.keywords.map(String).join('|') : '';
+    const signature = `${normalizeCardNameForIdentity(card.name || '')}|${String(card.type_line || '')}|${Number.isFinite(Number(card.cmc)) ? Number(card.cmc) : ''}|${keywords}|${oracle}|intent:${String(intentText || '')}`;
+    let byContext = strategicRoleProfileCacheByEffects.get(parsedEffects);
+    if (byContext?.has(signature)) {
+        strategicRoleProfileCacheStats.hits++;
+        return byContext.get(signature);
+    }
+    const profile = inferStrategicRoleProfileUncached(card, parsedEffects, intentText);
+    if (!byContext) {
+        byContext = new Map();
+        strategicRoleProfileCacheByEffects.set(parsedEffects, byContext);
+    }
+    // A parsed array might occasionally be reused with many edited intent contexts. Keep that
+    // branch bounded; LRU freshness is not needed for this short per-card cache.
+    if (byContext.size >= 8) byContext.clear();
+    byContext.set(signature, profile);
+    strategicRoleProfileCacheStats.computed++;
+    return profile;
+}
+
 function calculateStrategicRoleScore(sourceProfile, candidateProfile, sourceFingerprint = null, candidateFingerprint = null) {
     if (!sourceProfile?.length || !candidateProfile?.length) return 0;
     let best = 0;
@@ -8467,7 +8551,7 @@ function extractNumericWords(text) {
     return out.filter(Number.isFinite);
 }
 
-function buildStrategicRoleFingerprint(card, parsedEffects = [], profile = []) {
+function buildStrategicRoleFingerprintUncached(card, parsedEffects = [], profile = []) {
     const text = strategicRoleCardText(card);
     const lower = text.toLowerCase();
     const topRole = profile?.[0]?.role || null;
@@ -8513,6 +8597,39 @@ function buildStrategicRoleFingerprint(card, parsedEffects = [], profile = []) {
         activated: (parsedEffects || []).some(e => getEffectRepeatabilityProfile(e)?.kind === 'repeatable_activation') || /\bpay\b|\{t\}|\bsacrifice\b.*:\s*/i.test(text),
         strength: sourceRole?.score || 0
     };
+}
+
+
+// The fingerprint repeats text regex scans and several parsed-effect reductions after role inference.
+// Cache it by effect-array identity and profile identity (the profile already includes intent text).
+// Card signature guards against reusing a fingerprint when card metadata is edited/replaced.
+const strategicRoleFingerprintCacheByEffects = new WeakMap();
+const strategicRoleFingerprintCacheStats = { hits: 0, computed: 0 };
+function buildStrategicRoleFingerprint(card, parsedEffects = [], profile = []) {
+    if (!card || typeof card !== 'object' || !Array.isArray(parsedEffects) || !profile || typeof profile !== 'object') {
+        return buildStrategicRoleFingerprintUncached(card, parsedEffects, profile);
+    }
+    let byProfile = strategicRoleFingerprintCacheByEffects.get(parsedEffects);
+    if (!byProfile) {
+        byProfile = new WeakMap();
+        strategicRoleFingerprintCacheByEffects.set(parsedEffects, byProfile);
+    }
+    let byContext = byProfile.get(profile);
+    if (!byContext) {
+        byContext = new Map();
+        byProfile.set(profile, byContext);
+    }
+    const text = strategicRoleCardText(card);
+    const signature = `${normalizeCardNameForIdentity(card.name || '')}|${String(card.type_line || '')}|${Number.isFinite(Number(card.cmc)) ? Number(card.cmc) : ''}|${Array.isArray(card.keywords) ? card.keywords.map(String).join('|') : ''}|${text}`;
+    if (byContext.has(signature)) {
+        strategicRoleFingerprintCacheStats.hits++;
+        return byContext.get(signature);
+    }
+    const fingerprint = buildStrategicRoleFingerprintUncached(card, parsedEffects, profile);
+    if (byContext.size >= 4) byContext.clear();
+    byContext.set(signature, fingerprint);
+    strategicRoleFingerprintCacheStats.computed++;
+    return fingerprint;
 }
 
 const STRATEGIC_INTENT_ROLES = new Set([
@@ -10170,6 +10287,12 @@ const UNIVERSAL_ZONE_TERMS = [
     'battlefield','graveyard','hand','library','stack','exile','command zone','outside the game',
     'ante','sideboard','dungeon','attraction','sticker sheet'
 ];
+// These terms are static for the lifetime of the app. Building/escaping the expression once avoids
+// several array allocations and a RegExp compile on every candidate's universal-profile pass.
+const UNIVERSAL_ZONE_REGEX = new RegExp(
+    '(?:' + UNIVERSAL_ZONE_TERMS.map(escapeMechanicRegexTerm).map(v => v.replace(/\s+/g, '\\s+')).join('|') + ')',
+    'gi'
+);
 const UNIVERSAL_CONTEXT_PATTERNS = {
     target: /\b(?:target|each|all|any|another|one or more|up to|a|an)\s+(?:creature|permanent|artifact|enchantment|land|planeswalker|battle|player|opponent|spell|ability|card|kindred|token|permanents?|creatures?|cards?)\b/gi,
     scope: /\b(?:you control|your opponents? control|each player|each opponent|all players|nonland|nontoken|legendary|nonlegendary|nonbasic|basic|multicolored|monocolored|historic|modified|attacking|blocking|tapped|untapped|dying|damaged|discarded|sacrificed|cast|crewed|equipped|enchanted|opponents?|you|your)\b/gi,
@@ -10183,13 +10306,44 @@ const UNIVERSAL_COUNTER_REGEX = /(?:[+\-−]\d+\/[+\-−]\d+\s*)?\b[a-z][a-z0-9-
 const UNIVERSAL_TOKEN_REGEX = /\b([a-z][a-z0-9' -]{1,32})\s+tokens?\b/gi;
 const UNIVERSAL_MANA_SYMBOL_REGEX = /\{[^}]+\}/g;
 
+// Many mechanical-pair comparisons repeatedly normalize the same small vocabulary (function,
+// zone, target, trigger, resource and scope labels). Memoize this pure operation in a bounded LRU
+// so the hot scoring loops avoid allocating and running the same regex replacements thousands of
+// times. Raw strings are exact cache keys, so this cannot merge values that were distinct before.
+const mechanicTokenNormalizationCache = new Map();
+const mechanicTokenNormalizationCacheStats = { hits: 0, computed: 0, evictions: 0 };
+const MECHANIC_TOKEN_NORMALIZATION_CACHE_MAX = 12000;
 function normalizeMechanicToken(value) {
-    return String(value || '')
+    const raw = String(value || '');
+    if (mechanicTokenNormalizationCache.has(raw)) {
+        mechanicTokenNormalizationCacheStats.hits++;
+        const cached = mechanicTokenNormalizationCache.get(raw);
+        mechanicTokenNormalizationCache.delete(raw);
+        mechanicTokenNormalizationCache.set(raw, cached);
+        return cached;
+    }
+    const normalized = raw
         .toLowerCase()
         .replace(/[’']/g, "'")
         .replace(/[‐‑‒–—]/g, '-')
         .replace(/\s+/g, ' ')
         .trim();
+    mechanicTokenNormalizationCache.set(raw, normalized);
+    mechanicTokenNormalizationCacheStats.computed++;
+    if (mechanicTokenNormalizationCache.size > MECHANIC_TOKEN_NORMALIZATION_CACHE_MAX) {
+        // Amortized eviction keeps the common hit path small while bounding retained strings.
+        const removeCount = Math.max(1024, Math.floor(MECHANIC_TOKEN_NORMALIZATION_CACHE_MAX * 0.12));
+        const iterator = mechanicTokenNormalizationCache.keys();
+        let removed = 0;
+        for (let i = 0; i < removeCount; i++) {
+            const next = iterator.next();
+            if (next.done) break;
+            mechanicTokenNormalizationCache.delete(next.value);
+            removed++;
+        }
+        mechanicTokenNormalizationCacheStats.evictions += removed;
+    }
+    return normalized;
 }
 
 function setCoverage(sourceSet, candidateSet) {
@@ -10199,6 +10353,45 @@ function setCoverage(sourceSet, candidateSet) {
     let overlap = 0;
     a.forEach(v => { if (b.has(v)) overlap++; });
     return overlap / a.size;
+}
+
+// Reuse per-keyword expressions across candidate parses. Previously these three regexes were
+// recompiled for each candidate/effect/profile pass, creating a large amount of short-lived
+// RegExp objects in the hottest structural-scoring path. Bounded LRU keeps user-defined keywords safe.
+const mechanicKeywordRegexCache = new Map();
+const mechanicKeywordRegexCacheStats = { hits: 0, computed: 0, evictions: 0 };
+const MECHANIC_KEYWORD_REGEX_CACHE_MAX = 2048;
+function getMechanicKeywordRegexes(keyword) {
+    const normalized = normalizeMechanicToken(keyword);
+    if (!normalized) return null;
+    const cached = mechanicKeywordRegexCache.get(normalized);
+    if (cached) {
+        mechanicKeywordRegexCacheStats.hits++;
+        mechanicKeywordRegexCache.delete(normalized);
+        mechanicKeywordRegexCache.set(normalized, cached);
+        return cached;
+    }
+    const escaped = escapeMechanicRegexTerm(normalized).replace(/\s+/g, '\\s+');
+    const regexes = {
+        contains: new RegExp('\\b' + escaped + '\\b', 'i'),
+        parameter: new RegExp('\\b' + escaped + '\\b(?:\\s+|[-—:]\\s+)([0-9]+|x|any|all|\\{[^}]+\\})', 'i'),
+        bridgeContains: new RegExp('(?:^|[^a-z0-9])' + escaped + '(?=$|[^a-z0-9])', 'i')
+    };
+    mechanicKeywordRegexCache.set(normalized, regexes);
+    mechanicKeywordRegexCacheStats.computed++;
+    if (mechanicKeywordRegexCache.size > MECHANIC_KEYWORD_REGEX_CACHE_MAX) {
+        const removeCount = Math.max(128, Math.floor(MECHANIC_KEYWORD_REGEX_CACHE_MAX * 0.15));
+        const iterator = mechanicKeywordRegexCache.keys();
+        let removed = 0;
+        for (let i = 0; i < removeCount; i++) {
+            const next = iterator.next();
+            if (next.done) break;
+            mechanicKeywordRegexCache.delete(next.value);
+            removed++;
+        }
+        mechanicKeywordRegexCacheStats.evictions += removed;
+    }
+    return regexes;
 }
 
 function extractMechanicKeywords(card, text) {
@@ -10214,8 +10407,8 @@ function extractMechanicKeywords(card, text) {
     const keywords = new Set(fromCard.map(normalizeMechanicToken).filter(Boolean));
     if (isTextSubset) {
         for (const keyword of [...keywords]) {
-            const escaped = escapeMechanicRegexTerm(keyword).replace(/\s+/g, '\\s+');
-            if (!(new RegExp('\\b' + escaped + '\\b', 'i')).test(String(text))) keywords.delete(keyword);
+            const patterns = getMechanicKeywordRegexes(keyword);
+            if (!patterns?.contains.test(String(text))) keywords.delete(keyword);
         }
     }
     return keywords;
@@ -10225,8 +10418,8 @@ function extractMechanicKeywordParameters(keywords, text) {
     const params = new Set();
     const lowerText = String(text || '').toLowerCase();
     for (const keyword of keywords || []) {
-        const escaped = escapeMechanicRegexTerm(keyword).replace(/\s+/g, '\\s+');
-        const match = lowerText.match(new RegExp('\\b' + escaped + '\\b(?:\\s+|[-—:]\\s+)([0-9]+|x|any|all|\\{[^}]+\\})', 'i'));
+        const patterns = getMechanicKeywordRegexes(keyword);
+        const match = patterns?.parameter.exec(lowerText);
         if (match) params.add(`${keyword}:${match[1] || ''}`);
     }
     return params;
@@ -10283,11 +10476,7 @@ function buildUniversalMechanicProfile(card = null, text = '', parsedEffects = n
         if (effect.canonical?.outcome) canonicalOutcomes.add(normalizeMechanicToken(effect.canonical.outcome));
     }
 
-    const zoneRegex = new RegExp(
-        '(?:' + UNIVERSAL_ZONE_TERMS.map(escapeMechanicRegexTerm).map(v => v.replace(/\s+/g, '\\s+')).join('|') + ')',
-        'gi'
-    );
-    const zones = collectRegexTokens(oracle, zoneRegex);
+    const zones = collectRegexTokens(oracle, UNIVERSAL_ZONE_REGEX);
     const context = {};
     for (const [name, regex] of Object.entries(UNIVERSAL_CONTEXT_PATTERNS)) context[name] = collectRegexTokens(oracle, regex);
     const resources = collectRegexTokens(oracle, UNIVERSAL_RESOURCE_REGEX);
@@ -10395,7 +10584,7 @@ function buildUniversalFunctionalText(card = null, text = '', parsedEffects = nu
     try { parsed = Array.isArray(parsed) ? parsed : parseMTGEffect(oracle); } catch (_) { parsed = []; }
     const profile = buildUniversalMechanicProfile(card, oracle, parsed);
     const parts = [];
-    const canonical = canonicalFunctionToText(getCanonicalFunctions(parsed));
+    const canonical = getCachedCanonicalFunctionText(parsed);
     if (canonical) parts.push(canonical);
     if (profile.keywords.size) parts.push(`keywords ${[...profile.keywords].join(' ')}`);
     const usefulActions = [...profile.actions].filter(x => !UNIVERSAL_GENERIC_TOKENS.has(x));
@@ -11397,10 +11586,8 @@ function inferContextualSemanticMechanics(card, text, directKeywords = new Set()
     const evidence = new Map();
 
     for (const keyword of allKeywords) {
-        const escapedKeyword = escapeMechanicRegexTerm(keyword).replace(/\s+/g, '\\s+');
-        const explicitlyNamedInHighlight = Boolean(escapedKeyword) && new RegExp(
-            `(?:^|[^a-z0-9])${escapedKeyword}(?=$|[^a-z0-9])`, 'i'
-        ).test(highlighted);
+        const keywordPatterns = getMechanicKeywordRegexes(keyword);
+        const explicitlyNamedInHighlight = Boolean(keywordPatterns) && keywordPatterns.bridgeContains.test(highlighted);
         if (directKeywords.has(keyword) || explicitlyNamedInHighlight) {
             inferred.add(keyword);
             evidence.set(keyword, { score: 1, reason: 'keyword-in-highlight' });
@@ -11898,19 +12085,30 @@ function inferMechanicalObject(effect, universalAtoms = new Set()) {
     return null;
 }
 
+// These inventories are constant. Compile once rather than recreating hundreds of keyword/action
+// regexes for every single node in every candidate graph.
+const MECHANICAL_NODE_KEYWORD_ANCHOR_PATTERNS = Object.entries(KEYWORD_MECHANIC_ANCHORS).map(([keyword, mapped]) => ({
+    keyword,
+    mapped,
+    regex: new RegExp('\\b' + escapeMechanicRegexTerm(keyword) + '\\b', 'i')
+}));
+const MECHANICAL_NODE_ACTION_ANCHOR_PATTERNS = UNIVERSAL_RULE_ACTION_TERMS.map(action => ({
+    action,
+    token: normalizeMechanicToken(action),
+    regex: new RegExp('\\b' + escapeMechanicRegexTerm(action).replace(/\\s+/g, '\\\\s+') + '\\b', 'i')
+}));
+
 function mechanicalNodeKeywordAnchors(effect) {
     const anchors = new Set();
     const raw = String(effect?.raw || '').toLowerCase();
-    for (const [keyword, mapped] of Object.entries(KEYWORD_MECHANIC_ANCHORS)) {
-        const re = new RegExp(`\\b${escapeMechanicRegexTerm(keyword)}\\b`, 'i');
-        if (re.test(raw)) {
-            anchors.add(`keyword:${keyword}`);
-            mapped.forEach(x => anchors.add(`anchor:${x}`));
+    for (const entry of MECHANICAL_NODE_KEYWORD_ANCHOR_PATTERNS) {
+        if (entry.regex.test(raw)) {
+            anchors.add(`keyword:${entry.keyword}`);
+            entry.mapped.forEach(x => anchors.add(`anchor:${x}`));
         }
     }
-    for (const action of UNIVERSAL_RULE_ACTION_TERMS) {
-        const re = new RegExp(`\\b${escapeMechanicRegexTerm(action).replace(/\\s+/g, '\\\\s+')}\\b`, 'i');
-        if (re.test(raw)) anchors.add(`action_anchor:${normalizeMechanicToken(action)}`);
+    for (const entry of MECHANICAL_NODE_ACTION_ANCHOR_PATTERNS) {
+        if (entry.regex.test(raw)) anchors.add(`action_anchor:${entry.token}`);
     }
     return anchors;
 }
@@ -12233,12 +12431,19 @@ const OPPOSITE_MECHANICS = new Set([
     'reanimate|mill','mill|reanimate'
 ]);
 
+const mechanicalNodeSignatureCache = new WeakMap();
+function getMechanicalNodeSignatures(node) {
+    if (!node || typeof node !== 'object') return [normalizeMechanicToken(node?.function), normalizeMechanicToken(node?.action), normalizeMechanicToken(node?.outcome)].filter(Boolean);
+    const cached = mechanicalNodeSignatureCache.get(node);
+    if (cached) return cached;
+    const signatures = [node.function, node.action, node.outcome].map(normalizeMechanicToken).filter(Boolean);
+    mechanicalNodeSignatureCache.set(node, signatures);
+    return signatures;
+}
 function hasOppositeMechanicalSignature(a, b) {
-    // Canonical function and family labels can be broader than the action (e.g. both Tap and
-    // Untap map into board-state). Check all available semantic levels, not just function || action.
-    const signatures = node => [node?.function, node?.action, node?.outcome]
-        .map(normalizeMechanicToken).filter(Boolean);
-    const left = signatures(a), right = signatures(b);
+    // These graph-node signatures are immutable; cache normalized labels so every graph-pair check
+    // doesn't allocate a fresh array and normalize the same function/action/outcome fields again.
+    const left = getMechanicalNodeSignatures(a), right = getMechanicalNodeSignatures(b);
     return left.some(x => right.some(y => OPPOSITE_MECHANICS.has(`${x}|${y}`)));
 }
 
@@ -12498,6 +12703,32 @@ function compareMechanicalNodeSetsUnordered(nodesA, nodesB) {
 
     const sourceWeights = source.map(n => Math.max(0.05, n.isCost ? 0.20 : (n.role === 'followup' ? 0.45 : 0.85)));
     const candidateWeights = candidate.map(n => Math.max(0.05, n.isCost ? 0.20 : (n.role === 'followup' ? 0.45 : 0.85)));
+    // The overwhelming majority of simple card texts have one node on at least one side. Avoid
+    // allocating and sorting an n*m pair array for these cases; ties retain the original nested-loop
+    // insertion order (the same result as a stable descending sort).
+    if (source.length === 1 || candidate.length === 1) {
+        let best = null;
+        if (source.length === 1) {
+            for (let j = 0; j < candidate.length; j++) {
+                const detail = compareMechanicalEffectNodes(source[0], candidate[j]);
+                if (detail.score > 0.02 && (!best || detail.score > best.detail.score)) best = { i: 0, j, detail };
+            }
+        } else {
+            for (let i = 0; i < source.length; i++) {
+                const detail = compareMechanicalEffectNodes(source[i], candidate[0]);
+                if (detail.score > 0.02 && (!best || detail.score > best.detail.score)) best = { i, j: 0, detail };
+            }
+        }
+        if (!best) return { sourceCoverage: 0, candidateCoverage: 0, score: 0, matches: [] };
+        const score = best.detail.score;
+        const sourceMatched = sourceWeights[best.i] * score;
+        const candidateMatched = candidateWeights[best.j] * score;
+        const sourceWeight = sourceWeights.reduce((a, b) => a + b, 0) || 1;
+        const candidateWeight = candidateWeights.reduce((a, b) => a + b, 0) || 1;
+        const sourceCoverage = Math.max(0, Math.min(1, sourceMatched / sourceWeight));
+        const candidateCoverage = Math.max(0, Math.min(1, candidateMatched / candidateWeight));
+        return { sourceCoverage, candidateCoverage, score: Math.sqrt(sourceCoverage * candidateCoverage), matches: [{ i: best.i, j: best.j, ...best.detail }] };
+    }
     const pairs = [];
     source.forEach((a, i) => candidate.forEach((b, j) => {
         const detail = compareMechanicalEffectNodes(a, b);
@@ -12591,7 +12822,7 @@ function mechanicalGraphContradictionScore(graphA, graphB, matches = []) {
     return Math.min(0.60, checked ? penalty / checked : penalty);
 }
 
-function calculateMechanicalGraphSimilarity(graphA, graphB) {
+function calculateMechanicalGraphSimilarityUncached(graphA, graphB) {
     if (!graphA || !graphB) return { score: 0, sourceCoverage: 0, candidateCoverage: 0, orderScore: 0, contradiction: 0, matches: [], featureVector: null, evidence: [] };
     const unordered = compareMechanicalNodeSetsUnordered(graphA.nodes, graphB.nodes);
     const sequence = compareMechanicalNodeSequences(graphA.nodes, graphB.nodes);
@@ -12679,6 +12910,30 @@ function calculateMechanicalGraphSimilarity(graphA, graphB) {
         semanticBridgeSimilarity,
         typeCoverage
     };
+}
+
+// Cache full graph-pair results as well as node-pair primitives. Cached graphs are immutable
+// derivatives of exact rules text, so identical graph object pairs are deterministic across repeated
+// scoring paths and benchmark runs. WeakMap keys keep the cache self-pruning.
+const mechanicalGraphSimilarityResultCache = new WeakMap();
+const mechanicalGraphSimilarityCacheStats = { computed: 0, hits: 0 };
+function calculateMechanicalGraphSimilarity(graphA, graphB) {
+    if (!graphA || typeof graphA !== 'object' || !graphB || typeof graphB !== 'object') {
+        return calculateMechanicalGraphSimilarityUncached(graphA, graphB);
+    }
+    let row = mechanicalGraphSimilarityResultCache.get(graphA);
+    if (row?.has(graphB)) {
+        mechanicalGraphSimilarityCacheStats.hits++;
+        return row.get(graphB);
+    }
+    if (!row) {
+        row = new WeakMap();
+        mechanicalGraphSimilarityResultCache.set(graphA, row);
+    }
+    mechanicalGraphSimilarityCacheStats.computed++;
+    const result = calculateMechanicalGraphSimilarityUncached(graphA, graphB);
+    row.set(graphB, result);
+    return result;
 }
 
 function buildMechanicalConsensusGraph(graphs = []) {
@@ -13230,7 +13485,48 @@ function runManaSearchPerformanceOptimizationRegressionSuite({ log = true } = {}
             const universalCached = calculateUniversalMechanicSimilarity(profileA, profileB);
             check(`${name}-universal-cache-stable`, universalLegacy === universalCached && close(universalLegacy.score, universalCached.score), `score=${universalCached.score}`);
         }
-        check('embedding-adaptive-batch-configuration-present', MANASEARCH_EMBED_ACTIVE_EDIT_BATCH === 4 && MANASEARCH_EMBED_RECENT_ACTIVITY_BATCH === 12, 'adaptive batch caps');
+        const roleCard = { name: 'Role Cache Fixture', type_line: 'Enchantment', cmc: 2, oracle_text: 'At the beginning of your upkeep, draw a card.', keywords: [] };
+        const roleEffects = getCachedParsedEffects(roleCard, roleCard.oracle_text);
+        const roleProfileA = inferStrategicRoleProfile(roleCard, roleEffects, '');
+        const roleHitsBefore = strategicRoleProfileCacheStats.hits;
+        const roleProfileB = inferStrategicRoleProfile(roleCard, roleEffects, '');
+        check('strategic-role-profile-cache-reuses-exact-result', roleProfileA === roleProfileB && strategicRoleProfileCacheStats.hits > roleHitsBefore, 'profile identity and cache-hit counter');
+        const fingerprintA = buildStrategicRoleFingerprint(roleCard, roleEffects, roleProfileA);
+        const fingerprintHitsBefore = strategicRoleFingerprintCacheStats.hits;
+        const fingerprintB = buildStrategicRoleFingerprint(roleCard, roleEffects, roleProfileA);
+        check('strategic-role-fingerprint-cache-reuses-exact-result', fingerprintA === fingerprintB && strategicRoleFingerprintCacheStats.hits > fingerprintHitsBefore, 'fingerprint identity and cache-hit counter');
+        check('embedding-adaptive-batch-configuration-present', MANASEARCH_EMBED_ACTIVE_EDIT_BATCH === 4 && MANASEARCH_EMBED_RECENT_ACTIVITY_BATCH === 12 && getManaSearchEmbeddingBatchSize() >= 16, 'adaptive batch caps');
+        check('serialized-scryfall-rate-safe-gap', SCRYFALL_MAX_CONCURRENT_REQUESTS === 1 && SCRYFALL_MIN_DISPATCH_GAP_MS >= 120 && SCRYFALL_MIN_DISPATCH_GAP_MS <= 200, `concurrency=${SCRYFALL_MAX_CONCURRENT_REQUESTS}; gap=${SCRYFALL_MIN_DISPATCH_GAP_MS}`);
+        check('mechanic-token-normalization-is-stable', normalizeMechanicToken('  Islandwalk—Only  ') === normalizeMechanicToken('  Islandwalk—Only  ') && normalizeMechanicToken('  Islandwalk—Only  ') === "islandwalk-only", 'normalization memo must preserve the original function');
+        const keywordRegexA = getMechanicKeywordRegexes('double strike');
+        const regexHitsBefore = mechanicKeywordRegexCacheStats.hits;
+        const keywordRegexB = getMechanicKeywordRegexes('double strike');
+        check('keyword-regex-cache-reuses-compiled-patterns', keywordRegexA === keywordRegexB && mechanicKeywordRegexCacheStats.hits > regexHitsBefore && keywordRegexA.contains.test('double strike') && keywordRegexA.parameter.test('double strike 2'), 'same keyword should reuse stable compiled expressions');
+        check('mechanical-anchor-patterns-precompiled', MECHANICAL_NODE_KEYWORD_ANCHOR_PATTERNS.length === Object.keys(KEYWORD_MECHANIC_ANCHORS).length && MECHANICAL_NODE_ACTION_ANCHOR_PATTERNS.length === UNIVERSAL_RULE_ACTION_TERMS.length && MECHANICAL_NODE_ACTION_ANCHOR_PATTERNS.every(x => x.regex instanceof RegExp), 'static anchor inventories should be compiled once');
+        const anchorFixtures = [
+            'Flying, lifelink, and vigilance.',
+            'Whenever you cast an instant or sorcery spell, draw a card.',
+            'At the beginning of your upkeep, create a Treasure token.',
+            'Return target creature from your graveyard to your hand.',
+            'Double strike; destroy target artifact.'
+        ];
+        for (let fi = 0; fi < anchorFixtures.length; fi++) {
+            const raw = anchorFixtures[fi].toLowerCase();
+            const legacyAnchors = new Set();
+            for (const [keyword, mapped] of Object.entries(KEYWORD_MECHANIC_ANCHORS)) {
+                if (new RegExp('\\b' + escapeMechanicRegexTerm(keyword) + '\\b', 'i').test(raw)) {
+                    legacyAnchors.add(`keyword:${keyword}`);
+                    mapped.forEach(x => legacyAnchors.add(`anchor:${x}`));
+                }
+            }
+            for (const action of UNIVERSAL_RULE_ACTION_TERMS) {
+                const re = new RegExp(`\\b${escapeMechanicRegexTerm(action).replace(/\\s+/g, '\\\\s+')}\\b`, 'i');
+                if (re.test(raw)) legacyAnchors.add(`action_anchor:${normalizeMechanicToken(action)}`);
+            }
+            const optimizedAnchors = mechanicalNodeKeywordAnchors({ raw });
+            check(`precompiled-mechanical-anchors-equivalent-${fi + 1}`, [...legacyAnchors].sort().join('|') === [...optimizedAnchors].sort().join('|'), anchorFixtures[fi]);
+        }
+        check('normalization-cache-statistics-available', Number.isFinite(mechanicTokenNormalizationCacheStats.hits) && Number.isFinite(mechanicTokenNormalizationCacheStats.computed) && Number.isFinite(mechanicTokenNormalizationCacheStats.evictions), 'cache should expose hit/computation/eviction counts');
         check('background-yield-budget-remains-cooperative', MANASEARCH_BACKGROUND_SLICE_BUDGET_MS >= 10 && MANASEARCH_BACKGROUND_SLICE_BUDGET_MS <= 16, String(MANASEARCH_BACKGROUND_SLICE_BUDGET_MS));
     } catch (error) {
         check('suite-execution', false, error?.stack || error?.message || String(error));
@@ -15139,10 +15435,11 @@ function setCachedSearch(cacheKey, value) {
 // once, so true serialization (one in flight at a time) is what actually keeps every stream under
 // the limiter regardless of how many pages it needs.
 const SCRYFALL_MAX_CONCURRENT_REQUESTS = 1;
-// Keep the complete retrieval pipeline intact, but use a deliberately conservative steady-state
-// cadence. This is still well below Scryfall's published <10 requests/second guidance and leaves
-// headroom for browser retries, other tabs, and traffic sharing the same public IP.
-const SCRYFALL_MIN_DISPATCH_GAP_MS = 400;
+// Keep requests strictly serialized, but avoid the prior 400ms idle gap that added substantial
+// latency to every independent search lane. A 150ms minimum gap caps this app at ~6.7 dispatches/s
+// before network latency is counted, below Scryfall's documented <10 requests/second guidance.
+// The single in-flight request limit and client-wide 429 circuit-breaker remain unchanged.
+const SCRYFALL_MIN_DISPATCH_GAP_MS = 150;
 
 let scryfallActiveRequests = 0;
 let scryfallLastDispatchAt = 0;
@@ -15818,6 +16115,22 @@ function normalizeOracleForEmbedding(text, cardName = '') {
     return value.replace(/[^a-z0-9+\-\s]/gi, ' ')
         .replace(/\s+/g, ' ')
         .trim();
+}
+
+// Oracle normalization is called once while warming the embedding cache and again while scoring
+// the same candidate. Cache per-card normalized text so each card's regex/token cleanup happens once.
+const normalizedOracleEmbeddingTextByCard = new WeakMap();
+function getCachedOracleEmbeddingText(card, text) {
+    const rawText = String(text || '');
+    const name = String(card?.name || '');
+    if (card && typeof card === 'object') {
+        const prior = normalizedOracleEmbeddingTextByCard.get(card);
+        if (prior && prior.rawText === rawText && prior.name === name) return prior.value;
+        const value = normalizeOracleForEmbedding(rawText, name);
+        normalizedOracleEmbeddingTextByCard.set(card, { rawText, name, value });
+        return value;
+    }
+    return normalizeOracleForEmbedding(rawText, name);
 }
 
 let semanticCosineBaseline = 0.30;
@@ -17076,7 +17389,7 @@ function buildSemanticRetrievalText(card, parsedEffects = null) {
     let fnText = '';
     try {
         const parsed = parsedEffects || parseMTGEffect(extractBulkOracleCardText(card));
-        fnText = canonicalFunctionToText(getCanonicalFunctions(parsed));
+        fnText = getCachedCanonicalFunctionText(parsed);
     } catch (_) {
         fnText = '';
     }
@@ -17600,6 +17913,16 @@ async function embedTextBatch(texts, extractor) {
     return vectors;
 }
 
+function getManaSearchEmbeddingBatchSize() {
+    // Larger batches reduce transformer invocation overhead on capable desktops. Keep mobile and
+    // low-core devices conservative; batch failures still bisect to a backend-compatible size.
+    const cores = typeof navigator !== 'undefined' ? Number(navigator.hardwareConcurrency) || 0 : 0;
+    const memory = typeof navigator !== 'undefined' ? Number(navigator.deviceMemory) || 0 : 0;
+    if ((memory > 0 && memory <= 4) || (cores > 0 && cores <= 4)) return 16;
+    if ((memory >= 8 && cores >= 8) || (!memory && cores >= 12)) return 48;
+    return 32;
+}
+
 async function warmEmbeddingCache(texts, extractor, diagnostics, batchSize = 32, isCancelled = null) {
     const unique = [...new Set(texts.filter(Boolean))].filter(t => !embeddingCache.has(t));
     // Length-bucket the inputs before batching. The feature-extraction pipeline pads each batch to
@@ -17615,16 +17938,26 @@ async function warmEmbeddingCache(texts, extractor, diagnostics, batchSize = 32,
     // use smaller batches, while idle searches recover full batching throughput. Every batch yields.
     const embedChunkWithFallback = async (chunk) => {
         throwIfSearchCancelled(isCancelled);
+        const batchStart = getManaResponsivenessNow();
         try {
             const vectors = await embedTextBatch(chunk, extractor);
             chunk.forEach((t, idx) => {
                 embeddingCache.set(t, vectors[idx]);
                 if (diagnostics) diagnostics.computed++;
             });
+            if (diagnostics) {
+                diagnostics.inferenceBatchCalls = (diagnostics.inferenceBatchCalls || 0) + 1;
+                diagnostics.inferenceBatchItems = (diagnostics.inferenceBatchItems || 0) + chunk.length;
+                diagnostics.inferenceBatchMaxSize = Math.max(diagnostics.inferenceBatchMaxSize || 0, chunk.length);
+                diagnostics.inferenceBatchMs = (diagnostics.inferenceBatchMs || 0) + (getManaResponsivenessNow() - batchStart);
+            }
         } catch (batchErr) {
-            // One unusually long or backend-sensitive text should not force every sibling in a large
-            // batch through serialized single-text inference. Bisect until the backend-compatible
-            // batch size is found; a single failing text retains the original scalar fallback.
+            if (diagnostics) {
+                diagnostics.inferenceBatchFailures = (diagnostics.inferenceBatchFailures || 0) + 1;
+                diagnostics.inferenceFallbackSplits = (diagnostics.inferenceFallbackSplits || 0) + (chunk.length > 1 ? 1 : 0);
+            }
+            // Split only the incompatible batch. This preserves output semantics while salvaging
+            // throughput from the compatible siblings instead of serializing the whole request.
             if (chunk.length > 1) {
                 const middle = Math.floor(chunk.length / 2);
                 await embedChunkWithFallback(chunk.slice(0, middle));
@@ -17639,7 +17972,7 @@ async function warmEmbeddingCache(texts, extractor, diagnostics, batchSize = 32,
         throwIfSearchCancelled(isCancelled);
         const nextTextLength = String(unique[i] || '').length;
         const textBatchCap = nextTextLength > 1600 ? 8
-            : (nextTextLength > 1000 ? 16 : (nextTextLength > 600 ? 24 : batchSize));
+            : (nextTextLength > 1000 ? 16 : (nextTextLength > 600 ? Math.min(32, batchSize) : batchSize));
         // Keep cooperative inference responsive without collapsing model throughput to scalar calls.
         // A four-vector batch still yields after completion during active editing; recent UI activity
         // uses a medium batch, and idle searches use the full length-bounded throughput batch.
@@ -23012,6 +23345,11 @@ async function scoreCardBatch({
     };
     __emitScoreProgress('setup', 0, cards.length, true);
     const __pairCacheStatsAtStart = { ...mechanicalPairCacheStats };
+    const __graphSimilarityStatsAtStart = { ...mechanicalGraphSimilarityCacheStats };
+    const __keywordRegexStatsAtStart = { ...mechanicKeywordRegexCacheStats };
+    const __tokenNormalizationStatsAtStart = { ...mechanicTokenNormalizationCacheStats };
+    const __strategicRoleCacheStatsAtStart = { ...strategicRoleProfileCacheStats };
+    const __strategicFingerprintCacheStatsAtStart = { ...strategicRoleFingerprintCacheStats };
     const rawWM = weights.mechanical ?? 45;
     const rawWS = weights.synergy ?? 10;
     const rawWC = weights.context ?? 20;
@@ -23090,13 +23428,13 @@ async function scoreCardBatch({
     // silently fell back to lexical-only scoring for that card. Everywhere else in this file is
     // careful to surface why a result looks the way it does; a per-card embedding failure used to
     // vanish into a `null` with nothing recording that it happened (review: embedding diagnostics).
-    const embeddingDiagnostics = { cacheHits: 0, computed: 0, failed: 0, skippedForBudget: 0 };
+    const embeddingDiagnostics = { cacheHits: 0, computed: 0, failed: 0, skippedForBudget: 0, inferenceBatchCalls: 0, inferenceBatchItems: 0, inferenceBatchMaxSize: 0, inferenceBatchMs: 0, inferenceBatchFailures: 0, inferenceFallbackSplits: 0 };
 
     // Functional embedding target: the source card's canonical function rendered as normalized
     // text. Embedding THIS instead of only raw Oracle wording means the model compares MTG
     // meaning rather than being asked to infer mechanics from arbitrary phrasing - which is the
     // whole point when the alternative card is worded completely differently (review Priority 8).
-    const sourceFunctionText = canonicalFunctionToText(getCanonicalFunctions(parsedSourceCard)) ||
+    const sourceFunctionText = getCachedCanonicalFunctionText(parsedSourceCard) ||
         buildUniversalFunctionalText(sourceCard, sourceTextToParse, parsedSourceCard);
     let sourceFunctionVector = suppliedSourceFunctionVector;
     if (!sourceFunctionVector && extractor && extractor.type !== 'fallback' && sourceFunctionText) {
@@ -23148,7 +23486,7 @@ async function scoreCardBatch({
         // Synergy and Category both classify the candidate's own strategic role. Their historical
         // inputs are the same full card text + this parsed card, so compute it once and reuse it.
         const categoryTargetText = strategicRoleCardText(card);
-        const categoryTargetProfile = categoryTargetText === cardText
+        const categoryTargetProfile = categoryTargetText.trim() === String(cardText || '').trim()
             ? candidateMechanicProfile
             : getCachedMechanicalProfile(card, categoryTargetText, parsedCandidateCard);
         const categoryTargetRoleProfile = inferStrategicRoleProfile(card, parsedCandidateCard, '');
@@ -23339,6 +23677,20 @@ async function scoreCardBatch({
         graphNodeComputed: mechanicalPairCacheStats.graphNodeComputed - __pairCacheStatsAtStart.graphNodeComputed,
         graphNodeHits: mechanicalPairCacheStats.graphNodeHits - __pairCacheStatsAtStart.graphNodeHits
     };
+    __scoreStageTimings.reuseCaches = {
+        graphSimilarityHits: mechanicalGraphSimilarityCacheStats.hits - __graphSimilarityStatsAtStart.hits,
+        graphSimilarityComputed: mechanicalGraphSimilarityCacheStats.computed - __graphSimilarityStatsAtStart.computed,
+        strategicRoleHits: strategicRoleProfileCacheStats.hits - __strategicRoleCacheStatsAtStart.hits,
+        strategicRoleComputed: strategicRoleProfileCacheStats.computed - __strategicRoleCacheStatsAtStart.computed,
+        roleFingerprintHits: strategicRoleFingerprintCacheStats.hits - __strategicFingerprintCacheStatsAtStart.hits,
+        roleFingerprintComputed: strategicRoleFingerprintCacheStats.computed - __strategicFingerprintCacheStatsAtStart.computed,
+        keywordRegexHits: mechanicKeywordRegexCacheStats.hits - __keywordRegexStatsAtStart.hits,
+        keywordRegexComputed: mechanicKeywordRegexCacheStats.computed - __keywordRegexStatsAtStart.computed,
+        keywordRegexEvictions: mechanicKeywordRegexCacheStats.evictions - __keywordRegexStatsAtStart.evictions,
+        tokenNormalizationHits: mechanicTokenNormalizationCacheStats.hits - __tokenNormalizationStatsAtStart.hits,
+        tokenNormalizationComputed: mechanicTokenNormalizationCacheStats.computed - __tokenNormalizationStatsAtStart.computed,
+        tokenNormalizationEvictions: mechanicTokenNormalizationCacheStats.evictions - __tokenNormalizationStatsAtStart.evictions
+    };
     const __cacheCalibrationStartedAt = __scoreNow();
     if (embeddingCache.size >= 8) calibrateSemanticCosineFromCache();
     __scoreStageTimings.cacheCalibrationMs = __scoreNow() - __cacheCalibrationStartedAt;
@@ -23511,16 +23863,16 @@ async function scoreCardBatch({
         for (const card of semanticEligible) {
             if (card.contextScore !== undefined) continue;
             const cardText = card.oracle_text || (card.card_faces ? card.card_faces.map(f => f.oracle_text).join(' ') : '');
-            if (hasSemanticEngine && cardText) textsToEmbed.push(normalizeOracleForEmbedding(cardText, card.name));
+            if (hasSemanticEngine && cardText) textsToEmbed.push(getCachedOracleEmbeddingText(card, cardText));
             if (sourceFunctionVector && card._parsedEffects) {
-                const candidateFunctionText = canonicalFunctionToText(getCanonicalFunctions(card._parsedEffects));
+                const candidateFunctionText = getCachedCanonicalFunctionText(card._parsedEffects);
                 if (candidateFunctionText) textsToEmbed.push(candidateFunctionText);
             }
         }
         __scoreStageTimings.embeddingTextPreparationMs = __scoreNow() - __embeddingTextPrepStartedAt;
         __emitScoreProgress('embeddings', 0, cards.length, true);
         const __embeddingWarmStartedAt = __scoreNow();
-        await warmEmbeddingCache(textsToEmbed, extractor, embeddingDiagnostics, 32, isCancelled);
+        await warmEmbeddingCache(textsToEmbed, extractor, embeddingDiagnostics, getManaSearchEmbeddingBatchSize(), isCancelled);
         __scoreStageTimings.embeddingWarmCacheMs = __scoreNow() - __embeddingWarmStartedAt;
     }
 
@@ -23540,7 +23892,7 @@ async function scoreCardBatch({
             // The cache was already warmed above, so this is a cache read, not a fresh model call.
             let semanticScore = null;
             if (hasSemanticEngine && cardText && semanticEligibleSet.has(card)) {
-                const cardVector = await getCachedEmbedding(normalizeOracleForEmbedding(cardText, card.name), extractor, embeddingDiagnostics);
+                const cardVector = await getCachedEmbedding(getCachedOracleEmbeddingText(card, cardText), extractor, embeddingDiagnostics);
                 if (cardVector) {
                     const semanticQueryVector = Number.isFinite(card._semanticRetrievalSimilarity)
                         ? semanticRetrievalTargetVector
@@ -23557,7 +23909,7 @@ async function scoreCardBatch({
             // one is weighted higher (review Priority 8).
             let functionScore = null;
             if (sourceFunctionVector && card._parsedEffects && semanticEligibleSet.has(card)) {
-                const candidateFunctionText = canonicalFunctionToText(getCanonicalFunctions(card._parsedEffects)) ||
+                const candidateFunctionText = getCachedCanonicalFunctionText(card._parsedEffects) ||
                     buildUniversalFunctionalText(card, cardText, card._parsedEffects);
                 if (candidateFunctionText) {
                     const fnVector = await getCachedEmbedding(candidateFunctionText, extractor, embeddingDiagnostics);
@@ -23871,6 +24223,7 @@ async function scoreCardBatch({
         __scoreStageTimings.semanticPassMs + __scoreStageTimings.calibrationMs + __scoreStageTimings.finalBlendMs;
     __scoreStageTimings.unattributedMs = Math.max(0, __scoreStageTimings.totalMs - __timedStagesMs);
     embeddingDiagnostics.stageTimings = { ...__scoreStageTimings };
+    embeddingDiagnostics.reuseCaches = { ...(__scoreStageTimings.reuseCaches || {}) };
     return { embeddingDiagnostics, semanticCalibration };
 }
 async function executeRelatedCardSearch() {
@@ -26512,7 +26865,7 @@ async function findSimilarCards() {
         const sourceOracleVector = semanticRetrieval?.queryVector || null;
         const sourceSemanticRetrievalVector = semanticRetrieval?.semanticRetrievalVector || sourceOracleVector;
         if (extractor && extractor.type !== 'fallback') {
-            const sourceFunctionText = canonicalFunctionToText(getCanonicalFunctions(sourceParsedEffects));
+            const sourceFunctionText = getCachedCanonicalFunctionText(sourceParsedEffects);
             if (sourceFunctionText) sourceFunctionVector = await getCachedEmbedding(sourceFunctionText, extractor);
         }
         let resultsG = semanticRetrieval?.hydrated || [];
@@ -26762,9 +27115,9 @@ if (candidates.length > 0) {
             if (requestId !== searchRequestId) return;
             const card = candidates[candidateIndex];
             const cardText = card.oracle_text || (card.card_faces ? card.card_faces.map(f => f.oracle_text || '').join(' ') : '');
-            const candidateFunctionText = card._parsedEffects ? canonicalFunctionToText(getCanonicalFunctions(card._parsedEffects)) : null;
+            const candidateFunctionText = card._parsedEffects ? getCachedCanonicalFunctionText(card._parsedEffects) : null;
             const functionVector = candidateFunctionText ? (embeddingCache.get(candidateFunctionText) || null) : null;
-            const oracleVector = cardText ? (embeddingCache.get(normalizeOracleForEmbedding(cardText, card.name)) || null) : null;
+            const oracleVector = cardText ? (embeddingCache.get(getCachedOracleEmbeddingText(card, cardText)) || null) : null;
             if (functionVector || oracleVector) recordInSessionSemanticCorpus(card, functionVector, oracleVector);
             if ((candidateIndex & 63) === 63) {
                 const now = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
@@ -26947,7 +27300,7 @@ if (candidates.length > 0) {
         // embeddingCache is a cache lookup, not a new model call - this diversity pass costs
         // nothing beyond arithmetic on vectors that already exist.
         const vectorOf = (card) => {
-            const functionText = card._parsedEffects ? canonicalFunctionToText(getCanonicalFunctions(card._parsedEffects)) : null;
+            const functionText = card._parsedEffects ? getCachedCanonicalFunctionText(card._parsedEffects) : null;
             if (functionText && embeddingCache.has(functionText)) return embeddingCache.get(functionText);
             const oracleText = card.oracle_text || (card.card_faces ? card.card_faces.map(f => f.oracle_text).join(' ') : '');
             const normalizedOracle = oracleText ? normalizeOracleForEmbedding(oracleText, card.name) : '';
@@ -27420,7 +27773,7 @@ function buildDiverseOrder(cards, criteria = 'overall') {
     const pool = input.slice(0, 80);
     const rest = input.slice(80);
     const vectorOf = card => {
-        const functionText = card?._parsedEffects ? canonicalFunctionToText(getCanonicalFunctions(card._parsedEffects)) : null;
+        const functionText = card?._parsedEffects ? getCachedCanonicalFunctionText(card._parsedEffects) : null;
         if (functionText && embeddingCache.has(functionText)) return embeddingCache.get(functionText);
         const oracleText = card?.oracle_text || (card?.card_faces ? card.card_faces.map(f => f.oracle_text || '').join(' ') : '');
         const normalized = oracleText ? normalizeOracleForEmbedding(oracleText, card?.name) : '';
@@ -27461,7 +27814,7 @@ async function buildDiverseOrderResponsively(cards, criteria = 'overall') {
     const pool = input.slice(0, 80);
     const rest = input.slice(80);
     const vectorOf = card => {
-        const functionText = card?._parsedEffects ? canonicalFunctionToText(getCanonicalFunctions(card._parsedEffects)) : null;
+        const functionText = card?._parsedEffects ? getCachedCanonicalFunctionText(card._parsedEffects) : null;
         if (functionText && embeddingCache.has(functionText)) return embeddingCache.get(functionText);
         const oracleText = card?.oracle_text || (card?.card_faces ? card.card_faces.map(f => f.oracle_text || '').join(' ') : '');
         const normalized = oracleText ? normalizeOracleForEmbedding(oracleText, card?.name) : '';
