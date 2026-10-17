@@ -1,6 +1,6 @@
-/* ManaSearch build 20261017-96 */
+/* ManaSearch build 20261017-99 */
 // ManaSearch deployment build marker. Bump this whenever app.js changes so cached-module issues are easy to diagnose.
-const MANASEARCH_APP_BUILD = '20261017-96';
+const MANASEARCH_APP_BUILD = '20261017-99';
 console.info(`[ManaSearch] app.js build ${MANASEARCH_APP_BUILD}`);
 
 // State Management
@@ -5515,8 +5515,8 @@ function parseZoneMovementEffect(clause) {
     // entirely and fell straight to "generic" - confirmed on a real benchmark run where Exhume
     // ("Each player puts a creature card from their graveyard onto the battlefield") produced zero
     // canonical functions at all, the single highest-impact case found by scoring analysis.
-    const hasMovementVerb = /\b(returns?|puts?|moves?|sacrifices?|destroys?|exiles?|discards?|mills?|draws?)\b/i.test(text);
-    if (!hasMovementVerb) return null;
+    const firstMovementVerb = text.match(/\b(returns?|puts?|moves?|sacrifices?|destroys?|exiles?|discards?|mills?|draws?)\b(?=\s+)/i)?.[1]?.toLowerCase() || null;
+    if (!firstMovementVerb) return null;
 
     const effect = {
         action: null,
@@ -5551,42 +5551,48 @@ function parseZoneMovementEffect(clause) {
     if (/\bunder\s+(?:an?\s+)?opponent(?:'s|’s)\s+control\b/i.test(text)) effect.recipientScope = 'opponent';
     else if (/\bunder\s+your\s+control\b/i.test(text)) effect.recipientScope = 'you';
 
-    if (/\b(returns?|puts?|moves?)\b/i.test(text)) {
-        effect.action = /\breturns?\b/i.test(text) ? "return" : "put";
+    if (/^(?:returns?|puts?|moves?)$/.test(firstMovementVerb)) {
+        effect.action = /^returns?$/.test(firstMovementVerb) ? "return" : "put";
         const match = text.match(/\b(?:returns?|puts?|moves?)\s+(?:target\s+|all\s+|each\s+)?([a-z\s\-]+?)\s*(?:card|creature|permanent|artifact|enchantment|land|planeswalker)s?\b/i);
         if (match) effect.restriction = extractMTGRestrictions(match[1]);
         effect.object = text.includes('creature') ? 'creature' : (text.includes('land') ? 'land' : 'card');
-    } else if (/\bsacrifices?\b/i.test(text)) {
+    } else if (/^sacrifices?$/.test(firstMovementVerb)) {
         effect.action = "sacrifice";
         effect.object = "permanent";
         if (!effect.from) effect.from = "battlefield";
         if (!effect.to) effect.to = "graveyard";
         const sacMatch = text.match(/\bsacrifices?\s+(?:a|an|target|each)?\s*([a-z\s\-]+?)\s*(?:creature|permanent|artifact|enchantment|land)s?\b/i);
         if (sacMatch) effect.restriction = extractMTGRestrictions(sacMatch[1]);
-    } else if (/\bdestroys?\b/i.test(text)) {
+    } else if (/^destroys?$/.test(firstMovementVerb)) {
         effect.action = "destroy";
         effect.object = "permanent";
         if (!effect.from) effect.from = "battlefield";
         if (!effect.to) effect.to = "graveyard";
         const destroyMatch = text.match(/\bdestroys?\s+(?:target|all|each)?\s*([a-z\s\-]+?)\s*(?:creature|permanent|artifact|enchantment|land|planeswalker)s?\b/i);
         if (destroyMatch) effect.restriction = extractMTGRestrictions(destroyMatch[1]);
-    } else if (/\bexiles?\b/i.test(text)) {
+    } else if (/^exiles?$/.test(firstMovementVerb)) {
         effect.action = "exile";
-        effect.object = text.includes('spell') ? 'spell' : 'card';
+        effect.object = /\bpermanents?\b/i.test(text) ? 'permanent'
+            : /\bcreatures?\b/i.test(text) ? 'creature'
+            : /\bartifacts?\b/i.test(text) ? 'artifact'
+            : /\benchantments?\b/i.test(text) ? 'enchantment'
+            : /\bplaneswalkers?\b/i.test(text) ? 'planeswalker'
+            : /\blands?\b/i.test(text) ? 'land'
+            : /\bspells?\b/i.test(text) ? 'spell' : 'card';
         if (!effect.to) effect.to = "exile";
         const exileMatch = text.match(/\bexiles?\s+(?:target|all|each)?\s*([a-z\s\-]+?)\s*(?:card|creature|permanent|artifact|enchantment|land|spell)s?\b/i);
         if (exileMatch) effect.restriction = extractMTGRestrictions(exileMatch[1]);
-    } else if (/\bdiscards?\b/i.test(text)) {
+    } else if (/^discards?$/.test(firstMovementVerb)) {
         effect.action = "discard";
         effect.object = "card";
         if (!effect.from) effect.from = "hand";
         if (!effect.to) effect.to = "graveyard";
-    } else if (/\bmills?\b/i.test(text)) {
+    } else if (/^mills?$/.test(firstMovementVerb)) {
         effect.action = "mill";
         effect.object = "card";
         if (!effect.from) effect.from = "library";
         if (!effect.to) effect.to = "graveyard";
-    } else if (hasExplicitCardDrawAction(text)) {
+    } else if (/^draws?$/.test(firstMovementVerb) && hasExplicitCardDrawAction(text)) {
         effect.action = "draw";
         effect.object = "card";
         if (!effect.from) effect.from = "library";
@@ -5944,9 +5950,18 @@ function parseTokenEffect(clause) {
  * @returns {Object|null}
  */
 function parseAnthemEffect(clause) {
-    const text = clause.toLowerCase();
+    const text = String(clause || '').toLowerCase().replace(/[’]/g, "'");
     const anthemMatch = text.match(/(other\s+)?([a-z\s\-]*?)\s*creatures?\s*(you control)?\s*get\s*([\+\-][\dx\/*]+\/[\+\-][\dx\/*]+)/i);
-    const keywordMatch = text.match(/(other\s+)?([a-z\s\-]*?)\s*creatures?\s*(you control)?\s*have\s+([a-z\s,]+)/i);
+    const keywordVocabulary = '(?:flying|trample|lifelink|deathtouch|vigilance|islandwalk|haste|reach|menace|ward|hexproof|indestructible|first strike|double strike|protection from [a-z]+)';
+    // Keyword grants may follow a stat buff in the SAME clause: "creatures you control get
+    // +X/+X and gain flying". Search within that subject's local clause rather than requiring
+    // "have flying" to immediately follow "creatures you control".
+    const keywordMatch = text.match(new RegExp(
+        // Require the plural team subject and explicit control scope. A clause such as
+        // "If you cast a creature spell this way, it gains haste" affects one spell/creature,
+        // not your team, and must not become a false Anthem mechanic. Captures only the optional
+        // "other" and granted-keyword list, never a prefix from an earlier trigger clause.
+        `\\b(other\\s+)?creatures\\s+you control[\\s\\S]{0,120}?\\b(?:gain|gains|have|has)\\s+(${keywordVocabulary}(?:\\s*(?:,|and|or)\\s*${keywordVocabulary})*)`, 'i'));
 
     if (!anthemMatch && !keywordMatch) return null;
 
@@ -5965,11 +5980,12 @@ function parseAnthemEffect(clause) {
 
     if (keywordMatch) {
         isOther = isOther || Boolean(keywordMatch[1]);
-        if (rawSubtype === "all" && keywordMatch[2]) rawSubtype = keywordMatch[2].trim();
-        controller = keywordMatch[3] ? "you_control" : controller;
-        
-        const possibleKeywords = ['flying', 'trample', 'lifelink', 'deathtouch', 'vigilance', 'islandwalk', 'haste', 'reach'];
-        grantedKeywords = possibleKeywords.filter(kw => keywordMatch[4].includes(kw));
+        // The pattern itself confirms a team-wide, explicitly controlled creature subject.
+        controller = "you_control";
+
+        const possibleKeywords = ['flying', 'trample', 'lifelink', 'deathtouch', 'vigilance', 'islandwalk', 'haste', 'reach', 'menace', 'ward', 'hexproof', 'indestructible', 'first strike', 'double strike'];
+        const keywordClause = String(keywordMatch[2] || '');
+        grantedKeywords = possibleKeywords.filter(kw => new RegExp(`\\b${kw.replace(/ /g, '\\s+')}\\b`, 'i').test(keywordClause));
     }
 
     return {
@@ -5980,7 +5996,10 @@ function parseAnthemEffect(clause) {
         controller: controller,
         powerToughness: pt,
         grantedKeywords: grantedKeywords,
-        isStatic: !/until end of turn/i.test(text)
+        scalingProfile: /\bwhere\s+x\s+is\s+the\s+number\s+of\s+creatures?\s+you control\b/i.test(text)
+            ? { kind: 'count_scaled', source: 'creatures_you_control', quantityUnit: 'creatures', operation: 'power_and_toughness' }
+            : (/\b[+\-]x\/[+\-]x\b/i.test(text) ? { kind: 'variable_x', source: 'defined_elsewhere', quantityUnit: null, operation: 'power_and_toughness' } : null),
+        isStatic: !/\buntil end of turn\b/i.test(text)
     };
 }
 // =============================================================================================
@@ -6772,8 +6791,16 @@ function deriveCanonicalFunction(effect) {
     const directlyExilesTopLibrary = /\bexiles?\s+(?:the\s+)?top\s+(?:(?:one|two|three|four|five|six|seven|eight|nine|ten|\d+)\s+)?cards?\s+of\s+(?:your|their|that player(?:'s)?|that opponent(?:'s)?|an opponent(?:'s)?|a player(?:'s)?)\s+library\b/i.test(ruleContext);
     const looksAtThenExilesLibraryCard = /\b(?:look at|reveal)\b[\s\S]{0,140}\btop\s+(?:(?:one|two|three|four|five|six|seven|eight|nine|ten|\d+)\s+)?cards?\s+of\s+(?:your|their|that player(?:'s)?|that opponent(?:'s)?|an opponent(?:'s)?|a player(?:'s)?)\s+library\b[\s\S]{0,170}\bexiles?\s+(?:it|that card)\b/i.test(ruleContext);
     const libraryTopExile = a === 'exile' && (effect.from === 'library' || directlyExilesTopLibrary || looksAtThenExilesLibraryCard);
-    const from = effect.from || (libraryTopExile ? 'library' : null);
-    const to = effect.to || (libraryTopExile ? 'exile' : null);
+    // Secondary atoms are re-parsed from a verb offset and can lose structured zone fields. Recover
+    // the source zone from the atom's own words and its owning clause before assigning a function:
+    // "exile a card from your hand ... and put time counters on it" is hand processing, never removal.
+    const explicitExileFrom = a === 'exile'
+        ? (ruleContext.match(/\bexiles?\b[\s\S]{0,180}\bfrom\s+(?:your|their|its owner's|that player's|a player's|the player's|the opponent's)?\s*(hand|library|battlefield|graveyard|exile)\b/i) || [])[1]?.toLowerCase() || null
+        : null;
+    const inferredExileFrom = a === 'exile' && !explicitExileFrom && /\bexiles?\s+(?:(?:target|all|each|up to\s+\d+|a|an|the)\s+)?(?:creatures?|permanents?|artifacts?|enchantments?|planeswalkers?|lands?)\b/i.test(ruleContext)
+        ? 'battlefield' : null;
+    const from = explicitExileFrom || effect.from || (libraryTopExile ? 'library' : null) || inferredExileFrom;
+    const to = effect.to || (a === 'exile' || libraryTopExile ? 'exile' : null);
     const inferredSearchedLand = a === 'put' && to === 'battlefield' && previousRuleSearchesForLands && /\bsearch(?:es)?\b[\s\S]{0,180}\b(?:basic\s+)?land cards?\b/i.test(ruleContext);
     const obj = inferredSearchedLand || (effect.object === 'card' && to === 'battlefield' && /\bland cards?\b/i.test(ruleContext))
         ? 'land' : (effect.object || (libraryTopExile ? 'card' : null));
@@ -6914,6 +6941,8 @@ function deriveCanonicalFunction(effect) {
             castingScope: effect.castingScope || null,
             timingPermission: effect.timingPermission || null,
             magnitude,
+            grantedKeywords: [...new Set([...(effect.grantedKeywords || []), ...(effect.keywords || [])])].map(x => String(x).toLowerCase()),
+            scalingProfile: effect.scalingProfile || null,
             quantity,
             manaOutputAmount: fn === 'mana_ability' && Number.isFinite(Number(effect.manaOutputAmount)) ? Number(effect.manaOutputAmount) : null,
             manaNetAmount: fn === 'mana_ability' && Number.isFinite(Number(effect.manaNetAmount)) ? Number(effect.manaNetAmount) : null,
@@ -6968,6 +6997,14 @@ function canonicalFunctionToText(canonicalFunctions) {
     if (!canonicalFunctions || canonicalFunctions.length === 0) return "";
     return canonicalFunctions.map(cf => {
         const p = cf.params || {};
+        if ((cf.function === 'anthem' || cf.function === 'tribal_anthem') && p.combatFinisher && p.scalingProfile?.source === 'creatures_you_control') {
+            const buffs = p.magnitude || '+X/+X';
+            const keywords = (p.grantedKeywords || []).join(', ');
+            return `combat anthem/finisher: creatures you control get ${buffs}, where X is the number of creatures you control${keywords ? `, and gain ${keywords}` : ''}${p.duration === 'temporary' ? ' until end of turn' : ''}`;
+        }
+        if (cf.function === 'zone_change' && p.from === 'hand' && p.to === 'exile') {
+            return 'exile a card from hand into exile for setup/future access; hand-zone change, not battlefield permanent removal';
+        }
         if (cf.function === 'library_exile_access') {
             const libraryOwner = p.libraryOwnerScope === 'you' ? 'your' : p.libraryOwnerScope === 'opponent' ? "an opponent's" : p.libraryOwnerScope === 'affected_player' ? "that player's" : "a player's";
             const access = p.playFromExile || p.accessType === 'impulse_draw'
@@ -7064,6 +7101,16 @@ function assignEffectImportance(effects) {
         if (eff.canonical.function === 'token_creation' && eff.canonical.params?.tokenType === 'clue' &&
             /\binvestigate\b/i.test(String(eff.raw || '')) && /\b(?:whenever|when)\b/i.test(String(eff.raw || eff.parentRuleText || ''))) {
             score = Math.max(score, 0.92);
+        }
+        // A temporary team-wide +X/+X whose X equals your creature count and that grants flying
+        // is a combat finisher, not just a generic anthem. Preserve its defining mechanic as a
+        // high-importance node so retrieval/scoring don't bury it below incidental trigger text.
+        if (['anthem','tribal_anthem'].includes(eff.canonical.function) &&
+            eff.canonical.params?.scalingProfile?.source === 'creatures_you_control' &&
+            (eff.canonical.params?.grantedKeywords || []).includes('flying')) {
+            score = Math.max(score, 0.99);
+            eff.combatFinisher = true;
+            eff.canonical.params.combatFinisher = true;
         }
 
         // An effect extracted as a trailing atom of a compound clause ("..., then draw a card")
@@ -7220,7 +7267,7 @@ function inferEffectRepeatabilityProfile(card, effect, fullText = '') {
     if (!effect || effect.isCostEffect) return { kind: 'unknown', group: 'unknown', strength: null, confidence: 0 };
     const raw = String(effect.raw || effect.canonical?.params?.raw || '').trim();
     const contextSeed = String(effect.repeatabilityContextOverride || effect.contextClause || effect.parentClauseRaw || raw).trim();
-    const context = effect.searchIntentContextOverride
+    const context = (effect.searchIntentContextOverride || effect.repeatabilityContextOverride)
         ? contextSeed
         : findRepeatabilityContextClause(contextSeed, fullText || strategicRoleCardText(card));
     const combined = `${context} ${raw}`.trim();
@@ -7250,12 +7297,19 @@ function inferEffectRepeatabilityProfile(card, effect, fullText = '') {
     const indefiniteCastReuse = /\b(?:buyback|retrace|escape)\b/i.test(strategicRoleCardText(card) || fullText || '');
 
     let kind = 'one_shot', confidence = 0.82, eventText = '';
-    // Ball Lightning-style text is a delayed, one-time expiration of this specific source.
-    // Its end-step timing must NOT make it a repeatable trigger/engine, and the self-sacrifice
-    // must not be conflated with an activation cost such as "Sacrifice a creature: ...".
+    const clueInvestigateTrigger = isPermanent &&
+        (effect.tokenType === 'clue' || effect.canonical?.params?.tokenType === 'clue') &&
+        /\binvestigate\b/i.test(combined) && /\b(?:when|whenever)\b/i.test(combined) &&
+        /\bcast\b[\s\S]{0,80}\b(?:instant|sorcery)\b/i.test(combined);
+    // Trail of Evidence's investigate event is repeatable because the player can cast more
+    // instants/sorceries. Keep it separate from the Clue's own repeatable activated draw effect.
     const oneTimeSelfSacrifice = isPermanent && consumesSource && /\bsacrifice\s+(?:this(?: creature| artifact| enchantment| permanent| planeswalker| land| card)?|the source|~|[\w'’-]+)\b/i.test(combined) &&
         /\bat the beginning of (?:your|the) end step\b|\bat (?:your|the) end step\b/i.test(combined);
-    if (oneTimeSelfSacrifice) {
+    if (clueInvestigateTrigger) {
+        kind = 'repeatable_trigger';
+        confidence = 0.97;
+        eventText = 'you cast an instant or sorcery spell and investigate';
+    } else if (oneTimeSelfSacrifice) {
         kind = 'self_event';
         confidence = 0.96;
         eventText = 'this permanent is sacrificed once at the end step';
@@ -7275,7 +7329,11 @@ function inferEffectRepeatabilityProfile(card, effect, fullText = '') {
     } else if (activation && isPermanent) {
         kind = consumesSource ? 'single_use_activation' : 'repeatable_activation';
         confidence = 0.88;
-    } else if (isPermanent && (replacementEffect || staticAbilityText || /\b(?:as long as|while)\b/i.test(combined) || effect.isStatic === true)) {
+    } else if (isPermanent && /\bwhen\b/i.test(combined) && selfReference && /\benters? (?:the )?battlefield\b/i.test(combined) && /\buntil end of turn\b/i.test(combined)) {
+        kind = 'entry_trigger';
+        confidence = 0.94;
+        eventText = 'this permanent enters the battlefield and grants a temporary team buff';
+    } else if (isPermanent && (replacementEffect || staticAbilityText || /\b(?:as long as|while)\b/i.test(combined) || effect.isStatic === true) && !/\buntil end of turn\b/i.test(combined)) {
         kind = 'ongoing_static';
         confidence = replacementEffect ? 0.93 : 0.84;
     } else if (/\b(?:when|whenever)\b/i.test(combined) && isPermanent) {
@@ -7538,13 +7596,20 @@ function inferStrategicRoleProfile(card, parsedEffects = [], intentText = '') {
         getEffectRepeatabilityProfile(e)?.group === 'repeatable_engine' &&
         (e?.canonical?.function === 'card_draw' || acquisitionText.test(String(e?.raw || e?.canonical?.params?.raw || '')))
     );
+    // Investigate grants a reusable Clue token, whose rules-defined {2}, sacrifice it: draw a card
+    // ability turns repeatable token production into repeatable card advantage. The derived draw
+    // atom is not literally printed on Trail of Evidence, so join it to the matching Clue trigger.
+    const repeatableClueToken = (parsedEffects || []).some(e => e?.canonical?.function === 'token_creation' &&
+        e.canonical.params?.tokenType === 'clue' && getEffectRepeatabilityProfile(e)?.group === 'repeatable_engine');
+    const repeatableClueDraw = repeatableClueToken && (parsedEffects || []).some(e =>
+        e?.canonical?.function === 'card_draw' && e.canonical.params?.derivedFromTokenAbility &&
+        getEffectRepeatabilityProfile(e)?.kind === 'repeatable_activation');
     // A trigger elsewhere on a card must not turn its unrelated one-shot draw into an engine.
-    // The draw/acquisition effect itself has to live in a repeatable trigger, activation or static
-    // ability. Resource costs alone are not evidence of repeatability.
-    if (recurringAcquisition && acquisitionIsRepeatable) {
+    // Resource costs alone are not evidence of repeatability, except for this explicit Clue link.
+    if ((recurringAcquisition && acquisitionIsRepeatable) || repeatableClueDraw) {
         const timingAnchor = (parsedEffects || []).some(e => getEffectRepeatabilityProfile(e)?.kind === 'periodic_trigger' && acquisitionText.test(String(e?.raw || e?.canonical?.params?.raw || '')));
         strategicRoleAdd(roles, 'card_advantage_engine', 0.84,
-            [directDraw ? 'card draw' : 'card acquisition', timingAnchor ? 'repeat timing' : 'repeatable acquisition', activated ? 'reusable ability' : null]);
+            [repeatableClueDraw ? 'repeatable Clue-token draw' : directDraw ? 'card draw' : 'card acquisition', timingAnchor ? 'repeat timing' : 'repeatable acquisition', activated ? 'reusable ability' : null]);
     }
 
     // Token production is an engine only when the creation effect itself can recur. A permanent
@@ -7568,6 +7633,9 @@ function inferStrategicRoleProfile(card, parsedEffects = [], intentText = '') {
     // General anthem: reserve for team-wide stat/keyword changes that are not clearly tribal.
     if (functions.has('anthem') && !functions.has('tribal_anthem')) {
         strategicRoleAdd(roles, 'anthem', 0.70, ['team stat/keyword buff']);
+    }
+    if ((parsedEffects || []).some(effect => Boolean(effect.canonical?.params?.combatFinisher) || Boolean(effect.combatFinisher))) {
+        strategicRoleAdd(roles, 'combat_finisher', 0.96, ['creature-count-scaled team buff', 'flying grant', 'combat finisher']);
     }
 
     // Interaction roles. Board wipe needs explicit mass language; removal needs a target; counter
@@ -11017,7 +11085,11 @@ function buildMechanicalEffectNode(effect, index = 0, graphAnchors = new Set()) 
         raw
     };
     if (effect?.stats) node.stats = normalizeMechanicToken(effect.stats);
-    if (effect?.keywords) node.grantedKeywords = normalizeMechanicalSet(effect.keywords);
+    const grantedKeywords = effect?.grantedKeywords || effect?.keywords || p.grantedKeywords || [];
+    if (grantedKeywords.length) node.grantedKeywords = normalizeMechanicalSet(grantedKeywords);
+    const scalingProfile = effect?.scalingProfile || p.scalingProfile || null;
+    if (scalingProfile) node.scalingProfile = scalingProfile;
+    node.combatFinisher = Boolean(effect?.combatFinisher || p.combatFinisher);
     if (effect?.tokenType || p.tokenType) node.tokenType = normalizeMechanicToken(effect?.tokenType || p.tokenType);
     if (effect?.multiplier != null) node.multiplier = Number(effect.multiplier) || null;
     return node;
@@ -11333,6 +11405,10 @@ function computeMechanicalEffectNodeComparison(a, b) {
     }
     const libraryAccessVsRemoval = (a.function === 'library_exile_access' && b.function === 'exile_removal') || (a.function === 'exile_removal' && b.function === 'library_exile_access');
     if (libraryAccessVsRemoval) return { score: 0.015, contradiction: 0.95, breakdown: { core: 0, incompatibleLibraryAccessAndRemoval: 1 } };
+    const handExileVsRemoval =
+        (a.function === 'zone_change' && a.from === 'hand' && b.function === 'exile_removal') ||
+        (b.function === 'zone_change' && b.from === 'hand' && a.function === 'exile_removal');
+    if (handExileVsRemoval) return { score: 0.015, contradiction: 0.97, breakdown: { core: 0, incompatibleHandExileAndBattlefieldRemoval: 1 } };
 
     const functionExact = a.function && b.function && a.function === b.function;
     const outcomeExact = a.outcome && b.outcome && a.outcome === b.outcome;
@@ -11372,13 +11448,27 @@ function computeMechanicalEffectNodeComparison(a, b) {
         tokenType: a.tokenType || b.tokenType ? (a.tokenType && b.tokenType ? (a.tokenType === b.tokenType ? 1 : 0.05) : 0.58) : 1,
         recipientScope: a.recipientScope || b.recipientScope ? (a.recipientScope && b.recipientScope ? (a.recipientScope === b.recipientScope ? 1 : 0.12) : 0.62) : 1,
         sacrificeScope: a.sacrificeScope || b.sacrificeScope ? (a.sacrificeScope && b.sacrificeScope ? (a.sacrificeScope === b.sacrificeScope ? 1 : 0.08) : 0.52) : 1,
-        keywords: compareMechanicalSets(a.keywordAnchors, b.keywordAnchors, 1)
+        keywords: compareMechanicalSets(a.keywordAnchors, b.keywordAnchors, 1),
+        grantedKeywords: (a.grantedKeywords?.size || b.grantedKeywords?.size)
+            ? compareMechanicalSets(a.grantedKeywords, b.grantedKeywords, 1)
+            : 1,
+        scaling: a.scalingProfile || b.scalingProfile
+            ? (a.scalingProfile && b.scalingProfile
+                ? (a.scalingProfile.kind === b.scalingProfile.kind && a.scalingProfile.source === b.scalingProfile.source ? 1 : 0.18)
+                : 0.38)
+            : 1,
+        // A creature-count-scaled team buff that also grants evasion is a combat finisher, not
+        // merely a different-sized generic anthem. Make that strategic role materially affect the
+        // graph score so rankings prefer full finisher analogues over fixed +1/+1 effects.
+        combatFinisher: (a.combatFinisher || b.combatFinisher)
+            ? (a.combatFinisher && b.combatFinisher ? 1 : 0.12)
+            : 1
     };
     const fieldParts = [
         [15, breakdown.object], [14, breakdown.target], [13, breakdown.zone], [10, breakdown.restriction],
         [9, breakdown.quantity], [10, breakdown.trigger], [8, breakdown.event], [7, breakdown.duration],
         [7, breakdown.mode], [16, breakdown.repeatability], [5, breakdown.cost], [5, breakdown.role], [5, breakdown.condition], [4, breakdown.stats],
-        [10, breakdown.tokenType], [8, breakdown.recipientScope], [12, breakdown.sacrificeScope]
+        [10, breakdown.tokenType], [8, breakdown.recipientScope], [12, breakdown.sacrificeScope], [16, breakdown.grantedKeywords], [16, breakdown.scaling], [12, breakdown.combatFinisher]
     ];
     const fieldScore = fieldParts.reduce((sum, [w, v]) => sum + w * v, 0) / fieldParts.reduce((sum, [w]) => sum + w, 0);
     const contradiction = mechanicalNodeContradiction(a, b);
@@ -11751,8 +11841,8 @@ function classifyZoneTransitionIntent(text) {
     const input = String(text || '').toLowerCase().replace(/[’]/g, "'");
     // A card exiled from hand is not a permanent being removed from the battlefield.
     // Return no removal intent for this zone-specific action before the generic exile fallback.
-    if (/\bexile\s+(?:(?:a|an|the|target|one|another|that)\s+)?(?:card|spell)\s+from\s+(?:your|their|its owner's|that player's|a player's)?\s*hand\b/i.test(input) ||
-        /\bfrom\s+(?:your|their|its owner's|that player's|a player's)?\s*hand\b[\s\S]{0,100}\bexile\b/i.test(input)) return 'none';
+    if (/\bexile\s+(?:(?:a|an|the|target|one|another|that)\s+)?(?:card|spell)\s+from\s+(?:your|their|its owner's|that player's|a player's|the player's)?\s*hand\b/i.test(input) ||
+        /\bfrom\s+(?:your|their|its owner's|that player's|a player's|the player's)?\s*hand\b[\s\S]{0,100}\bexile\b/i.test(input)) return 'hand_exile';
     const exileAt = input.search(/\bexile\b/);
     if (exileAt < 0) return 'none';
     const tail = input.slice(exileAt);
@@ -11783,6 +11873,14 @@ function inferExplicitMechanicalContrast(parsedA = [], parsedB = []) {
     // mechanically distinct cards that share the word "exile" or "create token".
     const zoneA = classifyZoneTransitionIntent(textA);
     const zoneB = classifyZoneTransitionIntent(textB);
+    if ((zoneA === 'hand_exile' && zoneB === 'exile_removal') ||
+        (zoneB === 'hand_exile' && zoneA === 'exile_removal')) {
+        return {
+            kind: 'hand-exile-vs-battlefield-removal',
+            signatures: [zoneA, zoneB],
+            reason: 'a card exiled from hand is not a permanent exiled from the battlefield'
+        };
+    }
     if ((zoneA === 'blink' && zoneB === 'exile_removal') ||
         (zoneB === 'blink' && zoneA === 'exile_removal')) {
         return {
@@ -12397,7 +12495,7 @@ function runManaSearchMasteryEdgeCaseRegressionSuite() {
     const cases = [];
     const check = (name, condition, detail = '') => cases.push({ name, passed: Boolean(condition), detail: String(detail || '') });
     const parse = text => parseMTGEffect(text).filter(effect => effect && effect.canonical);
-    const canonicalText = effects => canonicalFunctionToText(effects.map(effect => effect.canonical));
+    const canonicalText = effects => canonicalFunctionToText(effects.map(effect => effect?.canonical || effect).filter(Boolean));
 
     const fervent = parse('Search your library for up to three cards, put them into your hand, shuffle, then discard three cards at random.');
     const ferventFns = fervent.map(effect => effect.canonical.function);
@@ -12432,7 +12530,8 @@ function runManaSearchMasteryEdgeCaseRegressionSuite() {
     const alaundo = parseMTGEffect(alaundoText).filter(effect => effect && effect.canonical);
     const handExile = alaundo.find(effect => /\bexile\b/i.test(String(effect.raw || '')) && /\bfrom your hand\b/i.test(String(effect.raw || effect.parentRuleText || '')));
     check('Alaundo hand exile is not battlefield removal', Boolean(handExile) && handExile.canonical.function !== 'exile_removal' && handExile.canonical.params.from === 'hand', JSON.stringify(alaundo.map(effect => ({fn:effect.canonical.function,from:effect.canonical.params.from,to:effect.canonical.params.to,raw:effect.raw}))));
-    check('Alaundo hand-exile contrast does not imply removal', classifyZoneTransitionIntent('Exile a card from your hand and put time counters on it.') === 'none', classifyZoneTransitionIntent('Exile a card from your hand and put time counters on it.'));
+    check('Alaundo hand-exile receives a distinct non-removal signature', classifyZoneTransitionIntent('Exile a card from your hand and put time counters on it.') === 'hand_exile', classifyZoneTransitionIntent('Exile a card from your hand and put time counters on it.'));
+    check('Alaundo hand exile is strongly rejected as battlefield removal', computeMechanicalEffectNodeComparison({function:'zone_change', outcome:'card_changes_zone', from:'hand', to:'exile', action:'exile', object:'card'}, {function:'exile_removal', outcome:'permanent_exiled', from:'battlefield', to:'exile', action:'exile', object:'permanent'}).score <= 0.02, JSON.stringify(computeMechanicalEffectNodeComparison({function:'zone_change', outcome:'card_changes_zone', from:'hand', to:'exile', action:'exile', object:'card'}, {function:'exile_removal', outcome:'permanent_exiled', from:'battlefield', to:'exile', action:'exile', object:'permanent'})));
 
     const ballLightning = { name: 'Ball Lightning', type_line: 'Creature — Elemental', oracle_text: 'Trample. Haste. At the beginning of the end step, sacrifice this creature.' };
     const ballEffects = annotateEffectRepeatability(ballLightning, parseMTGEffect(ballLightning.oracle_text));
@@ -12477,6 +12576,56 @@ function runManaSearchMasteryEdgeCaseRegressionSuite() {
     const trailDraw = trailEffects.find(effect => effect.canonical?.function === 'card_draw' && effect.canonical.params.derivedFromTokenAbility);
     check('Trail of Evidence exposes the Clue token activated draw as a graph effect', Boolean(trailDraw) && getEffectRepeatabilityProfile(trailDraw)?.kind === 'repeatable_activation', JSON.stringify({canonical:trailDraw?.canonical,profile:getEffectRepeatabilityProfile(trailDraw)}));
     check('Trail of Evidence canonical Clue engine explains repeatable card draw', /repeatable Clue token engine/i.test(canonicalText(trailEffects.map(effect => effect.canonical).filter(Boolean))) && /repeatable activated card draw from a Clue token/i.test(canonicalText(trailEffects.map(effect => effect.canonical).filter(Boolean))), canonicalText(trailEffects.map(effect => effect.canonical).filter(Boolean)));
+    check('Trail of Evidence has no contradictory one-shot profile on investigate/Clue nodes', trailEffects.filter(effect => effect.canonical?.function === 'token_creation' && effect.canonical.params.tokenType === 'clue').every(effect => getEffectRepeatabilityProfile(effect)?.group === 'repeatable_engine') && trailEffects.filter(effect => effect.canonical?.params?.derivedFromTokenAbility).every(effect => getEffectRepeatabilityProfile(effect)?.kind === 'repeatable_activation'), JSON.stringify(trailEffects.map(effect => ({raw:effect.raw,fn:effect.canonical?.function,profile:getEffectRepeatabilityProfile(effect)}))));
+    const trailIntentModel = buildSearchIntentPresentationModel(trail, []);
+    check('Trail of Evidence Live Search Model shows repeatable investigate and repeatable Clue draw', trailIntentModel.effectViews.length >= 2 && trailIntentModel.effectViews.every(view => view.cadence.group === 'repeatable_engine') && trailIntentModel.effectViews.some(view => /Repeatable triggered ability/.test(view.cadence.label)) && trailIntentModel.effectViews.some(view => /Repeatable activated ability/.test(view.cadence.label)), JSON.stringify(trailIntentModel.effectViews.map(view => ({label:view.label,cadence:view.cadence}))));
+    check('Trail of Evidence is recognized as both a repeatable token engine and card-advantage engine', trailIntentModel.roleViews.some(role => /repeatable token engine/i.test(role.role)) && trailIntentModel.roleViews.some(role => /card-advantage engine/i.test(role.role)), JSON.stringify(trailIntentModel.roleViews));
+    const trailRetrievalQueries = buildFunctionalRetrievalQueries(trail, trailEffects, '-name:\"Trail of Evidence\"', 4).map(item => item.query).join(' ').toLowerCase();
+    const trailRoleQuery = String(buildRoleFocusedRetrievalQuery(trail, trailEffects, '-name:\"Trail of Evidence\"') || '').toLowerCase();
+    check('Trail of Evidence functional retrieval explicitly queries investigate', /o:\"investigate\"/.test(trailRetrievalQueries) || /o:\"investigate\"/.test(trailRoleQuery), JSON.stringify({queries:trailRetrievalQueries,role:trailRoleQuery}));
+    check('Trail of Evidence repeatable Clue draw affects shared strategic scoring roles', trailIntentModel.roleViews.some(role => /card-advantage engine/i.test(role.role)) && trailIntentModel.roleViews.some(role => /repeatable token engine/i.test(role.role)), JSON.stringify(trailIntentModel.roleViews));
+
+    const moonshaker = { name: 'Moonshaker Cavalry', type_line: 'Creature — Horse Spirit', oracle_text: 'When Moonshaker Cavalry enters the battlefield, creatures you control get +X/+X and gain flying until end of turn, where X is the number of creatures you control.' };
+    const moonEffects = annotateEffectRepeatability(moonshaker, parseMTGEffect(moonshaker.oracle_text), moonshaker.oracle_text);
+    const moonAnthem = moonEffects.find(effect => ['anthem','tribal_anthem'].includes(effect.canonical?.function));
+    const moonCanonicalText = canonicalText(moonEffects.map(effect => effect.canonical).filter(Boolean));
+    const moonGraph = buildMechanicalEffectGraph(moonshaker, moonshaker.oracle_text, moonEffects);
+    const moonNode = moonGraph.nodes.find(node => ['anthem','tribal_anthem'].includes(node.function));
+    check('Moonshaker Cavalry parses +X/+X and flying as one team-wide anthem effect', Boolean(moonAnthem) && moonAnthem.canonical.params.magnitude === '+x/+x' && (moonAnthem.canonical.params.grantedKeywords || []).includes('flying'), JSON.stringify({canonical:moonAnthem?.canonical,raw:moonAnthem?.raw}));
+    check('Moonshaker Cavalry preserves creature-count scaling in the scorer graph', moonAnthem?.canonical.params.scalingProfile?.source === 'creatures_you_control' && moonNode?.scalingProfile?.source === 'creatures_you_control', JSON.stringify({params:moonAnthem?.canonical?.params?.scalingProfile,node:moonNode?.scalingProfile}));
+    check('Moonshaker Cavalry is elevated as a primary combat finisher', Boolean(moonAnthem?.isPrimary) && moonAnthem.importance >= 0.95 && moonAnthem.canonical.params.combatFinisher === true && inferStrategicRoleProfile(moonshaker, moonEffects, moonshaker.oracle_text).some(role => role.role === 'combat_finisher'), JSON.stringify({primary:moonAnthem?.isPrimary,importance:moonAnthem?.importance,role:inferStrategicRoleProfile(moonshaker, moonEffects, moonshaker.oracle_text)}));
+    check('Moonshaker Cavalry entry trigger is single-use while its effect is a finisher', getEffectRepeatabilityProfile(moonAnthem)?.kind === 'entry_trigger' && /number of creatures/i.test(moonCanonicalText) && /flying/i.test(moonCanonicalText), JSON.stringify({profile:getEffectRepeatabilityProfile(moonAnthem),text:moonCanonicalText}));
+    const moonRetrievalQueries = buildFunctionalRetrievalQueries(moonshaker, moonEffects, '-name:\"Moonshaker Cavalry\"', 4).map(item => item.query).join(' ').toLowerCase();
+    const moonRoleQuery = String(buildRoleFocusedRetrievalQuery(moonshaker, moonEffects, '-name:\"Moonshaker Cavalry\"') || '').toLowerCase();
+    check('Moonshaker retrieval searches for both creature-count scaling and flying grants', /o:\"gain flying\"/.test(moonRetrievalQueries) && /o:\"number of creatures you control\"/.test(moonRetrievalQueries), JSON.stringify({queries:moonRetrievalQueries,role:moonRoleQuery}));
+    check('Moonshaker shared graph retains an explicit combat-finisher mechanic', moonNode?.function === 'anthem' && moonNode?.grantedKeywords instanceof Set && moonNode.grantedKeywords.has('flying') && moonNode?.scalingProfile?.source === 'creatures_you_control' && moonNode?.targetScope === 'you_control' && moonNode?.combatFinisher === true, JSON.stringify(moonNode));
+    const moonLikeText = 'When this creature enters the battlefield, creatures you control get +X/+X and gain flying until end of turn, where X is the number of creatures you control.';
+    const genericAnthemText = 'When this creature enters the battlefield, creatures you control get +1/+1 until end of turn.';
+    const moonLikeEffects = annotateEffectRepeatability({name:'Count-scaled flying anthem',type_line:'Creature',oracle_text:moonLikeText}, parseMTGEffect(moonLikeText), moonLikeText);
+    const genericAnthemEffects = annotateEffectRepeatability({name:'Generic anthem',type_line:'Creature',oracle_text:genericAnthemText}, parseMTGEffect(genericAnthemText), genericAnthemText);
+    const moonLikeNode = buildMechanicalEffectGraph(null, moonLikeText, moonLikeEffects).nodes.find(node => node.function === 'anthem');
+    const genericAnthemNode = buildMechanicalEffectGraph(null, genericAnthemText, genericAnthemEffects).nodes.find(node => node.function === 'anthem');
+    const moonLikeScore = computeMechanicalEffectNodeComparison(moonNode, moonLikeNode).score;
+    const genericAnthemScore = computeMechanicalEffectNodeComparison(moonNode, genericAnthemNode).score;
+    check('Moonshaker finisher scorer prefers a count-scaled flying anthem over a generic fixed buff', moonLikeScore > genericAnthemScore + 0.07, JSON.stringify({moonLikeScore,genericAnthemScore,moonLike:computeMechanicalEffectNodeComparison(moonNode,moonLikeNode).breakdown,generic:computeMechanicalEffectNodeComparison(moonNode,genericAnthemNode).breakdown}));
+
+    const alaundoFull = { name:'Alaundo the Seer', type_line:'Legendary Creature — Human Shaman', oracle_text:"{T}: Draw a card, then exile a card from your hand and put a number of time counters on it equal to its mana value. It gains \"When the last time counter is removed from this card, if it's exiled, you may cast it without paying its mana cost. If you cast a creature spell this way, it gains haste until end of turn.\" Then remove a time counter from each other card you own in exile." };
+    const alaundoEffectsFull = parseMTGEffect(alaundoFull.oracle_text);
+    const handExileAtoms = alaundoEffectsFull.filter(effect => effect.action === 'exile' && /\bfrom your hand\b/i.test(`${effect.raw || ''} ${effect.parentRuleText || ''} ${effect.contextClause || ''}`));
+    check('Alaundo compound atoms keep hand as the exiled card source zone', handExileAtoms.length > 0 && handExileAtoms.every(effect => effect.canonical?.function === 'zone_change' && effect.canonical.params.from === 'hand' && effect.canonical.params.to === 'exile'), JSON.stringify(alaundoEffectsFull.map(effect => ({raw:effect.raw,action:effect.action,fn:effect.canonical?.function,from:effect.canonical?.params?.from,to:effect.canonical?.params?.to,secondary:effect.isSecondaryAtom}))));
+    check('Alaundo gets no exile-removal-derived tags from hand exile', !generateTags(alaundoFull).some(tag => ['Removal','Removal:exile','Boardwipe'].includes(tag)), JSON.stringify(generateTags(alaundoFull)));
+    check('Alaundo does not mistake the noun in-exile for an exile verb', !alaundoEffectsFull.some(effect => effect.canonical?.function === 'exile_removal' && /\bremove a time counter\b/i.test(String(effect.raw || effect.parentRuleText || ''))), JSON.stringify(alaundoEffectsFull.map(effect => ({raw:effect.raw,fn:effect.canonical?.function,from:effect.canonical?.params?.from,to:effect.canonical?.params?.to}))));
+    check('Alaundo singular creature gaining haste is not falsely tagged as an Anthem', !generateTags(alaundoFull).some(tag => tag === 'Anthem' || /^Anthem:/.test(tag)), JSON.stringify(generateTags(alaundoFull)));
+    const alaundoIntentModel = buildSearchIntentPresentationModel(alaundoFull, []);
+    check('Alaundo Live Search Model does not describe hand exile as permanent removal', !alaundoIntentModel.effectViews.some(view => /exile permanents|remove permanents|board wipe/i.test(view.label + ' ' + view.detail)) && !alaundoIntentModel.roleViews.some(role => /targeted removal|mass removal/i.test(role.role)), JSON.stringify({effects:alaundoIntentModel.effectViews.map(view => ({label:view.label,cadence:view.cadence})),roles:alaundoIntentModel.roleViews}));
+    const alaundoRetrievalQueries = buildFunctionalRetrievalQueries(alaundoFull, alaundoEffectsFull, '-name:\"Alaundo the Seer\"', 6).map(item => item.query).join(' ').toLowerCase();
+    check('Alaundo retrieval preserves hand-to-exile setup and does not add battlefield-removal vocabulary', /o:\"hand\"[\s\S]*o:\"exile\"|o:\"exile\"[\s\S]*o:\"hand\"/.test(alaundoRetrievalQueries) && !/otag:removal|o:\"exile target permanent\"|o:\"exile target creature\"/.test(alaundoRetrievalQueries), alaundoRetrievalQueries);
+    const alaundoHandNode = buildMechanicalEffectGraph(alaundoFull, alaundoFull.oracle_text, alaundoEffectsFull).nodes.find(node => node.function === 'zone_change' && node.from === 'hand' && node.to === 'exile');
+    const battlefieldExileEffects = parseMTGEffect('Exile target permanent.');
+    annotateEffectRepeatability({name:'Targeted exile removal',type_line:'Instant',oracle_text:'Exile target permanent.'}, battlefieldExileEffects, 'Exile target permanent.');
+    const battlefieldExileNode = buildMechanicalEffectGraph(null, 'Exile target permanent.', battlefieldExileEffects).nodes.find(node => node.function === 'exile_removal');
+    const handVsBattlefieldRemoval = computeMechanicalEffectNodeComparison(alaundoHandNode, battlefieldExileNode);
+    check('Alaundo hand-exile and battlefield-removal receive a strong scorer contradiction penalty', Boolean(alaundoHandNode) && Boolean(battlefieldExileNode) && handVsBattlefieldRemoval.score <= 0.02 && handVsBattlefieldRemoval.contradiction >= 0.95, JSON.stringify(handVsBattlefieldRemoval));
 
     const passed = cases.filter(item => item.passed).length;
     return { passed, total: cases.length, ok: passed === cases.length, results: cases };
@@ -22879,7 +23028,10 @@ const FUNCTION_RETRIEVAL_VOCAB = {
         otag: "ramp"
     },
     token_creation: {
-        phrases: ["create a token", "creature token"],
+        // Investigate is the rules action that creates a Clue. It must be a first-class retrieval
+        // synonym so a repeatable Clue engine can retrieve other investigate engines, not merely
+        // cards that literally say "create a token".
+        phrases: ["investigate", "create a token", "creature token"],
         paramTemplate: (p) => typeof p.quantity === 'number' && p.quantity > 1 ? `o:"create ${p.quantity}"` : null
     },
     token_multiplier: {
@@ -22978,6 +23130,12 @@ function buildGenericFeatureCombinationQuery(canonicalFn) {
     if (p.to) parts.push(`o:"${p.to}"`);
     if (p.object && p.object !== 'generic' && p.object !== 'card') parts.push(`o:"${p.object}"`);
     if (p.magnitude) parts.push(`o:"${p.magnitude}"`);
+    if ((p.grantedKeywords || []).includes('flying')) parts.push('o:"gain flying"');
+    if (p.scalingProfile?.source === 'creatures_you_control') parts.push('o:"number of creatures you control"');
+    // Clue/investigate is a functional token mechanic even though the card's own Oracle text
+    // usually doesn't spell out the {2}, sacrifice-a-Clue draw ability. Include the originating
+    // rules action in structural retrieval so equivalent Clue engines remain reachable.
+    if (p.tokenType === 'clue' || p.clueDrawEngine) parts.push('o:"investigate"');
     if (typeof p.quantity === 'number' && p.quantity > 1) parts.push(`o:"${p.quantity}"`);
 
     // Restriction tokens include structural markers ("controlledbyyou") that aren't literal
@@ -23062,11 +23220,12 @@ const ROLE_RETRIEVAL_PHRASES = {
     fast_mana: ['add mana', 'add two mana', 'mana ability'],
     catch_up_ramp: ['more lands', 'search your library for a basic land'],
     land_ramp: ['search your library for a basic land', 'put it onto the battlefield'],
-    card_advantage_engine: ['draw a card', 'draw cards', 'put it into your hand'],
+    card_advantage_engine: ['investigate', 'draw a card', 'draw cards', 'put it into your hand'],
     token_multiplier: ['twice that many', 'tokens would be created'],
-    token_engine: ['create a token', 'create a creature token'],
+    token_engine: ['investigate', 'create a token', 'create a creature token'],
     tribal_anthem: ['other creatures you control get', 'get +1/+1'],
     anthem: ['creatures you control get', 'creatures get +1/+1'],
+    combat_finisher: ['creatures you control get', 'gain flying'],
     counterspell: ['counter target spell', 'counter target ability'],
     board_wipe: ['destroy all', 'exile all'],
     single_target_removal: ['destroy target', 'exile target'],
@@ -23319,6 +23478,7 @@ const SEARCH_INTENT_ROLE_LABELS = Object.freeze({
     fast_mana: 'fast mana / acceleration', land_ramp: 'land ramp', catch_up_ramp: 'catch-up ramp',
     card_advantage_engine: 'card-advantage engine', token_engine: 'repeatable token engine',
     token_multiplier: 'token multiplier', tribal_anthem: 'tribal payoff', anthem: 'team-wide buff',
+    combat_finisher: 'combat finisher / team-wide flying anthem',
     board_wipe: 'mass removal', single_target_removal: 'targeted removal', counterspell: 'countermagic',
     bounce: 'bounce / tempo', burn: 'direct damage', graveyard_recursion: 'graveyard recursion',
     tutor: 'tutoring', discard_engine: 'discard / disruption', mill_engine: 'mill strategy',
@@ -23328,9 +23488,15 @@ const SEARCH_INTENT_ROLE_LABELS = Object.freeze({
 function searchIntentFunctionLabel(effect) {
     const canonical = effect?.canonical || (effect ? deriveCanonicalFunction(effect) : null);
     const fn = canonical?.function || effect?.action || '';
-    const base = SEARCH_INTENT_FUNCTION_LABELS[fn] || String(fn).replace(/_/g, ' ');
     const p = canonical?.params || {};
+    const isFinisher = (fn === 'anthem' || fn === 'tribal_anthem') && p.combatFinisher && p.scalingProfile?.source === 'creatures_you_control';
+    const isHandExile = fn === 'zone_change' && p.from === 'hand' && p.to === 'exile';
+    const base = isFinisher ? 'buff your team by your creature count and grant flying (anthem/finisher)'
+        : isHandExile ? 'exile a card from hand (not battlefield removal)'
+        : (SEARCH_INTENT_FUNCTION_LABELS[fn] || String(fn).replace(/_/g, ' '));
     const details = [];
+    if (p.scalingProfile?.source === 'creatures_you_control') details.push('power/toughness scales with your creature count');
+    if ((p.grantedKeywords || []).includes('flying')) details.push('grants flying');
     if (p.quantity != null && Number.isFinite(Number(p.quantity)) && Number(p.quantity) > 0) {
         if (fn === 'card_draw') details.push(Number(p.quantity) === 1 ? 'usually one card per resolution' : `${p.quantity} cards per resolution`);
         else if (fn === 'mana_ability') details.push(`${p.quantity} net mana when used`);
