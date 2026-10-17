@@ -1,6 +1,6 @@
-/* ManaSearch build 20261017-103 */
+/* ManaSearch build 20261017-104 */
 // ManaSearch deployment build marker. Bump this whenever app.js changes so cached-module issues are easy to diagnose.
-const MANASEARCH_APP_BUILD = '20261017-103';
+const MANASEARCH_APP_BUILD = '20261017-104';
 console.info(`[ManaSearch] app.js build ${MANASEARCH_APP_BUILD}`);
 
 // State Management
@@ -1643,7 +1643,14 @@ async function downloadBenchmarkWorkbook(report) {
                 'Effect Coverage': num(scores?.effectCoverageScore, 3),
                 'Primary Effect Match': num(scores?.primaryEffectMatchScore, 3),
                 'Modal Mode Similarity': num(scores?.modalModeSimilarityScore, 3),
+                'Core Evidence Score': num(scores?.coreEvidenceScore, 3),
+                'Evidence Agreement': num(scores?.evidenceAgreement, 3),
                 'Ranking Refinement Signal': num(scores?.rankingRefinementSignal, 3),
+                'Deterministic Functional Anchor': num(scores?.deterministicFunctionalAnchor, 3),
+                'Primary-Effect Ranking Boost': num(scores?.primaryEffectRankingBoost, 3),
+                'Canonical Contradiction Penalty': num(scores?.contradictionPenalty, 3),
+                'Pre-Cadence Score': num(scores?.similarityBeforeCadenceAdjustment, 3),
+                'Relationship Mismatch': num(scores?.mechanicalBreakdown?.relationshipMismatch, 3),
                 'Ranking Intent': scores?.rankingIntent || '',
                 'Ranking Intent Role': scores?.rankingIntentRole || '',
                 'Ranking Intent Confidence': num(scores?.rankingIntentConfidence, 3),
@@ -7072,7 +7079,7 @@ function parseMTGEffect(oracleText, cardContext = null) {
     // as separate bullet-prefixed lines. Track the active mode group across clauses so each
     // mode is tagged with which group and "choose how many" header it belongs to, instead of
     // looking like unrelated standalone effects (project spec: multiple simultaneous modes).
-    const modalHeaderRegex = /^\s*choose\s+(one|two|three|four|up to two|up to three|up to four|one or more|any number)\b.*[—-]\s*$/i;
+    const modalHeaderRegex = /^\s*choose\s+(up to two|up to three|up to four|one or more|any number|one|two|three|four)\b(?:\s*[—–:-]|\s*\.)?\s*$/i;
     const bulletPrefixRegex = /^[•●]\s*|^-\s+/;
     let activeModeGroup = null;
     let modeGroupCounter = 0;
@@ -7092,6 +7099,11 @@ function parseMTGEffect(oracleText, cardContext = null) {
 
         const isBulletLine = bulletPrefixRegex.test(rawClause);
         const clause = rawClause.replace(bulletPrefixRegex, '');
+        // A mode-count instruction sentence belongs to the modal header, but is not itself an
+        // option. Keep the group active while skipping it instead of resetting before the bullets.
+        if (activeModeGroup && !isBulletLine && /^(?:you may choose (?:the )?same mode|you may choose any (?:one )?mode|you may choose modes|choose the same mode)\b/i.test(clause)) {
+            continue;
+        }
 
         const { costText, effectText } = splitActivationCost(clause);
 
@@ -8441,6 +8453,22 @@ function inferRankingIntent(sourceCard, parsedSourceEffects = [], targetText = '
     const topRole = sourceRoleProfile?.[0];
     const roleIsStrong = Boolean(topRole && STRATEGIC_INTENT_ROLES.has(topRole.role) && topRole.score >= 0.74);
     const effectCount = (parsedSourceEffects || []).filter(e => e && e.action && e.action !== 'generic').length;
+    const fullOracle = String(sourceCard?.oracle_text || (sourceCard?.card_faces || []).map(f => f?.oracle_text || '').join(' ') || '');
+    const sourceHasModalSet = shouldUseModalModeIntent(fullOracle, false, [], 0);
+    const modalIntentIsExplicit = sourceHasModalSet && (
+        !(highlights || []).length ||
+        (highlights || []).some(h => /\bchoose\s+(?:up to two|up to three|up to four|one or more|any number|one|two|three|four)\b/i.test(String(h?.text || ''))) ||
+        (highlights || []).filter(h => h?.field !== 'type').length >= 2
+    );
+    // Modal cards may superficially resemble one role (e.g. bounce) because one option is bounce.
+    // If the selection covers the modal instruction or multiple options, preserve modal-set context.
+    if (modalIntentIsExplicit) {
+        return {
+            kind: 'hybrid_effect', confidence: exactHighlights.length ? 0.94 : 0.88,
+            role: null, hasExactHighlight: exactHighlights.length > 0,
+            hasFlexibleHighlight: flexibleHighlights.length > 0, hasModalModes: true
+        };
+    }
     if ((highlights || []).length) {
         return { kind:'highlighted_effect', confidence: exactHighlights.length ? 0.94 : 0.86, role: roleIsStrong ? topRole.role : null, hasExactHighlight: exactHighlights.length > 0, hasFlexibleHighlight: flexibleHighlights.length > 0 };
     }
@@ -12781,13 +12809,14 @@ function calculateEffectRelationshipMismatch(parsedA = [], parsedB = []) {
 }
 
 function shouldUseModalModeIntent(sourceOracleText, hasEffectHighlight = false, highlights = [], effectHighlightCount = 0) {
-    const header = /\bchoose\s+(?:one|two|three|four|up to two|up to three|up to four|one or more|any number)\b[^\n]{0,60}[—-]/i;
+    // Printed Oracle commonly uses "Choose three. You may choose the same mode more than once."
+    // Previously only a dash-terminated header was recognized, disabling modal scoring on these cards.
+    const header = /\bchoose\s+(?:up to two|up to three|up to four|one or more|any number|one|two|three|four)\b(?=\s*(?:[—–:.-]|you may choose|$))/i;
     if (!header.test(String(sourceOracleText || ''))) return false;
     if (!hasEffectHighlight) return true;
-    // If the user highlighted the modal instruction itself, or intentionally selected multiple
-    // effect options, preserve the modal set context. A single isolated option remains focused on
-    // that option instead of silently widening back to the whole spell.
-    return (highlights || []).some(h => /\bchoose\s+(?:one|two|three|four|up to two|up to three|up to four|one or more|any number)\b/i.test(String(h?.text || '')))
+    // Explicitly selecting the modal instruction or multiple modes preserves option-set context;
+    // one isolated option remains focused on that effect.
+    return (highlights || []).some(h => /\bchoose\s+(?:up to two|up to three|up to four|one or more|any number|one|two|three|four)\b/i.test(String(h?.text || '')))
         || Number(effectHighlightCount) >= 2;
 }
 
@@ -12829,23 +12858,66 @@ function calculateModalModeSimilarity(parsedA, parsedB) {
     return best && best.score >= 0.24 ? best : null;
 }
 
-function blendCalibratedRankingEvidence(channelScore, agreement, refinementSignal, consensusAdjustment = 0) {
+function blendCalibratedRankingEvidence(channelScore, agreement, refinementSignal, consensusAdjustment = 0, functionalAnchor = undefined) {
     const clamp01 = value => Math.max(0, Math.min(1, Number(value) || 0));
-    // A convex blend prevents the old additive-bonus path from saturating the score at 1.0 for
-    // hundreds of loosely related cards. Refinement can influence order, but can't outweigh the
-    // independent structural/semantic/function channels that make a candidate genuinely relevant.
+    // Functional embeddings can under-score familiar Oracle phrasing variants. Preserve the
+    // independent rule-graph/effect-coverage witness as a first-class channel instead of using it
+    // only as a small post-hoc refinement. Omitted anchor defaults to core for compatibility.
     const core = clamp01(channelScore);
     const agreementEvidence = clamp01(agreement);
     const refinement = clamp01(refinementSignal);
-    const base = core * 0.80 + agreementEvidence * 0.08 + refinement * 0.12;
-    // Related-card consensus is directional evidence, not a free additive bonus. Scale its effect
-    // by the score's remaining headroom (or current score for a negative adjustment), so even a
-    // strong consensus cannot turn many near-equal candidates into a row of 1.000 scores.
+    const anchor = functionalAnchor === undefined ? core : clamp01(functionalAnchor);
+    const base = core * 0.50 + agreementEvidence * 0.06 + refinement * 0.10 + anchor * 0.34;
+    // Related-card consensus is directional evidence, not a free additive bonus. Limit influence
+    // by the score's remaining headroom so it cannot saturate many results to 1.000.
     const consensus = Math.max(-1, Math.min(1, (Number(consensusAdjustment) || 0) / 0.045));
     const adjusted = consensus >= 0
         ? base + consensus * (1 - base) * 0.15
         : base + consensus * base * 0.15;
     return clamp01(adjusted);
+}
+
+function calculateDeterministicRankingAnchor({
+    functionalSimilarity = 0, effectCoverage = 0, primaryEffectMatch = 0,
+    roleScore = 0, roleAnchored = false, mechanicalConfidence = 0.5,
+    relationshipMismatch = 0, sourceModal = false, modalSimilarity = null
+} = {}) {
+    const clamp01 = value => Math.max(0, Math.min(1, Number(value) || 0));
+    const deterministic = clamp01(
+        clamp01(functionalSimilarity) * 0.52 +
+        clamp01(effectCoverage) * 0.28 +
+        clamp01(primaryEffectMatch) * 0.20
+    );
+    const confidenceFactor = 0.72 + 0.28 * clamp01(mechanicalConfidence);
+    const mismatchFactor = 1 - 0.48 * clamp01(relationshipMismatch);
+    let anchor = deterministic * confidenceFactor * mismatchFactor;
+    if (roleAnchored) anchor = Math.max(anchor, clamp01(roleScore) * 0.88);
+    if (sourceModal) {
+        anchor = modalSimilarity !== null && modalSimilarity !== undefined && Number.isFinite(Number(modalSimilarity))
+            ? anchor * 0.48 + clamp01(modalSimilarity) * 0.52
+            : anchor * 0.58;
+    }
+    return clamp01(anchor);
+}
+
+function calculatePrimaryEffectRankingUplift({
+    functionalSimilarity = 0, effectCoverage = 0, primaryEffectMatch = 0,
+    mechanicalConfidence = 0.5, relationshipMismatch = 0
+} = {}) {
+    const clamp01 = value => Math.max(0, Math.min(1, Number(value) || 0));
+    const functional = clamp01(functionalSimilarity);
+    const coverage = clamp01(effectCoverage);
+    const primary = clamp01(primaryEffectMatch);
+    const confidence = clamp01(mechanicalConfidence);
+    const mismatch = clamp01(relationshipMismatch);
+    // Only award this signal when independent functional evidence agrees that the candidate
+    // really performs the main effect. Similar wording alone, a high role score alone, or a
+    // structurally contradictory target/zone/trigger cannot activate the lift.
+    if (functional < 0.74 || coverage < 0.88 || primary < 0.88 || confidence < 0.48 || mismatch >= 0.30) return 0;
+    const directQuality = clamp01(functional * 0.40 + coverage * 0.30 + primary * 0.30);
+    const confidenceFactor = 0.82 + 0.18 * confidence;
+    const contradictionFactor = 1 - 0.85 * mismatch;
+    return Math.max(0, Math.min(0.045, (directQuality - 0.70) * 0.18 * confidenceFactor * contradictionFactor));
 }
 
 function calculateMechanicalSimilarityDetailed(parsedA, parsedB, profileA = null, profileB = null) {
@@ -23268,7 +23340,7 @@ async function scoreCardBatch({
     };
     const baseProfile = channelWeights[rankingIntent.kind] || channelWeights.effect_match;
     let profile = { ...baseProfile };
-    const roleAnchoredHighlight = rankingIntent.kind === 'highlighted_effect' &&
+    const roleAnchoredHighlight = !sourceModalIntentActive && rankingIntent.kind === 'highlighted_effect' &&
         Boolean(rankingIntent.role) && STRATEGIC_INTENT_ROLES.has(rankingIntent.role) &&
         (sourceRoleProfile || []).some(role => role.role === rankingIntent.role && Number(role.score) >= 0.74);
     if (roleAnchoredHighlight) {
@@ -23324,11 +23396,21 @@ async function scoreCardBatch({
         const universalMechanical = Number(card.mechanicalBreakdown?.universalScore) || Number(card.mechanicalEvidence?.universal?.score) || 0;
         const functionSemanticAugmented = Math.max(functionSemantic, universalMechanical * 0.72);
         const roleSemantic = Math.max(0, Math.min(1, card.roleScore || 0));
+        const functionalSimilarity = Math.max(0, Math.min(1, Number(card.functionalSimilarityScore) || 0));
+        const effectCoverage = Math.max(0, Math.min(1, Number(card.effectCoverageScore) || 0));
+        const primaryEffectMatch = Math.max(0, Math.min(1, Number(card.primaryEffectMatchScore) || 0));
 
-        // Role intent gets role dominance; ordinary effect search keeps function semantic dominant.
+        // Rule-based functional similarity captures the canonical action plus trigger/target/zone
+        // graph. It must directly influence ranking, not merely appear as a small refinement bonus.
+        const trustedFunctional = functionalSimilarity * (0.78 + 0.22 * mechanicalConfidence);
+        const roleFloor = roleSemantic * (roleAnchoredHighlight ? 0.88 : 0.70);
         const functionRole = rankingIntent.kind === 'strategic_role'
-            ? Math.max(roleSemantic, functionSemanticAugmented)
-            : Math.max(functionSemanticAugmented * 0.72 + roleSemantic * 0.28, roleSemantic * 0.70);
+            ? Math.max(roleSemantic, functionSemanticAugmented, trustedFunctional * 0.92)
+            : Math.max(
+                functionSemanticAugmented * 0.54 + roleSemantic * 0.18 + trustedFunctional * 0.28,
+                trustedFunctional * (roleAnchoredHighlight ? 0.94 : 0.88),
+                roleFloor
+            );
 
         const baseChannelScore = (structuralTrusted * structuralW) + (rawSemantic * semanticW) + (functionRole * functionRoleW);
         const highlightBlend = blendHighlightIntentScore(baseChannelScore, card.highlightIntentScore || 0, highlightProfiles, {
@@ -23343,10 +23425,7 @@ async function scoreCardBatch({
             ? Math.sqrt(independent[0] * independent[1])
             : 0;
 
-        const effectCoverage = Math.max(0, Math.min(1, card.effectCoverageScore || 0));
         const balancedCoverage = Math.max(0, Math.min(1, card.balancedEffectCoverage || 0));
-        const primaryEffectMatch = Math.max(0, Math.min(1, card.primaryEffectMatchScore || 0));
-        const functionalSimilarity = Math.max(0, Math.min(1, card.functionalSimilarityScore || 0));
         const quantitySimilarity = Math.max(0, Math.min(1, card.quantitySimilarityScore || 0));
         const relatedConsensus = relatedIntentProfile
             ? calculateRelatedConsensusFit(relatedIntentProfile, candidateParsedEffects, card)
@@ -23455,9 +23534,31 @@ async function scoreCardBatch({
         card.relatedConsensusGate = relatedConsensusGate;
         card.rankingEvidence = { mechanical: structural, mechanicalTrusted: structuralTrusted, mechanicalConfidence, rawSemantic, functionSemantic: functionSemanticAugmented, roleSemantic, highlightIntent: Number(card.highlightIntentScore) || 0, highlightIntentWeight: highlightBlend.weight, explicitUserIntent: highlightBlend.explicitUserIntent, baseChannelScore, effectCoverage, balancedCoverage, primaryEffectMatch, rankingRefinementSignal: refinementSignal, modalModeSimilarity: modalSignal, evidenceAgreement: agreement, retrievalSimilarity: Number(card._semanticRetrievalSimilarity) || 0, rankingIntent: rankingIntent.kind, rankingIntentRole: rankingIntent.role || null, rankingIntentConfidence: rankingIntent.confidence, relatedConsensus: relatedConsensus ? { score: relatedConsensus.score, functionMatch: relatedConsensus.functionMatch, quantityFit: relatedConsensus.quantityFit, roleFit: relatedConsensus.roleFit, artifactFit: relatedConsensus.artifactFit, dominantFunction: relatedIntentProfile?.dominantFunction || null, targetQuantity: relatedIntentProfile?.numericTarget ?? null, confidence: relatedIntentProfile?.confidence || 0 } : null };
         const consensusAdjustment = relatedConsensus ? relatedConsensusDelta * 0.22 : 0;
-        const preCadenceSimilarityScore = Math.max(0, Math.min(1,
-            blendCalibratedRankingEvidence(channelScore, agreement, refinementSignal, consensusAdjustment) * evidenceGate * contradictionPenalty * relatedConsensusGate
+        const relationshipMismatch = Math.max(0, Math.min(1, Number(card.mechanicalBreakdown?.relationshipMismatch) || 0));
+        const strategicRoleAnchored = roleAnchoredHighlight || (
+            rankingIntent.kind === 'strategic_role' && roleSemantic >= 0.74 && rankingIntent.confidence >= 0.74
+        );
+        const deterministicFunctionalAnchor = calculateDeterministicRankingAnchor({
+            functionalSimilarity, effectCoverage, primaryEffectMatch,
+            roleScore: roleSemantic, roleAnchored: strategicRoleAnchored,
+            mechanicalConfidence, relationshipMismatch,
+            sourceModal: sourceModalIntentActive, modalSimilarity: modalSignal
+        });
+        card.deterministicFunctionalAnchor = deterministicFunctionalAnchor;
+        if (card.rankingEvidence) {
+            card.rankingEvidence.deterministicFunctionalAnchor = deterministicFunctionalAnchor;
+            card.rankingEvidence.primaryEffectRankingBoost = 0;
+        }
+        const calibratedBlendScore = Math.max(0, Math.min(1,
+            blendCalibratedRankingEvidence(channelScore, agreement, refinementSignal, consensusAdjustment, deterministicFunctionalAnchor)
+                * evidenceGate * contradictionPenalty * relatedConsensusGate
         ));
+        const primaryEffectRankingBoost = calculatePrimaryEffectRankingUplift({
+            functionalSimilarity, effectCoverage, primaryEffectMatch, mechanicalConfidence, relationshipMismatch
+        });
+        card.primaryEffectRankingBoost = primaryEffectRankingBoost;
+        if (card.rankingEvidence) card.rankingEvidence.primaryEffectRankingBoost = primaryEffectRankingBoost;
+        const preCadenceSimilarityScore = Math.max(0, Math.min(1, calibratedBlendScore + primaryEffectRankingBoost));
         const acquisitionCadenceMismatch = calculateSourceAcquisitionCadenceMismatch(
             sourceAcquisitionCadence, card, candidateParsedEffects
         );
@@ -29729,6 +29830,66 @@ function runManaSearchBenchmarkQualityRegressionSuite({ log = true } = {}) {
     return report;
 }
 try { window.runManaSearchBenchmarkQualityRegressionSuite = runManaSearchBenchmarkQualityRegressionSuite; } catch (_) {}
+
+// v104 ranking/scoring regressions. Checks deterministic effect evidence, strategic analogues,
+// contradiction damping, and real modal Oracle syntax (period header + instruction sentence).
+function runManaSearchRankingScoringRegressionSuite({ log = true } = {}) {
+    const results = [];
+    const check = (id, pass, detail = '') => results.push({ id, pass: Boolean(pass), detail: String(detail || '') });
+    try {
+        const strongAnchor = calculateDeterministicRankingAnchor({ functionalSimilarity: 0.856, effectCoverage: 1, primaryEffectMatch: 1, roleScore: 0.785, roleAnchored: true, mechanicalConfidence: 0.9 });
+        const weakAnchor = calculateDeterministicRankingAnchor({ functionalSimilarity: 0.18, effectCoverage: 0.12, primaryEffectMatch: 0, roleScore: 0.15, roleAnchored: false, mechanicalConfidence: 0.9 });
+        check('direct-function-anchor-rewards-primary-substitute', strongAnchor > weakAnchor, `strong=${strongAnchor.toFixed(3)} weak=${weakAnchor.toFixed(3)}`);
+        const weakScore = blendCalibratedRankingEvidence(0.72, 0.70, 0.50, 0, weakAnchor);
+        const strongScore = blendCalibratedRankingEvidence(0.72, 0.70, 0.50, 0, strongAnchor);
+        check('functional-anchor-affects-final-ranking-score', strongScore > weakScore, `strong=${strongScore.toFixed(3)} weak=${weakScore.toFixed(3)}`);
+        const contradicted = calculateDeterministicRankingAnchor({ functionalSimilarity: 0.856, effectCoverage: 1, primaryEffectMatch: 1, roleScore: 0.785, roleAnchored: true, mechanicalConfidence: 0.9, relationshipMismatch: 0.9 });
+        check('target-zone-or-trigger-contradiction-damps-anchor', contradicted < strongAnchor, `matched=${strongAnchor.toFixed(3)} contradicted=${contradicted.toFixed(3)}`);
+        const recurringEngine = calculateDeterministicRankingAnchor({ functionalSimilarity: 0.376, effectCoverage: 0.33, primaryEffectMatch: 0.33, roleScore: 0.967, roleAnchored: true, mechanicalConfidence: 0.9 });
+        const sameNoRole = calculateDeterministicRankingAnchor({ functionalSimilarity: 0.376, effectCoverage: 0.33, primaryEffectMatch: 0.33, roleScore: 0.967, roleAnchored: false, mechanicalConfidence: 0.9 });
+        check('strong-role-fingerprint-preserves-strategic-analogue', recurringEngine > sameNoRole, `role=${recurringEngine.toFixed(3)} noRole=${sameNoRole.toFixed(3)}`);
+        const exactCounterBoost = calculatePrimaryEffectRankingUplift({ functionalSimilarity: 0.856, effectCoverage: 1, primaryEffectMatch: 1, mechanicalConfidence: 0.90, relationshipMismatch: 0 });
+        const weakCounterBoost = calculatePrimaryEffectRankingUplift({ functionalSimilarity: 0.42, effectCoverage: 0.45, primaryEffectMatch: 0.30, mechanicalConfidence: 0.90, relationshipMismatch: 0 });
+        const contradictedCounterBoost = calculatePrimaryEffectRankingUplift({ functionalSimilarity: 0.856, effectCoverage: 1, primaryEffectMatch: 1, mechanicalConfidence: 0.90, relationshipMismatch: 0.8 });
+        check('primary-effect-uplift-rewards-high-coverage-substitutes', exactCounterBoost > 0.025 && exactCounterBoost <= 0.045, `boost=${exactCounterBoost.toFixed(3)}`);
+        check('primary-effect-uplift-ignores-weak-matches', weakCounterBoost === 0, `boost=${weakCounterBoost.toFixed(3)}`);
+        check('primary-effect-uplift-refuses-contradicted-targets', contradictedCounterBoost === 0, `boost=${contradictedCounterBoost.toFixed(3)}`);
+        const calibratedExpectedMatch = blendCalibratedRankingEvidence(0.71, 0.90, 0.589, 0, strongAnchor);
+        check('calibration-prioritizes-independent-primary-mechanics', calibratedExpectedMatch >= 0.76, `score=${calibratedExpectedMatch.toFixed(3)}`);
+
+        const mysticText = 'Choose three. You may choose the same mode more than once.\n• Counter target spell unless its controller pays {3}.\n• Return target creature to its owner’s hand.\n• Draw a card.';
+        const crypticText = 'Choose two —\n• Counter target spell.\n• Return target permanent to its owner’s hand.\n• Draw a card.\n• Tap all creatures your opponents control.';
+        const nonModalText = 'Counter target spell. Draw a card.';
+        const mysticParsed = parseMTGEffect(mysticText);
+        const crypticParsed = parseMTGEffect(crypticText);
+        const nonModalParsed = parseMTGEffect(nonModalText);
+        const sourceGroups = getModalEffectGroups(mysticParsed);
+        const modeSimilarity = calculateModalModeSimilarity(mysticParsed, crypticParsed);
+        check('period-terminated-modal-header-recognized', shouldUseModalModeIntent(mysticText, false, [], 0), mysticText.split('\n')[0]);
+        check('modal-instruction-keeps-following-bullets-in-one-group', sourceGroups.length === 1 && sourceGroups[0].length >= 3, JSON.stringify(sourceGroups.map(g => g.length)));
+        check('modal-option-set-matches-spell-with-overlapping-options', Boolean(modeSimilarity && modeSimilarity.score >= 0.35), JSON.stringify(modeSimilarity));
+        check('single-option-highlight-keeps-single-mode-focus', !shouldUseModalModeIntent(mysticText, true, [{ text: 'Draw a card', mode: 'variable' }], 1), 'one mode only');
+        check('highlighted-modal-header-preserves-option-set', shouldUseModalModeIntent(mysticText, true, [{ text: 'Choose three', mode: 'variable' }], 1), 'modal instruction selected');
+        check('nonmodal-candidate-does-not-invent-modal-group', calculateModalModeSimilarity(mysticParsed, nonModalParsed) === null, 'non-modal candidate');
+        const modalIntent = inferRankingIntent({ oracle_text: mysticText }, mysticParsed, 'Choose three Draw a card', [], [{ text: 'Choose three', mode: 'variable' }, { text: 'Draw a card', mode: 'variable' }]);
+        check('modal-highlight-does-not-collapse-to-one-strategic-role', modalIntent.kind === 'hybrid_effect' && !modalIntent.role && modalIntent.hasModalModes, JSON.stringify(modalIntent));
+
+        const source = parseMTGEffect('Counter target spell.');
+        const deprive = parseMTGEffect('Counter target spell. Return target land you control to its owner’s hand.');
+        const coverage = calculateEffectCoverageProfile(source, deprive);
+        const similarity = calculateFunctionalSimilarity(source, deprive);
+        const counterAnchor = calculateDeterministicRankingAnchor({ functionalSimilarity: similarity, effectCoverage: coverage.sourceCoverage, primaryEffectMatch: coverage.primaryMatch, roleScore: 0.78, roleAnchored: true, mechanicalConfidence: 0.9 });
+        check('primary-counter-effect-retained-despite-drawback', counterAnchor >= 0.72, `functional=${similarity.toFixed(3)} coverage=${coverage.sourceCoverage.toFixed(3)} anchor=${counterAnchor.toFixed(3)}`);
+        check('legacy-score-blend-remains-bounded', blendCalibratedRankingEvidence(0.99, 0.99, 0.99, 0.045) < 1, 'no saturation');
+    } catch (error) {
+        check('suite-execution', false, error?.stack || error?.message || String(error));
+    }
+    const passed = results.filter(r => r.pass).length;
+    const report = { passed, total: results.length, passRate: results.length ? passed / results.length : 0, ok: passed === results.length, results };
+    if (log) console[report.ok ? 'info' : 'warn'](`[ManaSearch] Ranking/scoring regression suite ${passed}/${results.length}`, report);
+    return report;
+}
+try { window.runManaSearchRankingScoringRegressionSuite = runManaSearchRankingScoringRegressionSuite; } catch (_) {}
 
 // v100 regression suite for shared constraint modes + source metadata editor controls.
 // Run from the browser console: runManaSearchAdvancedMechanicsRegressionSuite()
