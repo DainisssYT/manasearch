@@ -1,6 +1,6 @@
-/* ManaSearch build 20261017-107 */
+/* ManaSearch build 20261017-108 */
 // ManaSearch deployment build marker. Bump this whenever app.js changes so cached-module issues are easy to diagnose.
-const MANASEARCH_APP_BUILD = '20261017-107';
+const MANASEARCH_APP_BUILD = '20261017-108';
 console.info(`[ManaSearch] app.js build ${MANASEARCH_APP_BUILD}`);
 
 // State Management
@@ -14,10 +14,9 @@ let activeMainSearchRequestId = null;
 // Results are paginated in the presentation layer; the full ranked candidate list remains intact.
 let currentResultsPage = 1;
 let reorderResultsRequestId = 0;
-// Set after a search whose retrieval streams were capped mid-pagination (see fetchScryfallSearch's
-// `.continuation`) while Scryfall still had more pages. Holds everything searchDeeper() needs to
-// fetch more pages and score/merge/render them without re-deriving the whole search context from
-// the DOM again. null whenever there's nothing more to fetch, or before any search has run.
+// Set when a search retains additional local-corpus query plans for Search Deeper. Stores enough
+// context to extend the search without deriving it from the DOM again. Null when no deeper local
+// passes remain or before any search has run.
 let pendingDeeperSearch = null;
 // Snapshot the search-depth control at the start of each main search so 100% searches do not
 // advertise a continuation button after their requested complete retrieval has finished.
@@ -996,7 +995,7 @@ async function buildOtagLabeledCases(otagNames, { pagesPerTag = 4, maxSourcesPer
     for (const tag of tags) {
         const query = `otag:"${tag.replace(/\"/g, '\\\"')}"`;
         let cards = [];
-        try { cards = await fetchScryfallSearch(query, Math.max(1, pagesPerTag), `Otag label mining (${tag})`); }
+        try { cards = await searchLocalCardCorpusAdapter(query, Math.max(1, pagesPerTag), `Otag label mining (${tag})`); }
         catch (_) { cards = []; }
         const unique = [];
         const seen = new Set();
@@ -2047,7 +2046,7 @@ async function runBenchmarkPass(searchFn, test) {
             testStatus = 'empty';
         }
     } catch (err) {
-        if (isScryfallRateLimitError(err) || err?.scryfallCircuitOpen || (scryfallCircuitOpen && Date.now() < scryfallGlobalBackoffUntil)) {
+        if (isRuntimeCardApiRateLimitError(err) || err?.scryfallCircuitOpen || (scryfallCircuitOpen && Date.now() < scryfallGlobalBackoffUntil)) {
             testStatus = 'blocked_rate_limit';
             errorMessage = err?.message || 'Scryfall rate-limit/network circuit blocked live benchmark retrieval.';
         } else {
@@ -2179,7 +2178,7 @@ function resetBenchmarkColdState({ keepSourceCard = false } = {}) {
 
     // Source-card metadata is immutable input, not retrieval state. Keep the source cache across
     // benchmark tests so a previously loaded benchmark source can be reused without another
-    // Scryfall /cards/named request. Candidate/search/embedding state is still fully cold.
+    // Resolve source cards strictly from cards.bin. Candidate/search/embedding state is still fully cold.
     if (!keepSourceCard) {
         currentSourceCard = null;
     }
@@ -2366,7 +2365,7 @@ function ensureBenchmarkDashboard() {
             /* The width communicates completed benchmark stages; the moving sheen communicates
                that the current test is actively running even when its exact completion percentage
                is not yet known. This prevents a static 15%-ish bar from looking frozen for a 40s
-               live Scryfall retrieval. */
+               live local corpus retrieval. */
             .benchmark-runtime-progress.is-active::after {
                 content: '';
                 position: absolute;
@@ -2455,33 +2454,27 @@ function updateBenchmarkDashboard({ state, testIndex = 0, totalTests = BENCHMARK
 }
 
 async function preloadBenchmarkSourceCards() {
+    const corpus = staticCardCorpusMemory || await loadStaticCardCorpus();
+    if (!corpus?.cards?.length) {
+        throw new Error('Benchmark requires the bundled cards.bin catalog. Runtime card API lookups are disabled.');
+    }
     const uniqueSources = [...new Set((BENCHMARK_SUITE || []).map(test => String(test?.source || '').trim()).filter(Boolean))];
+    const missing = [];
     for (const source of uniqueSources) {
         const key = source.toLowerCase();
-        if (benchmarkSourceCardCatalog.has(key)) continue;
-        if (scryfallCircuitOpen && Date.now() < scryfallGlobalBackoffUntil) {
-            throw createScryfallRateLimitError('Scryfall is rate-limited before benchmark source preload completed.');
+        let card = getStaticCardByName(source);
+        if (!card) {
+            const normalized = normalizeLocalCorpusText(source);
+            const candidates = corpus.cards.filter(item => normalizeLocalCorpusText(item?.name) === normalized);
+            card = candidates[0] || null;
         }
-        const response = await scryfallThrottledFetch(
-            `https://api.scryfall.com/cards/named?fuzzy=${encodeURIComponent(source)}`,
-            {
-                headers: {
-                    'User-Agent': 'ManaMatch/1.0 (Semantic Magic Search)',
-                    'Accept': 'application/json'
-                }
-            }
-        );
-        if (!response?.ok) {
-            if (response?.status === 429) throw createScryfallRateLimitError(`Scryfall rate-limited source-card preload for ${source}.`);
-            throw new Error(`Could not preload benchmark source card "${source}" (${response?.status || 'network error'}).`);
-        }
-        const card = await response.json();
+        if (!card) { missing.push(source); continue; }
         benchmarkSourceCardCatalog.set(key, card);
         await backgroundAwareDelay(0);
     }
+    if (missing.length) throw new Error(`These benchmark source cards are missing from cards.bin: ${missing.join(', ')}`);
     return uniqueSources.length;
 }
-
 function withBenchmarkTimeout(promise, timeoutMs, label = 'operation') {
     return new Promise((resolve, reject) => {
         let settled = false;
@@ -2642,33 +2635,9 @@ function createBenchmarkBlockedPass(test, reason) {
  * the benchmark contract is to give every configured test a real search attempt. Waiting here is
  * safer than probing the API and turning one 429 into a retry storm.
  */
-async function waitForBenchmarkScryfallAvailability(label = 'benchmark') {
-    if (benchmarkUseLocalOracleCorpus) return;
-
-    while (scryfallCircuitOpen && Date.now() < scryfallGlobalBackoffUntil) {
-        const remainingMs = Math.max(0, scryfallGlobalBackoffUntil - Date.now());
-        const remainingSeconds = Math.ceil(remainingMs / 1000);
-        console.warn(`Benchmark waiting for Scryfall cooldown before ${label}: ~${remainingSeconds}s remaining; no API probe will be sent.`);
-        try {
-            updateBenchmarkDashboard({
-                state: 'Waiting for Scryfall',
-                totalTests: BENCHMARK_SUITE.length,
-                detail: `Waiting ~${remainingSeconds}s for Scryfall's existing rate-limit cooldown before ${label}. The benchmark will then run this test normally.`,
-                percent: null
-            });
-        } catch (_) {}
-        await backgroundAwareDelay(Math.min(1000, Math.max(250, remainingMs)));
-    }
-
-    // Cooldown has elapsed. It is safe to clear the local gate without issuing a test request.
-    if (scryfallCircuitOpen && Date.now() >= scryfallGlobalBackoffUntil) {
-        scryfallCircuitOpen = false;
-        if (scryfallDispatchTimer) {
-            clearTimeout(scryfallDispatchTimer);
-            scryfallDispatchTimer = null;
-        }
-        scryfallDispatchTimerPending = false;
-    }
+async function waitForBenchmarkScryfallAvailability() {
+    // Static-data-only runtime: there is no external card API cooldown to wait for.
+    return;
 }
 
 /**
@@ -2684,12 +2653,12 @@ async function runBenchmarkPassWithRateLimitRecovery(searchFn, test, label = 'be
         resetBenchmarkColdState();
 
         if (attempt > 1) {
-            console.warn(`Benchmark ${label}: retrying after Scryfall cooldown (attempt ${attempt}/${attempts}).`);
+            console.warn(`Benchmark ${label}: retrying after a local-data test failure (attempt ${attempt}/${attempts}).`);
             try {
                 updateBenchmarkDashboard({
                     state: 'Retrying test',
                     totalTests: BENCHMARK_SUITE.length,
-                    detail: `Scryfall cooldown cleared; rerunning ${label} from a cold state (attempt ${attempt}/${attempts})…`,
+                    detail: `Preparing a fresh local-data pass; rerunning ${label} from a cold state (attempt ${attempt}/${attempts})…`,
                     percent: null
                 });
             } catch (_) {}
@@ -2709,7 +2678,7 @@ async function runBenchmarkPassWithRateLimitRecovery(searchFn, test, label = 'be
 
     return lastPass || createBenchmarkBlockedPass(
         test,
-        `Scryfall remained rate-limited after ${attempts} benchmark attempts.`
+        `Runtime card API fallback was disabled after ${attempts} benchmark attempts.`
     );
 }
 
@@ -2736,35 +2705,18 @@ async function runBenchmarkSuite(searchFn) {
     benchmarkUseLocalOracleCorpus = false;
     benchmarkLocalOracleCorpus = null;
     benchmarkApiConservativeMode = false;
-    try {
-        updateBenchmarkDashboard({
-            state: 'Checking local corpus',
-            totalTests: BENCHMARK_SUITE.length,
-            detail: 'Using an already-loaded semantic index if available; never blocking Test #1 on a full index build…',
-            percent: 5
-        });
-        await backgroundAwareDelay(0);
-
-        // IMPORTANT: do not await IndexedDB chunk loading here. A persisted full index can be
-        // hundreds of MB in memory and loading it before Test #1 was the V20.17 startup hang.
-        // Only use an index already resident in memory; otherwise the benchmark starts immediately
-        // in bounded API-conservative mode. Normal searches may still build/load the full index.
-        if (fullSemanticIndexMemory && fullSemanticIndexMemory.source !== 'static') {
-            benchmarkUseLocalOracleCorpus = true;
-            benchmarkLocalOracleCorpus = fullSemanticIndexMemory;
-            console.info('Benchmark retrieval mode: in-memory client Scryfall Oracle semantic index.');
-        } else {
-            // The deployed static index intentionally stores only names + quantized vectors; normal
-            // users hydrate the small semantic hit set from Scryfall after retrieval. Keep benchmark
-            // local-corpus mode off for that compact asset rather than pretending its card payloads
-            // are present.
-            benchmarkApiConservativeMode = true;
-            console.info('Benchmark retrieval mode: API-conservative fallback; no in-memory semantic index is ready.');
-        }
-    } catch (err) {
-        benchmarkApiConservativeMode = true;
-        console.info('Benchmark local-index check skipped; using API-conservative fallback:', err?.message || err);
+    updateBenchmarkDashboard({
+        state: 'Checking bundled card data',
+        totalTests: BENCHMARK_SUITE.length,
+        detail: 'Loading cards.bin and semantic-index.bin. Benchmark retrieval and hydration use only bundled local assets.',
+        percent: 5
+    });
+    await backgroundAwareDelay(0);
+    const staticReadyForBenchmark = staticSearchResourcesReady() || await loadStaticSearchResources();
+    if (!staticReadyForBenchmark || !staticCardCorpusMemory?.cards?.length || fullSemanticIndexMemory?.source !== 'static') {
+        throw new Error('Benchmark requires the bundled cards.bin and semantic-index.bin. Runtime Scryfall card fetches are disabled. Check static-data-meta.json and the two .bin assets.');
     }
+    console.info('Benchmark retrieval mode: local-only cards.bin + precomputed semantic-index.bin; no card API requests.');
 
     // Load the NLP model opportunistically, but never let model startup block the whole suite.
     try {
@@ -2780,16 +2732,13 @@ async function runBenchmarkSuite(searchFn) {
         nlpExtractor = { type: 'fallback' };
     }
 
-    // Source-card metadata is immutable benchmark input. Reuse anything already present in the
-    // benchmark catalog or normal source-card cache; do NOT make a dozen API requests up front.
-    // Missing source cards are fetched only when their individual test starts.
+    // Source-card metadata is resolved exclusively from cards.bin. Every benchmark source and candidate
+    // must exist in the local deployed catalog; this benchmark never fetches card records online.
     if (typeof updateBenchmarkDashboard === 'function') {
         updateBenchmarkDashboard({
-            state: benchmarkUseLocalOracleCorpus ? 'Using local corpus' : 'API-conservative mode',
+            state: 'Using bundled local data',
             totalTests: BENCHMARK_SUITE.length,
-            detail: benchmarkUseLocalOracleCorpus
-                ? 'Ready semantic index found; starting benchmark tests…'
-                : 'No ready semantic index found; starting with bounded live retrieval…',
+            detail: 'Bundled card catalog and precomputed semantic index are ready; starting local-only benchmark tests…',
             percent: 12
         });
         await backgroundAwareDelay(0);
@@ -2803,7 +2752,7 @@ async function runBenchmarkSuite(searchFn) {
     resetBenchmarkColdState();
 
     console.log("==================================================");
-    console.log("     ManaMatch Local Search Benchmark Suite       ");
+    console.log("     ManaSearch Local-Only Benchmark Suite       ");
     console.log(`     Run ID: ${runId}`);
     console.log("==================================================\n");
 
@@ -2841,7 +2790,7 @@ async function runBenchmarkSuite(searchFn) {
         });
         await backgroundAwareDelay(0);
         // EVERY configured test gets an actual search attempt. If a previous test opened the
-        // Scryfall cooldown, wait for the already-announced cooldown instead of skipping this test.
+        // Local-only mode: continue testing independently without remote card-data cooldowns.
         await waitForBenchmarkScryfallAvailability(`Test #${test.id}`);
 
         // True cold test: no retrieval/scoring state from the preceding benchmark test.
@@ -2871,7 +2820,7 @@ async function runBenchmarkSuite(searchFn) {
         );
 
         if (strictPass.testStatus === 'blocked_rate_limit') {
-            console.warn(`Benchmark Test #${test.id}: Scryfall remained rate-limited after the retry budget; recording this test as blocked, then continuing.`);
+            console.warn(`Benchmark Test #${test.id}: Runtime card API fallback was disabled after the retry budget; recording this test as blocked, then continuing.`);
         } else if (strictPass.testStatus === 'error') {
             console.error(`Benchmark Test #${test.id}: isolated strict-pass error; continuing.`);
         }
@@ -3105,9 +3054,8 @@ async function runBenchmarkSuite(searchFn) {
         // Hard per-test safety boundary: a trace/reporting bug or unexpected runtime error in one
         // benchmark case must never abort the remaining suite. Record the isolated failure and continue.
         const elapsedMs = Date.now() - benchmarkTestStartedAt;
-        const blocked = isScryfallRateLimitError(testError) || testError?.scryfallCircuitOpen ||
-            (scryfallCircuitOpen && Date.now() < scryfallGlobalBackoffUntil);
-        const fallbackStatus = blocked ? 'blocked_rate_limit' : 'error';
+        const blocked = false;
+        const fallbackStatus = 'error';
         const fallbackMessage = testError?.message || String(testError);
         const expected = Array.isArray(test?.expected) ? test.expected : [];
         const fallbackRanks = {};
@@ -3159,7 +3107,7 @@ async function runBenchmarkSuite(searchFn) {
                 testIndex: benchmarkIndex + 1,
                 totalTests: BENCHMARK_SUITE.length,
                 test,
-                detail: `${blocked ? 'Blocked by Scryfall; ' : 'Error isolated; '}continuing through the suite…`,
+                detail: 'Local-data test error isolated; continuing through the suite…',
                 percent: 15 + ((benchmarkIndex + 1) / Math.max(1, BENCHMARK_SUITE.length)) * 80
             });
             await backgroundAwareDelay(0);
@@ -3215,7 +3163,7 @@ async function runBenchmarkSuite(searchFn) {
     if (benchmarkCompleted) {
         console.log(`Benchmark traversed all tests: ${completedBenchmarkTests}/${BENCHMARK_SUITE.length}.`);
         if (blockedBenchmarkTests > 0 || erroredBenchmarkTests > 0) {
-            console.log(`Non-measured tests: ${blockedBenchmarkTests} API-blocked, ${erroredBenchmarkTests} isolated error(s). Quality metrics below report only ${measuredBenchmarkTests} measured test(s).`);
+            console.log(`Non-measured tests: ${blockedBenchmarkTests} blocked, ${erroredBenchmarkTests} isolated error(s). Quality metrics below report only ${measuredBenchmarkTests} measured test(s).`);
         } else {
             console.log('All tests were fully measured.');
         }
@@ -3296,7 +3244,9 @@ async function runBenchmarkSuite(searchFn) {
         totalTests: BENCHMARK_SUITE.length,
         benchmarkCompleted,
         benchmarkFullyMeasured,
-        scryfallRateLimited: scryfallConsecutiveRateLimits > 0,
+        runtimeCardApiUsed: false,
+        runtimeCardApiEnabled: false,
+        cardDataSource: 'cards.bin + semantic-index.bin',
         benchmarkConfiguration: currentBenchmarkConfiguration ? { ...currentBenchmarkConfiguration } : null
     };
 
@@ -3319,7 +3269,7 @@ async function runBenchmarkSuite(searchFn) {
                 totalTests: BENCHMARK_SUITE.length,
                 detail: complete
                     ? ((blockedBenchmarkTests > 0 || erroredBenchmarkTests > 0)
-                        ? `Benchmark run finished. All ${completed}/${BENCHMARK_SUITE.length} tests were traversed; ${blockedBenchmarkTests} were blocked by the Scryfall API circuit and ${erroredBenchmarkTests} had isolated errors. Results and traces are shown below.`
+                        ? `Benchmark run finished. All ${completed}/${BENCHMARK_SUITE.length} tests were traversed; ${blockedBenchmarkTests} were blocked and ${erroredBenchmarkTests} had isolated local-data errors. Results and traces are shown below.`
                         : 'Benchmark run finished. The results and traces are shown below.')
                     : `Benchmark stopped after ${completed}/${BENCHMARK_SUITE.length} completed test${completed === 1 ? '' : 's'}.`,
                 percent: complete ? 100 : (BENCHMARK_SUITE.length ? (completed / BENCHMARK_SUITE.length) * 100 : 0)
@@ -10236,7 +10186,7 @@ function calculateAggregateQuantitySimilarity(parsedSource, parsedCandidate, cov
 // UNIVERSAL MECHANIC SIGNATURE
 // ---------------------------------------------------------------------------
 // The finite effect parser remains useful for detailed rules structure, but Magic's mechanic
-// vocabulary is much larger than any sensible hand-written parser table. Scryfall card objects carry
+// vocabulary is much larger than any sensible hand-written parser table. bundled card records carry
 // the card's structured `keywords` array, so use that as the universal mechanic layer. This means
 // obscure, historic, and newly introduced keyword abilities/actions can participate in mechanical
 // matching without adding a new branch to the parser each time Wizards adds a mechanic.
@@ -13496,7 +13446,7 @@ function runManaSearchPerformanceOptimizationRegressionSuite({ log = true } = {}
         const fingerprintB = buildStrategicRoleFingerprint(roleCard, roleEffects, roleProfileA);
         check('strategic-role-fingerprint-cache-reuses-exact-result', fingerprintA === fingerprintB && strategicRoleFingerprintCacheStats.hits > fingerprintHitsBefore, 'fingerprint identity and cache-hit counter');
         check('embedding-adaptive-batch-configuration-present', MANASEARCH_EMBED_ACTIVE_EDIT_BATCH === 4 && MANASEARCH_EMBED_RECENT_ACTIVITY_BATCH === 12 && getManaSearchEmbeddingBatchSize() >= 16, 'adaptive batch caps');
-        check('serialized-scryfall-rate-safe-gap', SCRYFALL_MAX_CONCURRENT_REQUESTS === 1 && SCRYFALL_MIN_DISPATCH_GAP_MS >= 120 && SCRYFALL_MIN_DISPATCH_GAP_MS <= 200, `concurrency=${SCRYFALL_MAX_CONCURRENT_REQUESTS}; gap=${SCRYFALL_MIN_DISPATCH_GAP_MS}`);
+        check('runtime-card-api-transport-is-disabled', !/fetch\s*\(/.test(disabledRuntimeCardApiTransport.toString()) && disabledRuntimeCardApiTransport.toString().includes('no longer fetches card records at runtime'), 'All card records must come from cards.bin; no API transport is available.');
         check('mechanic-token-normalization-is-stable', normalizeMechanicToken('  Islandwalk—Only  ') === normalizeMechanicToken('  Islandwalk—Only  ') && normalizeMechanicToken('  Islandwalk—Only  ') === "islandwalk-only", 'normalization memo must preserve the original function');
         const keywordRegexA = getMechanicKeywordRegexes('double strike');
         const regexHitsBefore = mechanicKeywordRegexCacheStats.hits;
@@ -14698,7 +14648,7 @@ function matchesComparisonFilter(cardValue, filterSpec) {
  * @param {{operator: string, value: number}|null} filterSpec
  * @returns {string} empty string when there's nothing to add
  */
-function comparisonFilterToScryfallQuery(field, filterSpec) {
+function comparisonFilterToLocalQuery(field, filterSpec) {
     return filterSpec ? `${field}${filterSpec.operator}${filterSpec.value}` : '';
 }
 
@@ -14908,7 +14858,7 @@ function hasActiveConstraintFilters(filters) {
     );
 }
 
-function escapeScryfallValue(value) {
+function escapeLocalQueryValue(value) {
     return String(value || '').replace(/(["\\])/g, '\\$1');
 }
 
@@ -14917,7 +14867,7 @@ function getConstraintMode(filters, key) {
     return value === 'prefer' || value === 'exclude' ? value : 'hard';
 }
 
-function buildScryfallConstraintParts(filters) {
+function buildLocalConstraintParts(filters) {
     const parts = [];
     const hard = key => getConstraintMode(filters, key) === 'hard';
     const addTypedTerms = (key, values, makeTerm) => {
@@ -14926,17 +14876,17 @@ function buildScryfallConstraintParts(filters) {
         const prefix = mode === 'exclude' ? '-' : '';
         (values || []).forEach(value => parts.push(`${prefix}${makeTerm(value)}`));
     };
-    addTypedTerms('types', filters?.types, value => `type:${escapeScryfallValue(value)}`);
+    addTypedTerms('types', filters?.types, value => `type:${escapeLocalQueryValue(value)}`);
     // Exclusion uses Scryfall's negated field syntax; preferences stay out of remote retrieval
     // and are applied only as a bounded ranking bonus after candidates are found.
-    addTypedTerms('supertype', filters?.supertypes, value => `type:${escapeScryfallValue(value)}`);
-    addTypedTerms('subtype', filters?.subtypes, value => `type:"${escapeScryfallValue(value)}"`);
-    (filters?.keywords || []).forEach(keyword => parts.push(`keyword:"${escapeScryfallValue(keyword)}"`));
+    addTypedTerms('supertype', filters?.supertypes, value => `type:${escapeLocalQueryValue(value)}`);
+    addTypedTerms('subtype', filters?.subtypes, value => `type:"${escapeLocalQueryValue(value)}"`);
+    (filters?.keywords || []).forEach(keyword => parts.push(`keyword:"${escapeLocalQueryValue(keyword)}"`));
     if (filters?.format && hard('format')) parts.push(`f:${filters.format}`);
     if (filters?.rarity) {
         const rarityMode = getConstraintMode(filters, 'rarity');
-        if (rarityMode === 'hard') parts.push(`r:${escapeScryfallValue(filters.rarity)}`);
-        else if (rarityMode === 'exclude') parts.push(`-r:${escapeScryfallValue(filters.rarity)}`);
+        if (rarityMode === 'hard') parts.push(`r:${escapeLocalQueryValue(filters.rarity)}`);
+        else if (rarityMode === 'exclude') parts.push(`-r:${escapeLocalQueryValue(filters.rarity)}`);
     }
     if (filters?.identity && hard('identity')) parts.push(`identity:${filters.identity}`);
     if (filters?.colors && hard('colors')) parts.push(`c:${filters.colors}`);
@@ -14945,7 +14895,7 @@ function buildScryfallConstraintParts(filters) {
         if (raw === undefined || raw === null || String(raw).trim() === '') return;
         const mode = getConstraintMode(filters, key);
         if (mode === 'prefer') return; // ranking preference: don't reduce the retrieval candidate pool
-        const query = comparisonFilterToScryfallQuery(scryfallField, parseComparisonFilter(raw));
+        const query = comparisonFilterToLocalQuery(scryfallField, parseComparisonFilter(raw));
         if (!query) return;
         parts.push(mode === 'exclude' ? `-${query}` : query);
     };
@@ -14954,10 +14904,10 @@ function buildScryfallConstraintParts(filters) {
     addNumericModeQuery('toughness', 'tou');
     if (filters?.set) {
         const setMode = getConstraintMode(filters, 'set');
-        if (setMode === 'hard') parts.push(`e:${escapeScryfallValue(filters.set)}`);
-        else if (setMode === 'exclude') parts.push(`-e:${escapeScryfallValue(filters.set)}`);
+        if (setMode === 'hard') parts.push(`e:${escapeLocalQueryValue(filters.set)}`);
+        else if (setMode === 'exclude') parts.push(`-e:${escapeLocalQueryValue(filters.set)}`);
     }
-    if (filters?.extraOracle) parts.push(`o:"${escapeScryfallValue(filters.extraOracle)}"`);
+    if (filters?.extraOracle) parts.push(`o:"${escapeLocalQueryValue(filters.extraOracle)}"`);
     return parts;
 }
 
@@ -15413,613 +15363,98 @@ function setCachedSearch(cacheKey, value) {
     }
 }
 
-// --- Global Scryfall request throttle ---------------------------------------------------
-// findSimilarCards fires several independent search streams (A, B, C, E, and up to 5
-// functional "F" formulations) concurrently via Promise.all, and each stream paginates
-// itself with its own internal 100ms inter-page delay. That per-stream delay only spaces out
-// a single stream's OWN pages - it does nothing to coordinate the streams with each other, so
-// on the very first tick every stream can issue a page-1 request at once, and again for page 2,
-// etc. That burst of simultaneously in-flight requests is what was tripping Scryfall's rate
-// limiter (429s), independent of any single stream's own pacing. Routing every request from
-// every stream through one shared queue - bounded concurrency plus a minimum gap between
-// dispatches - fixes the bursting at its source instead of only retrying after the fact.
-//
-// Concurrency is 1, not 2: an earlier version of this queue allowed 2 requests in flight at
-// once, which was enough to fix the light tests (few pages per stream) but NOT the heavy ones -
-// a test whose streams each need many pages (Sol Ring, Phyrexian Arena, Mystic Confluence) kept
-// both queue slots continuously occupied for most of retrieval, which is exactly the sustained
-// overlap Scryfall's limiter flags. Every 429 then cost an exponential backoff (up to 15s, up to
-// 5 retries per page) that stacked directly onto that test's wall-clock time - this, not the NLP
-// model, is why later/heavier tests in a benchmark run appeared to get progressively slower.
-// Scryfall's own guidance is to insert a delay BETWEEN serial requests, not to run several at
-// once, so true serialization (one in flight at a time) is what actually keeps every stream under
-// the limiter regardless of how many pages it needs.
-const SCRYFALL_MAX_CONCURRENT_REQUESTS = 1;
-// Keep requests strictly serialized, but avoid the prior 400ms idle gap that added substantial
-// latency to every independent search lane. A 150ms minimum gap caps this app at ~6.7 dispatches/s
-// before network latency is counted, below Scryfall's documented <10 requests/second guidance.
-// The single in-flight request limit and client-wide 429 circuit-breaker remain unchanged.
-const SCRYFALL_MIN_DISPATCH_GAP_MS = 150;
-
-let scryfallActiveRequests = 0;
-let scryfallLastDispatchAt = 0;
-const scryfallRequestQueue = [];
-
-// A 429 is a client-wide signal. The first one freezes all queued traffic for at least a minute;
-// repeated 429s escalate the freeze instead of repeatedly probing the same endpoint. The cooldown
-// is intentionally longer than the minimum steady-state gap because Scryfall explicitly asks
-// clients not to retry through a rate limit.
-const SCRYFALL_DEFAULT_COOLDOWN_MS = 60000;
-const SCRYFALL_MAX_COOLDOWN_MS = 5 * 60 * 1000;
+// --- Static-data-only card retrieval ----------------------------------------------------
+// Search, source-card resolution, semantic hydration, related-card lookup and benchmarks must
+// consume cards.bin and semantic-index.bin. Runtime card-record API requests are intentionally
+// prohibited; Scryfall is used offline by the repository update workflow only.
+let scryfallCircuitOpen = false;
 let scryfallGlobalBackoffUntil = 0;
 let scryfallConsecutiveRateLimits = 0;
-let scryfallLastHealthyResponseAt = 0;
-let scryfallLastCooldownUiNoticeAt = 0;
-let scryfallDispatchGeneration = 0;
-let scryfallCircuitOpen = false;
-const SCRYFALL_COOLDOWN_UI_NOTICE_DEDUP_MS = 8000;
-
-function showScryfallCooldownNotice(message) {
-    const now = Date.now();
-    if (now - scryfallLastCooldownUiNoticeAt < SCRYFALL_COOLDOWN_UI_NOTICE_DEDUP_MS) return;
-    scryfallLastCooldownUiNoticeAt = now;
-    updateProgress(null, null, message);
-}
-
-// Exact in-flight request coalescing is a correctness/performance guard, not a search-quality
-// change. If two parts of the app ask for the same Scryfall URL at the same time, they share the
-// one physical HTTP request instead of creating redundant traffic. Completed requests can still
-// be cached by the normal search/source-card caches below.
-const scryfallInFlightRequests = new Map();
-// Global backoff broadcast: a 429 (or a network error that looks like a disguised one - see the
-// CORS note in fetchScryfallSearch) almost always reflects load on the WHOLE client's traffic to
-// Scryfall, not just the one query that happened to receive it. Previously, only the offending
-// stream's own retry loop slowed down; every other stream kept dispatching through the shared
-// queue at the normal 100ms pace in the meantime and would frequently walk into the same limit
-// moments later, each independently re-discovering it and burning its own retry budget instead of
-// the client backing off as a whole. notifyScryfallRateLimited widens the gap between EVERY
-// dispatch (not just the offending stream's) for a cooldown window, then it decays back to normal.
-const SCRYFALL_BACKOFF_DISPATCH_GAP_MS = 1000;
-
-function createScryfallRateLimitError(message = "Scryfall rate limit/network block") {
+let scryfallDispatchTimer = null;
+let scryfallDispatchTimerPending = false;
+function createStaticCardDataError(message = 'Runtime card API requests are disabled.') {
     const error = new Error(message);
-    error.code = "SCRYFALL_RATE_LIMIT";
-    error.isScryfallRateLimit = true;
+    error.code = 'STATIC_CARD_DATA_ONLY';
+    error.isScryfallRateLimit = false;
+    error.isStaticCardDataError = true;
     return error;
 }
-
-function isScryfallRateLimitError(error) {
-    return Boolean(error?.isScryfallRateLimit || error?.code === "SCRYFALL_RATE_LIMIT");
+function isRuntimeCardApiRateLimitError() { return false; }
+function showLocalDataIssueNotice(message) {
+    // Compatibility shim for older error paths: this now reports local asset state, never API cooldowns.
+    updateProgress(null, null, String(message || 'ManaSearch uses the bundled local card catalog.'));
 }
-
-function abortQueuedScryfallRequests(reason = 'Scryfall rate limit; queued API requests were cancelled locally.') {
-    // Invalidate every outstanding queue wake-up. A rate limit is a circuit-breaker event, so
-    // stale timeout callbacks must not be allowed to resurrect the queue during the cooldown.
-    scryfallDispatchGeneration++;
-    if (scryfallDispatchTimer) {
-        clearTimeout(scryfallDispatchTimer);
-        scryfallDispatchTimer = null;
-    }
-    scryfallDispatchTimerPending = false;
-
-    const queuedError = createScryfallRateLimitError(reason);
-    const dropped = scryfallRequestQueue.splice(0);
-    dropped.forEach(task => {
-        try {
-            task.reject(queuedError);
-        } catch (_) {}
-    });
-    return dropped.length;
+function disabledRuntimeCardApiTransport() {
+    return Promise.reject(createStaticCardDataError(
+        'ManaSearch no longer fetches card records at runtime. Load cards.bin and semantic-index.bin, then retry.'
+    ));
 }
+// ----------------------------------------------------------------------------------------
 
-function notifyScryfallRateLimited(cooldownMs = SCRYFALL_DEFAULT_COOLDOWN_MS, source = '429') {
-    // A browser CORS failure can obscure an HTTP 429 as `TypeError: Failed to fetch`. Explicit 429s
-    // use the normal escalation; generic network/CORS failures get one fixed cooldown so multiple
-    // observers of the same browser failure cannot turn it into a multi-minute freeze.
-    const wasAlreadyOpen = scryfallCircuitOpen;
-    const isExplicit429 = source === '429';
-    if (isExplicit429) scryfallConsecutiveRateLimits++;
-    scryfallCircuitOpen = true;
-
-    // Escalate repeated explicit 429s: 60s -> 120s -> 240s -> 300s max. The important part is that
-    // a limit is a CIRCUIT BREAKER, not a retry instruction: queued traffic is failed locally
-    // instead of sitting in a timer chain that probes Scryfall again.
-    const escalation = isExplicit429
-        ? 2 ** Math.max(0, scryfallConsecutiveRateLimits - 1)
-        : 1;
-    const requestedCooldown = Math.max(0, cooldownMs);
-    const effectiveCooldown = Math.min(
-        SCRYFALL_MAX_COOLDOWN_MS,
-        Math.max(SCRYFALL_DEFAULT_COOLDOWN_MS, requestedCooldown) * escalation
-    );
-    const nextBackoffUntil = Date.now() + effectiveCooldown;
-
-    // Extend the existing cooldown, never shorten it.
-    scryfallGlobalBackoffUntil = Math.max(
-        scryfallGlobalBackoffUntil,
-        nextBackoffUntil
-    );
-
-    showScryfallCooldownNotice(
-        `Scryfall rate limit detected. API traffic is cooling down for ${Math.ceil(effectiveCooldown / 1000)}s; unsent queued API work was cancelled and will not be retried.`
-    );
-
-    // Do not keep already-queued API work alive through the cooldown. Those requests would only
-    // become a retry wave after the timer fires. Each search stream already knows how to preserve
-    // its partial results, so canceling unsent work is the correct fail-closed behavior here.
-    const dropped = abortQueuedScryfallRequests(
-        `Scryfall rate limit (${source}); unsent API request(s) cancelled.`
-    );
-    if (dropped > 0 && !wasAlreadyOpen) {
-        showScryfallCooldownNotice(`Scryfall rate limit: cancelled ${dropped} queued API request(s); keeping partial results and sending no retries.`);
-    }
-}
-
-function noteScryfallHealthyResponse() {
-    const now = Date.now();
-    scryfallLastHealthyResponseAt = now;
-
-    // A healthy response after the current freeze clears the escalation state so an old rate
-    // limit doesn't permanently make this session slower. We intentionally require a healthy
-    // response AFTER the cooldown window rather than resetting on a queued request that merely
-    // started while the queue was still recovering.
-    if (now >= scryfallGlobalBackoffUntil) {
-        scryfallConsecutiveRateLimits = 0;
-        scryfallLastCooldownUiNoticeAt = 0;
-        scryfallCircuitOpen = false;
-    }
-}
-
-function currentScryfallDispatchGapMs() {
-    // The cooldown is handled separately by pumpScryfallQueue(). This helper only
-    // defines the normal steady-state spacing between Scryfall dispatches.
-    return SCRYFALL_MIN_DISPATCH_GAP_MS;
-}
-
-let scryfallDispatchTimerPending = false;
-let scryfallDispatchTimer = null;
-
-function pumpScryfallQueue() {
-    // A client-wide 429 circuit is a hard stop. Never schedule a cooldown timer and never probe
-    // the API again from the queue; callers are rejected at the front door until the cooldown ends.
-    const now = Date.now();
-    if (scryfallCircuitOpen) {
-        if (now < scryfallGlobalBackoffUntil) {
-            abortQueuedScryfallRequests('Scryfall client-wide rate-limit circuit is open; queued work cancelled.');
-            return;
-        }
-        scryfallCircuitOpen = false;
-    }
-
-    if (
-        scryfallActiveRequests >= SCRYFALL_MAX_CONCURRENT_REQUESTS ||
-        scryfallRequestQueue.length === 0
-    ) {
-        return;
-    }
-
-    const gapRemaining = scryfallLastDispatchAt + SCRYFALL_MIN_DISPATCH_GAP_MS - now;
-    if (gapRemaining > 0) {
-        if (!scryfallDispatchTimerPending) {
-            const generation = scryfallDispatchGeneration;
-            scryfallDispatchTimerPending = true;
-            scryfallDispatchTimer = setTimeout(() => {
-                scryfallDispatchTimerPending = false;
-                scryfallDispatchTimer = null;
-                if (generation !== scryfallDispatchGeneration) return;
-                pumpScryfallQueue();
-            }, gapRemaining);
-        }
-        return;
-    }
-
-    scryfallActiveRequests++;
-    scryfallLastDispatchAt = Date.now();
-    const task = scryfallRequestQueue.shift();
-    if (!task) {
-        scryfallActiveRequests--;
-        pumpScryfallQueue();
-        return;
-    }
-
-    fetch(task.url, task.options)
-        .then(response => {
-            if (response.status === 429) {
-                const retryAfterHeader = parseFloat(response.headers?.get?.('Retry-After'));
-                const retryAfterMs = !isNaN(retryAfterHeader) && retryAfterHeader >= 0
-                    ? retryAfterHeader * 1000
-                    : SCRYFALL_DEFAULT_COOLDOWN_MS;
-                notifyScryfallRateLimited(retryAfterMs);
-            } else if (response.ok) {
-                noteScryfallHealthyResponse();
-            }
-            task.resolve(response);
-        }, error => {
-            if (!isScryfallRateLimitError(error)) {
-                notifyScryfallRateLimited(SCRYFALL_DEFAULT_COOLDOWN_MS, 'network');
-            }
-            task.reject(error);
-        })
-        .finally(() => {
-            scryfallActiveRequests--;
-            // Do not pump the queue after a rate-limit/network circuit opens. Any remaining queued
-            // work was already rejected by notifyScryfallRateLimited().
-            if (!scryfallCircuitOpen) pumpScryfallQueue();
-        });
-}
-
-function scryfallRequestKey(url, options = {}) {
-    return JSON.stringify({
-        url,
-        method: options.method || 'GET',
-        body: options.body || null
-    });
-}
-
-function scryfallThrottledFetch(url, options = {}) {
-    // Never enqueue work while the client-wide circuit is open. This is intentionally global,
-    // including interactive traffic: a queued request is still a retry and Scryfall asks clients
-    // not to keep probing after a 429. Once the cooldown expires, the next caller may resume.
-    const now = Date.now();
-    if (scryfallCircuitOpen) {
-        if (now < scryfallGlobalBackoffUntil) {
-            const cooldownError = createScryfallRateLimitError(
-                benchmarkColdMode
-                    ? 'Scryfall is in a client-wide cooldown after a 429; benchmark stopped to avoid retry traffic.'
-                    : 'Scryfall is in a client-wide cooldown after a 429; new API traffic is paused.'
-            );
-            cooldownError.isLocalCooldownRejection = true;
-            return Promise.reject(cooldownError);
-        }
-        scryfallCircuitOpen = false;
-    }
-
-    const requestOptions = benchmarkColdMode
-        ? { ...options, cache: 'no-store' }
-        : options;
-    const key = scryfallRequestKey(url, requestOptions);
-    const inFlight = scryfallInFlightRequests.get(key);
-    if (inFlight) return inFlight;
-
-    // Always enqueue while a cooldown is active. pumpScryfallQueue() owns the cooldown gate and
-    // will simply hold the request until the safe dispatch time. This avoids turning a temporary
-    // server-side rate limit into a cascade of local promise rejections.
-
-    const requestPromise = new Promise((resolve, reject) => {
-        scryfallRequestQueue.push({
-            url,
-            options: requestOptions,
-            resolve,
-            reject
-        });
-
-        pumpScryfallQueue();
-    });
-
-    scryfallInFlightRequests.set(key, requestPromise);
-    requestPromise.then(
-        () => scryfallInFlightRequests.delete(key),
-        () => scryfallInFlightRequests.delete(key)
-    );
-
-    return requestPromise;
-}
-// ------------------------------------------------------------------------------------------
-
-async function fetchScryfallSearch(query, maxPagesOverride = MIN_SEARCH_PAGES, searchLabel = "Search", expectedSearchRequestId = null) {
-    // Capture the initiating search before the first await. Callers that themselves awaited before
-    // reaching this fallback may pass their original ID explicitly, so late pages still cancel.
+async function searchLocalCardCorpusAdapter(query, maxPagesOverride = MIN_SEARCH_PAGES, searchLabel = 'Local Search', expectedSearchRequestId = null) {
     const owningSearchRequestId = Number.isFinite(expectedSearchRequestId) ? expectedSearchRequestId : searchRequestId;
-    const depthInput = parseFloat(document.getElementById('filter-depth-percent')?.value);
-    const rawDepth = (!isNaN(depthInput) && depthInput > 0) ? depthInput : DEFAULT_SEARCH_DEPTH_PERCENT;
-    const depthPercent = Math.max(1, Math.min(MAX_SEARCH_DEPTH_PERCENT, rawDepth));
-
-    // Include every input that affects the result set in the cache key - a query at 25% depth
-    // must not satisfy a later request for the same query at 100% depth.
-    const cacheKey = JSON.stringify({ query, depthPercent, maxPagesOverride });
-    const cached = getCachedSearch(cacheKey);
-    if (cached) return cached;
-
-    let allResults = [];
-    let url = `https://api.scryfall.com/cards/search?q=${encodeURIComponent(query)}&order=edhrec`;
-    let hasMore = true;
-    let pagesFetched = 0;
-    // maxPagesOverride is now a MINIMUM page budget, not a hard ceiling. All streams request at
-    // least 8 pages where available, and Search Depth (%) decides what fraction of the COMPLETE
-    // Scryfall result set is traversed. This is what makes 100% genuinely exhaustive.
-    const requestedBaseline = Math.max(MIN_SEARCH_PAGES, maxPagesOverride || MIN_SEARCH_PAGES);
-    let maxPages = requestedBaseline;
-    let totalCardsForQuery = 0;
-
-    const MAX_RATE_LIMIT_RETRIES = 5;
-    let rateLimitRetries = 0;
-    let bailedAfterRetries = false;
-
-    while (hasMore && url) {
-        if (owningSearchRequestId !== searchRequestId) return [];
-        let response;
-        try {
-            // Goes through the shared, rate-limited queue (see above) instead of calling
-            // fetch() directly, so this stream's requests are paced against every OTHER
-            // concurrent search stream, not just against its own previous page.
-            response = await scryfallThrottledFetch(url, {
-                headers: {
-                    'User-Agent': 'ManaMatch/1.0 (Semantic Magic Search)',
-                    'Accept': 'application/json'
-                }
-            });
-            if (owningSearchRequestId !== searchRequestId) return [];
-        } catch (networkErr) {
-            // A late failure from a superseded search is not a current API failure and must not
-            // surface a stale cooldown notice over the newer run.
-            if (owningSearchRequestId !== searchRequestId) return [];
-            // Browser-side CORS failures can hide an HTTP 429 as TypeError/ERR_FAILED. The shared
-            // queue treats that as a client-wide circuit-breaker event, so this stream stops and
-            // preserves its already-retrieved pages. Locally-generated circuit errors are handled
-            // the same way, without issuing a retry.
-            bailedAfterRetries = true;
-            if (!networkErr?.isLocalCooldownRejection) {
-                showScryfallCooldownNotice(`[${searchLabel}] Scryfall request blocked by the API/network. This stream kept its partial results and stopped without retrying the failed request.`);
-            }
-            break;
-        }
-
-        // 200 -> Valid Search
-        if (response.status === 200) {
-            rateLimitRetries = 0;
-            const data = await response.json();
-            if (owningSearchRequestId !== searchRequestId) return [];
-            
-            if (pagesFetched === 0) {
-                totalCardsForQuery = data.total_cards || 0;
-                const scryfallTotalPages = Math.ceil(totalCardsForQuery / 175) || 1;
-
-                // Search Depth (%) operates on the FULL available Scryfall page count.
-                // A minimum of 8 pages is retained for sufficiently large queries, but it never
-                // exceeds the query's actual page count. At 100%, every page is fetched. At 25%,
-                // half of the complete result set is fetched, rounded up, with the 8-page floor.
-                const depthBasedPages = Math.ceil(scryfallTotalPages * (depthPercent / 100));
-                maxPages = depthPercent >= MAX_SEARCH_DEPTH_PERCENT
-                    ? scryfallTotalPages
-                    : Math.min(
-                        scryfallTotalPages,
-                        Math.max(requestedBaseline, MIN_SEARCH_PAGES, depthBasedPages)
-                    );
-            }
-
-            if (data.data) allResults.push(...data.data);
-            hasMore = data.has_more;
-            url = data.next_page;
-            pagesFetched++;
-            
-            const pageProgressMessage = `${pagesFetched}/${maxPages} pages searched`;
-            const mayReportProgress = owningSearchRequestId === searchRequestId;
-            if (mayReportProgress && typeof activeSearchStreamProgressReporter === 'function') {
-                activeSearchStreamProgressReporter({ label: searchLabel, message: pageProgressMessage, kind: 'progress', ownerRequestId: owningSearchRequestId });
-            } else if (mayReportProgress && activeMainSearchRequestId === owningSearchRequestId &&
-                activeResultView.mode === 'main' && activeResultView.requestId === owningSearchRequestId) {
-                updateProgress(null, null, `[${searchLabel}] ${pageProgressMessage}...`);
-            }
-            if (pagesFetched >= maxPages) break;
-            
-        // 429 -> Rate Limit. The shared queue has already opened a client-wide cooldown, so
-        // this stream records the partial result set and never retries the limited request.
-        } else if (response.status === 429) {
-            // Scryfall returned an explicit rate-limit response. Honor Retry-After when
-            // available, freeze the shared queue, and STOP this stream. Retrying the same page
-            // is exactly the traffic pattern that turns one 429 into a cascade of 429s.
-            // The shared queue has already read Retry-After and opened the global circuit breaker
-            // before this response reached the search stream. Do not notify a second time here.
-            bailedAfterRetries = true;
-            showScryfallCooldownNotice(`[${searchLabel}] Scryfall rate limit (429). Stream stopped; no retry will be sent.`);
-            break;
-
-        // 404 -> No matches is a normal Scryfall search outcome.  The search endpoint uses
-        // 404 for a query that produces no cards, so treating every 404 as a syntax error made
-        // Related Search report "invalid Scryfall query" whenever a perfectly valid narrow
-        // phrase simply had no matches.  Only a 400-class parser/request error should be surfaced
-        // as invalid syntax.
-        } else if (response.status === 404) {
-            if (pagesFetched === 0) {
-                hasMore = false;
-                url = null;
-                totalCardsForQuery = 0;
-                break;
-            }
-            // A 404 after successful pagination is unusual. Preserve the valid pages already
-            // retrieved rather than discarding them or mislabeling the search as invalid.
-            hasMore = false;
-            url = null;
-            bailedAfterRetries = false;
-            break;
-
-        // 400 -> Malformed / invalid Scryfall query. Unlike a 404 no-match response, this is a
-        // genuine query-construction problem and should be surfaced to the caller with the API's
-        // own details when available.
-        } else if (response.status === 400) {
-            let details = '';
-            try {
-                const data = await response.json();
-                details = typeof data?.details === 'string' ? data.details : '';
-            } catch (_) {}
-            const err = new Error(details || 'invalid Scryfall query');
-            err.status = 400;
-            err.scryfallDetails = details;
-            throw err;
-
-        // Other -> Network / API Error (5xx etc.) - retry with the same bounded backoff, then
-        // fall back to whatever this stream already has rather than discarding it.
-        } else {
-            rateLimitRetries++;
-            if (rateLimitRetries > MAX_RATE_LIMIT_RETRIES) {
-                bailedAfterRetries = true;
-                break;
-            }
-            const backoffMs = Math.min(1000 * 2 ** rateLimitRetries, 15000);
-            const retryMessage = `API error (${response.status}) — retry ${rateLimitRetries}/${MAX_RATE_LIMIT_RETRIES}`;
-            if (owningSearchRequestId === searchRequestId && typeof activeSearchStreamProgressReporter === 'function') {
-                activeSearchStreamProgressReporter({ label: searchLabel, message: retryMessage, kind: 'error', ownerRequestId: owningSearchRequestId });
-            } else if (owningSearchRequestId === searchRequestId && activeMainSearchRequestId === owningSearchRequestId &&
-                activeResultView.mode === 'main' && activeResultView.requestId === owningSearchRequestId) {
-                updateProgress(null, null, `[${searchLabel}] ${retryMessage}...`);
-            }
-            await backgroundAwareDelay(backoffMs);
-            continue;
-        }
-        
-        if (hasMore && pagesFetched < maxPages) {
-            await backgroundAwareDelay(100);
-        }
+    const corpus = staticCardCorpusMemory || await loadStaticCardCorpus();
+    if (owningSearchRequestId !== searchRequestId) return decorateLocalCoverage([], searchLabel, query);
+    if (!corpus?.cards?.length) {
+        const error = new Error('Local card catalog unavailable: cards.bin could not be loaded. ManaSearch does not use Scryfall at runtime.');
+        error.isStaticCardDataError = true;
+        throw error;
     }
-    
-    // Coverage metadata attached directly to the returned array (not just a count), so a caller
-    // that wants to know WHY an expected card might be missing can see whether this stream even
-    // finished covering its own match set (project spec Priority 7: retrieval diagnostics).
-    allResults.coverage = {
-        query,
-        totalCards: totalCardsForQuery,
-        pagesFetched,
-        maxPages,
-        retrievedCount: allResults.length,
-        fullyCovered: pagesFetched >= Math.ceil(totalCardsForQuery / 175),
-        // True when this stream had to give up mid-pagination after exhausting its retries
-        // (persistent 429s, CORS-blocked rate-limit responses, or repeated 5xx errors) rather
-        // than because it legitimately finished. Diagnostics can use this to distinguish "this
-        // query only has 3 pages of matches" from "this query has more, we just couldn't get
-        // to them" (review Priority 7).
-        bailedAfterRetries
+
+    const alternatives = extractLocalRetrievalAlternativesFromQuery(query);
+    if (!alternatives.length) return decorateLocalCoverage([], searchLabel, query);
+    const excludeMatch = String(query || '').match(/-name\s*:\s*"?([^"\s)]+(?:\s+[^"\s)]+)*)"?/i);
+    const excludeName = excludeMatch?.[1] ? excludeMatch[1].replace(/\\/g, '').trim() : '';
+    const depthPercent = getCurrentSearchDepthPercent();
+    // Compatibility callers only. Main retrieval uses the unified local broker directly.
+    const requestedLimit = Math.max(36, Math.min(1200, Math.max(1, Number(maxPagesOverride) || 1) * 175));
+    const limit = getDepthScaledLocalLimit(requestedLimit, depthPercent);
+    const results = await searchStaticCardCorpusAlternatives(alternatives, {
+        limit,
+        excludeName,
+        label: searchLabel,
+        isCancelled: () => owningSearchRequestId !== searchRequestId
+    });
+    if (owningSearchRequestId !== searchRequestId) return decorateLocalCoverage([], searchLabel, query);
+    results.retrievalSource = 'static-card-corpus';
+    results.coverage = {
+        query: String(query || ''), totalCards: corpus.total, pagesFetched: 1, maxPages: 1,
+        retrievedCount: results.length, fullyCovered: true, local: true, depthPercent,
+        note: 'Local indexed retrieval; no runtime card API requests.'
     };
-
-    // A resumable cursor for "Search Deeper": present only when this stream was deliberately
-    // capped by maxPages while Scryfall still had more pages (hasMore), and NOT when it gave up
-    // after exhausting retries (bailedAfterRetries) - a stream that bailed needs a fresh attempt
-    // from the same spot, not to be treated as "successfully paused here". `url` at this point
-    // already holds next_page from the last successful response, since it's only reassigned
-    // inside the 200-status branch above.
-    allResults.continuation = (hasMore && !bailedAfterRetries && url)
-        ? { url, searchLabel }
-        : null;
-
-    // Don't cache a result that's short because retries were exhausted - caching it would lock
-    // in the gap for the full 10-minute TTL. A clean result (even an intentionally small one,
-    // e.g. a narrow query that only had one page) is still safe to cache.
-    if (!bailedAfterRetries) {
-        setCachedSearch(cacheKey, allResults);
-    }
-    return allResults;
+    // Local queries are evaluated against the bundled corpus. Main Search Deeper uses localPlans;
+    // there is no remote page cursor in the static-only architecture.
+    results.continuation = null;
+    return results;
 }
 
-/**
- * Fetches more pages of an already-started Scryfall search, continuing from a previously-issued
- * continuation cursor (see fetchScryfallSearch's `.continuation`). This is the engine behind
- * "Search Deeper": rather than one search trying to exhaustively page through a haystack that
- * could be thousands of cards deep (slow, and mostly wasted on cards that were never going to
- * rank), the initial search stays bounded and fast, and the user can explicitly ask for more in
- * controlled, paced batches - each one still going through the exact same shared throttled queue
- * and retry/backoff behavior as every other Scryfall request, so this never bypasses the rate
- * limiting that keeps every OTHER request healthy.
- * @param {{url: string, searchLabel: string}} continuation
- * @param {number} pageBudget - how many more pages to fetch in this one call
- * @returns {Promise<{results: Array, continuation: {url,searchLabel}|null, bailedAfterRetries: boolean}>}
- */
-async function fetchScryfallContinuationPages(continuation, pageBudget) {
-    let { url, searchLabel } = continuation;
-    const results = [];
-    let hasMore = true;
-    let pagesFetched = 0;
-    const MAX_RATE_LIMIT_RETRIES = 5;
-    let rateLimitRetries = 0;
-    let bailedAfterRetries = false;
-
-    while (hasMore && url && pagesFetched < pageBudget) {
-        let response;
-        try {
-            response = await scryfallThrottledFetch(url, {
-                headers: { 'User-Agent': 'ManaMatch/1.0 (Semantic Magic Search)', 'Accept': 'application/json' }
-            });
-        } catch (networkErr) {
-            // The shared queue already opened the global circuit breaker for the rejected Scryfall
-            // request. This stream simply stops without sending a duplicate retry.
-            bailedAfterRetries = true;
-            if (!networkErr?.isLocalCooldownRejection) {
-                showScryfallCooldownNotice(`[${searchLabel}] Search Deeper: Scryfall rate limit/network response blocked. No retry sent.`);
-            }
-            break;
-        }
-
-        if (response.status === 200) {
-            rateLimitRetries = 0;
-            const data = await response.json();
-            if (data.data) results.push(...data.data);
-            hasMore = data.has_more;
-            url = data.next_page;
-            pagesFetched++;
-            updateProgress(null, null, `[${searchLabel}] Search Deeper: ${pagesFetched}/${pageBudget} more pages...`);
-        } else if (response.status === 429) {
-            // Central queue handling already applied Retry-After and opened the global circuit
-            // breaker. Keep this stream from issuing a duplicate retry.
-            bailedAfterRetries = true;
-            showScryfallCooldownNotice(`[${searchLabel}] Search Deeper: rate limit (429). No retry sent.`);
-            break;
-        } else if (response.status === 404) {
-            // A continuation URL should never 404 (Scryfall generated it itself), but treat it as
-            // exhausted rather than throwing and losing every page already fetched this batch.
-            hasMore = false;
-        } else {
-            rateLimitRetries++;
-            if (rateLimitRetries > MAX_RATE_LIMIT_RETRIES) { bailedAfterRetries = true; break; }
-            const backoffMs = Math.min(1000 * 2 ** rateLimitRetries, 15000);
-            updateProgress(null, null, `[${searchLabel}] Search Deeper: API error (${response.status}). Retry ${rateLimitRetries}/${MAX_RATE_LIMIT_RETRIES}...`);
-            await backgroundAwareDelay(backoffMs);
-            continue;
-        }
-
-        if (hasMore && pagesFetched < pageBudget) {
-            await backgroundAwareDelay(100);
-        }
-    }
-
-    return {
-        results,
-        continuation: (hasMore && !bailedAfterRetries && url) ? { url, searchLabel } : null,
-        bailedAfterRetries
-    };
+async function getLocalContinuationCandidates(continuation, pageBudget) {
+    // Search Deeper is driven by local corpus plans in findSimilarCards(). These compatibility
+    // streams intentionally return no remote pages; no continuation URL is ever fetched.
+    return { results: [], continuation: null, bailedAfterRetries: false, localOnly: true };
 }
 
-async function fetchScryfallCollection(cardIdentifiers) {
-    const batchSize = 75;
-    let allCards = [];
-    for (let i = 0; i < cardIdentifiers.length; i += batchSize) {
-        const batch = cardIdentifiers.slice(i, i + batchSize);
-        try {
-            const response = await scryfallThrottledFetch('https://api.scryfall.com/cards/collection',{
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'User-Agent': 'ManaMatch/1.0 (Semantic Magic Search)',
-                    'Accept': 'application/json'
-            },
-                body: JSON.stringify({ identifiers: batch })
-            });
-            if (response.ok) {
-                const data = await response.json();
-                if (data.data) {
-                    allCards.push(...data.data);
-                }
-            } else if (response.status === 429) {
-                // The shared queue has already opened the global circuit breaker. Keep this
-                // collection call non-throwing so callers retain any successfully retrieved
-                // cards instead of losing the entire batch. Later queued work will resume after
-                // the same cooldown.
-                console.warn('Scryfall collection request rate-limited; retaining partial results while the global cooldown runs.');
-            }
-        } catch (err) {
-            if (!err?.isLocalCooldownRejection) {
-                console.error("Collection batch fetch failed:", err);
-            }
-        }
+async function hydrateCardsFromLocalCorpus(cardIdentifiers) {
+    const corpus = staticCardCorpusMemory || await loadStaticCardCorpus();
+    if (!corpus?.cards?.length) return [];
+    const output = [];
+    const seen = new Set();
+    const byId = new Map();
+    for (const card of corpus.cards) {
+        if (card?.id) byId.set(String(card.id).toLowerCase(), card);
+        if (card?.oracle_id) byId.set(String(card.oracle_id).toLowerCase(), card);
     }
-    return allCards;
+    for (const identifier of Array.isArray(cardIdentifiers) ? cardIdentifiers : []) {
+        const name = String(identifier?.name || '').trim();
+        const id = String(identifier?.id || identifier?.oracle_id || '').trim().toLowerCase();
+        const card = (name ? getStaticCardByName(name) : null) || (id ? byId.get(id) : null);
+        if (!card) continue;
+        const key = normalizeCardNameForIdentity(card.name);
+        if (!key || seen.has(key)) continue;
+        seen.add(key);
+        output.push(card);
+    }
+    return output;
 }
 
 // --- ENGINE 1: CONTEXT (Transformers / NLP) ---
@@ -16780,7 +16215,7 @@ async function loadStaticCardCorpus({ retryAttempt = 1 } = {}) {
         return corpus;
     })().catch(error => {
         staticCardCorpusLoadError = error?.message || String(error);
-        console.info('Precomputed card corpus unavailable; Scryfall fallback remains active:', staticCardCorpusLoadError);
+        console.warn('Precomputed card corpus unavailable; search remains local-only and will stay disabled until cards.bin loads:', staticCardCorpusLoadError);
         return null;
     }).finally(() => {
         // A failed attempt must not permanently poison the promise. The coordinated resource
@@ -16870,7 +16305,7 @@ async function searchStaticCardCorpus(queryText, options = {}) {
     }));
 }
 
-function extractLocalRetrievalAlternativesFromScryfallQuery(query) {
+function extractLocalRetrievalAlternativesFromQuery(query) {
     const input = String(query || '');
     if (!input) return [];
     const alternatives = [];
@@ -17237,7 +16672,7 @@ async function retrieveLocalFirst(localQueries, fallbackQuery, options = {}) {
     }
     if (!fallbackQuery) return decorateLocalCoverage([], label, '[local corpus unavailable]');
     if (isCancelled()) return [];
-    return fetchScryfallSearch(fallbackQuery, fallbackMaxPages, `${label} (Scryfall fallback)`, owningSearchRequestId);
+    return decorateLocalCoverage([], label, '[local cards.bin unavailable]');
 }
 
 const FULL_SEMANTIC_INDEX_SEARCH_LIMIT = 96;
@@ -17359,7 +16794,7 @@ async function loadStaticSemanticIndex({ retryAttempt = 1 } = {}) {
         return index;
     })().catch(error => {
         staticSemanticIndexLoadError = error?.message || String(error);
-        console.info('Precomputed semantic index unavailable; normal search remains fully functional:', staticSemanticIndexLoadError);
+        console.info('Precomputed semantic index unavailable; local lexical search may continue without semantic retrieval:', staticSemanticIndexLoadError);
         return null;
     }).finally(() => {
         // Let a failed attempt be retried by the coordinated loader. A successful index remains
@@ -17378,7 +16813,7 @@ function preloadStaticSemanticIndex() {
 
 // Compatibility helper: this used to read Scryfall bulk-card records directly.
 // The browser no longer downloads/builds the bulk corpus; this simply extracts Oracle text
-// from an ordinary Scryfall card object so retrieval/parsing code keeps one stable interface.
+// from an ordinary bundled card record so retrieval/parsing code keeps one stable interface.
 function extractBulkOracleCardText(card) {
     return getCardOracleText(card);
 }
@@ -18517,7 +17952,7 @@ function calculateSynergyScore(sourceCard, targetCard, activeFilters = {}, preco
 }
 
 // --- PATTERN EXTRACTION FOR RELATED CARDS ---
-function escapeScryfallQuotedValue(value) {
+function escapeLocalQuotedQueryValue(value) {
     // Scryfall quoted search terms use backslash escaping.  Related Search previously only
     // escaped double quotes in card names, so a name/text containing a backslash could produce
     // an invalid query.  Keep this helper deliberately narrow: it is for values inside "...".
@@ -18820,7 +18255,7 @@ function buildRelatedSearchQueries(sourceCard, selectedCards, repeatingPatterns,
     const allCards = [sourceCard, ...selectedCards];
     const priorityCards = [...selectedCards, sourceCard].filter(Boolean);
     const excludedNames = allCards
-        .map(c => escapeScryfallQuotedValue(c?.name || ''))
+        .map(c => escapeLocalQuotedQueryValue(c?.name || ''))
         .filter(Boolean)
         .map(name => `-name:"${name}"`)
         .join(' ');
@@ -18880,7 +18315,7 @@ function buildRelatedSearchQueries(sourceCard, selectedCards, repeatingPatterns,
                 const roleKey = clean.toLowerCase();
                 if (clean.length >= 5 && !seenRolePhrases.has(roleKey)) {
                     seenRolePhrases.add(roleKey);
-                    add(`o:"${escapeScryfallQuotedValue(clean)}" ${excludedNames} ${filters}`, 'role', 15 + seenRolePhrases.size);
+                    add(`o:"${escapeLocalQuotedQueryValue(clean)}" ${excludedNames} ${filters}`, 'role', 15 + seenRolePhrases.size);
                 }
             }
         }
@@ -18890,10 +18325,10 @@ function buildRelatedSearchQueries(sourceCard, selectedCards, repeatingPatterns,
     // values, reminder punctuation, and other MTG-specific structure, so it must never be the only
     // way a mechanically related pair can be retrieved.
     if (patterns.length) {
-        const oracleGroup = `(${patterns.map(p => `o:"${escapeScryfallQuotedValue(p)}"`).join(' or ')})`;
+        const oracleGroup = `(${patterns.map(p => `o:"${escapeLocalQuotedQueryValue(p)}"`).join(' or ')})`;
         add(`${oracleGroup} ${excludedNames} ${filters}`, 'shared-text', 70);
         patterns.slice(0, 2).forEach(pattern => {
-            add(`o:"${escapeScryfallQuotedValue(pattern)}" ${excludedNames} ${filters}`, 'shared-text-fallback', 75);
+            add(`o:"${escapeLocalQuotedQueryValue(pattern)}" ${excludedNames} ${filters}`, 'shared-text-fallback', 75);
         });
     }
 
@@ -21820,21 +21255,22 @@ function renderAdditionalSourceCards() {
     container.append(heading,grid);
 }
 async function addAdditionalSourceCard(card) {
-    if (!card?.name) return; const key=getSourceCardIdentity(card); if (sourceCards.has(key)) {closeSourceCardPicker();return;}
-    if (sourceCards.size>=MAX_SOURCE_CARDS) {closeSourceCardPicker();alert(`ManaSearch supports up to ${MAX_SOURCE_CARDS} source cards at once.`);return;}
+    if (!card?.name) return;
+    const key = getSourceCardIdentity(card);
+    if (sourceCards.has(key)) { closeSourceCardPicker(); return; }
+    if (sourceCards.size >= MAX_SOURCE_CARDS) {
+        closeSourceCardPicker();
+        alert(`ManaSearch supports up to ${MAX_SOURCE_CARDS} source cards at once.`);
+        return;
+    }
     try {
-        let fullCard=card;
-        if (!hasUsableOracleText(fullCard)) {
-            const response=await scryfallThrottledFetch(`https://api.scryfall.com/cards/named?fuzzy=${encodeURIComponent(card.name)}`,{headers:{'User-Agent':'ManaMatch/1.0 (Semantic Magic Search)','Accept':'application/json'}});
-            if(!response.ok) throw new Error('Unable to load the additional source card.'); fullCard=await response.json();
-        }
         const corpus = staticCardCorpusMemory || await loadStaticCardCorpus();
+        if (!corpus?.cards?.length) throw new Error('cards.bin is unavailable. ManaSearch does not fetch card records at runtime.');
+        const localRecord = getStaticCardByName(card.name);
+        if (!localRecord) throw new Error(`${card.name} was not found in cards.bin.`);
+        let fullCard = mergeCardRecords(localRecord, card);
+        if (!hasUsableOracleText(fullCard)) throw new Error(`${card.name} has no usable Oracle text in cards.bin.`);
         fullCard = enrichCardForPreferenceEvaluation(fullCard, corpus);
-        if (!hasCompleteCardPreferenceMetadata(fullCard)) {
-            const response = await scryfallThrottledFetch(`https://api.scryfall.com/cards/named?fuzzy=${encodeURIComponent(fullCard.name)}`, { headers: { 'User-Agent': 'ManaMatch/1.0 (Semantic Magic Search)', 'Accept': 'application/json' } });
-            if (!response.ok) throw new Error('Could not verify this source card against the current Preferences. Try again when card data is available.');
-            fullCard = mergeCardRecords(await response.json(), fullCard);
-        }
         if (!isAllowedByCandidatePreferences(fullCard)) {
             const reason = getPreferenceHiddenReason(fullCard);
             throw new Error(`${fullCard.name} is hidden by your current Preferences (${reason}). Enable the relevant option in Preferences to use it as a source card.`);
@@ -21842,7 +21278,9 @@ async function addAdditionalSourceCard(card) {
         sourceCardCache.set(fullCard.name.toLowerCase(), fullCard);
         if (addSourceCardToSet(fullCard)) addToHistory(fullCard.name, fullCard);
         closeSourceCardPicker();
-    } catch(error) { alert(error.message||'Unable to add source card.'); }
+    } catch (error) {
+        alert(error.message || 'Unable to add source card from the local catalog.');
+    }
 }
 function updateSourceCardMultiSearchState() {
     const count=sourceCards.size, badge=document.getElementById('source-card-count-badge'); if(badge) badge.textContent=String(Math.max(1,count));
@@ -22086,11 +21524,10 @@ function getSourceCardSuggestionMatches(recentCards = []) {
         const cached = cacheByName.get(key) || null;
         // Keep curated suggestions usable even while recovering from a missing local catalog.
         // Selection still goes through the normal loader, which fetches the full card if needed.
-        const card = local || cached || {
-            name,
-            image_uris: { normal: `https://api.scryfall.com/cards/named?exact=${encodeURIComponent(name)}&format=image&version=normal` }
-        };
-        if (isAllowedByCandidatePreferences(enrichCardForPreferenceEvaluation(card, staticCardCorpusMemory))) {
+        const card = local || cached;
+        // Curated starter cards are suggestions only when their records exist in the bundled catalog.
+        // Never synthesize an API-backed image/card record as a runtime fallback.
+        if (card && isAllowedByCandidatePreferences(enrichCardForPreferenceEvaluation(card, staticCardCorpusMemory))) {
             suggestions.push(card);
         }
     }
@@ -22275,7 +21712,7 @@ async function searchSourceCardPicker(query) {
             ? (history.length < SOURCE_CARD_SUGGESTION_THRESHOLD ? 'Recent cards and suggestions' : 'Recent cards')
             : canClassifyHistory ? 'Try a suggested card or search by name.' : 'Local card catalog unavailable';
         if (canClassifyHistory) renderSourceCardPickerHome(history, { emptyMessage: 'No recent cards yet. Try a suggested card or search by name.' });
-        else renderSourceCardPickerCards([], 'Recent cards could not be checked against Preferences because the local card catalog is unavailable. Type to search using the fallback card search.');
+        else renderSourceCardPickerCards([], 'Recent cards could not be checked because the local card catalog is unavailable. Reload the local catalog before searching; no external fallback is used.');
         return;
     }
     if (q.length < 2) {
@@ -22319,31 +21756,8 @@ async function searchSourceCardPicker(query) {
             return;
         }
 
-        // The static corpus is an optimization, never a hard dependency. If a deployment has not
-        // generated cards.bin yet, retain the original Scryfall picker behavior.
-        const response = await scryfallThrottledFetch(
-            `https://api.scryfall.com/cards/search?unique=cards&order=name&q=${encodeURIComponent(q)}`,
-            { headers: { 'User-Agent': 'ManaMatch/1.0 (Semantic Magic Search)', 'Accept': 'application/json' } }
-        );
-        if (requestId !== sourceCardPickerRequestId) return;
-        if (response.status === 404) {
-            if (sourceCardPickerStatus) sourceCardPickerStatus.textContent = 'No matching cards';
-            renderSourceCardPickerCards([], 'No matching cards.');
-            return;
-        }
-        if (!response.ok) throw new Error('Card search is temporarily unavailable.');
-        const payload = await response.json();
-        const fetchedCards = Array.isArray(payload.data) ? payload.data : [];
-        const cards = filterSourceCardsByCurrentPreferences(fetchedCards).slice(0, 12);
-        cards.forEach(card => { if (card?.name) sourceCardCache.set(card.name.toLowerCase(), card); });
-        if (sourceCardPickerStatus) {
-            sourceCardPickerStatus.textContent = cards.length
-                ? `${cards.length} result${cards.length === 1 ? '' : 's'}`
-                : fetchedCards.length ? 'Matching cards are hidden by current Preferences' : 'No matching cards';
-        }
-        renderSourceCardPickerCards(cards, fetchedCards.length
-            ? 'Matching cards are hidden by current Preferences. Adjust the Digital-only or Tokens/Emblems/Nontraditional cards preferences to include them.'
-            : 'No matching cards.');
+        if (sourceCardPickerStatus) sourceCardPickerStatus.textContent = 'Local card catalog unavailable';
+        renderSourceCardPickerCards([], 'ManaSearch searches only cards.bin. Reload the local card catalog and try again; no external card search is used.');
     } catch (error) {
         if (requestId !== sourceCardPickerRequestId) return;
         if (sourceCardPickerStatus) sourceCardPickerStatus.textContent = 'Search unavailable';
@@ -22482,91 +21896,35 @@ async function loadSourceCard(query, providedCard = null) {
         if (!cardData) cardData = benchmarkColdMode ? (benchmarkSourceCardCatalog.get(cacheKey) || null) : null;
         if (!cardData) cardData = sourceCardCache.get(cacheKey) || null;
 
-        // Old history/picker entries may have been saved before full Oracle text was retained.
-        // Hydrate those records through Scryfall before displaying the source card. This is also
-        // what repairs any existing broken history entries rather than requiring the user to
-        // delete and recreate their history.
-        if (cardData && !hasUsableOracleText(cardData) && !benchmarkColdMode) {
-            try {
-                const response = await scryfallThrottledFetch(
-                    `https://api.scryfall.com/cards/named?fuzzy=${encodeURIComponent(cardData.name || query)}`,
-                    {
-                        headers: {
-                            'User-Agent': 'ManaMatch/1.0 (Semantic Magic Search)',
-                            'Accept': 'application/json'
-                        }
-                    }
-                );
-                if (requestId !== searchRequestId) return;
-                if (response.ok) {
-                    const fullCard = await response.json();
-                    cardData = mergeCardRecords(cardData, fullCard);
-                    sourceCardCache.set(cacheKey, cardData);
-                }
-            } catch (hydrateError) {
-                // Fall through to the existing record; a transient hydration failure should not
-                // prevent an otherwise usable cached card from loading.
-                console.warn('Could not hydrate Oracle text for source card:', hydrateError.message);
-            }
+        // Canonicalize every source selection against cards.bin. A history entry or picker preview
+        // is never treated as an independent card database, and no API hydration is performed.
+        const preferenceCorpus = staticCardCorpusMemory || await loadStaticCardCorpus();
+        if (requestId !== searchRequestId) return;
+        if (!preferenceCorpus?.cards?.length) {
+            const error = new Error('ManaSearch needs cards.bin to load source cards. Runtime Scryfall card lookups are disabled.');
+            error.isStaticCardDataError = true;
+            throw error;
         }
-
-        if (!cardData && !benchmarkColdMode) {
-            const corpus = staticCardCorpusMemory || await loadStaticCardCorpus();
-            const exactLocal = corpus?.byName?.get(normalizeCardNameForIdentity(query)) || null;
-            if (exactLocal) {
-                cardData = exactLocal;
-                sourceCardCache.set(cacheKey, cardData);
-            }
+        const requestedName = String(cardData?.name || query || '').trim();
+        const localCanonical = getStaticCardByName(requestedName) || getStaticCardByName(query);
+        if (!localCanonical) {
+            throw new Error(`“${requestedName || query}” was not found in cards.bin. Search by the exact card name in the Source Card picker.`);
         }
-
-        if (!cardData) {
-            const response = await scryfallThrottledFetch(
-                `https://api.scryfall.com/cards/named?fuzzy=${encodeURIComponent(query)}`,
-                {
-                    headers: {
-                        'User-Agent': 'ManaMatch/1.0 (Semantic Magic Search)',
-                        'Accept': 'application/json'
-                    }
-                }
-            );
-
-            if (requestId !== searchRequestId) return;
-            if (response.status === 429) {
-                const rateLimitError = new Error('Scryfall is temporarily rate-limiting requests. The app has paused API traffic and will resume queued work automatically.');
-                rateLimitError.status = 429;
-                throw rateLimitError;
-            }
-            if (!response.ok) throw new Error('Card not found.');
-
-            cardData = await response.json();
-            sourceCardCache.set(cacheKey, cardData);
-            if (benchmarkColdMode) benchmarkSourceCardCatalog.set(cacheKey, cardData);
+        cardData = mergeCardRecords(localCanonical, cardData);
+        if (!hasUsableOracleText(cardData)) {
+            throw new Error(`${cardData.name} does not have usable Oracle text in cards.bin. Update the static card data and redeploy the asset.`);
         }
+        sourceCardCache.set(cacheKey, cardData);
+        if (benchmarkColdMode) benchmarkSourceCardCatalog.set(cacheKey, cardData);
 
         // A newer search started while this fetch was in flight - drop these results
         // so a slow lookup for an earlier query can't overwrite the current card.
         if (requestId !== searchRequestId) return;
 
-        if (!benchmarkColdMode) {
-            const preferenceCorpus = staticCardCorpusMemory || await loadStaticCardCorpus();
-            if (requestId !== searchRequestId) return;
-            cardData = enrichCardForPreferenceEvaluation(cardData, preferenceCorpus);
-            // Older sidebar/history previews do not retain classification fields. Resolve a full
-            // Scryfall record before allowing them to become a source card so the preferences
-            // cannot be bypassed by clicking a stale history/favorite item or typing its name.
-            if (!hasCompleteCardPreferenceMetadata(cardData)) {
-                const response = await scryfallThrottledFetch(
-                    `https://api.scryfall.com/cards/named?fuzzy=${encodeURIComponent(cardData.name || query)}`,
-                    { headers: { 'User-Agent': 'ManaMatch/1.0 (Semantic Magic Search)', 'Accept': 'application/json' } }
-                );
-                if (requestId !== searchRequestId) return;
-                if (!response.ok) throw new Error('Could not verify this card against your current source-card Preferences. Please retry when card data is available.');
-                cardData = mergeCardRecords(await response.json(), cardData);
-            }
-            if (!isAllowedByCandidatePreferences(cardData)) {
-                const reason = getPreferenceHiddenReason(cardData);
-                throw new Error(`${cardData.name} is hidden by your current Preferences (${reason}). Enable the relevant option in Preferences to use it as a source card.`);
-            }
+        cardData = enrichCardForPreferenceEvaluation(cardData, preferenceCorpus);
+        if (!isAllowedByCandidatePreferences(cardData)) {
+            const reason = getPreferenceHiddenReason(cardData);
+            throw new Error(`${cardData.name} is hidden by your current Preferences (${reason}). Enable the relevant option in Preferences to use it as a source card.`);
         }
 
         currentSourceCard = cardData;
@@ -22596,8 +21954,8 @@ async function loadSourceCard(query, providedCard = null) {
     } catch (error) {
         activeSearchStreamProgressReporter = null;
         if (requestId !== searchRequestId) return;
-        if (benchmarkColdMode && isScryfallRateLimitError(error)) {
-            // A benchmark-wide Scryfall circuit is a suite stop condition, not a browser alert.
+        if (benchmarkColdMode) {
+            // Fail this benchmark test honestly when its source card cannot be resolved locally.
             throw error;
         }
         currentSourceCard = null;
@@ -22936,7 +22294,7 @@ function initSourceMetadataEditors() {
                 currentSourceCard.mana_value = value;
             }
             // The comparison is optional and writes into ManaSearch's existing CMC constraint,
-            // so Scryfall retrieval, hard filtering, and ranking preferences keep using one state.
+            // so local corpus retrieval, hard filtering, and ranking preferences keep using one state.
             const comparator = byId('source-mana-value-comparison')?.value || 'none';
             const filterCmc = byId('filter-cmc');
             if (filterCmc) {
@@ -24281,7 +23639,7 @@ async function executeRelatedCardSearch() {
 
     const filters = readConstraintFilters();
 
-    const filterParts = buildScryfallConstraintParts(filters);
+    const filterParts = buildLocalConstraintParts(filters);
 
     const relatedSearchQueries = buildRelatedSearchQueries(
         sourceCardAtStart,
@@ -24302,7 +23660,7 @@ async function executeRelatedCardSearch() {
             buildRelatedConsensusIntentText(relatedIntentProfile),
             ...(relatedHighlightText ? [`Source-highlight focus: ${relatedHighlightText}`] : []),
             ...repeatingPatterns.slice(0, 8),
-            ...relatedSearchQueries.flatMap(attempt => extractLocalRetrievalAlternativesFromScryfallQuery(
+            ...relatedSearchQueries.flatMap(attempt => extractLocalRetrievalAlternativesFromQuery(
                 typeof attempt === 'string' ? attempt : attempt?.query
             ))
         ].filter(Boolean);
@@ -24330,24 +23688,7 @@ async function executeRelatedCardSearch() {
             };
             results.continuation = null;
         } else {
-            // Compatibility fallback for browsers/deployments that do not have a usable cards.bin.
-            // 404/no-match is treated as an ordinary empty result; malformed-query errors remain
-            // retryable across the alternate Scryfall formulations.
-            const queryAttempts = relatedSearchQueries;
-            for (let qi = 0; qi < queryAttempts.length; qi++) {
-                const attempt = queryAttempts[qi];
-                const candidateQuery = typeof attempt === 'string' ? attempt : attempt?.query;
-                const kind = typeof attempt === 'string' ? 'related' : (attempt?.kind || 'related');
-                try {
-                    const attemptResults = await fetchScryfallSearch(candidateQuery, 2, `Related ${kind}`);
-                    if (attemptResults.length > 0) results.push(...attemptResults);
-                    lastRelatedQueryError = null;
-                } catch (error) {
-                    lastRelatedQueryError = error;
-                    if (error?.status !== 400) throw error;
-                }
-                if (!isCurrentRelatedSearch()) return;
-            }
+            lastRelatedQueryError = new Error('Local card catalog unavailable. Related Search requires cards.bin; runtime card API retrieval is disabled.');
         }
 
         // The semantic index is a second, first-class Related Search retrieval lane. It is essential
@@ -24427,11 +23768,11 @@ async function executeRelatedCardSearch() {
                     const localNames = new Set(localHydrated.map(card => normalizeCardNameForIdentity(card.name)));
                     const missing = Array.from(semanticByName.values()).filter(item => !localNames.has(normalizeCardNameForIdentity(item.name)));
                     if (missing.length) {
-                        const hydrated = await fetchScryfallCollection(missing.map(x => ({ name: x.name })));
+                        const hydrated = await hydrateCardsFromLocalCorpus(missing.map(x => ({ name: x.name })));
                         localHydrated.push(...(hydrated || []).map(card => ({
                             ...card,
                             _semanticRetrievalSimilarity: scoreByName.get(normalizeCardNameForIdentity(card.name)) || 0,
-                            _semanticRetrievalSource: 'related-semantic-index-scryfall-fallback'
+                            _semanticRetrievalSource: 'related-semantic-index-local-corpus-fallback'
                         })));
                     }
                     semanticMatches = localHydrated;
@@ -24728,7 +24069,7 @@ const FUNCTION_RETRIEVAL_VOCAB = {
         paramTemplate: (p) => {
             const traits = p.mechanicProfile?.traits || [];
             const keys = traits.filter(t => /^mechanic:/.test(t)).map(t => t.split(':').slice(1).join(':').replace(/_/g,' '));
-            return keys.length ? `(${keys.slice(0,3).map(k => `o:"${escapeScryfallValue(k)}"`).join(' or ')})` : '(o:"flying" or o:"trample" or o:"menace")';
+            return keys.length ? `(${keys.slice(0,3).map(k => `o:"${escapeLocalQueryValue(k)}"`).join(' or ')})` : '(o:"flying" or o:"trample" or o:"menace")';
         }
     },
     mechanic_stateful_game_profile: {
@@ -24808,7 +24149,7 @@ const FUNCTION_RETRIEVAL_VOCAB = {
         ],
         paramTemplate: (p) => {
             const scope = String(p.castingScope || '').trim().toLowerCase();
-            if (scope && scope !== 'all') return `o:"${escapeScryfallValue(scope)} spells" o:"flash"`;
+            if (scope && scope !== 'all') return `o:"${escapeLocalQueryValue(scope)} spells" o:"flash"`;
             return 'o:"as though they had flash"';
         }
     },
@@ -25025,7 +24366,7 @@ function buildGenericFeatureCombinationQuery(canonicalFn) {
 }
 
 /**
- * Generates diversified Scryfall retrieval queries from the source card's CANONICAL functions.
+ * Generates diversified local corpus retrieval queries from the source card's CANONICAL functions.
  *
  * Three layers, in order of how much hand-authoring each needs:
  *   1. FUNCTION_RETRIEVAL_VOCAB (phrases / otag / paramTemplate) - hand-written per mechanic,
@@ -25680,15 +25021,15 @@ function runManaSearchIntentRegressionSuite() {
         const excludeSetFilters = { set: 'dom', constraintModes: { set: 'exclude' } };
         const preferSetFilters = { set: 'dom', constraintModes: { set: 'prefer' } };
         check('highlight-set-code-hard-exclude-and-prefer-filter-correctly', matchesActiveFilters(legendaryHumanCard, hardSetFilters) && !matchesActiveFilters(otherCreatureCard, hardSetFilters) && !matchesActiveFilters(legendaryHumanCard, excludeSetFilters) && matchesActiveFilters(otherCreatureCard, excludeSetFilters) && matchesActiveFilters(legendaryHumanCard, preferSetFilters) && matchesActiveFilters(otherCreatureCard, preferSetFilters) && calculateConstraintPreferenceBonus(legendaryHumanCard, preferSetFilters) > calculateConstraintPreferenceBonus(otherCreatureCard, preferSetFilters), 'Set code modes filter, exclude, or boost matching printings');
-        const subtypeExcludeQuery = buildScryfallConstraintParts({ types: [], supertypes: [], subtypes: ['Human Wizard'], constraintModes: { subtype: 'exclude' } }).join(' ');
+        const subtypeExcludeQuery = buildLocalConstraintParts({ types: [], supertypes: [], subtypes: ['Human Wizard'], constraintModes: { subtype: 'exclude' } }).join(' ');
         check('highlight-subtype-query-uses-scryfall-type-line-field', subtypeExcludeQuery.includes('-type:\"Human Wizard\"') && !subtypeExcludeQuery.includes('subtype:'), subtypeExcludeQuery);
-        const hardTypeQuery = buildScryfallConstraintParts({ types: ['creature'], supertypes: [], subtypes: [], constraintModes: { types: 'hard' } }).join(' ');
-        const excludeTypeQuery = buildScryfallConstraintParts({ types: ['creature'], supertypes: [], subtypes: [], constraintModes: { types: 'exclude' } }).join(' ');
-        const preferTypeQuery = buildScryfallConstraintParts({ types: ['creature'], supertypes: [], subtypes: [], constraintModes: { types: 'prefer' } }).join(' ');
+        const hardTypeQuery = buildLocalConstraintParts({ types: ['creature'], supertypes: [], subtypes: [], constraintModes: { types: 'hard' } }).join(' ');
+        const excludeTypeQuery = buildLocalConstraintParts({ types: ['creature'], supertypes: [], subtypes: [], constraintModes: { types: 'exclude' } }).join(' ');
+        const preferTypeQuery = buildLocalConstraintParts({ types: ['creature'], supertypes: [], subtypes: [], constraintModes: { types: 'prefer' } }).join(' ');
         check('highlight-type-modes-build-correct-retrieval-queries', hardTypeQuery.includes('type:creature') && !hardTypeQuery.includes('-type:creature') && excludeTypeQuery.includes('-type:creature') && !preferTypeQuery.includes('type:creature'), JSON.stringify({ hardTypeQuery, excludeTypeQuery, preferTypeQuery }));
-        const hardSetQuery = buildScryfallConstraintParts({ set: 'dom', constraintModes: { set: 'hard' } }).join(' ');
-        const excludeSetQuery = buildScryfallConstraintParts({ set: 'dom', constraintModes: { set: 'exclude' } }).join(' ');
-        const preferSetQuery = buildScryfallConstraintParts({ set: 'dom', constraintModes: { set: 'prefer' } }).join(' ');
+        const hardSetQuery = buildLocalConstraintParts({ set: 'dom', constraintModes: { set: 'hard' } }).join(' ');
+        const excludeSetQuery = buildLocalConstraintParts({ set: 'dom', constraintModes: { set: 'exclude' } }).join(' ');
+        const preferSetQuery = buildLocalConstraintParts({ set: 'dom', constraintModes: { set: 'prefer' } }).join(' ');
         check('highlight-set-code-modes-build-correct-retrieval-queries', hardSetQuery.includes('e:dom') && !hardSetQuery.includes('-e:dom') && excludeSetQuery.includes('-e:dom') && !preferSetQuery.includes('e:dom'), JSON.stringify({ hardSetQuery, excludeSetQuery, preferSetQuery }));
 
         const raff = {
@@ -26040,7 +25381,7 @@ async function findSimilarCards() {
     // remain mandatory in the local filtering stage.
     const broadFallbackFilters = null;
 
-    const filterParts = buildScryfallConstraintParts(filters);
+    const filterParts = buildLocalConstraintParts(filters);
 
     const stopWords = new Set(['the','of','and','a','to','in','is','that','it','for','on','are','as','with','they','at','be','this','have','from','or','by','but','not','what','all','were','we','when','your','can','there','an','which','do','their','if','will','up','about','out','then','them','these','so','some','would','make','like','into','has','more','no','could','my','than','first','been','who','its','now','down','may']);
     // Ultra-common Magic oracle-text vocabulary, kept separate from the general English list
@@ -26062,7 +25403,7 @@ async function findSimilarCards() {
     const excludeSelf = allSourceExclusions || `-name:"${currentSourceCard.name.replace(/"/g, '\"')}"`;
 
     // Broad Search uses more source-text terms than Search B and deliberately omits narrow
-    // Scryfall constraint clauses here. The local hard-filter stage still enforces every explicit
+    // Compact local query-dialect clauses here. The local hard-filter stage still enforces every explicit
     // constraint chosen by the user.
     const broadSourceText = hasHighlight ? targetTextForScoring : sourceOracleTextForParsing;
     const broadKeywords = isBroadSearch
@@ -26579,7 +25920,7 @@ async function findSimilarCards() {
         // visible Functional Match chip complete once the whole F group has settled.
         const functionalQueryPromises = benchmarkUseLocalOracleCorpus ? [] : uniqueFunctionalQueries.map((q, idx) => {
             const streamLabel = `Search F #${idx + 1} (Functional Match)`;
-            const localQueries = extractLocalRetrievalAlternativesFromScryfallQuery(q.query);
+            const localQueries = extractLocalRetrievalAlternativesFromQuery(q.query);
             const p = retrieveLocalFirst(localQueries, q.query, {
                 label: streamLabel, fallbackMaxPages: benchmarkPageCap, limit: isBroadSearch ? 320 : 220,
                 excludeName: currentSourceCard.name, filters, broadFallbackFilters, highlights: searchHighlightsSnapshot
@@ -26622,7 +25963,7 @@ async function findSimilarCards() {
             if (!query) return;
             const promise = trackStream(
                 benchmarkUseLocalOracleCorpus ? Promise.resolve([]) :
-                retrieveLocalFirst(extractLocalRetrievalAlternativesFromScryfallQuery(query), query, {
+                retrieveLocalFirst(extractLocalRetrievalAlternativesFromQuery(query), query, {
                     label, fallbackMaxPages: benchmarkPageCap, limit: isBroadSearch ? 320 : 220,
                     excludeName: currentSourceCard.name, filters, broadFallbackFilters, highlights: searchHighlightsSnapshot
                 }).catch(() => []),
@@ -26649,13 +25990,13 @@ async function findSimilarCards() {
             { key: 'Broader Mechanical', queries: [primaryType || '', sourceRoleProfileForFloor?.kind || '', ...activeTags], limit: isBroadSearch ? 320 : 220 },
             ...(isBroadSearch ? [{ key: 'Broad Retrieval', queries: [broadSourceText], limit: 520 }] : []),
             ...(sharedSourceTextQuery ? [{ key: 'Shared Source Text', queries: sharedLocalQueries, limit: 420 }] : []),
-            ...uniqueFunctionalQueries.map((q, idx) => ({ key: `Functional Match #${idx + 1}`, queries: extractLocalRetrievalAlternativesFromScryfallQuery(q.query), limit: isBroadSearch ? 320 : 220 })),
+            ...uniqueFunctionalQueries.map((q, idx) => ({ key: `Functional Match #${idx + 1}`, queries: extractLocalRetrievalAlternativesFromQuery(q.query), limit: isBroadSearch ? 320 : 220 })),
             ...exactHighlightQueries.map((q, idx) => ({ key: `Exact Highlight #${idx + 1}`, queries: [q.query.match(/\"([^\"]+)\"/)?.[1] || q.query], limit: 260 })),
-            ...Object.entries(methodQueries).filter(([, query]) => query).map(([key, query]) => ({ key: `${key} search`, queries: extractLocalRetrievalAlternativesFromScryfallQuery(query), limit: isBroadSearch ? 320 : 220 }))
+            ...Object.entries(methodQueries).filter(([, query]) => query).map(([key, query]) => ({ key: `${key} search`, queries: extractLocalRetrievalAlternativesFromQuery(query), limit: isBroadSearch ? 320 : 220 }))
         ].filter(plan => plan.queries?.some(q => String(q || '').trim()));
 
         // The NLP model and the precomputed semantic index are independent startup resources.
-        // Start both now so their download/initialization overlaps the Scryfall retrieval streams.
+        // Start the local semantic index in parallel with the corpus retrieval streams.
         // The static index is the ONLY full-corpus semantic source for live users; it must be a
         // real Search G retrieval lane in the main search, not merely a post-search background job.
         const extractorPromise = getNLPModel();
@@ -26663,7 +26004,7 @@ async function findSimilarCards() {
             ? ensureFullSemanticIndex()
             : Promise.resolve(null);
 
-        // Start Search G immediately, in parallel with the ordinary Scryfall retrieval streams.
+        // Start Search G immediately, in parallel with the local corpus retrieval streams.
         // The same normalized target embedding is returned for the scoring pass, so we do not
         // embed the source text twice. For the deployed static index, the vector representation
         // is the normalized Oracle text used by semantic-index.bin.
@@ -26737,11 +26078,11 @@ async function findSimilarCards() {
                         const localNames = new Set(localCards.map(card => normalizeCardNameForIdentity(card.name)));
                         const missingNames = Array.from(byName.values()).filter(item => !localNames.has(normalizeCardNameForIdentity(item.name)));
                         if (missingNames.length) {
-                            const fetched = await fetchScryfallCollection(missingNames.map(x => ({ name: x.name })));
+                            const fetched = await hydrateCardsFromLocalCorpus(missingNames.map(x => ({ name: x.name })));
                             localCards.push(...(fetched || []).map(card => ({
                                 ...card,
                                 _semanticRetrievalSimilarity: scoreByName.get(normalizeCardNameForIdentity(card.name)) || 0,
-                                _semanticRetrievalSource: 'full-index-scryfall-fallback'
+                                _semanticRetrievalSource: 'full-index-local-corpus-fallback'
                             })));
                         }
                         hydrated = localCards;
@@ -27370,7 +26711,7 @@ if (candidates.length > 0) {
     lastSearchCandidateCount = countAfterHardFilters;
 
     // Collect a resumable cursor from every stream that was deliberately capped mid-pagination
-    // (see fetchScryfallSearch's `.continuation`) - local corpus and semantic-index lanes are static
+    // (see searchLocalCardCorpusAdapter's `.continuation`) - local corpus and semantic-index lanes are static
     // and the local/semantic corpus lanes are not paginated the same way and never carry one.
     // Search Deeper must preserve every authoritative constraint from the original search.
     // In particular, Exact Highlight retrieval (Search H) is a real paginated stream too; if its
@@ -27538,11 +26879,11 @@ if (candidates.length > 0) {
         pipelineCompleted = true;
         clearTimeout(searchTimeoutId);
         document.getElementById('provisional-results-banner')?.classList.add('hidden');
-        if (isScryfallRateLimitError(error) || error?.scryfallCircuitOpen) {
+        if (isRuntimeCardApiRateLimitError(error) || error?.scryfallCircuitOpen) {
             if (!error?.isLocalCooldownRejection) {
-                console.warn('Scryfall retrieval stopped for the affected stream:', error?.message || error);
+                console.warn('Local retrieval stream stopped:', error?.message || error);
             }
-            showScryfallCooldownNotice('Scryfall rate limit/network block affected one retrieval stream. Partial results were retained; no retry was sent for the failed request.');
+            showLocalDataIssueNotice('A local retrieval stream stopped; any completed local results were retained.');
         } else {
             console.error("Error in findSimilarCards:", error);
             if (typeof alert === 'function') alert(error.message);
@@ -27571,7 +26912,7 @@ if (candidates.length > 0) {
  * capped mid-pagination on the last search, scores just the newly-found candidates, merges them
  * into the already-displayed results, and re-renders. This is deliberately NOT a full re-run of
  * findSimilarCards: re-deriving queries from the DOM again would re-fetch pages already fetched
- * (Scryfall search results are cached by exact query/page, so a fresh fetchScryfallSearch call
+ * (local corpus search results are cached by exact query/page, so a fresh searchLocalCardCorpusAdapter call
  * would just hand back the same truncated cache entry, not new pages) and would re-score cards
  * already scored. Using the saved continuation cursors and search context from pendingDeeperSearch
  * instead means every fetch here is for genuinely new pages, and every score computed here is for
@@ -27607,7 +26948,7 @@ async function searchDeeper() {
     try {
         const apiBatchResults = hasApiStreams
             ? await Promise.all(
-                streams.map(c => fetchScryfallContinuationPages(c, PAGES_PER_CLICK).catch(() => ({ results: [], continuation: null, bailedAfterRetries: true })))
+                streams.map(c => getLocalContinuationCandidates(c, PAGES_PER_CLICK).catch(() => ({ results: [], continuation: null, bailedAfterRetries: true })))
             )
             : [];
         if (requestId !== searchRequestId || pendingDeeperSearch?.requestId !== requestId) return;
@@ -30770,14 +30111,14 @@ try { window.runManaSearchDeepMechanicsRegressionSuite = runManaSearchDeepMechan
 function runManaSearchConstraintModeRegressionSuite({ log = true } = {}) {
     const results = [];
     const check = (name, condition, detail = '') => results.push({ name, passed: Boolean(condition), detail: condition ? '' : String(detail || 'Assertion failed') });
-    const parts = filters => buildScryfallConstraintParts(filters);
+    const parts = filters => buildLocalConstraintParts(filters);
     const has = (filters, term) => parts(filters).includes(term);
     const mode = (key, value, raw) => ({ [key]: raw, constraintModes: { [key]: value } });
     try {
         check('rarity-hard-filter-builds-query', has(mode('rarity', 'hard', 'rare'), 'r:rare'), 'Hard rarity must constrain retrieval.');
         check('rarity-prefer-does-not-restrict-retrieval', !parts(mode('rarity', 'prefer', 'rare')).some(term => /\br:rare\b/.test(term)), 'Prefer rarity must keep other rarities eligible.');
         check('rarity-not-include-builds-negative-query', has(mode('rarity', 'exclude', 'rare'), '-r:rare'), 'Not include rarity must exclude matching rarity cards.');
-        check('mana-value-hard-comparison-builds-query', has(mode('cmc', 'hard', '<=3'), 'cmc<=3'), 'Hard mana-value comparison must reach Scryfall retrieval.');
+        check('mana-value-hard-comparison-builds-query', has(mode('cmc', 'hard', '<=3'), 'cmc<=3'), 'Hard mana-value comparison must reach local corpus retrieval.');
         check('mana-value-prefer-keeps-retrieval-broad', !parts(mode('cmc', 'prefer', '<=3')).some(term => /^-?cmc/.test(term)), 'Prefer mana value must be ranking-only.');
         check('mana-value-not-include-builds-negative-query', has(mode('cmc', 'exclude', '<=3'), '-cmc<=3'), 'Not include numeric comparison must exclude matches.');
         check('power-hard-comparison-builds-query', has(mode('power', 'hard', '>=4'), 'pow>=4'), 'Hard power comparison must reach retrieval.');
@@ -30825,3 +30166,38 @@ function runManaSearchConstraintModeRegressionSuite({ log = true } = {}) {
     return summary;
 }
 try { window.runManaSearchConstraintModeRegressionSuite = runManaSearchConstraintModeRegressionSuite; } catch (_) {}
+
+
+// Static-only data-path regression suite. Run in the browser console:
+// runManaSearchStaticOnlyRegressionSuite()
+function runManaSearchStaticOnlyRegressionSuite({ log = true } = {}) {
+    const results = [];
+    const check = (id, pass, detail = '') => results.push({ id, pass: Boolean(pass), detail: String(detail || '') });
+    try {
+        const transportSource = disabledRuntimeCardApiTransport.toString();
+        const localSearchSource = searchLocalCardCorpusAdapter.toString();
+        const localContinuationSource = getLocalContinuationCandidates.toString();
+        const localCollectionSource = hydrateCardsFromLocalCorpus.toString();
+        const sourceLoadSource = loadSourceCard.toString();
+        const pickerSearchSource = searchSourceCardPicker.toString();
+        check('api-transport-hard-disabled', !/fetch\s*\(/.test(transportSource) && transportSource.includes('no longer fetches card records at runtime'), transportSource);
+        check('query-search-adapter-uses-static-corpus', localSearchSource.includes('searchStaticCardCorpusAlternatives') && localSearchSource.includes('loadStaticCardCorpus') && !localSearchSource.includes('disabledRuntimeCardApiTransport'), 'searchLocalCardCorpusAdapter is a local corpus compatibility adapter only');
+        check('continuation-does-not-dispatch-network', !/fetch\s*\(/.test(localContinuationSource) && localContinuationSource.includes('localOnly: true'), localContinuationSource);
+        check('collection-hydration-is-local', localCollectionSource.includes('getStaticCardByName') && localCollectionSource.includes('corpus.cards') && !localCollectionSource.includes('disabledRuntimeCardApiTransport'), 'semantic hits hydrate from cards.bin only');
+        check('source-card-loading-requires-local-canonical-record', sourceLoadSource.includes('getStaticCardByName') && sourceLoadSource.includes('localCanonical') && !sourceLoadSource.includes('disabledRuntimeCardApiTransport'), 'source selection canonicalizes against cards.bin');
+        check('source-picker-has-no-remote-search', pickerSearchSource.includes('Local card catalog unavailable') && !pickerSearchSource.includes('disabledRuntimeCardApiTransport'), 'source picker is local only');
+        check('benchmark-requires-static-bins', typeof loadStaticSearchResources === 'function' && /loadStaticSearchResources\(\)/.test(runBenchmarkSuite.toString()) && /Runtime Scryfall card fetches are disabled/.test(runBenchmarkSuite.toString()), 'benchmark startup requires cards.bin and semantic-index.bin');
+        check('core-retrieval-fallback-is-local-empty-on-missing-assets', retrieveLocalFirst.toString().includes("decorateLocalCoverage([], label, '[local cards.bin unavailable]')") && !retrieveLocalFirst.toString().includes('searchLocalCardCorpusAdapter(fallbackQuery'), 'no runtime network fallback when cards.bin unavailable');
+        const endpointMarker = 'https://api.' + 'scryfall.com';
+        check('no-hardcoded-scryfall-card-api-url-in-active-adapters', ![transportSource, localSearchSource, localContinuationSource, localCollectionSource, sourceLoadSource, pickerSearchSource].some(body => body.includes(endpointMarker)), 'local adapters contain no card API endpoints');
+        check('asset-filenames-preserved', STATIC_CARD_CORPUS_FILENAME === 'cards.bin' && STATIC_SEMANTIC_INDEX_FILENAME === 'semantic-index.bin', `${STATIC_CARD_CORPUS_FILENAME}; ${STATIC_SEMANTIC_INDEX_FILENAME}`);
+        check('search-source-does-not-synthesize-api-backed-image', !getSourceCardSuggestionMatches.toString().includes('api.scryfall.com'), 'suggestions require local/cache records');
+    } catch (error) {
+        check('suite-execution', false, error?.stack || error?.message || String(error));
+    }
+    const passed = results.filter(r => r.pass).length;
+    const report = { passed, total: results.length, passRate: results.length ? passed / results.length : 0, ok: passed === results.length, results };
+    if (log) console[report.ok ? 'info' : 'warn'](`[ManaSearch] Static-only data-path suite ${passed}/${results.length}`, report);
+    return report;
+}
+try { window.runManaSearchStaticOnlyRegressionSuite = runManaSearchStaticOnlyRegressionSuite; } catch (_) {}
