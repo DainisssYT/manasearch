@@ -1,6 +1,6 @@
 /* ManaSearch build 20261018-111 */
 // ManaSearch deployment build marker. Bump this whenever app.js changes so cached-module issues are easy to diagnose.
-const MANASEARCH_APP_BUILD = '20261018-112';
+const MANASEARCH_APP_BUILD = '20261018-113';
 console.info(`[ManaSearch] app.js build ${MANASEARCH_APP_BUILD}`);
 
 // State Management
@@ -5325,7 +5325,7 @@ function analyzeManaOutput(text, amount) {
         && choiceSymbols.every(() => true);
 
     let mode = 'unknown';
-    let semanticAmount = Number.isFinite(Number(amount)) ? Number(amount) : null;
+    let semanticAmount = amount != null && Number.isFinite(Number(amount)) ? Number(amount) : null;
 
     if (isSimpleSingleManaChoice) {
         mode = 'choice_single_fixed_color';
@@ -5368,7 +5368,7 @@ function finalizeManaAbilityEffect(effect) {
     let netMin = null;
     let netMax = null;
 
-    if (Number.isFinite(Number(output.amount))) {
+    if (output.amount != null && Number.isFinite(Number(output.amount))) {
         const produced = Number(output.amount);
         const minCost = Number.isFinite(Number(cost?.manaMin)) ? Number(cost.manaMin) : 0;
         const maxCost = cost?.manaMax == null ? null : (Number.isFinite(Number(cost.manaMax)) ? Number(cost.manaMax) : null);
@@ -5397,8 +5397,12 @@ function finalizeManaAbilityEffect(effect) {
 }
 
 function manaNumericSimilarity(a, b) {
+    // null means unknown, not numeric zero. Treating Number(null) as 0 fabricated a match
+    // between unknown net mana values and could hide a real difference in fixed output amounts.
+    const hasA = a !== null && a !== undefined && a !== '' && Number.isFinite(Number(a));
+    const hasB = b !== null && b !== undefined && b !== '' && Number.isFinite(Number(b));
+    if (!hasA || !hasB) return null;
     const na = Number(a), nb = Number(b);
-    if (!Number.isFinite(na) || !Number.isFinite(nb)) return null;
     if (na === nb) return 1;
     return Math.max(0, 1 - Math.abs(na - nb) / Math.max(Math.abs(na), Math.abs(nb), 1));
 }
@@ -6028,7 +6032,7 @@ function parseManaAbilityEffect(clause) {
     }
 
     const manaOutput = analyzeManaOutput(text, amount);
-    const semanticAmount = Number.isFinite(Number(manaOutput.amount)) ? Number(manaOutput.amount) : amount;
+    const semanticAmount = manaOutput.amount != null && Number.isFinite(Number(manaOutput.amount)) ? Number(manaOutput.amount) : amount;
 
     return {
         action: 'add_mana',
@@ -7664,12 +7668,12 @@ function deriveCanonicalFunction(effect) {
         magnitude = `${effect.amount} damage`;
         quantity = typeof effect.amount === 'number' ? effect.amount : null;
     } else if (fn === "mana_ability") {
-        const netPart = Number.isFinite(Number(effect.manaNetAmount)) ? ` net ${effect.manaNetAmount}` : '';
+        const netPart = effect.manaNetAmount != null && Number.isFinite(Number(effect.manaNetAmount)) ? ` net ${effect.manaNetAmount}` : '';
         const colorPart = effect.colors && effect.colors.length > 0 ? effect.colors.join('/') : null;
         magnitude = [effect.amount, colorPart, 'mana', netPart].filter(Boolean).join(' ');
         // Quantity is the actual net mana increase when the activation cost is known. Gross
         // production is preserved as manaOutputAmount for a separate, lower-weight comparison.
-        quantity = Number.isFinite(Number(effect.manaNetAmount))
+        quantity = effect.manaNetAmount != null && Number.isFinite(Number(effect.manaNetAmount))
             ? Number(effect.manaNetAmount)
             : (typeof effect.amount === 'number' ? effect.amount : null);
     } else if (fn === "gain_life" || fn === "lose_life") {
@@ -7697,10 +7701,10 @@ function deriveCanonicalFunction(effect) {
             grantedKeywords: [...new Set([...(effect.grantedKeywords || []), ...(effect.keywords || [])])].map(x => String(x).toLowerCase()),
             scalingProfile: effect.scalingProfile || null,
             quantity,
-            manaOutputAmount: fn === 'mana_ability' && Number.isFinite(Number(effect.manaOutputAmount)) ? Number(effect.manaOutputAmount) : null,
-            manaNetAmount: fn === 'mana_ability' && Number.isFinite(Number(effect.manaNetAmount)) ? Number(effect.manaNetAmount) : null,
-            manaNetMin: fn === 'mana_ability' && Number.isFinite(Number(effect.manaNetMin)) ? Number(effect.manaNetMin) : null,
-            manaNetMax: fn === 'mana_ability' && Number.isFinite(Number(effect.manaNetMax)) ? Number(effect.manaNetMax) : null,
+            manaOutputAmount: fn === 'mana_ability' && effect.manaOutputAmount != null && Number.isFinite(Number(effect.manaOutputAmount)) ? Number(effect.manaOutputAmount) : null,
+            manaNetAmount: fn === 'mana_ability' && effect.manaNetAmount != null && Number.isFinite(Number(effect.manaNetAmount)) ? Number(effect.manaNetAmount) : null,
+            manaNetMin: fn === 'mana_ability' && effect.manaNetMin != null && Number.isFinite(Number(effect.manaNetMin)) ? Number(effect.manaNetMin) : null,
+            manaNetMax: fn === 'mana_ability' && effect.manaNetMax != null && Number.isFinite(Number(effect.manaNetMax)) ? Number(effect.manaNetMax) : null,
             manaOutputMode: fn === 'mana_ability' ? (effect.manaOutputMode || effect.manaOutput?.mode || null) : null,
             manaOutputColors: fn === 'mana_ability' ? (effect.manaOutputColors || effect.manaOutput?.colors || []) : [],
             manaOutputColorCount: fn === 'mana_ability' ? (effect.manaOutputColorCount ?? effect.manaOutput?.uniqueColorCount ?? null) : null,
@@ -8312,8 +8316,8 @@ function strategicRoleMaxNumber(parsedEffects, fn) {
     for (const e of (parsedEffects || [])) {
         if (!e.canonical || e.canonical.function !== fn) continue;
         if (fn === 'mana_ability') {
-            if (Number.isFinite(Number(e.manaNetAmount))) max = Math.max(max, Number(e.manaNetAmount));
-            else if (Number.isFinite(Number(e.canonical.params?.manaNetAmount))) max = Math.max(max, Number(e.canonical.params.manaNetAmount));
+            if (e.manaNetAmount != null && Number.isFinite(Number(e.manaNetAmount))) max = Math.max(max, Number(e.manaNetAmount));
+            else if (e.canonical.params?.manaNetAmount != null && Number.isFinite(Number(e.canonical.params.manaNetAmount))) max = Math.max(max, Number(e.canonical.params.manaNetAmount));
             else if (typeof e.quantity === 'number') max = Math.max(max, e.quantity);
             continue;
         }
@@ -8566,8 +8570,8 @@ function buildStrategicRoleFingerprintUncached(card, parsedEffects = [], profile
     const permanent = /\b(?:creature|artifact|enchantment|planeswalker)\b/.test(String(card?.type_line || '').toLowerCase());
     const damageAmounts = [...lower.matchAll(/\b(?:deal|deals)\s+(\d+)\s+damage\b/g)].map(m => Number(m[1])).filter(Number.isFinite);
     const manaEffects = (parsedEffects || []).filter(e => e?.canonical?.function === 'mana_ability');
-    const manaNetValues = manaEffects.map(e => Number(e.manaNetAmount)).filter(Number.isFinite);
-    const manaOutputValues = manaEffects.map(e => Number(e.manaOutputAmount ?? e.amount)).filter(Number.isFinite);
+    const manaNetValues = manaEffects.map(e => e.manaNetAmount).filter(value => value != null && Number.isFinite(Number(value))).map(Number);
+    const manaOutputValues = manaEffects.map(e => e.manaOutputAmount ?? e.amount).filter(value => value != null && Number.isFinite(Number(value))).map(Number);
     const manaPerActivation = manaNetValues.length ? Math.max(...manaNetValues) : strategicRoleMaxNumber(parsedEffects, 'mana_ability');
     const manaOutputPerActivation = manaOutputValues.length ? Math.max(...manaOutputValues) : null;
     const primaryManaEffect = manaEffects.slice().sort((a,b) => (Number(b.manaNetAmount ?? b.amount) || 0) - (Number(a.manaNetAmount ?? a.amount) || 0))[0] || null;
@@ -12168,7 +12172,7 @@ function buildMechanicalEffectNode(effect, index = 0, graphAnchors = new Set()) 
             bound: normalizeMechanicToken(quantityProfile.bound || ''),
             source: normalizeMechanicToken(quantityProfile.source || '')
         },
-        quantity: Number.isFinite(Number(effect?.quantity ?? p.quantity)) ? Number(effect?.quantity ?? p.quantity) : null,
+        quantity: (effect?.quantity ?? p.quantity) != null && Number.isFinite(Number(effect?.quantity ?? p.quantity)) ? Number(effect?.quantity ?? p.quantity) : null,
         magnitude: normalizeMechanicToken(p.magnitude || effect?.powerToughness || effect?.amount || ''),
         duration: normalizeMechanicToken(effect?.durationProfile || p.duration || ''),
         event,
@@ -12351,9 +12355,13 @@ function buildMechanicalEffectGraph(card = null, text = '', parsedEffects = null
 }
 
 function mechanicalNumericSimilarity(a, b) {
+    // Missing quantity is unknown, not zero. Unknown/unknown is neutral; unknown/fixed is a
+    // cautious partial match instead of a fabricated zero-quantity disagreement.
+    const hasA = a !== null && a !== undefined && a !== '' && Number.isFinite(Number(a));
+    const hasB = b !== null && b !== undefined && b !== '' && Number.isFinite(Number(b));
+    if (!hasA && !hasB) return 1;
+    if (!hasA || !hasB) return 0.55;
     const aa = Number(a), bb = Number(b);
-    if (!Number.isFinite(aa) && !Number.isFinite(bb)) return 1;
-    if (!Number.isFinite(aa) || !Number.isFinite(bb)) return 0.55;
     return Math.max(0, 1 - Math.abs(aa - bb) / Math.max(Math.abs(aa), Math.abs(bb), 1));
 }
 
@@ -18161,9 +18169,61 @@ const MANASEARCH_MECHANIC_RANKING_TIER_LABELS = Object.freeze([
 ]);
 
 /**
+ * Fixed numeric differences are parameter conflicts even when the action text is otherwise the
+ * same. In particular, a free +2-mana rock is not an equivalent match for a +1-mana rock.
+ * This remains conservative: only compare values when BOTH cards expose a fixed, parsed number.
+ */
+const QUANTITATIVE_MECHANIC_FUNCTIONS = new Set([
+    'direct_damage', 'gain_life', 'lose_life', 'card_draw', 'token_creation',
+    'place_counter', 'mill', 'discard', 'cost_reduction'
+]);
+const EMPTY_MECHANIC_ANCHOR_SET = new Set();
+function readFiniteMechanicQuantity(...values) {
+    for (const value of values) {
+        if (value === null || value === undefined || value === '' || typeof value === 'boolean') continue;
+        const number = Number(value);
+        if (Number.isFinite(number)) return number;
+    }
+    return null;
+}
+function compareMechanicQuantityValues(a, b, field) {
+    if (a === null || b === null || a === b) return { conflict: false, severity: 0, field, sourceValue: a, candidateValue: b };
+    const similarity = mechanicalNumericSimilarity(a, b);
+    const severity = Math.max(0, Math.min(1, 1 - similarity));
+    // Avoid calling small rounding/drift differences a contradiction; a material fixed
+    // quantity difference (e.g. 1 vs 2 mana or 2 vs 3 damage) is a genuine ranking conflict.
+    return { conflict: severity >= 0.16, severity, field, sourceValue: a, candidateValue: b };
+}
+function getQuantitativeMechanicConflict(sourceNode, candidateNode, sourceEffect = null, candidateEffect = null) {
+    const fn = String(sourceNode?.function || '');
+    if (!fn || fn !== String(candidateNode?.function || '')) return { conflict: false, severity: 0, field: null, sourceValue: null, candidateValue: null };
+
+    const sourceParams = sourceEffect?.canonical?.params || sourceEffect?.params || {};
+    const candidateParams = candidateEffect?.canonical?.params || candidateEffect?.params || {};
+    if (fn === 'mana_ability') {
+        const sourceNet = readFiniteMechanicQuantity(sourceParams.manaNetAmount, sourceEffect?.manaNetAmount);
+        const candidateNet = readFiniteMechanicQuantity(candidateParams.manaNetAmount, candidateEffect?.manaNetAmount);
+        // Net mana is the strategically relevant amount: two produced mana with a one-mana
+        // activation cost is not equivalent to two mana with no cost. If both net values exist,
+        // do not let a gross-output difference override equal net efficiency.
+        if (sourceNet !== null && candidateNet !== null) return compareMechanicQuantityValues(sourceNet, candidateNet, 'net_mana');
+        const sourceGross = readFiniteMechanicQuantity(sourceParams.manaOutputAmount, sourceEffect?.manaOutputAmount, sourceNode?.quantity);
+        const candidateGross = readFiniteMechanicQuantity(candidateParams.manaOutputAmount, candidateEffect?.manaOutputAmount, candidateNode?.quantity);
+        return compareMechanicQuantityValues(sourceGross, candidateGross, 'gross_mana');
+    }
+
+    if (!QUANTITATIVE_MECHANIC_FUNCTIONS.has(fn)) return { conflict: false, severity: 0, field: null, sourceValue: null, candidateValue: null };
+    const sourceQuantity = readFiniteMechanicQuantity(sourceNode?.quantity, sourceParams.quantity, sourceEffect?.quantity, sourceEffect?.amount);
+    const candidateQuantity = readFiniteMechanicQuantity(candidateNode?.quantity, candidateParams.quantity, candidateEffect?.quantity, candidateEffect?.amount);
+    return compareMechanicQuantityValues(sourceQuantity, candidateQuantity, 'quantity');
+}
+
+/**
  * Classify one candidate against the source using already-built effect graph nodes. Reuses the
  * same canonical-function, opposition, and relationship-conflict logic as the mechanical scorer;
  * this is deliberately deterministic and does not require an embedding or network request.
+ * V113 also treats material fixed-quantity differences as conflicts and skips obviously unrelated
+ * node pairs before invoking the more expensive pairwise scorer.
  */
 function classifyMechanicRankingTier(sourceGraph, candidateGraph, sourceEffects = [], candidateEffects = []) {
     const sourceNodes = Array.isArray(sourceGraph?.nodes) ? sourceGraph.nodes : [];
@@ -18181,12 +18241,28 @@ function classifyMechanicRankingTier(sourceGraph, candidateGraph, sourceEffects 
         let bestForSource = null;
         const sourceEffect = sourceEffects?.[sourceNode.index] || null;
         const sourcePriority = sourceEffect?.isPrimary ? 2 : Math.max(0.1, Number(sourceEffect?.importance) || 0.35);
+        const sourceAnchors = sourceNode.keywordAnchors instanceof Set ? sourceNode.keywordAnchors : EMPTY_MECHANIC_ANCHOR_SET;
         for (const candidateNode of candidateNodes) {
-            const comparison = compareMechanicalEffectNodes(sourceNode, candidateNode);
-            const core = Math.max(0, Math.min(1, Number(comparison?.breakdown?.core) || 0));
             const sameFunction = Boolean(sourceNode.function && candidateNode.function && sourceNode.function === candidateNode.function);
             const sameFamily = Boolean(sourceNode.family && candidateNode.family && sourceNode.family === candidateNode.family);
+            const prefilterSameAction = Boolean(sourceNode.action && candidateNode.action && sourceNode.action === candidateNode.action);
+            const sameOutcome = Boolean(sourceNode.outcome && candidateNode.outcome && sourceNode.outcome === candidateNode.outcome);
             const opposite = hasOppositeMechanicalSignature(sourceNode, candidateNode);
+            const affinity = getFunctionAffinity(sourceNode.function, candidateNode.function);
+            const candidateAnchors = candidateNode.keywordAnchors instanceof Set ? candidateNode.keywordAnchors : EMPTY_MECHANIC_ANCHOR_SET;
+            let sharedAnchor = false;
+            if (!sameFunction && !sameFamily && !opposite && !prefilterSameAction && !sameOutcome && affinity < 0.78 && sourceAnchors.size && candidateAnchors.size) {
+                for (const anchor of sourceAnchors) {
+                    if (candidateAnchors.has(anchor)) { sharedAnchor = true; break; }
+                }
+            }
+            // Most card pairs contain unrelated secondary clauses. Reject those cheaply rather
+            // than running full structural comparison and relationship-mismatch analysis on every
+            // node pair. Keep the same routes by which the scorer can identify a real match.
+            if (!sameFunction && !sameFamily && !opposite && !prefilterSameAction && !sameOutcome && affinity < 0.78 && !sharedAnchor) continue;
+
+            const comparison = compareMechanicalEffectNodes(sourceNode, candidateNode);
+            const core = Math.max(0, Math.min(1, Number(comparison?.breakdown?.core) || 0));
             // compareMechanicalEffectNodes already contains the parameter-level contradiction
             // signal. Reuse it rather than recomputing the same node conflict for every candidate.
             const nodeContradiction = Number(comparison?.contradiction) || 0;
@@ -18203,6 +18279,7 @@ function classifyMechanicRankingTier(sourceGraph, candidateGraph, sourceEffects 
             const relationshipMismatch = sameFunction && sourceEffect && candidateEffect
                 ? calculateEffectRelationshipMismatch([sourceEffect], [candidateEffect])
                 : 0;
+            const quantitativeConflict = getQuantitativeMechanicConflict(sourceNode, candidateNode, sourceEffect, candidateEffect);
             const rawA = String(sourceNode.raw || sourceEffect?.raw || '');
             const rawB = String(candidateNode.raw || candidateEffect?.raw || '');
             const wordingSimilarity = calculateSimpleSimilarity(rawA, rawB);
@@ -18217,7 +18294,7 @@ function classifyMechanicRankingTier(sourceGraph, candidateGraph, sourceEffects 
                 (opposite && wordingSimilarity >= 0.50) ||
                 ((!actionA || !actionB) && wordingSimilarity >= 0.88);
             const isContradiction = opposite || nodeContradiction >= 0.14 ||
-                Number(comparison?.contradiction) >= 0.14 || relationshipMismatch >= 0.46;
+                Number(comparison?.contradiction) >= 0.14 || relationshipMismatch >= 0.46 || quantitativeConflict.conflict;
             const tier = isContradiction
                 ? (sameWording
                     ? MANASEARCH_MECHANIC_RANKING_TIER.CONTRADICTION_SAME_WORDING
@@ -18234,7 +18311,13 @@ function classifyMechanicRankingTier(sourceGraph, candidateGraph, sourceEffects 
                 sourcePriority,
                 matchStrength,
                 wordingSimilarity,
-                contradiction: Math.max(nodeContradiction, Number(comparison?.contradiction) || 0, relationshipMismatch, opposite ? 0.30 : 0),
+                contradiction: Math.max(nodeContradiction, Number(comparison?.contradiction) || 0, relationshipMismatch, quantitativeConflict.severity || 0, opposite ? 0.30 : 0),
+                quantitativeConflict: quantitativeConflict.field && quantitativeConflict.conflict ? {
+                    field: quantitativeConflict.field,
+                    sourceValue: quantitativeConflict.sourceValue,
+                    candidateValue: quantitativeConflict.candidateValue,
+                    severity: Number(quantitativeConflict.severity.toFixed(3))
+                } : null,
                 sourceFunction: sourceNode.function || '',
                 candidateFunction: candidateNode.function || '',
                 sourceAction: sourceNode.action || '',
@@ -18268,6 +18351,7 @@ function classifyMechanicRankingTier(sourceGraph, candidateGraph, sourceEffects 
             candidateAction: best.candidateAction,
             wordingSimilarity: Number(best.wordingSimilarity.toFixed(3)),
             contradiction: Number(best.contradiction.toFixed(3)),
+            quantitativeConflict: best.quantitativeConflict || null,
             sourceEffectIndex: best.sourceEffectIndex,
             candidateEffectIndex: best.candidateEffectIndex
         }
@@ -18532,7 +18616,7 @@ function buildRelatedIntentProfile(cards = [], selectedCards = []) {
                     value: Number(q),
                     weight: supportWeight,
                     cardName: ref.card.name,
-                    outputValue: entry.functionName === 'mana_ability' && Number.isFinite(Number(cfParams.manaOutputAmount)) ? Number(cfParams.manaOutputAmount) : null
+                    outputValue: entry.functionName === 'mana_ability' && cfParams.manaOutputAmount != null && Number.isFinite(Number(cfParams.manaOutputAmount)) ? Number(cfParams.manaOutputAmount) : null
                 });
             }
         }
@@ -18649,11 +18733,11 @@ function getRelatedCandidateFunctionRecords(parsedEffects = [], functionName = n
         out.push({
             effect,
             canonical: cf,
-            quantity: cf.function === 'mana_ability' && Number.isFinite(Number(cf.params?.manaNetAmount))
+            quantity: cf.function === 'mana_ability' && cf.params?.manaNetAmount != null && Number.isFinite(Number(cf.params.manaNetAmount))
                 ? Number(cf.params.manaNetAmount)
-                : (Number.isFinite(Number(cf.params?.quantity))
+                : (cf.params?.quantity != null && Number.isFinite(Number(cf.params.quantity))
                     ? Number(cf.params.quantity)
-                    : (Number.isFinite(Number(effect.quantity)) ? Number(effect.quantity) : (Number.isFinite(Number(effect.amount)) ? Number(effect.amount) : null)))
+                    : (effect.quantity != null && Number.isFinite(Number(effect.quantity)) ? Number(effect.quantity) : (effect.amount != null && Number.isFinite(Number(effect.amount)) ? Number(effect.amount) : null)))
         });
     }
     return out;
@@ -18688,8 +18772,9 @@ function calculateRelatedConsensusFit(profile, parsedCandidate, card = null) {
     let manaOutputFit = 0;
     if (profile.dominantFunction === 'mana_ability' && candidateFunctions.length && profile.manaOutputTarget != null) {
         for (const record of candidateFunctions) {
-            const output = Number(record.canonical?.params?.manaOutputAmount);
-            if (Number.isFinite(output)) manaOutputFit = Math.max(manaOutputFit, manaNumericSimilarity(profile.manaOutputTarget, output) || 0);
+            const rawOutput = record.canonical?.params?.manaOutputAmount;
+            const output = Number(rawOutput);
+            if (rawOutput != null && Number.isFinite(output)) manaOutputFit = Math.max(manaOutputFit, manaNumericSimilarity(profile.manaOutputTarget, output) || 0);
         }
     }
 
@@ -30710,6 +30795,50 @@ function runManaSearchRankingScoringRegressionSuite({ log = true } = {}) {
             tierNode('Destroy all creatures.', 'creature_destroy', 'destroy', { targetKind: 'all', targetObject: 'creature' })
         );
         check('mechanic-tier-same-mechanic-same-wording-first', sameWordTier === MANASEARCH_MECHANIC_RANKING_TIER.SAME_MECHANIC_SAME_WORDING, `tier=${sameWordTier}`);
+        const sourceSolRingEffect = {
+            raw: '{T}: Add {C}{C}.', action: 'add_mana', quantity: 2, amount: 2,
+            manaNetAmount: 2, manaOutputAmount: 2,
+            canonical: { function: 'mana_ability', params: { quantity: 2, manaNetAmount: 2, manaOutputAmount: 2 } }
+        };
+        const candidateOneManaEffect = {
+            raw: '{T}: Add {C}.', action: 'add_mana', quantity: 1, amount: 1,
+            manaNetAmount: 1, manaOutputAmount: 1,
+            canonical: { function: 'mana_ability', params: { quantity: 1, manaNetAmount: 1, manaOutputAmount: 1 } }
+        };
+        const oneManaInsteadOfTwoTier = tierOf(
+            tierNode(sourceSolRingEffect.raw, 'mana_ability', 'add_mana', { quantity: 2 }),
+            tierNode(candidateOneManaEffect.raw, 'mana_ability', 'add_mana', { quantity: 1 }),
+            [sourceSolRingEffect], [candidateOneManaEffect]
+        );
+        check('mechanic-tier-sol-ring-two-mana-rejects-one-mana-as-quantitative-conflict',
+            oneManaInsteadOfTwoTier === MANASEARCH_MECHANIC_RANKING_TIER.CONTRADICTION_SAME_WORDING ||
+            oneManaInsteadOfTwoTier === MANASEARCH_MECHANIC_RANKING_TIER.CONTRADICTION_DIFFERENT_WORDING,
+            `tier=${oneManaInsteadOfTwoTier}`);
+        const exactTwoManaTier = tierOf(
+            tierNode(sourceSolRingEffect.raw, 'mana_ability', 'add_mana', { quantity: 2 }),
+            tierNode('{T}: Add {C}{C}.', 'mana_ability', 'add_mana', { quantity: 2 }),
+            [sourceSolRingEffect], [{ ...sourceSolRingEffect }]
+        );
+        check('mechanic-tier-sol-ring-keeps-equal-two-mana-in-no-conflict-tier',
+            exactTwoManaTier === MANASEARCH_MECHANIC_RANKING_TIER.SAME_MECHANIC_SAME_WORDING,
+            `tier=${exactTwoManaTier}`);
+        const sourceUnknownNet = {
+            ...sourceSolRingEffect, manaNetAmount: null,
+            canonical: { function: 'mana_ability', params: { quantity: 2, manaNetAmount: null, manaOutputAmount: 2 } }
+        };
+        const candidateUnknownNet = {
+            ...candidateOneManaEffect, manaNetAmount: null,
+            canonical: { function: 'mana_ability', params: { quantity: 1, manaNetAmount: null, manaOutputAmount: 1 } }
+        };
+        const oneManaUnknownNetTier = tierOf(
+            tierNode(sourceUnknownNet.raw, 'mana_ability', 'add_mana', { quantity: 2 }),
+            tierNode(candidateUnknownNet.raw, 'mana_ability', 'add_mana', { quantity: 1 }),
+            [sourceUnknownNet], [candidateUnknownNet]
+        );
+        check('mechanic-tier-sol-ring-compares-gross-output-when-net-is-unknown',
+            oneManaUnknownNetTier === MANASEARCH_MECHANIC_RANKING_TIER.CONTRADICTION_SAME_WORDING ||
+            oneManaUnknownNetTier === MANASEARCH_MECHANIC_RANKING_TIER.CONTRADICTION_DIFFERENT_WORDING,
+            `tier=${oneManaUnknownNetTier}`);
         const differentWordTier = tierOf(
             tierNode('Return target creature card from your graveyard to the battlefield.', 'zone_change', 'return', { from: 'graveyard', to: 'battlefield' }),
             tierNode('Put target creature card from your graveyard onto the battlefield.', 'zone_change', 'put', { from: 'graveyard', to: 'battlefield' })
