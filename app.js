@@ -1,6 +1,6 @@
 /* ManaSearch build 20261018-111 */
 // ManaSearch deployment build marker. Bump this whenever app.js changes so cached-module issues are easy to diagnose.
-const MANASEARCH_APP_BUILD = '20261018-111';
+const MANASEARCH_APP_BUILD = '20261018-112';
 console.info(`[ManaSearch] app.js build ${MANASEARCH_APP_BUILD}`);
 
 // State Management
@@ -1980,6 +1980,10 @@ function createBenchmarkScoreSnapshot(card) {
         supportingEvidenceScore: card.supportingEvidenceScore ?? null,
         evidenceAgreement: card.evidenceAgreement ?? null,
         contradictionPenalty: card.contradictionPenalty ?? null,
+        mechanicRankingTier: Number.isInteger(card.mechanicRankingTier) ? card.mechanicRankingTier : null,
+        mechanicRankingTierLabel: card.mechanicRankingTierLabel ?? null,
+        mechanicRankingConfidence: card.mechanicRankingConfidence ?? null,
+        mechanicRankingEvidence: card.mechanicRankingEvidence ?? null,
         similarityScore: card.similarityScore ?? null
     };
 }
@@ -2065,6 +2069,10 @@ async function runBenchmarkPass(searchFn, test) {
                 supportingEvidenceScore: card.supportingEvidenceScore ?? null,
                 evidenceAgreement: card.evidenceAgreement ?? null,
                 contradictionPenalty: card.contradictionPenalty ?? null,
+                mechanicRankingTier: Number.isInteger(card.mechanicRankingTier) ? card.mechanicRankingTier : null,
+                mechanicRankingTierLabel: card.mechanicRankingTierLabel ?? null,
+                mechanicRankingConfidence: card.mechanicRankingConfidence ?? null,
+                mechanicRankingEvidence: card.mechanicRankingEvidence ?? null,
                 similarityScore: card.similarityScore ?? null
             });
         });
@@ -18135,6 +18143,151 @@ function calculateCanonicalContradictionPenalty(sourceCard, candidateCard) {
     return Math.max(0.82, Math.min(1, penalty));
 }
 
+// V112: explicit mechanic-first result tiers. These are ordering buckets, not hidden score
+// multipliers: a stronger semantic score can sort a card ahead of another only within its tier.
+const MANASEARCH_MECHANIC_RANKING_TIER = Object.freeze({
+    SAME_MECHANIC_SAME_WORDING: 0,
+    SAME_MECHANIC_DIFFERENT_WORDING: 1,
+    CONTRADICTION_SAME_WORDING: 2,
+    CONTRADICTION_DIFFERENT_WORDING: 3,
+    OTHER: 4
+});
+const MANASEARCH_MECHANIC_RANKING_TIER_LABELS = Object.freeze([
+    'Same mechanic · same wording · no contradiction',
+    'Same mechanic · different wording · no contradiction',
+    'Related mechanic · same wording · contradiction',
+    'Related mechanic · different wording · contradiction',
+    'Other matches'
+]);
+
+/**
+ * Classify one candidate against the source using already-built effect graph nodes. Reuses the
+ * same canonical-function, opposition, and relationship-conflict logic as the mechanical scorer;
+ * this is deliberately deterministic and does not require an embedding or network request.
+ */
+function classifyMechanicRankingTier(sourceGraph, candidateGraph, sourceEffects = [], candidateEffects = []) {
+    const sourceNodes = Array.isArray(sourceGraph?.nodes) ? sourceGraph.nodes : [];
+    const candidateNodes = Array.isArray(candidateGraph?.nodes) ? candidateGraph.nodes : [];
+    const fallback = {
+        mechanicRankingTier: MANASEARCH_MECHANIC_RANKING_TIER.OTHER,
+        mechanicRankingTierLabel: MANASEARCH_MECHANIC_RANKING_TIER_LABELS[MANASEARCH_MECHANIC_RANKING_TIER.OTHER],
+        mechanicRankingConfidence: 0,
+        mechanicRankingEvidence: null
+    };
+    if (!sourceNodes.length || !candidateNodes.length) return fallback;
+
+    const bestBySourceNode = new Map();
+    for (const sourceNode of sourceNodes) {
+        let bestForSource = null;
+        const sourceEffect = sourceEffects?.[sourceNode.index] || null;
+        const sourcePriority = sourceEffect?.isPrimary ? 2 : Math.max(0.1, Number(sourceEffect?.importance) || 0.35);
+        for (const candidateNode of candidateNodes) {
+            const comparison = compareMechanicalEffectNodes(sourceNode, candidateNode);
+            const core = Math.max(0, Math.min(1, Number(comparison?.breakdown?.core) || 0));
+            const sameFunction = Boolean(sourceNode.function && candidateNode.function && sourceNode.function === candidateNode.function);
+            const sameFamily = Boolean(sourceNode.family && candidateNode.family && sourceNode.family === candidateNode.family);
+            const opposite = hasOppositeMechanicalSignature(sourceNode, candidateNode);
+            // compareMechanicalEffectNodes already contains the parameter-level contradiction
+            // signal. Reuse it rather than recomputing the same node conflict for every candidate.
+            const nodeContradiction = Number(comparison?.contradiction) || 0;
+
+            // Identical canonical functions are a strong match even when a parameter conflict
+            // subsequently lowers their pair score. Different functions need a strong shared
+            // family/core comparison, or an explicitly recognized opposite action.
+            const related = opposite || sameFunction ||
+                (sameFamily && core >= 0.68) ||
+                (core >= 0.78 && Number(comparison?.score) >= 0.56);
+            if (!related) continue;
+
+            const candidateEffect = candidateEffects?.[candidateNode.index] || null;
+            const relationshipMismatch = sameFunction && sourceEffect && candidateEffect
+                ? calculateEffectRelationshipMismatch([sourceEffect], [candidateEffect])
+                : 0;
+            const rawA = String(sourceNode.raw || sourceEffect?.raw || '');
+            const rawB = String(candidateNode.raw || candidateEffect?.raw || '');
+            const wordingSimilarity = calculateSimpleSimilarity(rawA, rawB);
+            const actionA = normalizeMechanicToken(sourceNode.action || '');
+            const actionB = normalizeMechanicToken(candidateNode.action || '');
+            // Treat an effect as using the same wording when the core action is the same and the
+            // surrounding rule text remains close. Opposite actions (gain/lose, tap/untap, etc.)
+            // are also same-wording contradictions when only the mechanic word flips. Equivalent
+            // verbs such as "return" vs "put" are intentionally classified as different wording.
+            const sameAction = Boolean(actionA && actionB && actionA === actionB);
+            const sameWording = (sameAction && wordingSimilarity >= 0.42) ||
+                (opposite && wordingSimilarity >= 0.50) ||
+                ((!actionA || !actionB) && wordingSimilarity >= 0.88);
+            const isContradiction = opposite || nodeContradiction >= 0.14 ||
+                Number(comparison?.contradiction) >= 0.14 || relationshipMismatch >= 0.46;
+            const tier = isContradiction
+                ? (sameWording
+                    ? MANASEARCH_MECHANIC_RANKING_TIER.CONTRADICTION_SAME_WORDING
+                    : MANASEARCH_MECHANIC_RANKING_TIER.CONTRADICTION_DIFFERENT_WORDING)
+                : (sameWording
+                    ? MANASEARCH_MECHANIC_RANKING_TIER.SAME_MECHANIC_SAME_WORDING
+                    : MANASEARCH_MECHANIC_RANKING_TIER.SAME_MECHANIC_DIFFERENT_WORDING);
+            const matchStrength = Math.max(0, Math.min(1,
+                (sameFunction ? 0.54 : 0) + core * 0.24 + (Number(comparison?.score) || 0) * 0.16 +
+                (opposite ? 0.06 : 0) + (sameFamily ? 0.04 : 0)
+            ));
+            const record = {
+                tier,
+                sourcePriority,
+                matchStrength,
+                wordingSimilarity,
+                contradiction: Math.max(nodeContradiction, Number(comparison?.contradiction) || 0, relationshipMismatch, opposite ? 0.30 : 0),
+                sourceFunction: sourceNode.function || '',
+                candidateFunction: candidateNode.function || '',
+                sourceAction: sourceNode.action || '',
+                candidateAction: candidateNode.action || '',
+                sourceEffectIndex: sourceNode.index,
+                candidateEffectIndex: candidateNode.index
+            };
+            // A source's primary effect takes precedence over matches to incidental secondary
+            // text. Within the same source effect, a cleaner tier wins before similarity strength.
+            if (!bestForSource || record.tier < bestForSource.tier ||
+                (record.tier === bestForSource.tier && record.matchStrength > bestForSource.matchStrength)) {
+                bestForSource = record;
+            }
+        }
+        if (bestForSource) bestBySourceNode.set(sourceNode.index, bestForSource);
+    }
+    if (!bestBySourceNode.size) return fallback;
+
+    const best = [...bestBySourceNode.values()].sort((a, b) =>
+        (b.sourcePriority - a.sourcePriority) || (a.tier - b.tier) ||
+        (b.matchStrength - a.matchStrength) || (b.wordingSimilarity - a.wordingSimilarity)
+    )[0];
+    return {
+        mechanicRankingTier: best.tier,
+        mechanicRankingTierLabel: MANASEARCH_MECHANIC_RANKING_TIER_LABELS[best.tier],
+        mechanicRankingConfidence: Math.max(0, Math.min(1, best.matchStrength)),
+        mechanicRankingEvidence: {
+            sourceFunction: best.sourceFunction,
+            candidateFunction: best.candidateFunction,
+            sourceAction: best.sourceAction,
+            candidateAction: best.candidateAction,
+            wordingSimilarity: Number(best.wordingSimilarity.toFixed(3)),
+            contradiction: Number(best.contradiction.toFixed(3)),
+            sourceEffectIndex: best.sourceEffectIndex,
+            candidateEffectIndex: best.candidateEffectIndex
+        }
+    };
+}
+
+function getMechanicRankingTier(card) {
+    const tier = Number(card?.mechanicRankingTier);
+    return Number.isInteger(tier) && tier >= 0 && tier <= 4 ? tier : MANASEARCH_MECHANIC_RANKING_TIER.OTHER;
+}
+
+function compareManaSearchRankingCards(a, b, criteria = 'overall') {
+    const ranking = validOrderCriteriaForOrdering(criteria);
+    if (ranking === 'overall') {
+        const tierDifference = getMechanicRankingTier(a) - getMechanicRankingTier(b);
+        if (tierDifference) return tierDifference;
+    }
+    return getRankingScoreForCriteria(b, ranking) - getRankingScoreForCriteria(a, ranking);
+}
+
 function calculateEvidenceAgreement(card, rankingIntent = { kind: 'effect_match' }) {
     // Only independent channels participate: structural parse, functional semantic text,
     // raw-oracle semantic text, and an explicit highlight. Retrieval provenance and the old
@@ -23331,6 +23484,12 @@ async function scoreCardBatch({
         __detailStageStartedAt = __scoreNow();
 
         card.mechanicalScore = bestMechanical.mechanical;
+        Object.assign(card, classifyMechanicRankingTier(
+            sourceMechanicalGraph,
+            candidateMechanicalGraph,
+            parsedSourceCard,
+            parsedCandidateCard
+        ));
         card.mechanicalEvidence = {
             universal: bestMechanical.mechanicalDetail?.universal || null,
             graph: bestMechanical.mechanicalDetail?.graphFeatureVector || bestMechanical.graphDetail?.featureVector || null,
@@ -26115,7 +26274,8 @@ async function findSimilarCards() {
             'functionalSimilarityScore', 'quantitySimilarityScore', '_mechanicalReferenceEffects',
             'roleProfile', '_strategicRoleFingerprint', 'roleScore', 'highlightIntentScore',
             'modalModeSimilarityScore', 'modalModeSimilarityDetail', 'fieldConfidence', 'parseConfidence',
-            'mechanicalConfidence', 'synergyScore', 'categoryScore'
+            'mechanicalConfidence', 'synergyScore', 'categoryScore',
+            'mechanicRankingTier', 'mechanicRankingTierLabel', 'mechanicRankingConfidence', 'mechanicRankingEvidence'
         ];
         const structuralScoreSnapshotByFingerprint = new Map();
         const structuralCandidateFingerprint = (card) => {
@@ -27130,6 +27290,8 @@ if (candidates.length > 0) {
         const rel = c.relevanceEvidenceScore || 0;
         const semanticHit = Number.isFinite(c._semanticRetrievalSimilarity) ? c._semanticRetrievalSimilarity : 0;
         if (hasStrongPrimaryEffectEvidenceForFloor(c)) return true;
+        if (getMechanicRankingTier(c) <= 1 && (mech >= 0.42 || Number(c.functionalSimilarityScore) >= 0.62) &&
+            (Number(c.effectCoverageScore) >= 0.38 || Number(c.primaryEffectMatchScore) >= 0.44)) return true;
         if (sourceRankingIntentForFloor.kind === 'strategic_role' && role >= 0.72) return true;
         if (sourceRankingIntentForFloor.kind === 'highlighted_effect' && highlight >= 0.68) return true;
         if (mech >= 0.76) return true;
@@ -27142,8 +27304,15 @@ if (candidates.length > 0) {
         return false;
     };
 
-    const passesAbsoluteFloor = c => (c[scoreKey] || 0) >= ABSOLUTE_RELEVANCE_FLOOR || (Number.isFinite(c._semanticRetrievalSimilarity) && c._semanticRetrievalSimilarity >= 0.70);
-    const passesRelativeFloor = c => (c[scoreKey] || 0) >= relativeFloor || (Number.isFinite(c._semanticRetrievalSimilarity) && c._semanticRetrievalSimilarity >= 0.64);
+    const hasStrongNonConflictingMechanicTier = c => getMechanicRankingTier(c) <= 1 &&
+        (Number(c.mechanicalScore) >= 0.46 || Number(c.functionalSimilarityScore) >= 0.64) &&
+        (Number(c.effectCoverageScore) >= 0.38 || Number(c.primaryEffectMatchScore) >= 0.44);
+    const passesAbsoluteFloor = c => (c[scoreKey] || 0) >= ABSOLUTE_RELEVANCE_FLOOR ||
+        (Number.isFinite(c._semanticRetrievalSimilarity) && c._semanticRetrievalSimilarity >= 0.70) ||
+        ((c[scoreKey] || 0) >= ABSOLUTE_RELEVANCE_FLOOR * 0.78 && hasStrongNonConflictingMechanicTier(c));
+    const passesRelativeFloor = c => (c[scoreKey] || 0) >= relativeFloor ||
+        (Number.isFinite(c._semanticRetrievalSimilarity) && c._semanticRetrievalSimilarity >= 0.64) ||
+        hasStrongNonConflictingMechanicTier(c);
 
     const strictQualified = await sortManaArrayResponsively(
         candidates.filter(c => passesAbsoluteFloor(c) && (passesRelativeFloor(c) || hasStrongDirectEvidence(c))),
@@ -27176,6 +27345,10 @@ if (candidates.length > 0) {
                     (Number(c.relevanceEvidenceScore) || 0) * 0.92,
                     (Number(c._semanticRetrievalSimilarity) || 0) * 0.78
                 );
+                if (validOrderCriteriaForOrdering(priorityValue) === 'overall') {
+                    const tierDifference = getMechanicRankingTier(a) - getMechanicRankingTier(b);
+                    if (tierDifference) return tierDifference;
+                }
                 return signal(b) - signal(a);
             }
         );
@@ -27186,7 +27359,9 @@ if (candidates.length > 0) {
         const CATASTROPHIC_EMPTY_RESCUE_CAP = 20;
         const rescueOrder = evidenceBearing.length > 0
             ? evidenceBearing
-            : await sortManaArrayResponsively(candidates, (a, b) => (b[scoreKey] || 0) - (a[scoreKey] || 0));
+            : await sortManaArrayResponsively(candidates, (a, b) => validOrderCriteriaForOrdering(priorityValue) === 'overall'
+                ? compareManaSearchRankingCards(a, b, 'overall')
+                : (b[scoreKey] || 0) - (a[scoreKey] || 0));
         if (requestId !== searchRequestId) return;
         qualified = rescueOrder.slice(0, Math.min(CATASTROPHIC_EMPTY_RESCUE_CAP, candidates.length));
 
@@ -27213,7 +27388,9 @@ if (candidates.length > 0) {
         candidate.constraintPreferenceScore = bonus;
         if (bonus > 0) candidate.similarityScore = Math.min(1, (Number(candidate.similarityScore) || 0) + bonus);
     }
-    qualified = await sortManaArrayResponsively(qualified, (a, b) => (b[scoreKey] || 0) - (a[scoreKey] || 0));
+    qualified = await sortManaArrayResponsively(qualified, (a, b) => validOrderCriteriaForOrdering(priorityValue) === 'overall'
+        ? compareManaSearchRankingCards(a, b, 'overall')
+        : (b[scoreKey] || 0) - (a[scoreKey] || 0));
     if (requestId !== searchRequestId) return;
 
     // Stage 6: what survived pruning. Matrix Sweep is an Order mode, so it never trims the
@@ -27843,30 +28020,56 @@ async function buildMatrixSweepOrderResponsively(cards, criteria = 'overall') {
     return output;
 }
 
-function applyResultOrdering(cards, criteria, featureFlags = null) {
+function applyResultOrderingWithinGroup(cards, ranking, features) {
     const input = Array.isArray(cards) ? cards.slice() : [];
-    const ranking = validOrderCriteriaForOrdering(criteria);
-    const features = featureFlags || activeOrderFeatureFlags;
     let output = input.sort((a, b) => getRankingScoreForCriteria(b, ranking) - getRankingScoreForCriteria(a, ranking));
-
-    // Attribute sorts (price/mana value) should remain strictly ordered; diversity/matrix are
-    // presentation modifiers for similarity rankings only.
     const attributeSort = ['price', 'manaValue', 'manaValueDesc'].includes(ranking);
     if (!attributeSort && features.diverse) output = buildDiverseOrder(output, ranking);
     if (!attributeSort && features.matrix) output = buildMatrixSweepOrder(output, ranking);
     return output;
 }
 
-
-async function applyResultOrderingResponsively(cards, criteria, featureFlags = null) {
+async function applyResultOrderingWithinGroupResponsively(cards, ranking, features) {
     const input = Array.isArray(cards) ? cards.slice() : [];
-    const ranking = validOrderCriteriaForOrdering(criteria);
-    const features = featureFlags || activeOrderFeatureFlags;
     let output = await sortManaArrayResponsively(input,
         (a, b) => getRankingScoreForCriteria(b, ranking) - getRankingScoreForCriteria(a, ranking));
     const attributeSort = ['price', 'manaValue', 'manaValueDesc'].includes(ranking);
     if (!attributeSort && features.diverse) output = await buildDiverseOrderResponsively(output, ranking);
     if (!attributeSort && features.matrix) output = await buildMatrixSweepOrderResponsively(output, ranking);
+    return output;
+}
+
+function shouldGroupByMechanicTier(cards, ranking) {
+    return ranking === 'overall' && Array.isArray(cards) && cards.some(card => Number.isInteger(card?.mechanicRankingTier));
+}
+
+function applyResultOrdering(cards, criteria, featureFlags = null) {
+    const input = Array.isArray(cards) ? cards.slice() : [];
+    const ranking = validOrderCriteriaForOrdering(criteria);
+    const features = featureFlags || activeOrderFeatureFlags;
+    if (!shouldGroupByMechanicTier(input, ranking)) return applyResultOrderingWithinGroup(input, ranking, features);
+
+    // Keep every tier contiguous. Diversity and Matrix Sweep can reorder within a tier but may not
+    // put a weaker mechanic class ahead of a better class.
+    const output = [];
+    for (let tier = 0; tier <= MANASEARCH_MECHANIC_RANKING_TIER.OTHER; tier++) {
+        const group = input.filter(card => getMechanicRankingTier(card) === tier);
+        if (group.length) output.push(...applyResultOrderingWithinGroup(group, ranking, features));
+    }
+    return output;
+}
+
+async function applyResultOrderingResponsively(cards, criteria, featureFlags = null) {
+    const input = Array.isArray(cards) ? cards.slice() : [];
+    const ranking = validOrderCriteriaForOrdering(criteria);
+    const features = featureFlags || activeOrderFeatureFlags;
+    if (!shouldGroupByMechanicTier(input, ranking)) return applyResultOrderingWithinGroupResponsively(input, ranking, features);
+
+    const output = [];
+    for (let tier = 0; tier <= MANASEARCH_MECHANIC_RANKING_TIER.OTHER; tier++) {
+        const group = input.filter(card => getMechanicRankingTier(card) === tier);
+        if (group.length) output.push(...await applyResultOrderingWithinGroupResponsively(group, ranking, features));
+    }
     return output;
 }
 
@@ -30476,6 +30679,7 @@ function runManaSearchRankingScoringRegressionSuite({ log = true } = {}) {
         });
         check('benchmark-score-snapshot-captures-primary-function-signals', traceSnapshot?.deterministicFunctionalAnchor === 0.712 && traceSnapshot?.primaryEffectRankingBoost === 0.026, JSON.stringify({ anchor: traceSnapshot?.deterministicFunctionalAnchor, boost: traceSnapshot?.primaryEffectRankingBoost }));
         check('benchmark-score-snapshot-retains-relationship-mismatch', traceSnapshot?.mechanicalBreakdown?.relationshipMismatch === 0.10, String(traceSnapshot?.mechanicalBreakdown?.relationshipMismatch));
+        check('benchmark-score-snapshot-includes-mechanic-ranking-tier', createBenchmarkScoreSnapshot({ mechanicRankingTier: 1, mechanicRankingTierLabel: MANASEARCH_MECHANIC_RANKING_TIER_LABELS[1] })?.mechanicRankingTier === 1, 'tier diagnostics should be available in benchmark traces');
         const traceScoreMap = new Map([['ranked card', { similarityScore: 0.91 }]]);
         mergeBenchmarkScoreSnapshots(traceScoreMap, new Map([
             ['ranked card', { similarityScore: 0.80 }],
@@ -30488,6 +30692,56 @@ function runManaSearchRankingScoringRegressionSuite({ log = true } = {}) {
         check('primary-effect-uplift-is-damped-by-partial-mismatch', partialMismatchBoost > 0 && partialMismatchBoost < exactCounterBoost, `clean=${exactCounterBoost.toFixed(3)} mismatch=${partialMismatchBoost.toFixed(3)}`);
         const calibratedExpectedMatch = blendCalibratedRankingEvidence(0.71, 0.90, 0.589, 0, strongAnchor);
         check('calibration-prioritizes-independent-primary-mechanics', calibratedExpectedMatch >= 0.76, `score=${calibratedExpectedMatch.toFixed(3)}`);
+
+        const tierNode = (raw, fn, action, extra = {}) => ({
+            index: 0, sequence: 0, raw, function: fn, action, outcome: '', family: fn,
+            mechanicKey: '', mechanicFamily: '', keywordAnchors: new Set(), restriction: new Set(),
+            costs: new Set(), grantedKeywords: new Set(), targetKind: 'target', targetObject: 'creature',
+            targetScope: '', recipientScope: '', sacrificeScope: '', from: '', to: '', scope: '',
+            quantity: null, quantityProfile: {}, duration: '', event: 'resolution', triggerType: '',
+            triggerWindow: '', triggerEvent: '', condition: '', conditionDetail: new Set(), effectMode: 'normal',
+            replacement: false, prevention: false, static: false, role: 'primary', isMode: false,
+            repeatabilityProfile: null, ...extra
+        });
+        const tierOf = (sourceNode, candidateNode, sourceEffects = [], candidateEffects = []) =>
+            classifyMechanicRankingTier({ nodes: [sourceNode] }, { nodes: [candidateNode] }, sourceEffects, candidateEffects).mechanicRankingTier;
+        const sameWordTier = tierOf(
+            tierNode('Destroy target creature.', 'creature_destroy', 'destroy'),
+            tierNode('Destroy all creatures.', 'creature_destroy', 'destroy', { targetKind: 'all', targetObject: 'creature' })
+        );
+        check('mechanic-tier-same-mechanic-same-wording-first', sameWordTier === MANASEARCH_MECHANIC_RANKING_TIER.SAME_MECHANIC_SAME_WORDING, `tier=${sameWordTier}`);
+        const differentWordTier = tierOf(
+            tierNode('Return target creature card from your graveyard to the battlefield.', 'zone_change', 'return', { from: 'graveyard', to: 'battlefield' }),
+            tierNode('Put target creature card from your graveyard onto the battlefield.', 'zone_change', 'put', { from: 'graveyard', to: 'battlefield' })
+        );
+        check('mechanic-tier-equivalent-different-wording-second', differentWordTier === MANASEARCH_MECHANIC_RANKING_TIER.SAME_MECHANIC_DIFFERENT_WORDING, `tier=${differentWordTier}`);
+        const sameWordConflictTier = tierOf(
+            tierNode('You gain 5 life.', 'life_gain', 'gain_life'),
+            tierNode('You lose 5 life.', 'life_loss', 'lose_life')
+        );
+        check('mechanic-tier-opposite-same-wording-third', sameWordConflictTier === MANASEARCH_MECHANIC_RANKING_TIER.CONTRADICTION_SAME_WORDING, `tier=${sameWordConflictTier}`);
+        const sourceDrawEffect = { raw: 'Whenever you cast an instant or sorcery spell, draw a card.', action: 'draw', canonical: { function: 'card_draw', params: { triggerProfile: { event: 'spell_cast' } } } };
+        const candidateDrawEffect = { raw: 'At the beginning of your upkeep, draw a card.', action: 'draw', canonical: { function: 'card_draw', params: { triggerProfile: { event: 'upkeep' } } } };
+        const differentWordConflictTier = tierOf(
+            tierNode(sourceDrawEffect.raw, 'card_draw', 'draw', { triggerEvent: 'spell_cast', triggerType: 'triggered' }),
+            tierNode(candidateDrawEffect.raw, 'card_draw', 'draw', { triggerEvent: 'upkeep', triggerType: 'triggered' }),
+            [sourceDrawEffect], [candidateDrawEffect]
+        );
+        check('mechanic-tier-conflict-different-wording-fourth', differentWordConflictTier === MANASEARCH_MECHANIC_RANKING_TIER.CONTRADICTION_DIFFERENT_WORDING, `tier=${differentWordConflictTier}`);
+        const unrelatedTier = tierOf(
+            tierNode('Destroy target creature.', 'creature_destroy', 'destroy'),
+            tierNode('Draw two cards.', 'card_draw', 'draw')
+        );
+        check('mechanic-tier-unrelated-effects-last', unrelatedTier === MANASEARCH_MECHANIC_RANKING_TIER.OTHER, `tier=${unrelatedTier}`);
+        const tierOrderFixture = [
+            { name: 'Other', mechanicRankingTier: 4, similarityScore: 0.99 },
+            { name: 'Conflict same wording', mechanicRankingTier: 2, similarityScore: 0.98 },
+            { name: 'Equivalent wording', mechanicRankingTier: 1, similarityScore: 0.10 },
+            { name: 'Exact wording', mechanicRankingTier: 0, similarityScore: 0.12 },
+            { name: 'Conflict different wording', mechanicRankingTier: 3, similarityScore: 0.97 }
+        ];
+        const tierOrderedNames = applyResultOrdering(tierOrderFixture, 'overall', { diverse: false, matrix: false }).map(card => card.name);
+        check('mechanic-tiers-override-score-between-groups', tierOrderedNames.join('|') === 'Exact wording|Equivalent wording|Conflict same wording|Conflict different wording|Other', tierOrderedNames.join('|'));
 
         const mysticText = 'Choose three. You may choose the same mode more than once.\n• Counter target spell unless its controller pays {3}.\n• Return target creature to its owner’s hand.\n• Draw a card.';
         const crypticText = 'Choose two —\n• Counter target spell.\n• Return target permanent to its owner’s hand.\n• Draw a card.\n• Tap all creatures your opponents control.';
