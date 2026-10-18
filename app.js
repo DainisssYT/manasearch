@@ -13542,6 +13542,7 @@ function runManaSearchPerformanceOptimizationRegressionSuite({ log = true } = {}
         const descriptorCacheSecondScore = scoreLocalCorpusCardForDescriptor(descriptorCacheFixture, descriptorCacheFixtureQuery);
         check('local-descriptor-score-cache-preserves-exact-score', descriptorCacheFirstScore === descriptorCacheSecondScore && descriptorCacheAfterFirst.computed === descriptorCacheStatsBefore.computed + 1 && localCorpusDescriptorScoreCacheStats.hits === descriptorCacheAfterFirst.hits + 1, `first=${descriptorCacheFirstScore}; second=${descriptorCacheSecondScore}`);
         check('large-structural-prescore-batches', /STRUCTURAL_PRESCORE_BATCH_SIZE = 256/.test(findSimilarCards.toString()), 'larger batches amortize repeated source profile setup while the scorer still yields cooperatively');
+        check('main-search-structural-cache-key-is-explicitly-mapped', (findSimilarCards.toString().match(/structuralScoreCacheKey:\s*structuralScoringCacheKey/g) || []).length === 2 && !/\bstructuralScoreCacheKey\s*[,}]/.test(findSimilarCards.toString()), 'both scoring passes must map the locally declared key to the scoreCardBatch option; never use an undeclared shorthand');
         check('corpus-output-feeds-scoring-queue', /ctx\.onRetrievedCandidate\(card, state\.request\)/.test(runLocalCorpusBatch.toString()), 'only capped local retrieval outputs are enqueued for one-time structural scoring');
         check('local-broker-filter-results-are-not-filtered-again', /_manaLocalFiltersValidatedSearchRequestId/.test(runLocalCorpusBatch.toString()) === false && /_manaLocalFiltersValidatedSearchRequestId/.test(findSimilarCards.toString()) && /broadFallbackFilters && hasActiveConstraintFilters/.test(runLocalCorpusBatch.toString()), 'local result validation is preserved while duplicate merge-time filtering is skipped');
         check('benchmark-preserves-immutable-embeddings-between-cases', /keepImmutableEmbeddings/.test(resetBenchmarkColdState.toString()) && /keepImmutableEmbeddings: true/.test(runBenchmarkPassWithLocalRecovery.toString()), 'only result/session candidate state is reset per benchmark test');
@@ -26175,7 +26176,7 @@ async function findSimilarCards() {
                         sniperIds: new Set(),
                         activeFilters: filters,
                         structuralOnly: true,
-                        structuralScoreCacheKey
+                        structuralScoreCacheKey: structuralScoringCacheKey
                     });
                     saveStructuralScoreSnapshots(batch);
                     structuralPreScoreCandidateCount += batch.filter(card => card?._manaStructuralScoreKey === structuralScoringCacheKey).length;
@@ -27032,7 +27033,7 @@ if (candidates.length > 0) {
         topNNames,
         sniperIds: sniperCardIds,
         activeFilters: filters,
-        structuralScoreCacheKey,
+        structuralScoreCacheKey: structuralScoringCacheKey,
         reuseStructuralResults: true
     });
     finalStructuralReuseCount = Math.max(0, Number(embeddingDiagnostics?.structuralReuseCount) || 0);
