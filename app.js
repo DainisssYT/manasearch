@@ -1,6 +1,6 @@
-/* ManaSearch build 20261018-111 */
+/* ManaSearch build 20261019-114 */
 // ManaSearch deployment build marker. Bump this whenever app.js changes so cached-module issues are easy to diagnose.
-const MANASEARCH_APP_BUILD = '20261018-113';
+const MANASEARCH_APP_BUILD = '20261019-114';
 console.info(`[ManaSearch] app.js build ${MANASEARCH_APP_BUILD}`);
 
 // State Management
@@ -1130,6 +1130,7 @@ const BENCHMARK_SUITE = [
             { text: "Counter target spell", mode: "exact", intent: "counter an opposing spell" }
         ],
         expected: ["Deprive", "Logic Knot", "Memory Lapse"],
+        relevancePredicate: 'counterspell',
         categories: ["single-effect", "conditional-effects", "same-function-different-outcome", "highlight-exact"]
     },
     {
@@ -1154,6 +1155,8 @@ const BENCHMARK_SUITE = [
             { text: "to any target", mode: "exact", intent: "retain a chosen-target damage effect" }
         ],
         expected: ["Shard Volley", "Galvanic Blast", "Play with Fire", "Fiery Impulse", "Wild Slash"],
+        constraintConflicts: ["Fiery Impulse"],
+        relevancePredicate: 'burn-any-target',
         categories: ["single-effect", "conditional-effects", "quantitative", "highlight-mixed-modes"]
     },
     {
@@ -1243,6 +1246,7 @@ const BENCHMARK_SUITE = [
             { text: "{C}{C}", mode: "variable", intent: "allow the amount of mana to vary" }
         ],
         expected: ["Mana Vault"],
+        relevancePredicate: 'tap-for-mana-artifact',
         categories: ["same-archetypal-role", "fast-mana", "differently-worded", "highlight-mixed-modes"]
     },
     {
@@ -1321,6 +1325,7 @@ const BENCHMARK_SUITE = [
             { text: "Counter target spell.", mode: "exact", intent: "require the complete unconditional counter sentence" }
         ],
         expected: ["Cancel", "Dissipate", "Dissolve", "Dismiss", "Arcane Denial"],
+        relevancePredicate: 'unconditional-counter-sentence',
         categories: ["highlight-exact", "sentence-boundary", "conditional-effects", "single-effect"]
     }
 ];
@@ -1522,6 +1527,7 @@ async function downloadBenchmarkWorkbook(report) {
     // --- Sheet: Overview (a proper dashboard, not just a metrics dump) ---
     const overviewRows = [
         { Metric: 'Run ID', Value: report.runId || '' },
+        { Metric: 'ManaSearch app build', Value: MANASEARCH_APP_BUILD },
         { Metric: 'Benchmark started', Value: (report.startedAt || report.generatedAt || new Date()).toLocaleString() },
         { Metric: 'Benchmark finished', Value: (report.finishedAt || report.generatedAt || new Date()).toLocaleString() },
         { Metric: 'Total runtime', Value: durStr(report.durationMs) },
@@ -1541,6 +1547,7 @@ async function downloadBenchmarkWorkbook(report) {
         { Metric: 'Mean Recall@20', Value: pct(report.meanRecall20) },
         { Metric: 'Mean Adjusted Recall@20', Value: pct(report.meanAdjustedRecall20) },
         { Metric: 'Mean Semantic Recall@20', Value: report.meanSemanticRecall20 !== null ? pct(report.meanSemanticRecall20) : 'n/a (no preferred-constraint tests)' },
+        { Metric: 'Semantic Recall tests measured (denominator)', Value: report.semanticRecallTestCount ?? 0 },
         { Metric: 'Mean Retrieval Recall (ceiling)', Value: pct(report.meanRetrievalRecall) },
         { Metric: 'Mean MRR', Value: num(report.meanMRR) },
         { Metric: 'Mean NDCG@10', Value: num(report.meanNDCG10) },
@@ -1615,6 +1622,10 @@ async function downloadBenchmarkWorkbook(report) {
             'Scoring Recall': num(s.stageRecalls.scoring, 3),
             'Pruning Recall': num(s.stageRecalls.pruning, 3),
             'Avg Expected Rank': num(s.avgTestRank, 2),
+            'Predicate': r.relevancePredicate || '',
+            'Predicate Relevant Set Size': Array.isArray(r.predicateExpected) ? r.predicateExpected.length : '',
+            'Predicate Precision@10': s.predicatePrecision10 === null || s.predicatePrecision10 === undefined ? '' : num(s.predicatePrecision10, 3),
+            'Predicate NDCG@10': s.predicateNdcg10 === null || s.predicateNdcg10 === undefined ? '' : num(s.predicateNdcg10, 3),
             'Results Returned': (s.rankedResults || []).length
         };
     });
@@ -1728,9 +1739,15 @@ async function downloadBenchmarkWorkbook(report) {
                 'Ranking Intent Confidence': num(scores?.rankingIntentConfidence, 3),
                 'Acquisition Cadence Factor': num(scores?.acquisitionCadenceRankFactor, 3),
                 'Overall Score': num(scores?.similarityScore, 3),
+                'Unclamped Score': num(scores?.unclampedSimilarityScore, 4),
+                'Mechanic Ranking Tier': scores?.mechanicRankingTier ?? '',
+                'Mechanic Ranking Tier Label': scores?.mechanicRankingTierLabel || '',
+                'Quantitative Conflict': scores?.quantitativeConflict ? JSON.stringify(scores.quantitativeConflict) : '',
+                'Quantitative Conflict Penalty': num(scores?.quantitativeConflictPenalty, 4),
+                'Proximity Score': num(scores?.proximityScore, 3),
                 'Lost At Stage': diagnoseFailureStage(d, expCard, rankIndex),
                 'Filter Mismatch': (d?.filterFailureReasons?.get(n) || [])
-                    .map(fr => `${fr.field}: expected ${fr.expected}, actual ${fr.actual}`).join('; '),
+                    .map(fr => typeof fr === 'string' ? fr : `${fr.field || fr.type || 'filter'}: expected ${fr.expected ?? ''}, actual ${fr.actual ?? ''}`).join('; '),
                 'Retrieved Via': streams
             });
         });
@@ -1738,6 +1755,30 @@ async function downloadBenchmarkWorkbook(report) {
     report.structuredResults.forEach(r => {
         buildTraceRows(r.strict, r, 'Strict');
         buildTraceRows(r.semantic, r, 'Semantic');
+    });
+
+    // --- Sheet: Top 20 Results (actual heads of each full benchmark ranking) ---
+    const top20Rows = [];
+    report.structuredResults.forEach(r => {
+        for (const passKey of ['strict', 'semantic']) {
+            const pass = r[passKey];
+            if (!pass) continue;
+            (pass.rankedResults || []).slice(0, 20).forEach((cardName, index) => {
+                const scores = pass.scoreByName?.get(String(cardName).toLowerCase()) || {};
+                top20Rows.push({
+                    'Test ID': r.id, 'Test': r.name, 'Source Card': r.source, 'Pass': passKey,
+                    'Rank': index + 1, 'Card': cardName,
+                    'Displayed Score': num(scores.similarityScore, 4),
+                    'Unclamped Score': num(scores.unclampedSimilarityScore, 4),
+                    'Mechanic Ranking Tier': scores.mechanicRankingTier ?? '',
+                    'Mechanic Ranking Tier Label': scores.mechanicRankingTierLabel || '',
+                    'Quantitative Conflict': scores.quantitativeConflict ? JSON.stringify(scores.quantitativeConflict) : '',
+                    'Quantitative Conflict Penalty': num(scores.quantitativeConflictPenalty, 4),
+                    'Proximity Score': num(scores.proximityScore, 3),
+                    'Ranking Intent': scores.rankingIntent || ''
+                });
+            });
+        }
     });
 
     // --- Sheet: Pipeline Diagnostics ---
@@ -1804,7 +1845,7 @@ async function downloadBenchmarkWorkbook(report) {
     // bold) are a SheetJS Pro feature and are silently ignored by the community build, so they're
     // set as a no-cost upgrade for style-capable builds but nothing depends on them. That's why
     // MAX_WIDTH is generous rather than relying on text wrapping to reveal long values.
-    const WRAP_COLUMNS = new Set(['Query', 'Filter Mismatch', 'Lost At Stage', 'Error', 'Card Ranks', 'Categories', 'Retrieved Via', 'Search A Query', 'Search B Query', 'Search Intent Text', 'Functional Queries', 'Source Canonical Functions', 'Search Methods']);
+    const WRAP_COLUMNS = new Set(['Query', 'Filter Mismatch', 'Lost At Stage', 'Error', 'Card Ranks', 'Categories', 'Retrieved Via', 'Search A Query', 'Search B Query', 'Search Intent Text', 'Functional Queries', 'Source Canonical Functions', 'Search Methods', 'Quantitative Conflict', 'Problem', 'Action', 'Mechanic Ranking Tier Label']);
     const MIN_WIDTH = 12;
     const MAX_WIDTH = 40;
     // Long free-text columns get a much higher cap. Because wrapText is unavailable in the
@@ -1869,6 +1910,8 @@ async function downloadBenchmarkWorkbook(report) {
     addSheet(timingRows, 'Test Timing');
     addSheet(report.categoryBreakdown, 'Category Breakdown');
     addSheet(traceRows, 'Expected Card Trace');
+    addSheet(top20Rows, 'Top 20 Results');
+    addSheet((report.labelLintRows && report.labelLintRows.length) ? report.labelLintRows : [{ Status: 'PASS', Detail: 'No impossible expected-card labels detected by preflight.' }], 'Benchmark Label Lint');
     addSheet(retrievalCostRows, 'Retrieval Cost');
     addSheet(pipelineRows, 'Pipeline Diagnostics');
     addSheet(coverageRows, 'Stream Coverage');
@@ -1984,6 +2027,10 @@ function createBenchmarkScoreSnapshot(card) {
         mechanicRankingTierLabel: card.mechanicRankingTierLabel ?? null,
         mechanicRankingConfidence: card.mechanicRankingConfidence ?? null,
         mechanicRankingEvidence: card.mechanicRankingEvidence ?? null,
+        quantitativeConflict: card.quantitativeConflict ?? card.mechanicRankingEvidence?.quantitativeConflict ?? null,
+        quantitativeConflictPenalty: card.quantitativeConflictPenalty ?? null,
+        unclampedSimilarityScore: card.unclampedSimilarityScore ?? null,
+        proximityScore: card.proximityScore ?? null,
         similarityScore: card.similarityScore ?? null
     };
 }
@@ -2073,6 +2120,10 @@ async function runBenchmarkPass(searchFn, test) {
                 mechanicRankingTierLabel: card.mechanicRankingTierLabel ?? null,
                 mechanicRankingConfidence: card.mechanicRankingConfidence ?? null,
                 mechanicRankingEvidence: card.mechanicRankingEvidence ?? null,
+                quantitativeConflict: card.quantitativeConflict ?? card.mechanicRankingEvidence?.quantitativeConflict ?? null,
+                quantitativeConflictPenalty: card.quantitativeConflictPenalty ?? null,
+                unclampedSimilarityScore: card.unclampedSimilarityScore ?? null,
+                proximityScore: card.proximityScore ?? null,
                 similarityScore: card.similarityScore ?? null
             });
         });
@@ -2112,6 +2163,10 @@ async function runBenchmarkPass(searchFn, test) {
     const ndcg20 = calculateNDCGAtK(rankedResults, test.expected, 20);
     const precision10 = calculatePrecisionAtK(rankedResults, test.expected, 10);
     const stageRecalls = calculateStageRecalls(diagnostics, test.expected);
+    const predicateExpected = Array.isArray(test.predicateExpected) ? test.predicateExpected : [];
+    const hasPredicateEvaluation = Boolean(test.relevancePredicate);
+    const predicatePrecision10 = hasPredicateEvaluation ? calculatePrecisionAtK(rankedResults, predicateExpected, 10) : null;
+    const predicateNdcg10 = hasPredicateEvaluation ? calculateNDCGAtK(rankedResults, predicateExpected, 10) : null;
 
     const cardRanks = getExpectedCardRanks(rankedResults, test.expected, 100);
     const rankValues = Object.values(cardRanks);
@@ -2120,7 +2175,10 @@ async function runBenchmarkPass(searchFn, test) {
     return {
         rankedResults, diagnostics, scoreByName, testStatus, errorMessage, conflictSet,
         recall5, recall10, recall20, adjustedRecall5, adjustedRecall10, adjustedRecall20,
-        mrr, ndcg10, ndcg20, precision10, stageRecalls, cardRanks, avgTestRank
+        mrr, ndcg10, ndcg20, precision10, stageRecalls, cardRanks, avgTestRank,
+        predicateExpectedCount: hasPredicateEvaluation ? predicateExpected.length : null,
+        predicatePrecision10,
+        predicateNdcg10
     };
 }
 
@@ -2554,6 +2612,98 @@ function withBenchmarkTimeout(promise, timeoutMs, label = 'operation') {
     });
 }
 
+function buildBenchmarkFiltersForLint(test) {
+    const c = test?.constraints || {};
+    return {
+        types: c.type ? normalizeConstraintList(c.type) : [],
+        supertypes: [], subtypes: [], keywords: [],
+        type: c.type || '', format: c.format || '', rarity: c.rarity || '',
+        identity: c.identity || '', colors: c.colors || '', cmc: c.cmc || '',
+        power: c.power || '', toughness: c.toughness || '', set: c.set || '',
+        extraOracle: c.extraOracle || '', constraintModes: {}
+    };
+}
+
+function getBenchmarkOracleText(card) {
+    return String(card?.oracle_text || (Array.isArray(card?.card_faces)
+        ? card.card_faces.map(face => face?.oracle_text || '').join(' ')
+        : '') || '');
+}
+
+function matchesBenchmarkRelevancePredicate(card, predicate) {
+    const oracle = getBenchmarkOracleText(card);
+    const typeLine = String(card?.type_line || '').toLowerCase();
+    switch (predicate) {
+        case 'counterspell':
+            return /\bcounter target spell\b/i.test(oracle) && /\binstant\b/.test(typeLine);
+        case 'burn-any-target':
+            return /\bdeals?\s+(?:\d+|x)\s+damage\s+to\s+any target\b/i.test(oracle) && /\binstant\b/.test(typeLine);
+        case 'tap-for-mana-artifact':
+            return /\bartifact\b/.test(typeLine) && /\{t\}\s*:\s*add\b/i.test(oracle);
+        case 'unconditional-counter-sentence':
+            return /(?:^|\s)counter target spell\.(?=\s|$)/i.test(oracle.replace(/\s+/g, ' ').trim());
+        default:
+            return false;
+    }
+}
+
+function buildBenchmarkPredicateExpected(test, corpusCards) {
+    if (!test?.relevancePredicate || !Array.isArray(corpusCards)) return [];
+    const sourceKey = normalizeCardNameForIdentity(test.source || '');
+    const filters = buildBenchmarkFiltersForLint(test);
+    const names = new Map();
+    for (const card of corpusCards) {
+        const key = normalizeCardNameForIdentity(card?.name);
+        if (!key || key === sourceKey || !matchesBenchmarkRelevancePredicate(card, test.relevancePredicate)) continue;
+        if (!matchesActiveFilters(card, filters, null)) continue;
+        if (!names.has(key)) names.set(key, String(card.name));
+    }
+    return [...names.values()];
+}
+
+function lintBenchmarkExpectedLabels(tests, corpusCards) {
+    const rows = [];
+    if (!Array.isArray(corpusCards) || !corpusCards.length) return rows;
+    const byName = new Map();
+    for (const card of corpusCards) {
+        const key = normalizeCardNameForIdentity(card?.name);
+        if (!key) continue;
+        if (!byName.has(key)) byName.set(key, []);
+        byName.get(key).push(card);
+    }
+    for (const test of (tests || [])) {
+        const sourceKey = normalizeCardNameForIdentity(test.source || '');
+        const sourceCard = byName.get(sourceKey)?.[0] || findBenchmarkSourceCard(test.source);
+        const filters = buildBenchmarkFiltersForLint(test);
+        const highlights = sourceCard ? buildBenchmarkHighlightState(test, sourceCard) : [];
+        const intentionalConflicts = new Set((test.constraintConflicts || []).map(normalizeCardNameForIdentity));
+        for (const expectedName of (test.expected || [])) {
+            const key = normalizeCardNameForIdentity(expectedName);
+            const candidates = byName.get(key) || [];
+            const failures = [];
+            if (!candidates.length) {
+                failures.push('expected card not found in local cards.bin corpus');
+            } else {
+                const filterMatches = candidates.filter(card => matchesActiveFilters(card, filters, null));
+                if (!filterMatches.length) failures.push('active benchmark filters reject this expected card');
+                else if (highlights.length && !filterMatches.some(card => matchesExactHighlightConstraints(card, highlights))) {
+                    const explanations = filterMatches.flatMap(card => explainExactHighlightFailures(card, highlights));
+                    failures.push(`exact-highlight constraint rejects this expected card${explanations.length ? `: ${[...new Set(explanations)].join(' | ')}` : ''}`);
+                }
+            }
+            if (failures.length) rows.push({
+                'Test ID': test.id, 'Source Card': test.source, 'Expected Card': expectedName,
+                'Classification': intentionalConflicts.has(key) ? 'Declared intentional conflict' : 'Potentially impossible label',
+                'Problem': failures.join('; '),
+                'Action': intentionalConflicts.has(key)
+                    ? 'Confirm the declared conflict is intentional; do not count it as a strict-filter ranker failure.'
+                    : 'Review the expected label and benchmark hard filters/highlights.'
+            });
+        }
+    }
+    return rows;
+}
+
 function validateBenchmarkSuiteConfiguration() {
     const errors = [];
     const warnings = [];
@@ -2770,6 +2920,17 @@ async function runBenchmarkSuite(searchFn) {
     }
     console.info('Benchmark retrieval mode: local-only cards.bin + precomputed semantic-index.bin; no card API requests.');
 
+    const benchmarkLabelLintRows = lintBenchmarkExpectedLabels(BENCHMARK_SUITE, staticCardCorpusMemory.cards);
+    if (benchmarkLabelLintRows.length) {
+        console.warn(`[ManaSearch] Benchmark label lint found ${benchmarkLabelLintRows.length} likely impossible expectation(s).`, benchmarkLabelLintRows);
+        console.table(benchmarkLabelLintRows);
+    } else {
+        console.info('[ManaSearch] Benchmark label lint: no impossible expected-card labels found.');
+    }
+    const benchmarkPredicateExpectedById = new Map(BENCHMARK_SUITE.map(test => [
+        test.id, buildBenchmarkPredicateExpected(test, staticCardCorpusMemory.cards)
+    ]));
+
     // Load the NLP model opportunistically, but never let model startup block the whole suite.
     try {
         updateBenchmarkDashboard({
@@ -2863,9 +3024,11 @@ async function runBenchmarkSuite(searchFn) {
         await backgroundAwareDelay(0);
 
         console.log(`  Benchmark search attempt: Test #${test.id} — running the local in-browser search pipeline.`);
+        const predicateExpected = benchmarkPredicateExpectedById.get(test.id) || [];
+        const evaluationTest = test.relevancePredicate ? { ...test, predicateExpected } : test;
         const strictPass = await runBenchmarkPassWithLocalRecovery(
             searchFn,
-            test,
+            evaluationTest,
             `Test #${test.id} strict pass`,
             3
         );
@@ -2891,7 +3054,7 @@ async function runBenchmarkSuite(searchFn) {
             preferredFields.forEach(f => { delete relaxedConstraints[f]; });
             semanticPass = await runBenchmarkPassWithLocalRecovery(
                 searchFn,
-                { ...test, constraints: relaxedConstraints },
+                { ...evaluationTest, constraints: relaxedConstraints },
                 `Test #${test.id} semantic pass`,
                 3
             );
@@ -3073,6 +3236,9 @@ async function runBenchmarkSuite(searchFn) {
                 text: h.text, mode: h.mode, intent: h.intent || ''
             })),
             expected: test.expected, constraintConflicts: test.constraintConflicts || [],
+            relevancePredicate: test.relevancePredicate || '',
+            predicateExpected: predicateExpected,
+            labelLint: benchmarkLabelLintRows.filter(row => Number(row['Test ID']) === Number(test.id)),
             preferredConstraints: preferredFields,
             durationMs: testDurationMs,
             strict: strictPass,
@@ -3095,6 +3261,10 @@ async function runBenchmarkSuite(searchFn) {
             "MRR": strictPass.mrr.toFixed(3),
             "NDCG@20": strictPass.ndcg20.toFixed(3),
             "P@10": strictPass.precision10.toFixed(3),
+            "Predicate": test.relevancePredicate || '-',
+            "Predicate N": strictPass.predicateExpectedCount ?? '-',
+            "Predicate P@10": strictPass.predicatePrecision10 == null ? '-' : strictPass.predicatePrecision10.toFixed(3),
+            "Predicate NDCG@10": strictPass.predicateNdcg10 == null ? '-' : strictPass.predicateNdcg10.toFixed(3),
             "Retrieval Recall": `${(strictPass.stageRecalls.retrieval * 100).toFixed(0)}%`,
             "Avg Exp Rank": strictPass.avgTestRank.toFixed(1),
             "Card Ranks": JSON.stringify(strictPass.cardRanks)
@@ -3232,6 +3402,7 @@ async function runBenchmarkSuite(searchFn) {
         meanRecall20: totalRecall20 / testCount,
         meanAdjustedRecall20: totalAdjustedRecall20 / testCount,
         meanSemanticRecall20: semanticTestCount > 0 ? totalSemanticRecall20 / semanticTestCount : null,
+        semanticRecallTestCount: semanticTestCount,
         meanRetrievalRecall: totalRetrievalRecall / testCount,
         meanMRR: totalMRR / testCount,
         meanNDCG10: totalNDCG10 / testCount,
@@ -3288,6 +3459,7 @@ async function runBenchmarkSuite(searchFn) {
         ...summaryMetrics,
         categoryBreakdown,
         structuredResults,
+        labelLintRows: benchmarkLabelLintRows,
         retrievalCostRows,
         previousRun,
         details: suiteResults,
@@ -6223,7 +6395,7 @@ function parseTokenEffect(clause) {
  */
 function parseAnthemEffect(clause) {
     const text = String(clause || '').toLowerCase().replace(/[’]/g, "'");
-    const anthemMatch = text.match(/(other\s+)?([a-z\s\-]*?)\s*creatures?\s*(you control)?\s*get\s*([\+\-][\dx\/*]+\/[\+\-][\dx\/*]+)/i);
+    const anthemMatch = text.match(/(other\s+)?([a-z\s\-]*?)\s*(?:creatures?\s*)?(you control)?\s*get\s*([\+\-][\dx\/*]+\/[\+\-][\dx\/*]+)/i);
     const keywordVocabulary = '(?:flying|trample|lifelink|deathtouch|vigilance|islandwalk|haste|reach|menace|ward|hexproof|indestructible|first strike|double strike|protection from [a-z]+)';
     // Keyword grants may follow a stat buff in the SAME clause: "creatures you control get
     // +X/+X and gain flying". Search within that subject's local clause rather than requiring
@@ -6245,7 +6417,11 @@ function parseAnthemEffect(clause) {
 
     if (anthemMatch) {
         isOther = Boolean(anthemMatch[1]);
-        rawSubtype = anthemMatch[2] ? anthemMatch[2].trim() : "all";
+        rawSubtype = anthemMatch[2] ? anthemMatch[2].trim()
+            .replace(/\bcreatures?\b/gi, ' ')
+            .replace(/\byou control\b/gi, ' ')
+            .replace(/\bthat are\b/gi, ' ')
+            .replace(/\s+/g, ' ').trim() || "all" : "all";
         controller = anthemMatch[3] ? "you_control" : "all";
         pt = anthemMatch[4];
     }
@@ -8671,6 +8847,14 @@ function inferRankingIntent(sourceCard, parsedSourceEffects = [], targetText = '
             kind: 'hybrid_effect', confidence: exactHighlights.length ? 0.94 : 0.88,
             role: null, hasExactHighlight: exactHighlights.length > 0,
             hasFlexibleHighlight: flexibleHighlights.length > 0, hasModalModes: true
+        };
+    }
+    const allHighlightsFlexible = flexibleHighlights.length > 0 && exactHighlights.length === 0;
+    if (allHighlightsFlexible && roleIsStrong && Number(topRole?.score) >= 0.82) {
+        return {
+            kind: 'strategic_role', confidence: Math.min(1, 0.76 + Number(topRole.score) * 0.24),
+            role: topRole.role, hasExactHighlight: false, hasFlexibleHighlight: true,
+            roleDrivenFlexibleHighlights: true
         };
     }
     if ((highlights || []).length) {
@@ -12466,6 +12650,25 @@ function mechanicalNodeContradiction(a, b) {
     const tokenTypeA = normalizeMechanicToken(a?.tokenType || '');
     const tokenTypeB = normalizeMechanicToken(b?.tokenType || '');
     if (a?.function === 'token_creation' && b?.function === 'token_creation' && tokenTypeA && tokenTypeB && tokenTypeA !== tokenTypeB) penalty += 0.25;
+
+    // A difference in numeric magnitude is only a soft ranking penalty, but an incompatible
+    // target class is a genuine mechanical conflict (e.g. destroy a creature vs destroy an artifact).
+    // Broad targets such as "permanent" or "card" overlap specific classes and are not treated as
+    // mutually exclusive. Token aliases and compound targets are handled as class sets.
+    const readTargetClasses = value => {
+        const text = normalizeMechanicToken(value || '');
+        const classes = ['creature', 'artifact', 'enchantment', 'land', 'planeswalker', 'battle', 'instant', 'sorcery', 'spell', 'player', 'opponent', 'permanent', 'card'];
+        const tokens = new Set(text.split(/[^a-z0-9]+/).filter(Boolean));
+        return classes.filter(name => tokens.has(name));
+    };
+    const targetClassesA = readTargetClasses(a?.targetObject || a?.object || '');
+    const targetClassesB = readTargetClasses(b?.targetObject || b?.object || '');
+    const broadTargetClasses = new Set(['permanent', 'card', 'spell']);
+    if (targetClassesA.length && targetClassesB.length &&
+        !targetClassesA.some(name => targetClassesB.includes(name)) &&
+        !targetClassesA.some(name => broadTargetClasses.has(name)) &&
+        !targetClassesB.some(name => broadTargetClasses.has(name))) penalty += 0.22;
+
     const sacrificeScopeA = normalizeMechanicToken(a?.sacrificeScope || '');
     const sacrificeScopeB = normalizeMechanicToken(b?.sacrificeScope || '');
     if (sacrificeScopeA && sacrificeScopeB && sacrificeScopeA !== sacrificeScopeB) penalty += 0.30;
@@ -12484,7 +12687,7 @@ function mechanicalNodeContradiction(a, b) {
         (a?.targetScope === 'opponent_control' && b?.targetScope === 'you_control')) penalty += 0.26;
 
     const massA = ['all','each'].includes(a?.targetKind), massB = ['all','each'].includes(b?.targetKind);
-    if (massA !== massB) penalty += 0.10;
+    if (massA !== massB) penalty += 0.18; // target-vs-mass scope is a tier conflict, not a numeric delta
 
     const destinationConflict = a?.to && b?.to && a.to !== b.to &&
         ['battlefield','hand','graveyard','library','exile'].includes(a.to) &&
@@ -18190,8 +18393,8 @@ function compareMechanicQuantityValues(a, b, field) {
     if (a === null || b === null || a === b) return { conflict: false, severity: 0, field, sourceValue: a, candidateValue: b };
     const similarity = mechanicalNumericSimilarity(a, b);
     const severity = Math.max(0, Math.min(1, 1 - similarity));
-    // Avoid calling small rounding/drift differences a contradiction; a material fixed
-    // quantity difference (e.g. 1 vs 2 mana or 2 vs 3 damage) is a genuine ranking conflict.
+    // Keep quantitative distance as diagnostic evidence only. The ranker applies a small
+    // relative-gap penalty; numeric deltas are not semantic contradictions by themselves.
     return { conflict: severity >= 0.16, severity, field, sourceValue: a, candidateValue: b };
 }
 function getQuantitativeMechanicConflict(sourceNode, candidateNode, sourceEffect = null, candidateEffect = null) {
@@ -18218,12 +18421,22 @@ function getQuantitativeMechanicConflict(sourceNode, candidateNode, sourceEffect
     return compareMechanicQuantityValues(sourceQuantity, candidateQuantity, 'quantity');
 }
 
+function calculateQuantitativeMechanicSoftPenalty(conflictEvidence) {
+    const source = readFiniteMechanicQuantity(conflictEvidence?.sourceValue);
+    const candidate = readFiniteMechanicQuantity(conflictEvidence?.candidateValue);
+    if (source === null || candidate === null || source === candidate) return 0;
+    // Ignore most +/-1 differences at low values, then scale the penalty with relative distance.
+    // This retains Mana Vault and 2-damage burn spells as near-matches without claiming equality.
+    const relativeGap = Math.abs(source - candidate) / Math.max(2, Math.abs(source), Math.abs(candidate));
+    return Math.max(0, Math.min(0.055, (relativeGap - 0.25) * 0.08));
+}
+
 /**
  * Classify one candidate against the source using already-built effect graph nodes. Reuses the
  * same canonical-function, opposition, and relationship-conflict logic as the mechanical scorer;
  * this is deliberately deterministic and does not require an embedding or network request.
- * V113 also treats material fixed-quantity differences as conflicts and skips obviously unrelated
- * node pairs before invoking the more expensive pairwise scorer.
+ * Fixed-quantity differences are retained as evidence for a small score penalty, while tier
+ * contradictions are reserved for polarity, target class, zone, scope, or relationship conflicts.
  */
 function classifyMechanicRankingTier(sourceGraph, candidateGraph, sourceEffects = [], candidateEffects = []) {
     const sourceNodes = Array.isArray(sourceGraph?.nodes) ? sourceGraph.nodes : [];
@@ -18294,7 +18507,7 @@ function classifyMechanicRankingTier(sourceGraph, candidateGraph, sourceEffects 
                 (opposite && wordingSimilarity >= 0.50) ||
                 ((!actionA || !actionB) && wordingSimilarity >= 0.88);
             const isContradiction = opposite || nodeContradiction >= 0.14 ||
-                Number(comparison?.contradiction) >= 0.14 || relationshipMismatch >= 0.46 || quantitativeConflict.conflict;
+                Number(comparison?.contradiction) >= 0.14 || relationshipMismatch >= 0.46;
             const tier = isContradiction
                 ? (sameWording
                     ? MANASEARCH_MECHANIC_RANKING_TIER.CONTRADICTION_SAME_WORDING
@@ -18311,8 +18524,8 @@ function classifyMechanicRankingTier(sourceGraph, candidateGraph, sourceEffects 
                 sourcePriority,
                 matchStrength,
                 wordingSimilarity,
-                contradiction: Math.max(nodeContradiction, Number(comparison?.contradiction) || 0, relationshipMismatch, quantitativeConflict.severity || 0, opposite ? 0.30 : 0),
-                quantitativeConflict: quantitativeConflict.field && quantitativeConflict.conflict ? {
+                contradiction: Math.max(nodeContradiction, Number(comparison?.contradiction) || 0, relationshipMismatch, opposite ? 0.30 : 0),
+                quantitativeConflict: quantitativeConflict.field && quantitativeConflict.sourceValue !== quantitativeConflict.candidateValue ? {
                     field: quantitativeConflict.field,
                     sourceValue: quantitativeConflict.sourceValue,
                     candidateValue: quantitativeConflict.candidateValue,
@@ -18365,11 +18578,15 @@ function getMechanicRankingTier(card) {
 
 function compareManaSearchRankingCards(a, b, criteria = 'overall') {
     const ranking = validOrderCriteriaForOrdering(criteria);
-    if (ranking === 'overall') {
-        const tierDifference = getMechanicRankingTier(a) - getMechanicRankingTier(b);
-        if (tierDifference) return tierDifference;
+    const scoreA = getRankingScoreForCriteria(a, ranking);
+    const scoreB = getRankingScoreForCriteria(b, ranking);
+    const scoreDifference = scoreB - scoreA;
+    if (ranking === 'overall' && Math.abs(scoreDifference) <= 0.02) {
+        const proximityA = Number(a?.proximityScore) || 0;
+        const proximityB = Number(b?.proximityScore) || 0;
+        if (Math.abs(proximityB - proximityA) > 0.005) return proximityB - proximityA;
     }
-    return getRankingScoreForCriteria(b, ranking) - getRankingScoreForCriteria(a, ranking);
+    return scoreDifference;
 }
 
 function calculateEvidenceAgreement(card, rankingIntent = { kind: 'effect_match' }) {
@@ -23575,6 +23792,9 @@ async function scoreCardBatch({
             parsedSourceCard,
             parsedCandidateCard
         ));
+        card.quantitativeConflict = card.mechanicRankingEvidence?.quantitativeConflict || null;
+        card.quantitativeConflictPenalty = calculateQuantitativeMechanicSoftPenalty(card.quantitativeConflict);
+        card.proximityScore = calculateCardProximityScore(sourceCard, card);
         card.mechanicalEvidence = {
             universal: bestMechanical.mechanicalDetail?.universal || null,
             graph: bestMechanical.mechanicalDetail?.graphFeatureVector || bestMechanical.graphDetail?.featureVector || null,
@@ -24210,7 +24430,7 @@ async function scoreCardBatch({
         });
         card.primaryEffectRankingBoost = primaryEffectRankingBoost;
         if (card.rankingEvidence) card.rankingEvidence.primaryEffectRankingBoost = primaryEffectRankingBoost;
-        const preCadenceSimilarityScore = Math.max(0, Math.min(1, calibratedBlendScore + primaryEffectRankingBoost));
+        const preCadenceSimilarityScore = Math.max(0, calibratedBlendScore + primaryEffectRankingBoost);
         card.preCadenceSimilarityScore = preCadenceSimilarityScore;
         const acquisitionCadenceMismatch = calculateSourceAcquisitionCadenceMismatch(
             sourceAcquisitionCadence, card, candidateParsedEffects
@@ -24222,9 +24442,9 @@ async function scoreCardBatch({
         card.acquisitionCadenceMismatch = acquisitionCadenceMismatch;
         card.acquisitionCadenceRankFactor = sourceAcquisitionCadenceRankFactor(acquisitionCadenceMismatch);
         card.similarityBeforeCadenceAdjustment = preCadenceSimilarityScore;
-        card.similarityScore = Math.max(0, Math.min(1,
-            preCadenceSimilarityScore * card.acquisitionCadenceRankFactor
-        ));
+        const scoreBeforeQuantityPenalty = preCadenceSimilarityScore * card.acquisitionCadenceRankFactor;
+        card.unclampedSimilarityScore = Math.max(0, scoreBeforeQuantityPenalty - (Number(card.quantitativeConflictPenalty) || 0));
+        card.similarityScore = Math.max(0, Math.min(1, card.unclampedSimilarityScore));
 
         const finalRankNow = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
         if (finalRankNow - finalRankYieldStartedAt >= getManaSearchSliceBudgetMs()) {
@@ -27471,7 +27691,12 @@ if (candidates.length > 0) {
     for (const candidate of qualified) {
         const bonus = calculateConstraintPreferenceBonus(candidate, activeConstraintPreferences);
         candidate.constraintPreferenceScore = bonus;
-        if (bonus > 0) candidate.similarityScore = Math.min(1, (Number(candidate.similarityScore) || 0) + bonus);
+        if (bonus > 0) {
+            const baseRankScore = Number.isFinite(candidate.unclampedSimilarityScore)
+                ? candidate.unclampedSimilarityScore : (Number(candidate.similarityScore) || 0);
+            candidate.unclampedSimilarityScore = baseRankScore + bonus;
+            candidate.similarityScore = Math.max(0, Math.min(1, candidate.unclampedSimilarityScore));
+        }
     }
     qualified = await sortManaArrayResponsively(qualified, (a, b) => validOrderCriteriaForOrdering(priorityValue) === 'overall'
         ? compareManaSearchRankingCards(a, b, 'overall')
@@ -27929,6 +28154,54 @@ async function searchDeeper() {
     }
 }
 
+function getMechanicTierOrderingPenalty(card) {
+    const penalties = [0, 0.008, 0.020, 0.030, 0.045];
+    return penalties[getMechanicRankingTier(card)] ?? penalties[4];
+}
+
+function getOverallInternalScore(card) {
+    const raw = Number.isFinite(card?.unclampedSimilarityScore)
+        ? Number(card.unclampedSimilarityScore) : (Number(card?.similarityScore) || 0);
+    return raw - getMechanicTierOrderingPenalty(card);
+}
+
+function calculateCardProximityScore(sourceCard, candidateCard) {
+    if (!sourceCard || !candidateCard) return 0;
+    let score = 0, weight = 0;
+    const sourceMvRaw = sourceCard.mana_value ?? sourceCard.cmc;
+    const candidateMvRaw = candidateCard.mana_value ?? candidateCard.cmc;
+    const sourceMv = sourceMvRaw === null || sourceMvRaw === undefined || sourceMvRaw === '' ? null : Number(sourceMvRaw);
+    const candidateMv = candidateMvRaw === null || candidateMvRaw === undefined || candidateMvRaw === '' ? null : Number(candidateMvRaw);
+    if (Number.isFinite(sourceMv) && Number.isFinite(candidateMv)) {
+        score += 0.45 * Math.max(0, 1 - Math.abs(sourceMv - candidateMv) / 5);
+        weight += 0.45;
+    }
+    const sourceColorsRaw = Array.isArray(sourceCard.color_identity) ? sourceCard.color_identity : sourceCard.colors;
+    const candidateColorsRaw = Array.isArray(candidateCard.color_identity) ? candidateCard.color_identity : candidateCard.colors;
+    if (Array.isArray(sourceColorsRaw) && Array.isArray(candidateColorsRaw)) {
+        const sourceColors = new Set(sourceColorsRaw.map(c => String(c).toLowerCase()));
+        const candidateColors = new Set(candidateColorsRaw.map(c => String(c).toLowerCase()));
+        const union = new Set([...sourceColors, ...candidateColors]);
+        const colorSimilarity = union.size ? [...sourceColors].filter(c => candidateColors.has(c)).length / union.size : 1;
+        score += 0.30 * colorSimilarity;
+        weight += 0.30;
+    }
+    const typeTokens = ['creature', 'instant', 'sorcery', 'artifact', 'enchantment', 'land', 'planeswalker', 'battle', 'kindred'];
+    const sourceLine = String(sourceCard.type_line || '').toLowerCase();
+    const candidateLine = String(candidateCard.type_line || '').toLowerCase();
+    const sourceTypeWords = sourceLine.split(/[^a-z]+/).filter(Boolean);
+    const sourceTypes = typeTokens.filter(t => sourceTypeWords.includes(t));
+    const candidateTypeWords = candidateLine.split(/[^a-z]+/).filter(Boolean);
+    const candidateTypes = typeTokens.filter(t => candidateTypeWords.includes(t));
+    if (sourceLine && candidateLine) {
+        const shared = sourceTypes.filter(t => candidateTypes.includes(t)).length;
+        const union = new Set([...sourceTypes, ...candidateTypes]).size;
+        score += 0.25 * (union ? shared / union : 0);
+        weight += 0.25;
+    }
+    return weight > 0 ? Math.max(0, Math.min(1, score / weight)) : 0;
+}
+
 function getRankingScoreForCriteria(card, criteria) {
     if (!card) return 0;
     switch (criteria) {
@@ -27948,7 +28221,7 @@ function getRankingScoreForCriteria(card, criteria) {
         case 'manaValue': { const raw = card?.cmc; if (raw === null || raw === undefined || raw === '') return -1e9; const manaValue = Number(raw); return Number.isFinite(manaValue) && manaValue >= 0 ? -manaValue : -1e9; }
         case 'manaValueDesc': { const raw = card?.cmc; if (raw === null || raw === undefined || raw === '') return -1e9; const manaValue = Number(raw); return Number.isFinite(manaValue) && manaValue >= 0 ? manaValue : -1e9; }
         case 'overall':
-        default: return Number(card.similarityScore) || 0;
+        default: return getOverallInternalScore(card);
     }
 }
 
@@ -28107,7 +28380,7 @@ async function buildMatrixSweepOrderResponsively(cards, criteria = 'overall') {
 
 function applyResultOrderingWithinGroup(cards, ranking, features) {
     const input = Array.isArray(cards) ? cards.slice() : [];
-    let output = input.sort((a, b) => getRankingScoreForCriteria(b, ranking) - getRankingScoreForCriteria(a, ranking));
+    let output = input.sort((a, b) => compareManaSearchRankingCards(a, b, ranking));
     const attributeSort = ['price', 'manaValue', 'manaValueDesc'].includes(ranking);
     if (!attributeSort && features.diverse) output = buildDiverseOrder(output, ranking);
     if (!attributeSort && features.matrix) output = buildMatrixSweepOrder(output, ranking);
@@ -28117,7 +28390,7 @@ function applyResultOrderingWithinGroup(cards, ranking, features) {
 async function applyResultOrderingWithinGroupResponsively(cards, ranking, features) {
     const input = Array.isArray(cards) ? cards.slice() : [];
     let output = await sortManaArrayResponsively(input,
-        (a, b) => getRankingScoreForCriteria(b, ranking) - getRankingScoreForCriteria(a, ranking));
+        (a, b) => compareManaSearchRankingCards(a, b, ranking));
     const attributeSort = ['price', 'manaValue', 'manaValueDesc'].includes(ranking);
     if (!attributeSort && features.diverse) output = await buildDiverseOrderResponsively(output, ranking);
     if (!attributeSort && features.matrix) output = await buildMatrixSweepOrderResponsively(output, ranking);
@@ -28132,30 +28405,15 @@ function applyResultOrdering(cards, criteria, featureFlags = null) {
     const input = Array.isArray(cards) ? cards.slice() : [];
     const ranking = validOrderCriteriaForOrdering(criteria);
     const features = featureFlags || activeOrderFeatureFlags;
-    if (!shouldGroupByMechanicTier(input, ranking)) return applyResultOrderingWithinGroup(input, ranking, features);
-
-    // Keep every tier contiguous. Diversity and Matrix Sweep can reorder within a tier but may not
-    // put a weaker mechanic class ahead of a better class.
-    const output = [];
-    for (let tier = 0; tier <= MANASEARCH_MECHANIC_RANKING_TIER.OTHER; tier++) {
-        const group = input.filter(card => getMechanicRankingTier(card) === tier);
-        if (group.length) output.push(...applyResultOrderingWithinGroup(group, ranking, features));
-    }
-    return output;
+    // Mechanic tier is now a small bounded score nudge, not a hard ordering wall.
+    return applyResultOrderingWithinGroup(input, ranking, features);
 }
 
 async function applyResultOrderingResponsively(cards, criteria, featureFlags = null) {
     const input = Array.isArray(cards) ? cards.slice() : [];
     const ranking = validOrderCriteriaForOrdering(criteria);
     const features = featureFlags || activeOrderFeatureFlags;
-    if (!shouldGroupByMechanicTier(input, ranking)) return applyResultOrderingWithinGroupResponsively(input, ranking, features);
-
-    const output = [];
-    for (let tier = 0; tier <= MANASEARCH_MECHANIC_RANKING_TIER.OTHER; tier++) {
-        const group = input.filter(card => getMechanicRankingTier(card) === tier);
-        if (group.length) output.push(...await applyResultOrderingWithinGroupResponsively(group, ranking, features));
-    }
-    return output;
+    return applyResultOrderingWithinGroupResponsively(input, ranking, features);
 }
 
 function validOrderCriteriaForOrdering(criteria) {
@@ -30790,6 +31048,26 @@ function runManaSearchRankingScoringRegressionSuite({ log = true } = {}) {
         });
         const tierOf = (sourceNode, candidateNode, sourceEffects = [], candidateEffects = []) =>
             classifyMechanicRankingTier({ nodes: [sourceNode] }, { nodes: [candidateNode] }, sourceEffects, candidateEffects).mechanicRankingTier;
+        const targetClassConflict = mechanicalNodeContradiction(
+            tierNode('Destroy target creature.', 'creature_destroy', 'destroy', { targetObject: 'creature' }),
+            tierNode('Destroy target artifact.', 'creature_destroy', 'destroy', { targetObject: 'artifact' })
+        );
+        check('mechanic-contradiction-detects-incompatible-target-class', targetClassConflict >= 0.14, `penalty=${targetClassConflict.toFixed(3)}`);
+        const compoundTargetConflict = mechanicalNodeContradiction(
+            tierNode('Destroy target creature or planeswalker.', 'creature_destroy', 'destroy', { targetObject: 'creature_or_planeswalker' }),
+            tierNode('Destroy target artifact.', 'creature_destroy', 'destroy', { targetObject: 'artifact' })
+        );
+        check('mechanic-contradiction-parses-compound-target-classes', compoundTargetConflict >= 0.14, `penalty=${compoundTargetConflict.toFixed(3)}`);
+        const broadTargetCompatibility = mechanicalNodeContradiction(
+            tierNode('Destroy target permanent.', 'creature_destroy', 'destroy', { targetObject: 'permanent' }),
+            tierNode('Destroy target creature.', 'creature_destroy', 'destroy', { targetObject: 'creature' })
+        );
+        check('mechanic-contradiction-does-not-mismatch-broad-permanent-target', broadTargetCompatibility < 0.14, `penalty=${broadTargetCompatibility.toFixed(3)}`);
+        const targetMassConflict = mechanicalNodeContradiction(
+            tierNode('Destroy target creature.', 'creature_destroy', 'destroy', { targetKind: 'target' }),
+            tierNode('Destroy all creatures.', 'creature_destroy', 'destroy', { targetKind: 'all' })
+        );
+        check('mechanic-contradiction-detects-target-versus-mass-scope', targetMassConflict >= 0.14, `penalty=${targetMassConflict.toFixed(3)}`);
         const sameWordTier = tierOf(
             tierNode('Destroy target creature.', 'creature_destroy', 'destroy'),
             tierNode('Destroy all creatures.', 'creature_destroy', 'destroy', { targetKind: 'all', targetObject: 'creature' })
@@ -30810,10 +31088,16 @@ function runManaSearchRankingScoringRegressionSuite({ log = true } = {}) {
             tierNode(candidateOneManaEffect.raw, 'mana_ability', 'add_mana', { quantity: 1 }),
             [sourceSolRingEffect], [candidateOneManaEffect]
         );
-        check('mechanic-tier-sol-ring-two-mana-rejects-one-mana-as-quantitative-conflict',
-            oneManaInsteadOfTwoTier === MANASEARCH_MECHANIC_RANKING_TIER.CONTRADICTION_SAME_WORDING ||
-            oneManaInsteadOfTwoTier === MANASEARCH_MECHANIC_RANKING_TIER.CONTRADICTION_DIFFERENT_WORDING,
+        check('mechanic-tier-sol-ring-one-mana-is-not-a-hard-contradiction',
+            oneManaInsteadOfTwoTier === MANASEARCH_MECHANIC_RANKING_TIER.SAME_MECHANIC_SAME_WORDING ||
+            oneManaInsteadOfTwoTier === MANASEARCH_MECHANIC_RANKING_TIER.SAME_MECHANIC_DIFFERENT_WORDING,
             `tier=${oneManaInsteadOfTwoTier}`);
+        const oneVsTwoPenalty = calculateQuantitativeMechanicSoftPenalty({ field: 'net_mana', sourceValue: 2, candidateValue: 1 });
+        const twoVsThreePenalty = calculateQuantitativeMechanicSoftPenalty({ field: 'net_mana', sourceValue: 2, candidateValue: 3 });
+        const twoVsEightPenalty = calculateQuantitativeMechanicSoftPenalty({ field: 'net_mana', sourceValue: 2, candidateValue: 8 });
+        check('quantity-gap-is-soft-penalty', oneVsTwoPenalty > 0 && oneVsTwoPenalty < 0.03, `2-vs-1=${oneVsTwoPenalty.toFixed(4)}`);
+        check('small-neighbor-quantity-gap-is-mostly-ignored', twoVsThreePenalty < 0.01, `2-vs-3=${twoVsThreePenalty.toFixed(4)}`);
+        check('large-quantity-gap-gets-larger-bounded-penalty', twoVsEightPenalty > twoVsThreePenalty && twoVsEightPenalty <= 0.055, `2-vs-8=${twoVsEightPenalty.toFixed(4)}`);
         const exactTwoManaTier = tierOf(
             tierNode(sourceSolRingEffect.raw, 'mana_ability', 'add_mana', { quantity: 2 }),
             tierNode('{T}: Add {C}{C}.', 'mana_ability', 'add_mana', { quantity: 2 }),
@@ -30835,9 +31119,9 @@ function runManaSearchRankingScoringRegressionSuite({ log = true } = {}) {
             tierNode(candidateUnknownNet.raw, 'mana_ability', 'add_mana', { quantity: 1 }),
             [sourceUnknownNet], [candidateUnknownNet]
         );
-        check('mechanic-tier-sol-ring-compares-gross-output-when-net-is-unknown',
-            oneManaUnknownNetTier === MANASEARCH_MECHANIC_RANKING_TIER.CONTRADICTION_SAME_WORDING ||
-            oneManaUnknownNetTier === MANASEARCH_MECHANIC_RANKING_TIER.CONTRADICTION_DIFFERENT_WORDING,
+        check('mechanic-tier-sol-ring-gross-output-gap-is-not-hard-contradiction',
+            oneManaUnknownNetTier === MANASEARCH_MECHANIC_RANKING_TIER.SAME_MECHANIC_SAME_WORDING ||
+            oneManaUnknownNetTier === MANASEARCH_MECHANIC_RANKING_TIER.SAME_MECHANIC_DIFFERENT_WORDING,
             `tier=${oneManaUnknownNetTier}`);
         const differentWordTier = tierOf(
             tierNode('Return target creature card from your graveyard to the battlefield.', 'zone_change', 'return', { from: 'graveyard', to: 'battlefield' }),
@@ -30863,14 +31147,14 @@ function runManaSearchRankingScoringRegressionSuite({ log = true } = {}) {
         );
         check('mechanic-tier-unrelated-effects-last', unrelatedTier === MANASEARCH_MECHANIC_RANKING_TIER.OTHER, `tier=${unrelatedTier}`);
         const tierOrderFixture = [
-            { name: 'Other', mechanicRankingTier: 4, similarityScore: 0.99 },
-            { name: 'Conflict same wording', mechanicRankingTier: 2, similarityScore: 0.98 },
-            { name: 'Equivalent wording', mechanicRankingTier: 1, similarityScore: 0.10 },
-            { name: 'Exact wording', mechanicRankingTier: 0, similarityScore: 0.12 },
-            { name: 'Conflict different wording', mechanicRankingTier: 3, similarityScore: 0.97 }
+            { name: 'High score Other', mechanicRankingTier: 4, similarityScore: 0.99 },
+            { name: 'Near-tied Other', mechanicRankingTier: 4, similarityScore: 0.905, proximityScore: 0.10 },
+            { name: 'Near-tied Exact', mechanicRankingTier: 0, similarityScore: 0.91, proximityScore: 0.80 },
+            { name: 'Weak Exact', mechanicRankingTier: 0, similarityScore: 0.12 }
         ];
         const tierOrderedNames = applyResultOrdering(tierOrderFixture, 'overall', { diverse: false, matrix: false }).map(card => card.name);
-        check('mechanic-tiers-override-score-between-groups', tierOrderedNames.join('|') === 'Exact wording|Equivalent wording|Conflict same wording|Conflict different wording|Other', tierOrderedNames.join('|'));
+        check('mechanic-tier-soft-bias-does-not-hard-cluster', tierOrderedNames[0] === 'High score Other', tierOrderedNames.join('|'));
+        check('mechanic-tier-nudge-helps-near-tie', tierOrderedNames.indexOf('Near-tied Exact') < tierOrderedNames.indexOf('Near-tied Other'), tierOrderedNames.join('|'));
 
         const mysticText = 'Choose three. You may choose the same mode more than once.\n• Counter target spell unless its controller pays {3}.\n• Return target creature to its owner’s hand.\n• Draw a card.';
         const crypticText = 'Choose two —\n• Counter target spell.\n• Return target permanent to its owner’s hand.\n• Draw a card.\n• Tap all creatures your opponents control.';
@@ -30896,6 +31180,10 @@ function runManaSearchRankingScoringRegressionSuite({ log = true } = {}) {
         const counterAnchor = calculateDeterministicRankingAnchor({ functionalSimilarity: similarity, effectCoverage: coverage.sourceCoverage, primaryEffectMatch: coverage.primaryMatch, roleScore: 0.78, roleAnchored: true, mechanicalConfidence: 0.9 });
         check('primary-counter-effect-retained-despite-drawback', counterAnchor >= 0.72, `functional=${similarity.toFixed(3)} coverage=${coverage.sourceCoverage.toFixed(3)} anchor=${counterAnchor.toFixed(3)}`);
         check('legacy-score-blend-remains-bounded', blendCalibratedRankingEvidence(0.99, 0.99, 0.99, 0.045) < 1, 'no saturation');
+        check('overall-ranking-score-retains-unclamped-primary-boost', getRankingScoreForCriteria({ similarityScore: 1, unclampedSimilarityScore: 1.07, mechanicRankingTier: 0 }, 'overall') > 1, 'internal rank score keeps values above display clamp');
+        const normalizedMerfolkA = parseAnthemEffect('Other Merfolk creatures you control get +1/+1.');
+        const normalizedMerfolkB = parseAnthemEffect('Other Merfolk you control get +1/+1.');
+        check('tribal-anthem-normalizes-grammatical-target-variants', Boolean(normalizedMerfolkA && normalizedMerfolkB && normalizedMerfolkA.subtype === normalizedMerfolkB.subtype), JSON.stringify({ a: normalizedMerfolkA?.subtype, b: normalizedMerfolkB?.subtype }));
     } catch (error) {
         check('suite-execution', false, error?.stack || error?.message || String(error));
     }
