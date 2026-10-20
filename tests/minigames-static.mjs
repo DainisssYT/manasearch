@@ -13,9 +13,9 @@ const puzzlesDoc = JSON.parse(read('minigames/puzzles.json'));
 
 assert.match(html, /id="minigames-btn"/);
 assert.match(html, /<dialog id="minigames-dialog"/);
-assert.match(html, /href="minigames\.css\?v=20261020-117"/);
-assert.match(html, /src="minigames\.js\?v=20261020-117"/);
-assert.match(html, /app\.js\?v=20261020-117/);
+assert.match(html, /href="minigames\.css\?v=20261020-118"/);
+assert.match(html, /src="minigames\.js\?v=20261020-118"/);
+assert.match(html, /app\.js\?v=20261020-118/);
 assert.match(app, /window\.ManaSearchApi\s*=\s*Object\.freeze/);
 for (const apiName of ['getCardByName', 'getCardNames', 'getOracleText', 'parseEffects', 'scoreEffectMatch', 'assignEffects', 'openCard']) {
     assert.match(app, new RegExp(`\\b${apiName}\\s*\\(`), `Missing minigame API method: ${apiName}`);
@@ -27,6 +27,16 @@ assert.match(game, /runManaSearchMinigameRegressionSuite/);
 assert.match(game, /item\.cardId && guessedCard\.id && item\.cardId === guessedCard\.id/, 'alternate faces of the same card should count as a repeated guess');
 assert.ok(game.includes(".replace(/^[\\s.,;:!?]+|[\\s.,;:!?]+$/g, '').replace(/\\s+/g, ' ')"), 'ability-check dedupe should ignore terminal punctuation');
 assert.match(app, /card\.cmc !== null && card\.cmc !== undefined && card\.cmc !== ''/, 'unknown mana values must not be converted to zero');
+
+assert.match(html, /Starting minigames… retrying the game module\./, 'launcher must fail visibly if its module did not initialize');
+assert.match(html, /import\(retryUrl\)/, 'launcher must retry a cache-busted module request after a boot failure');
+assert.match(game, /open:\s*openMinigames/, 'minigame module must expose its open action to the launcher recovery');
+assert.match(game, /dataset\.minigamesBound !== 'true'/, 'module recovery must avoid duplicate click handlers');
+const appBuild = app.match(/MANASEARCH_APP_BUILD\s*=\s*'([^']+)'/)?.[1];
+assert.ok(appBuild, 'app build tag must be present');
+for (const asset of ['app.js', 'pako.min.js', 'style.css', 'minigames.js', 'minigames.css']) {
+    assert.match(html, new RegExp(`${asset.replace('.', '\\.')}\\?v=${appBuild}`), `${asset} asset URL must match app build tag`);
+}
 
 for (const forbidden of ['currentSourceCard', 'lastSearchResults', 'manualHighlights', 'searchRequestId', 'HISTORY_KEY', 'addToHistory']) {
     assert.ok(!game.includes(forbidden), `Minigame UI should not access ${forbidden} directly`);

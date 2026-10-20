@@ -754,28 +754,40 @@
         nameIndexReady = true;
     }
 
+    async function openMinigames() {
+        if (!ui.dialog || !ui.registry) return;
+        if (!ui.dialog.open) {
+            try { ui.dialog.showModal(); }
+            catch (_) { ui.dialog.setAttribute('open', ''); }
+        }
+        ui.launch?.setAttribute('aria-expanded', 'true');
+        showListView();
+        setStatus('Loading the local card catalog…');
+        try {
+            if (!window.ManaSearchApi?.ready) throw new Error('ManaSearch card API is not available yet. Refresh the page and try again.');
+            await window.ManaSearchApi.ready();
+            if (!puzzles.length) {
+                const response = await fetch(CONFIG.puzzlePath, { cache: 'no-cache' });
+                if (!response.ok) throw new Error(`Puzzle file returned HTTP ${response.status}`);
+                loadPuzzleData(await response.json());
+                buildNameIndex();
+            }
+            if (!puzzles.length) throw new Error('No starter puzzles passed validation against cards.bin.');
+            renderList();
+            setStatus(`${puzzles.length} puzzles ready. Practice is unlimited; Daily uses the same puzzle for everyone each UTC day.`, 'success');
+        } catch (error) {
+            setStatus(`Minigames could not load: ${error?.message || error}. Check that the app, minigame files, cards.bin, and minigames/puzzles.json deployed together.`, 'warning');
+        }
+    }
+
     async function initialize() {
         if (!ui.launch || !ui.dialog || !ui.registry) return;
-        ui.launch.addEventListener('click', async () => {
-            try { ui.dialog.showModal(); } catch (_) { ui.dialog.setAttribute('open', ''); }
-            ui.launch.setAttribute('aria-expanded', 'true');
-            showListView();
-            setStatus('Loading the local card catalog…');
-            try {
-                await window.ManaSearchApi.ready();
-                if (!puzzles.length) {
-                    const response = await fetch(CONFIG.puzzlePath, { cache: 'no-cache' });
-                    if (!response.ok) throw new Error(`Puzzle file returned HTTP ${response.status}`);
-                    loadPuzzleData(await response.json());
-                    buildNameIndex();
-                }
-                if (!puzzles.length) throw new Error('No starter puzzles passed validation against cards.bin.');
-                renderList();
-                setStatus(`${puzzles.length} puzzles ready. Practice is unlimited; Daily uses the same puzzle for everyone each UTC day.`, 'success');
-            } catch (error) {
-                setStatus(`Minigames could not load: ${error?.message || error}. Make sure cards.bin and minigames/puzzles.json are present.`, 'warning');
-            }
-        });
+        // A recovery import can load this module if the first module request failed. Never
+        // attach duplicate listeners if the original request finishes at the same time.
+        if (ui.launch.dataset.minigamesBound !== 'true') {
+            ui.launch.dataset.minigamesBound = 'true';
+            ui.launch.addEventListener('click', openMinigames);
+        }
         ui.close.addEventListener('click', () => ui.dialog.close());
         ui.back.addEventListener('click', () => { showListView(); setStatus(''); });
         ui.dialog.addEventListener('close', () => ui.launch.setAttribute('aria-expanded', 'false'));
@@ -839,6 +851,10 @@
     }
 
     window.runManaSearchMinigameRegressionSuite = runRegressionSuite;
-    window.ManaSearchMinigames = Object.freeze({ config: CONFIG, registry: registry.map(({ id, title, description, built }) => ({ id, title, description, built })) });
+    window.ManaSearchMinigames = Object.freeze({
+        config: CONFIG,
+        registry: registry.map(({ id, title, description, built }) => ({ id, title, description, built })),
+        open: openMinigames
+    });
     void initialize();
 })();

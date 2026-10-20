@@ -5,8 +5,8 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>ManaSearch</title>
-    <link rel="stylesheet" href="style.css?v=20261020-117">
-    <link rel="stylesheet" href="minigames.css?v=20261020-117">
+    <link rel="stylesheet" href="style.css?v=20261020-118">
+    <link rel="stylesheet" href="minigames.css?v=20261020-118">
 </head>
 <body>
     <header class="site-header">
@@ -1056,8 +1056,51 @@
         import * as transformers from "https://cdn.jsdelivr.net/npm/@xenova/transformers@2.16.0";
         window.transformers = transformers;
     </script>
-    <script src="pako.min.js?v=20261020-117"></script>
-    <script type="module" src="app.js?v=20261020-117"></script>
-    <script type="module" src="minigames.js?v=20261020-117"></script>
+    <script>
+        // Synchronous launch fallback: if the minigame module failed to load, the button
+        // still opens the dialog, reports status, and retries a cache-busted module request.
+        (() => {
+            const launch = document.getElementById('minigames-btn');
+            const dialog = document.getElementById('minigames-dialog');
+            const status = document.getElementById('minigames-status');
+            if (!launch || !dialog) return;
+            let recoveryPromise = null;
+            launch.addEventListener('click', () => {
+                if (typeof window.ManaSearchMinigames?.open === 'function' && launch.dataset.minigamesBound === 'true') return;
+                try {
+                    if (!dialog.open) dialog.showModal();
+                } catch (_) {
+                    dialog.setAttribute('open', '');
+                }
+                launch.setAttribute('aria-expanded', 'true');
+                if (status) {
+                    status.className = 'minigames-status is-warning';
+                    status.textContent = 'Starting minigames… retrying the game module.';
+                }
+                if (!recoveryPromise) {
+                    const retryUrl = new URL(`minigames.js?v=20261020-118&recovery=${Date.now()}`, document.baseURI).href;
+                    recoveryPromise = import(retryUrl).then(() => {
+                        if (typeof window.ManaSearchMinigames?.open !== 'function') {
+                            throw new Error('Minigame module loaded without registering its launcher.');
+                        }
+                        return window.ManaSearchMinigames.open();
+                    }).catch(error => {
+                        console.error('[ManaSearch minigames] launch recovery failed', error);
+                        if (status) {
+                            status.className = 'minigames-status is-warning';
+                            status.textContent = `Minigames could not start (${error?.message || error}). Check the deployed minigames.js and minigames/puzzles.json files, then refresh.`;
+                        }
+                        recoveryPromise = null;
+                    });
+                }
+            }, { capture: true });
+            dialog.addEventListener('close', () => {
+                launch.setAttribute('aria-expanded', 'false');
+            });
+        })();
+    </script>
+    <script src="pako.min.js?v=20261020-118"></script>
+    <script type="module" src="app.js?v=20261020-118"></script>
+    <script type="module" src="minigames.js?v=20261020-118"></script>
 </body>
 </html>
