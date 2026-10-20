@@ -1,6 +1,6 @@
-/* ManaSearch build 20261019-114 */
+/* ManaSearch build 20261019-116 */
 // ManaSearch deployment build marker. Bump this whenever app.js changes so cached-module issues are easy to diagnose.
-const MANASEARCH_APP_BUILD = '20261019-114';
+const MANASEARCH_APP_BUILD = '20261019-116';
 console.info(`[ManaSearch] app.js build ${MANASEARCH_APP_BUILD}`);
 
 // State Management
@@ -4750,6 +4750,148 @@ function getHighlightParentLabel(index) {
     return text.length > 34 ? text.slice(0, 31) + '\u2026' : text;
 }
 
+// Structured highlight aspects are opt-in. Missing/auto values deliberately preserve legacy ranking.
+function normalizeHighlightAspects(aspects) {
+    const mana = aspects?.mana || {};
+    const quantity = aspects?.quantity || {};
+    const validAmount = value => ({
+        rule: ['auto','exact','at_least','at_most','any'].includes(value?.rule) ? value.rule : 'auto',
+        value: Number.isFinite(Number(value?.value)) && value?.value !== null ? Number(value.value) : null
+    });
+    const validColor = value => ({
+        rule: ['auto','same','specific','any_colored','any'].includes(value?.rule) ? value.rule : 'auto',
+        colors: Array.isArray(value?.colors) ? [...new Set(value.colors.map(c => String(c).toLowerCase()).filter(c => ['w','u','b','r','g','c'].includes(c)))] : []
+    });
+    return {
+        mana: { amount: validAmount(mana.amount), color: validColor(mana.color), activation: { rule: ['auto','free','any'].includes(mana.activation?.rule) ? mana.activation.rule : 'auto' }, fullRun: Boolean(mana.fullRun) },
+        quantity: { amount: validAmount(quantity.amount) }
+    };
+}
+function hasActiveHighlightAspects(aspects) {
+    const a = normalizeHighlightAspects(aspects);
+    return a.mana.amount.rule !== 'auto' || a.mana.color.rule !== 'auto' || a.mana.activation.rule !== 'auto' || a.quantity.amount.rule !== 'auto' || a.mana.fullRun;
+}
+function deriveHighlightAspectKind(highlight, sourceText = getCurrentSourceOracleText()) {
+    const text = String(highlight?.text || '').trim();
+    const clause = getHighlightSourceClauseInfo(highlight, sourceText)?.clauseText || text;
+    const manaContext = /\badd\b[^.!?;]{0,100}(?:mana|\{[wubrgcs]\})/i.test(clause) || /\{[wubrgcs]\}/i.test(text);
+    const selectedSymbols = text.match(/\{[wubrgc]\}/gi) || [];
+    const clauseSymbols = String(clause || '').match(/\{[wubrgc]\}/gi) || [];
+    const useFullRun = Boolean(highlight?.aspects?.mana?.fullRun) && selectedSymbols.length === 1 && clauseSymbols.length > 1;
+    const symbols = useFullRun ? clauseSymbols : selectedSymbols;
+    const number = text.match(/^\s*(\d+)\s*$/);
+    const quantityContext = QUANTITATIVE_MECHANIC_FUNCTIONS instanceof Set && [...QUANTITATIVE_MECHANIC_FUNCTIONS].some(fn => fn) && /\b(?:damage|life|draw|cards?|counters?|tokens?|mill|discard)\b/i.test(clause);
+    if (manaContext) return { kind: 'mana', amount: symbols.length ? symbols.length : (number ? Number(number[1]) : null), colors: [...new Set(symbols.map(x => x.slice(1,-1).toLowerCase()))], clause };
+    if (number && quantityContext) return { kind: 'quantity', amount: Number(number[1]), colors: [], clause };
+    if (quantityContext && /\b\d+\b/.test(text)) return { kind: 'quantity', amount: Number(text.match(/\d+/)[0]), colors: [], clause };
+    return null;
+}
+function getHighlightAspectCandidateEffects(card, kind) {
+    const oracle = getCardOracleText(card);
+    const parsed = parseMTGEffect(oracle);
+    if (kind === 'mana') return parsed.filter(e => e && (e.canonical?.function === 'mana_ability' || e.action === 'add_mana' || e.manaOutputAmount != null || e.canonical?.params?.manaOutputAmount != null));
+    return parsed.filter(e => e && (QUANTITATIVE_MECHANIC_FUNCTIONS.has(String(e.canonical?.function || e.action || ''))));
+}
+function getAspectCandidateAmount(effect) {
+    const params = effect?.canonical?.params || effect?.params || {};
+    for (const value of [effect?.manaNetAmount, params.manaNetAmount, effect?.manaOutputAmount, params.manaOutputAmount, effect?.quantity, params.quantity, effect?.amount, params.amount, effect?.canonical?.quantity]) {
+        if (value !== null && value !== undefined && Number.isFinite(Number(value))) return Number(value);
+    }
+    const raw = String(effect?.raw || effect?.contextClause || '');
+    const m = raw.match(/\b(?:add|deals?|deal|draw|discard|mill|create|put|gets?)\s+(\d+)\b/i);
+    return m ? Number(m[1]) : null;
+}
+function getAspectCandidateColors(effect) {
+    const params = effect?.canonical?.params || effect?.params || {};
+    const raw = String(effect?.raw || effect?.contextClause || '');
+    const rawColors = params.manaOutputColors || effect?.manaOutputColors || effect?.colors || [];
+    const colorList = Array.isArray(rawColors) ? rawColors : (typeof rawColors === 'string' ? rawColors.split(/[\s,/]+/) : []);
+    const colors = new Set(colorList.map(c => String(c).toLowerCase().replace('colorless','c')).filter(c => ['w','u','b','r','g','c'].includes(c)));
+    ['w','u','b','r','g','c'].forEach(c => { if (new RegExp('\\{'+c+'\\}', 'i').test(raw)) colors.add(c); });
+    if (/any (?:one )?(?:color|type)/i.test(raw)) ['w','u','b','r','g'].forEach(c => colors.add(c));
+    return colors;
+}
+function highlightAspectEffectMatches(highlight, card, kind = null) {
+    const derived = deriveHighlightAspectKind(highlight);
+    kind = kind || derived?.kind;
+    const implicitAtomicMana = kind === 'mana' && !highlight.aspects && /^(?:\s*\{[wubrgc]\}\s*)+$/i.test(String(highlight.text || ''));
+    if (!kind || (!hasActiveHighlightAspects(highlight?.aspects) && !implicitAtomicMana)) return { applies: false, matches: true, score: 1, reason: '' };
+    const aspects = normalizeHighlightAspects(highlight.aspects);
+    if (kind === 'mana' && aspects.mana.fullRun && derived) {
+        aspects.mana.amount = { rule: 'exact', value: derived.amount };
+        aspects.mana.color = { rule: 'same', colors: derived.colors };
+    }
+    // A pure symbol selection is itself a value request: one selected {C} means one colorless mana.
+    // Legacy highlights containing no such atomic selection remain untouched.
+    if (kind === 'mana' && !highlight.aspects && (String(highlight.text || '').match(/\{[wubrgc]\}/gi) || []).length) {
+        aspects.mana.amount = { rule: 'exact', value: derived?.amount ?? null };
+        aspects.mana.color = { rule: 'same', colors: derived?.colors || [] };
+    }
+    const effects = getHighlightAspectCandidateEffects(card, kind);
+    if (!effects.length) return { applies: true, matches: false, score: 0, reason: `No matching ${kind} effect was parsed` };
+    let best = { applies: true, matches: false, score: 0, reason: '' };
+    for (const effect of effects) {
+        let matches = true, score = 1, reason = '';
+        const amountRule = kind === 'mana' ? aspects.mana.amount : aspects.quantity.amount;
+        const amount = getAspectCandidateAmount(effect);
+        if (amountRule.rule !== 'auto' && amountRule.rule !== 'any') {
+            const target = amountRule.value ?? (derived?.amount ?? null);
+            if (amount === null) {
+                matches = false;
+                score *= 0.18;
+                reason = 'Candidate effect quantity is unknown';
+            } else if (target !== null) {
+                if (amountRule.rule === 'exact') matches = amount === target;
+                else if (amountRule.rule === 'at_least') matches = amount >= target;
+                else if (amountRule.rule === 'at_most') matches = amount <= target;
+                score *= matches ? 1 : 0.18;
+                if (!matches) reason = `Amount ${amount} does not satisfy ${amountRule.rule} ${target}`;
+            }
+        }
+        if (kind === 'mana') {
+            const colorRule = aspects.mana.color;
+            if (colorRule.rule !== 'auto' && colorRule.rule !== 'any') {
+                const colors = getAspectCandidateColors(effect);
+                const wanted = new Set(colorRule.rule === 'same' ? (derived?.colors || []) : colorRule.colors);
+                if (colorRule.rule === 'any_colored') {
+                    const colored = ['w','u','b','r','g'].some(c => colors.has(c)) || /any (?:one )?(?:color|type)/i.test(String(effect.raw || ''));
+                    matches = matches && colored;
+                    score *= colored ? 1 : 0.12;
+                    if (!colored) reason = 'Does not produce colored mana';
+                } else if (wanted.size) {
+                    const includes = [...wanted].every(c => colors.has(c));
+                    const same = colorRule.rule !== 'same' || (includes && colors.size === wanted.size);
+                    matches = matches && includes && same;
+                    score *= includes && same ? 1 : 0.12;
+                    if (!(includes && same)) reason = `Mana colors do not match ${[...wanted].join(', ')}`;
+                }
+            }
+            const activationRule = aspects.mana.activation.rule;
+            if (activationRule === 'free') {
+                const raw = String(effect.raw || effect.contextClause || '');
+                const tapOnly = /\{t\}\s*:/i.test(raw) && !/\{(?!t\})[^}]+\}/i.test(raw.replace(/\{t\}/ig, ''));
+                matches = matches && tapOnly;
+                score *= tapOnly ? 1 : 0.15;
+                if (!tapOnly) reason = 'Activation requires more than tapping';
+            }
+        }
+        if (matches) return { applies: true, matches: true, score, reason: '' };
+        if (score > best.score) best = { applies: true, matches: false, score, reason };
+    }
+    return best;
+}
+
+function buildHighlightAspectPreview(highlight, detected = deriveHighlightAspectKind(highlight)) {
+    if (!detected) return '';
+    const a = normalizeHighlightAspects(highlight?.aspects);
+    if (detected.kind === 'mana') {
+        const amount = a.mana.amount.rule === 'auto' ? (detected.amount == null ? 'a' : `exactly ${detected.amount}`) : a.mana.amount.rule === 'any' ? 'any amount' : `${a.mana.amount.rule.replace('_',' ')} ${a.mana.amount.value ?? detected.amount ?? 'N'}`;
+        const colors = a.mana.color.rule === 'same' ? (detected.colors.includes('c') ? 'colorless' : detected.colors.map(c=>c.toUpperCase()).join('/') || 'same colors') : a.mana.color.rule === 'specific' ? a.mana.color.colors.map(c=>c==='c'?'colorless':c.toUpperCase()).join('/') : a.mana.color.rule === 'any_colored' ? 'colored' : a.mana.color.rule === 'any' ? 'any color' : 'mana';
+        return `Looking for: ${String(amount).replace('exactly exactly','exactly')} ${colors} mana.`;
+    }
+    return `Looking for: ${a.quantity.amount.rule === 'auto' ? `the selected ${detected.amount ?? 'quantity'}` : a.quantity.amount.rule === 'any' ? 'any amount' : `${a.quantity.amount.rule.replace('_',' ')} ${a.quantity.amount.value ?? detected.amount ?? 'N'}`} in a similar effect.`;
+}
+
 function renderHighlightEditor(idx) {
     if (highlightEditIndex !== idx || !manualHighlights[idx]) return null;
     const h = manualHighlights[idx];
@@ -4796,6 +4938,63 @@ function renderHighlightEditor(idx) {
     };
     modeRow.appendChild(makeModeButton('variable', '\u2248 Flexible', 'Match the underlying mechanic/intent; values and wording may differ.'));
     modeRow.appendChild(makeModeButton('exact', '= Exact', 'Require the text/value to occur literally in a matching card.'));
+ 
+    const detectedAspect = deriveHighlightAspectKind(h);
+    let aspectControls = null;
+    if (detectedAspect) {
+        aspectControls = document.createElement('div');
+        aspectControls.className = 'highlight-aspects';
+        aspectControls.setAttribute('role', 'group');
+        aspectControls.setAttribute('aria-label', 'What matters about this highlight');
+        const heading = document.createElement('div');
+        heading.className = 'highlight-edit-label';
+        heading.textContent = 'What matters?';
+        aspectControls.appendChild(heading);
+        const current = normalizeHighlightAspects(h.aspects);
+        if (detectedAspect.kind === 'mana' && (String(h.text || '').match(/\{[wubrgc]\}/gi) || []).length === 1 && (String(detectedAspect.clause || '').match(/\{[wubrgc]\}/gi) || []).length > 1) {
+            const fullRunLabel = document.createElement('label'); fullRunLabel.className = 'highlight-aspect-color';
+            const fullRun = document.createElement('input'); fullRun.type = 'checkbox'; fullRun.checked = current.mana.fullRun; fullRun.setAttribute('aria-label','Use the whole mana output');
+            fullRun.addEventListener('change', () => { const next = normalizeHighlightAspects(h.aspects); next.mana.fullRun = fullRun.checked; h.aspects = next; renderHighlightChips(); });
+            fullRunLabel.append(fullRun, document.createTextNode('Use whole mana output instead of just the selected symbol'));
+            aspectControls.appendChild(fullRunLabel);
+        }
+        const addSelect = (labelText, options, value, onChange) => {
+            const row = document.createElement('label'); row.className = 'highlight-aspect-row';
+            const label = document.createElement('span'); label.textContent = labelText; row.appendChild(label);
+            const select = document.createElement('select'); select.className = 'highlight-edit-select'; select.setAttribute('aria-label', labelText);
+            options.forEach(([v, text]) => { const opt = document.createElement('option'); opt.value = v; opt.textContent = text; select.appendChild(opt); });
+            select.value = value; select.addEventListener('change', () => { onChange(select.value); }); row.appendChild(select); aspectControls.appendChild(row); return select;
+        };
+        const updateAspect = (path, value) => {
+            const next = normalizeHighlightAspects(h.aspects);
+            if (path === 'mana.amount.rule') next.mana.amount.rule = value;
+            if (path === 'mana.color.rule') next.mana.color.rule = value;
+            if (path === 'mana.activation.rule') next.mana.activation.rule = value;
+            if (path === 'quantity.amount.rule') next.quantity.amount.rule = value;
+            h.aspects = next;
+            renderHighlightChips();
+        };
+        const amountOptions = [['auto','Let ManaSearch decide'],['exact','Exactly N'],['at_least','At least N'],['at_most','At most N'],['any','Any amount']];
+        if (detectedAspect.kind === 'mana') {
+            addSelect('Amount', amountOptions, current.mana.amount.rule, v => updateAspect('mana.amount.rule',v));
+            addSelect('Color', [['auto','Let ManaSearch decide'],['same','Same as highlighted'],['specific','Specific colors'],['any_colored','Any colored mana'],['any','Anything']], current.mana.color.rule, v => updateAspect('mana.color.rule',v));
+            if (current.mana.color.rule === 'specific') {
+                const chips = document.createElement('div'); chips.className = 'highlight-aspect-colors'; chips.setAttribute('aria-label','Choose mana colors');
+                ['w','u','b','r','g','c'].forEach(color => { const label = document.createElement('label'); label.className = 'highlight-aspect-color'; const cb = document.createElement('input'); cb.type='checkbox'; cb.checked=current.mana.color.colors.includes(color); cb.setAttribute('aria-label',`Include ${color.toUpperCase()} mana`); cb.addEventListener('change',()=>{const next=normalizeHighlightAspects(h.aspects);next.mana.color.colors=cb.checked?[...new Set([...next.mana.color.colors,color])]:next.mana.color.colors.filter(c=>c!==color);h.aspects=next;preview.textContent=buildHighlightAspectPreview(h,detectedAspect);}); label.append(cb,document.createTextNode(color.toUpperCase())); chips.appendChild(label); }); aspectControls.appendChild(chips);
+            }
+            addSelect('Activation', [['auto','Let ManaSearch decide'],['free','Only {T} (no extra cost)'],['any',"Don't care"]], current.mana.activation.rule, v => updateAspect('mana.activation.rule',v));
+        } else addSelect('Amount', amountOptions, current.quantity.amount.rule, v => updateAspect('quantity.amount.rule',v));
+        const activeAmount = detectedAspect.kind === 'mana' ? current.mana.amount : current.quantity.amount;
+        if (!['auto','any'].includes(activeAmount.rule)) {
+            const valueRow = document.createElement('label'); valueRow.className = 'highlight-aspect-row';
+            const valueLabel = document.createElement('span'); valueLabel.textContent = 'Amount value'; valueRow.appendChild(valueLabel);
+            const valueInput = document.createElement('input'); valueInput.type = 'number'; valueInput.min = '0'; valueInput.step = '1'; valueInput.className = 'highlight-edit-select'; valueInput.setAttribute('aria-label','Amount value');
+            valueInput.value = String(activeAmount.value ?? detectedAspect.amount ?? ''); valueInput.placeholder = String(detectedAspect.amount ?? 'N');
+            valueInput.addEventListener('change', () => { const next = normalizeHighlightAspects(h.aspects); const target = detectedAspect.kind === 'mana' ? next.mana.amount : next.quantity.amount; target.value = valueInput.value.trim() === '' ? null : Math.max(0, Number(valueInput.value)); h.aspects = next; preview.textContent = buildHighlightAspectPreview(h,detectedAspect); });
+            valueRow.appendChild(valueInput); aspectControls.appendChild(valueRow);
+        }
+        const preview = document.createElement('div'); preview.className='highlight-aspect-preview'; preview.setAttribute('aria-live','polite'); preview.textContent=buildHighlightAspectPreview(h,detectedAspect); aspectControls.appendChild(preview);
+    }
 
     const connectRow = document.createElement('div');
     connectRow.className = 'highlight-edit-row';
@@ -4922,6 +5121,7 @@ function renderHighlightEditor(idx) {
     editor.appendChild(textLabel);
     editor.appendChild(input);
     editor.appendChild(modeRow);
+    if (aspectControls) editor.appendChild(aspectControls);
     editor.appendChild(connectRow);
     editor.appendChild(help);
     editor.appendChild(actions);
@@ -4968,6 +5168,20 @@ function renderHighlightChips() {
         label.className = 'highlight-chip-text';
         label.textContent = h.text.length > 55 ? h.text.slice(0, 52) + '\u2026' : h.text;
         label.title = h.text;
+        if (hasActiveHighlightAspects(h.aspects)) {
+            const aspectBadge = document.createElement('span');
+            aspectBadge.className = 'highlight-aspect-summary';
+            const aspects = normalizeHighlightAspects(h.aspects);
+            const parts = [];
+            const amount = h.field === 'type' ? null : (aspects.mana.amount.rule !== 'auto' ? aspects.mana.amount.rule.replace('_', ' ') : aspects.quantity.amount.rule !== 'auto' ? aspects.quantity.amount.rule.replace('_', ' ') : '');
+            if (amount) parts.push(amount === 'exact' ? `exactly ${aspects.mana.amount.value ?? aspects.quantity.amount.value ?? 'N'}` : amount);
+            if (aspects.mana.color.rule === 'same') parts.push((deriveHighlightAspectKind(h)?.colors || []).map(c => c === 'c' ? 'colorless' : c.toUpperCase()).join('/'));
+            else if (aspects.mana.color.rule === 'any_colored') parts.push('any colored');
+            else if (aspects.mana.color.rule === 'any') parts.push('any color');
+            aspectBadge.textContent = parts.filter(Boolean).join(' · ');
+            aspectBadge.title = `Structured requirements: ${aspectBadge.text}`;
+            if (aspectBadge.text) chip.appendChild(aspectBadge);
+        }
 
         const editBtn = document.createElement('button');
         editBtn.type = 'button';
@@ -9408,6 +9622,12 @@ function scoreHighlightEffectMatch(highlightEffect, candidateEffect, mode) {
     score += 0.12 * highlightTargetSimilarity(highlightEffect.targetProfile || {}, candidateEffect.targetProfile || {}, mode);
     score += 0.08 * highlightRestrictionSimilarity(highlightEffect.restriction, candidateEffect.restriction);
     score += 0.10 * highlightQuantitySimilarity(highlightEffect.quantityProfile, candidateEffect.quantityProfile, mode);
+    // User-declared structured aspects override generic quantity heuristics; Flexible mode ranks violations down but never filters.
+    if (highlightEffect.userAspects && hasActiveHighlightAspects(highlightEffect.userAspects)) {
+        const pseudoCard = { oracle_text: String(candidateEffect.raw || candidateEffect.contextClause || '') };
+        const aspectResult = highlightAspectEffectMatches({ text: highlightEffect.raw || highlightEffect.contextClause || '', aspects: highlightEffect.userAspects, mode }, pseudoCard);
+        if (aspectResult.applies && !aspectResult.matches && mode === 'variable') score *= Math.max(0.12, aspectResult.score || 0.18);
+    }
     score += 0.10 * highlightRelationshipSimilarity(highlightEffect, candidateEffect, mode);
     if (highlightEffect.effectMode || candidateEffect.effectMode) {
         score += highlightEffect.effectMode === candidateEffect.effectMode ? 0.07 : (mode === 'variable' ? 0.01 : 0);
@@ -9983,6 +10203,9 @@ function buildHighlightIntentProfiles(highlights, sourceCard = currentSourceCard
             if (effect && typeof effect === 'object') {
                 effect.contextClause = String(group.parseText || group.sourceClauseText || group.contextText || effect.raw || '').trim();
                 effect.searchIntentContextOverride = Boolean(group.triggerIntentOverride);
+                const matchingHighlight = group.find(h => deriveHighlightAspectKind(h, sourceText) && (h.aspects || hasActiveHighlightAspects(h.aspects)));
+                if (matchingHighlight) effect.userAspects = normalizeHighlightAspects(matchingHighlight.aspects);
+                else { const atomicMana = group.find(h => /^(?:\s*\{[wubrgc]\}\s*)+$/i.test(String(h.text || '').trim())); if (atomicMana) { const derived = deriveHighlightAspectKind(atomicMana, sourceText); if (derived?.kind === 'mana') effect.userAspects = { mana: { amount: { rule: 'exact', value: derived.amount }, color: { rule: 'same', colors: derived.colors }, activation: { rule: 'auto' } } }; } }
             }
         });
         let canonicalFunctions = getCanonicalFunctions(parsedEffects);
@@ -18122,27 +18345,28 @@ function getCardOracleText(card) {
  * A trailing period on an Exact highlight is a semantic hard boundary, not formatting.
  */
 function matchesExactHighlightConstraints(card, highlights = []) {
-    const exactHighlights = (highlights || [])
-        .filter(h => h && h.mode !== 'variable' && !h.benchmarkIntentOnly && typeof h.text === 'string' && h.text.trim())
-        .map(h => parseExactHighlightRequirement(h.text))
-        .filter(req => req.text);
+    const exactHighlights = (highlights || []).filter(h => h && h.mode !== 'variable' && !h.benchmarkIntentOnly && typeof h.text === 'string' && h.text.trim());
     if (!exactHighlights.length) return true;
-
     const oracle = getCardOracleText(card);
     if (!oracle) return false;
-    return exactHighlights.every(requirement => exactHighlightOccursInOracle(oracle, requirement));
+    return exactHighlights.every(highlight => {
+        if ((hasActiveHighlightAspects(highlight.aspects) || (!highlight.aspects && deriveHighlightAspectKind(highlight)?.kind === 'mana' && /^(?:\s*\{[wubrgc]\}\s*)+$/i.test(highlight.text))) && deriveHighlightAspectKind(highlight)) return highlightAspectEffectMatches(highlight, card).matches;
+        const requirement = parseExactHighlightRequirement(highlight.text);
+        return !requirement.text || exactHighlightOccursInOracle(oracle, requirement);
+    });
 }
 
 function explainExactHighlightFailures(card, highlights = []) {
     const oracle = getCardOracleText(card);
-    return (highlights || [])
-        .filter(h => h && h.mode !== 'variable' && !h.benchmarkIntentOnly && typeof h.text === 'string' && h.text.trim())
-        .map(h => ({ raw: h.text.trim(), requirement: parseExactHighlightRequirement(h.text) }))
-        .filter(item => item.requirement.text && !exactHighlightOccursInOracle(oracle, item.requirement))
-        .map(item => item.requirement.requiresSentenceTerminalPeriod
-            ? `exact highlight sentence boundary missing: "${item.raw}"`
-            : `exact highlight not present: "${item.raw}"`
-        );
+    return (highlights || []).filter(h => h && h.mode !== 'variable' && !h.benchmarkIntentOnly && typeof h.text === 'string' && h.text.trim()).flatMap(h => {
+        if ((hasActiveHighlightAspects(h.aspects) || (!h.aspects && deriveHighlightAspectKind(h)?.kind === 'mana' && /^(?:\s*\{[wubrgc]\}\s*)+$/i.test(h.text))) && deriveHighlightAspectKind(h)) {
+            const result = highlightAspectEffectMatches(h, card);
+            return result.matches ? [] : [{ field: 'highlight aspect', expected: buildHighlightAspectPreview(h), actual: result.reason || 'candidate effect did not satisfy the structured requirement' }];
+        }
+        const requirement = parseExactHighlightRequirement(h.text);
+        if (!requirement.text || exactHighlightOccursInOracle(oracle, requirement)) return [];
+        return [{ field: 'exact highlight', expected: h.text.trim(), actual: requirement.requiresSentenceTerminalPeriod ? 'sentence boundary missing' : 'text not present in candidate Oracle text' }];
+    });
 }
 
 function calculateFuzzyTextMatch(sourceText, targetText) {
@@ -18398,6 +18622,12 @@ function compareMechanicQuantityValues(a, b, field) {
     return { conflict: severity >= 0.16, severity, field, sourceValue: a, candidateValue: b };
 }
 function getQuantitativeMechanicConflict(sourceNode, candidateNode, sourceEffect = null, candidateEffect = null) {
+    const userAspects = sourceEffect?.userAspects;
+    const declaredAmount = normalizeHighlightAspects(userAspects);
+    if (hasActiveHighlightAspects(userAspects) && (
+        declaredAmount.quantity.amount.rule === 'any' ||
+        declaredAmount.mana.amount.rule === 'any'
+    )) return { conflict: false, severity: 0, field: null, sourceValue: null, candidateValue: null, overriddenByUserAspect: true };
     const fn = String(sourceNode?.function || '');
     if (!fn || fn !== String(candidateNode?.function || '')) return { conflict: false, severity: 0, field: null, sourceValue: null, candidateValue: null };
 
@@ -18506,8 +18736,12 @@ function classifyMechanicRankingTier(sourceGraph, candidateGraph, sourceEffects 
             const sameWording = (sameAction && wordingSimilarity >= 0.42) ||
                 (opposite && wordingSimilarity >= 0.50) ||
                 ((!actionA || !actionB) && wordingSimilarity >= 0.88);
-            const isContradiction = opposite || nodeContradiction >= 0.14 ||
-                Number(comparison?.contradiction) >= 0.14 || relationshipMismatch >= 0.46;
+            const sourceAspects = normalizeHighlightAspects(sourceEffect?.userAspects);
+            const userSaysQuantityAny = hasActiveHighlightAspects(sourceEffect?.userAspects) && (
+                sourceAspects.quantity.amount.rule === 'any' || sourceAspects.mana.amount.rule === 'any'
+            );
+            const isContradiction = opposite || (!userSaysQuantityAny && (nodeContradiction >= 0.14 ||
+                Number(comparison?.contradiction) >= 0.14)) || relationshipMismatch >= 0.46;
             const tier = isContradiction
                 ? (sameWording
                     ? MANASEARCH_MECHANIC_RANKING_TIER.CONTRADICTION_SAME_WORDING
@@ -18524,7 +18758,7 @@ function classifyMechanicRankingTier(sourceGraph, candidateGraph, sourceEffects 
                 sourcePriority,
                 matchStrength,
                 wordingSimilarity,
-                contradiction: Math.max(nodeContradiction, Number(comparison?.contradiction) || 0, relationshipMismatch, opposite ? 0.30 : 0),
+                contradiction: Math.max(userSaysQuantityAny ? 0 : nodeContradiction, userSaysQuantityAny ? 0 : (Number(comparison?.contradiction) || 0), relationshipMismatch, opposite ? 0.30 : 0),
                 quantitativeConflict: quantitativeConflict.field && quantitativeConflict.sourceValue !== quantitativeConflict.candidateValue ? {
                     field: quantitativeConflict.field,
                     sourceValue: quantitativeConflict.sourceValue,
@@ -25496,6 +25730,7 @@ function getSearchIntent(sourceCard, highlights = []) {
         field: h?.field || 'oracle',
         colorIndex: Number.isInteger(h?.colorIndex) ? h.colorIndex : 0,
         mode: h?.mode === 'variable' ? 'variable' : 'exact',
+        aspects: normalizeHighlightAspects(h?.aspects),
         origin: h?.origin || 'user',
         // Offsets are part of live highlight identity: selecting the same phrase in a different
         // clause can produce a different grammatical context and therefore a different intent.
@@ -25707,6 +25942,11 @@ function buildSearchIntentPresentationModel(sourceCard = currentSourceCard, high
         const modes = [exact ? 'Exact highlights require matching text in candidate Oracle text' : '', flexible ? 'Flexible highlights focus on matching mechanics even when wording differs' : ''].filter(Boolean);
         if (modes.length) summary += ` Highlight behavior: ${modes.join('; ')}.`;
     }
+    const aspectHighlights = activeHighlights.filter(h => hasActiveHighlightAspects(h?.aspects));
+    if (aspectHighlights.length) {
+        const aspectSummary = aspectHighlights.map(h => buildHighlightAspectPreview(h)).filter(Boolean);
+        if (aspectSummary.length) summary += ` Structured highlight requirements: ${aspectSummary.join(' ')}`;
+    }
     const coverage = effectViews.length > 0;
     const roleViews = roles.slice(0, 3).map(role => ({
         role: SEARCH_INTENT_ROLE_LABELS[role.role] || String(role.role || '').replace(/_/g, ' '),
@@ -25850,7 +26090,7 @@ function refreshManaSearchIntentPanel() {
                 if (generation !== manaSearchIntentRenderGeneration) return;
                 renderManaSearchIntentModel(model);
                 setSearchIntentText(statusText, 'Live');
-                panel.dataset.intentKey = `${String(currentSourceCard?.name || '')}|${(manualHighlights || []).map(h => `${h.field || 'oracle'}:${h.mode || 'exact'}:${h.text}`).join('|')}`;
+                panel.dataset.intentKey = `${String(currentSourceCard?.name || '')}|${(manualHighlights || []).map(h => `${h.field || 'oracle'}:${h.mode || 'exact'}:${h.text}:${JSON.stringify(normalizeHighlightAspects(h.aspects))}`).join('|')}`;
             } catch (error) {
                 console.error('[ManaSearch] Search intent refresh failed:', error?.message || error);
                 body.replaceChildren();

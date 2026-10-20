@@ -7670,3 +7670,31 @@ body.light-theme .card-actions .edhrec-link-btn:hover {
     .source-comparison-radio-group { gap: 6px; }
     .source-comparison-radio span { width: 29px; height: 29px; }
 }
+
+/* Structured highlight aspects: compact, keyboard-accessible controls inside the existing editor. */
+.highlight-aspects {
+    display: grid;
+    gap: 6px;
+    margin-top: 10px;
+    padding: 9px;
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    background: color-mix(in srgb, var(--bg-primary) 72%, var(--bg-secondary));
+}
+.highlight-aspect-row {
+    display: grid;
+    grid-template-columns: minmax(76px, .45fr) minmax(0, 1fr);
+    align-items: center;
+    gap: 8px;
+    color: var(--text-muted);
+    font-size: 11px;
+}
+.highlight-aspect-row .highlight-edit-select { width: 100%; min-width: 0; }
+.highlight-aspect-colors { display: flex; flex-wrap: wrap; gap: 6px; }
+.highlight-aspect-color { display: inline-flex; align-items: center; gap: 4px; padding: 4px 7px; border: 1px solid var(--border-color); border-radius: 6px; font-size: 11px; cursor: pointer; }
+.highlight-aspect-color input { margin: 0; accent-color: var(--accent-color); }
+.highlight-aspect-preview { color: var(--text-muted); font-size: 11px; line-height: 1.4; }
+@media (max-width: 480px) {
+    .highlight-aspect-row { grid-template-columns: 1fr; gap: 3px; }
+    .highlight-aspects { padding: 8px; }
+}
