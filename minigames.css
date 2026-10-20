@@ -1,14 +1,26 @@
-/* v118 — isolated Guess the Source minigame shell and responsive gameplay UI. */
+/* v119 — self-contained Guess the Source minigame UI and aligned header launcher. */
 .minigames-launch-btn {
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    margin-top: 9px;
-    min-height: 34px;
-    padding: 6px 11px;
-    font-size: 11px;
+    margin: 0;
+    min-height: 36px;
+    padding: 7px 13px;
+    border: 1px solid var(--accent-color) !important;
+    border-radius: 9px;
+    color: #fff !important;
+    background: var(--accent-color) !important;
+    font-size: 12px;
     font-weight: 850;
     letter-spacing: .12em;
+    line-height: 1;
+    box-shadow: 0 3px 12px rgba(98, 0, 238, .2);
+}
+.minigames-launch-btn:hover,
+.minigames-launch-btn:focus-visible {
+    border-color: var(--accent-color) !important;
+    background: color-mix(in srgb, var(--accent-color) 85%, white) !important;
+    color: #fff !important;
 }
 .minigames-dialog {
     width: min(1120px, calc(100vw - 32px));
@@ -133,4 +145,53 @@ body:has(.minigames-dialog[open]) { overflow:hidden; }
     .minigames-known-check { grid-template-columns:23px minmax(0,1fr); }
     .minigames-known-check-grade { grid-column:2; text-align:left; }
     .minigames-ending-actions { display:grid; grid-template-columns:minmax(0,1fr); }
+}
+
+
+/* v119 header arrangement: the purple arcade launcher and helper sentence share a row. */
+.site-header .header-top {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+}
+.site-header .brand-block {
+    flex: 1 1 auto;
+    min-width: 0;
+}
+.site-header .brand-tools-row {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 13px;
+    margin-top: 10px;
+    min-width: 0;
+}
+.site-header .brand-tools-row .minigames-launch-btn {
+    flex: 0 0 auto;
+    margin: 0;
+}
+.site-header .brand-tools-row .search-hint {
+    flex: 1 1 320px;
+    width: auto;
+    max-width: none;
+    min-width: 0;
+    margin: 0;
+    padding: 0;
+    text-align: left;
+    font-size: 12px;
+    line-height: 1.45;
+}
+@media (max-width: 760px) {
+    .site-header .brand-tools-row {
+        align-items: center;
+        gap: 9px 11px;
+        margin-top: 11px;
+    }
+    .site-header .brand-tools-row .search-hint {
+        flex: 1 1 190px;
+        width: auto;
+        margin: 0;
+        padding: 0;
+        text-align: left;
+    }
 }

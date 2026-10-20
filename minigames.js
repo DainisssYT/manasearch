@@ -1,4 +1,4 @@
-/* ManaSearch Minigames — isolated UI and game state. Reads card/parser capabilities through ManaSearchApi. */
+/* ManaSearch Minigames v119 — self-contained runtime. Reads card/parser capabilities through ManaSearchApi. */
 (() => {
     'use strict';
 
@@ -754,6 +754,35 @@
         nameIndexReady = true;
     }
 
+    function readEmbeddedPuzzleData() {
+        const script = document.getElementById('minigames-puzzle-data');
+        if (!script) return null;
+        try { return JSON.parse(script.textContent || '{}'); }
+        catch (error) {
+            console.warn('[ManaSearch minigames] Embedded puzzle data could not be parsed.', error);
+            return null;
+        }
+    }
+
+    async function ensurePuzzleData() {
+        if (puzzles.length) return;
+        const embedded = readEmbeddedPuzzleData();
+        if (embedded) loadPuzzleData(embedded);
+        // Runtime data is embedded in index.html so a stale GitHub Pages deployment cannot
+        // break the game merely by omitting an extra JSON asset. Keep the external JSON as a
+        // backwards-compatible fallback for local/source builds without the embedded payload.
+        if (!puzzles.length) {
+            try {
+                const response = await fetch(CONFIG.puzzlePath, { cache: 'no-cache' });
+                if (response.ok) loadPuzzleData(await response.json());
+            } catch (error) {
+                console.warn('[ManaSearch minigames] External puzzle JSON unavailable; embedded data was attempted first.', error);
+            }
+        }
+        if (!puzzles.length) throw new Error('No starter puzzles could be validated against cards.bin.');
+        buildNameIndex();
+    }
+
     async function openMinigames() {
         if (!ui.dialog || !ui.registry) return;
         if (!ui.dialog.open) {
@@ -766,13 +795,7 @@
         try {
             if (!window.ManaSearchApi?.ready) throw new Error('ManaSearch card API is not available yet. Refresh the page and try again.');
             await window.ManaSearchApi.ready();
-            if (!puzzles.length) {
-                const response = await fetch(CONFIG.puzzlePath, { cache: 'no-cache' });
-                if (!response.ok) throw new Error(`Puzzle file returned HTTP ${response.status}`);
-                loadPuzzleData(await response.json());
-                buildNameIndex();
-            }
-            if (!puzzles.length) throw new Error('No starter puzzles passed validation against cards.bin.');
+            await ensurePuzzleData();
             renderList();
             setStatus(`${puzzles.length} puzzles ready. Practice is unlimited; Daily uses the same puzzle for everyone each UTC day.`, 'success');
         } catch (error) {
@@ -788,7 +811,12 @@
             ui.launch.dataset.minigamesBound = 'true';
             ui.launch.addEventListener('click', openMinigames);
         }
-        ui.close.addEventListener('click', () => ui.dialog.close());
+        if (ui.close && ui.close.dataset.closeBound !== 'true') {
+            ui.close.dataset.closeBound = 'true';
+            ui.close.addEventListener('click', () => {
+                if (ui.dialog.open) ui.dialog.close();
+            });
+        }
         ui.back.addEventListener('click', () => { showListView(); setStatus(''); });
         ui.dialog.addEventListener('close', () => ui.launch.setAttribute('aria-expanded', 'false'));
         ui.dialog.addEventListener('click', event => {
@@ -804,12 +832,7 @@
     /* Lightweight public regression harness; it does not issue a search or mutate search history. */
     async function runRegressionSuite() {
         await window.ManaSearchApi.ready();
-        if (!puzzles.length) {
-            const response = await fetch(CONFIG.puzzlePath, { cache: 'no-cache' });
-            if (!response.ok) throw new Error('Puzzle file unavailable');
-            loadPuzzleData(await response.json());
-            buildNameIndex();
-        }
+        await ensurePuzzleData();
         const cases = [
             { card: 'Sol Ring', text: '{T}: Add {C}{C}.', expected: 'green' },
             { card: 'Sol Ring', text: '{T}: Add {C}{C}', expected: 'green' },
