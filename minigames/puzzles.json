@@ -1,0 +1,1106 @@
+{
+  "schemaVersion": 1,
+  "source": "Curated starter pool; candidate ranks are intentionally sampled from the middle of a plausible similarity list so clues reveal closer matches later.",
+  "puzzles": [
+    {
+      "id": "sol-ring",
+      "answer": "Sol Ring",
+      "difficulty": "easy",
+      "candidates": [
+        {
+          "name": "Thought Vessel",
+          "rank": 32,
+          "revealAtWrongGuesses": 0,
+          "reason": "A low-cost mana rock that taps for mana and has a Commander-friendly utility effect."
+        },
+        {
+          "name": "Everflowing Chalice",
+          "rank": 36,
+          "revealAtWrongGuesses": 0,
+          "reason": "An artifact that can be tapped for mana, with its output tied to how it enters."
+        },
+        {
+          "name": "Worn Powerstone",
+          "rank": 40,
+          "revealAtWrongGuesses": 0,
+          "reason": "A mana-producing artifact whose drawback balances its ramp effect."
+        },
+        {
+          "name": "Fellwar Stone",
+          "rank": 26,
+          "revealAtWrongGuesses": 1,
+          "reason": "A two-mana artifact that taps to add mana, with color depending on lands opponents control."
+        },
+        {
+          "name": "Mind Stone",
+          "rank": 23,
+          "revealAtWrongGuesses": 1,
+          "reason": "A two-mana mana rock that can later be exchanged for a card."
+        },
+        {
+          "name": "Thran Dynamo",
+          "rank": 20,
+          "revealAtWrongGuesses": 4,
+          "reason": "A dedicated artifact ramp piece that produces multiple mana when tapped."
+        },
+        {
+          "name": "Mana Vault",
+          "rank": 17,
+          "revealAtWrongGuesses": 4,
+          "reason": "A fast mana artifact with a powerful burst of colorless mana and an upkeep drawback."
+        },
+        {
+          "name": "Arcane Signet",
+          "rank": 15,
+          "revealAtWrongGuesses": 4,
+          "reason": "A familiar two-mana mana rock used to accelerate a deck's mana."
+        }
+      ]
+    },
+    {
+      "id": "lightning-bolt",
+      "answer": "Lightning Bolt",
+      "difficulty": "easy",
+      "candidates": [
+        {
+          "name": "Lava Spike",
+          "rank": 36,
+          "revealAtWrongGuesses": 0,
+          "reason": "A cheap red spell that deals direct damage, but can target only a player."
+        },
+        {
+          "name": "Flame Slash",
+          "rank": 40,
+          "revealAtWrongGuesses": 0,
+          "reason": "A one-mana red damage spell designed to remove a creature."
+        },
+        {
+          "name": "Skewer the Critics",
+          "rank": 32,
+          "revealAtWrongGuesses": 0,
+          "reason": "A red direct-damage spell whose cost can be reduced by spectacle."
+        },
+        {
+          "name": "Firebolt",
+          "rank": 26,
+          "revealAtWrongGuesses": 1,
+          "reason": "A cheap red sorcery that deals direct damage and can be reused from the graveyard."
+        },
+        {
+          "name": "Play with Fire",
+          "rank": 23,
+          "revealAtWrongGuesses": 1,
+          "reason": "A one-mana red instant that damages any target and can provide card selection."
+        },
+        {
+          "name": "Shock",
+          "rank": 20,
+          "revealAtWrongGuesses": 4,
+          "reason": "A one-mana instant that deals a small amount of damage to any target."
+        },
+        {
+          "name": "Galvanic Blast",
+          "rank": 17,
+          "revealAtWrongGuesses": 4,
+          "reason": "A cheap red instant whose damage scales with artifact presence."
+        },
+        {
+          "name": "Abrade",
+          "rank": 15,
+          "revealAtWrongGuesses": 4,
+          "reason": "A flexible red instant that can damage a creature or destroy an artifact."
+        }
+      ]
+    },
+    {
+      "id": "cultivate",
+      "answer": "Cultivate",
+      "difficulty": "easy",
+      "candidates": [
+        {
+          "name": "Circuitous Route",
+          "rank": 38,
+          "revealAtWrongGuesses": 0,
+          "reason": "A ramp spell that searches a library and puts lands onto the battlefield."
+        },
+        {
+          "name": "Migration Path",
+          "rank": 35,
+          "revealAtWrongGuesses": 0,
+          "reason": "A land-ramp spell with cycling as a late-game option."
+        },
+        {
+          "name": "Search for Tomorrow",
+          "rank": 32,
+          "revealAtWrongGuesses": 0,
+          "reason": "A green spell that searches for a basic land, with suspend enabling an earlier setup."
+        },
+        {
+          "name": "Farseek",
+          "rank": 27,
+          "revealAtWrongGuesses": 1,
+          "reason": "A two-mana spell that searches for a land and puts it onto the battlefield tapped."
+        },
+        {
+          "name": "Nature's Lore",
+          "rank": 24,
+          "revealAtWrongGuesses": 1,
+          "reason": "A cheap green spell that searches for a Forest card and puts it onto the battlefield."
+        },
+        {
+          "name": "Three Visits",
+          "rank": 20,
+          "revealAtWrongGuesses": 4,
+          "reason": "A low-cost Forest-ramp spell with a similar deck-building role."
+        },
+        {
+          "name": "Rampant Growth",
+          "rank": 17,
+          "revealAtWrongGuesses": 4,
+          "reason": "A two-mana green spell that fetches a basic land onto the battlefield tapped."
+        },
+        {
+          "name": "Kodama's Reach",
+          "rank": 15,
+          "revealAtWrongGuesses": 4,
+          "reason": "A close analogue that finds two basic lands, putting one in hand and one onto the battlefield tapped."
+        }
+      ]
+    },
+    {
+      "id": "counterspell",
+      "answer": "Counterspell",
+      "difficulty": "medium",
+      "candidates": [
+        {
+          "name": "Disallow",
+          "rank": 38,
+          "revealAtWrongGuesses": 0,
+          "reason": "A blue instant that counters a spell, ability, or triggered ability."
+        },
+        {
+          "name": "Memory Lapse",
+          "rank": 35,
+          "revealAtWrongGuesses": 0,
+          "reason": "A counterspell that delays the opposing spell by putting it on top of its owner's library."
+        },
+        {
+          "name": "Wash Away",
+          "rank": 32,
+          "revealAtWrongGuesses": 0,
+          "reason": "A blue instant that can counter spells with a special focus on spells cast from elsewhere than hand."
+        },
+        {
+          "name": "Mana Leak",
+          "rank": 27,
+          "revealAtWrongGuesses": 1,
+          "reason": "A two-mana counterspell that can be paid around by spending extra mana."
+        },
+        {
+          "name": "Arcane Denial",
+          "rank": 24,
+          "revealAtWrongGuesses": 1,
+          "reason": "A flexible two-mana counterspell that compensates players with card draw."
+        },
+        {
+          "name": "Dovin's Veto",
+          "rank": 20,
+          "revealAtWrongGuesses": 4,
+          "reason": "A multicolor counterspell that cannot be countered and stops noncreature spells."
+        },
+        {
+          "name": "Negate",
+          "rank": 17,
+          "revealAtWrongGuesses": 4,
+          "reason": "A two-mana answer that counters noncreature spells."
+        },
+        {
+          "name": "Swan Song",
+          "rank": 15,
+          "revealAtWrongGuesses": 4,
+          "reason": "A one-mana counterspell for selected noncreature spells, giving the opponent a token."
+        }
+      ]
+    },
+    {
+      "id": "swords-to-plowshares",
+      "answer": "Swords to Plowshares",
+      "difficulty": "easy",
+      "candidates": [
+        {
+          "name": "Dispatch",
+          "rank": 39,
+          "revealAtWrongGuesses": 0,
+          "reason": "A white instant that exiles a creature, with metalcraft enabling a particularly efficient answer."
+        },
+        {
+          "name": "Lay Down Arms",
+          "rank": 35,
+          "revealAtWrongGuesses": 0,
+          "reason": "A cheap white removal spell that exiles a creature based on Plains controlled."
+        },
+        {
+          "name": "Banishing Light",
+          "rank": 32,
+          "revealAtWrongGuesses": 0,
+          "reason": "A white permanent-based answer that temporarily exiles an opposing nonland permanent."
+        },
+        {
+          "name": "Fateful Absence",
+          "rank": 27,
+          "revealAtWrongGuesses": 1,
+          "reason": "A white instant that destroys a creature or planeswalker but gives its controller a clue."
+        },
+        {
+          "name": "Get Lost",
+          "rank": 24,
+          "revealAtWrongGuesses": 1,
+          "reason": "A white instant that destroys a creature, enchantment, or planeswalker with a token drawback."
+        },
+        {
+          "name": "Path to Exile",
+          "rank": 20,
+          "revealAtWrongGuesses": 4,
+          "reason": "A one-mana white instant that exiles a creature and compensates its controller with a basic land."
+        },
+        {
+          "name": "Generous Gift",
+          "rank": 17,
+          "revealAtWrongGuesses": 4,
+          "reason": "An instant-speed answer that destroys any permanent and gives its controller a token."
+        },
+        {
+          "name": "Beast Within",
+          "rank": 15,
+          "revealAtWrongGuesses": 4,
+          "reason": "A broadly applicable instant that destroys a permanent and creates a creature token for its controller."
+        }
+      ]
+    },
+    {
+      "id": "sign-in-blood",
+      "answer": "Sign in Blood",
+      "difficulty": "medium",
+      "candidates": [
+        {
+          "name": "Ambition's Cost",
+          "rank": 39,
+          "revealAtWrongGuesses": 0,
+          "reason": "A black sorcery that draws cards in exchange for life."
+        },
+        {
+          "name": "Painful Truths",
+          "rank": 35,
+          "revealAtWrongGuesses": 0,
+          "reason": "A multicolor-aware draw spell that trades life for cards."
+        },
+        {
+          "name": "Reckoner's Bargain",
+          "rank": 32,
+          "revealAtWrongGuesses": 0,
+          "reason": "A black instant that sacrifices an artifact or creature to draw cards and gain life."
+        },
+        {
+          "name": "Deadly Dispute",
+          "rank": 27,
+          "revealAtWrongGuesses": 1,
+          "reason": "A sacrifice-based instant that draws two cards and creates a Treasure."
+        },
+        {
+          "name": "Plumb the Forbidden",
+          "rank": 24,
+          "revealAtWrongGuesses": 1,
+          "reason": "A black instant that can scale card draw by sacrificing creatures."
+        },
+        {
+          "name": "Read the Bones",
+          "rank": 20,
+          "revealAtWrongGuesses": 4,
+          "reason": "A black sorcery that draws two cards, costs life, and scries first."
+        },
+        {
+          "name": "Village Rites",
+          "rank": 17,
+          "revealAtWrongGuesses": 4,
+          "reason": "A one-mana instant that sacrifices a creature to draw two cards."
+        },
+        {
+          "name": "Night's Whisper",
+          "rank": 15,
+          "revealAtWrongGuesses": 4,
+          "reason": "A two-mana black sorcery that draws two cards at the cost of life."
+        }
+      ]
+    },
+    {
+      "id": "path-to-exile",
+      "answer": "Path to Exile",
+      "difficulty": "easy",
+      "candidates": [
+        {
+          "name": "Banishing Light",
+          "rank": 39,
+          "revealAtWrongGuesses": 0,
+          "reason": "A white answer that exiles a nonland permanent while the enchantment remains."
+        },
+        {
+          "name": "Dispatch",
+          "rank": 35,
+          "revealAtWrongGuesses": 0,
+          "reason": "A white instant that can exile a creature very efficiently with metalcraft."
+        },
+        {
+          "name": "Lay Down Arms",
+          "rank": 32,
+          "revealAtWrongGuesses": 0,
+          "reason": "A white spell that exiles a creature based on Plains controlled."
+        },
+        {
+          "name": "Get Lost",
+          "rank": 27,
+          "revealAtWrongGuesses": 1,
+          "reason": "A low-cost answer to creatures and other problematic permanent types."
+        },
+        {
+          "name": "Fateful Absence",
+          "rank": 24,
+          "revealAtWrongGuesses": 1,
+          "reason": "A white instant that removes a creature or planeswalker at a small card-advantage cost."
+        },
+        {
+          "name": "Swords to Plowshares",
+          "rank": 20,
+          "revealAtWrongGuesses": 4,
+          "reason": "A one-mana white instant that exiles a creature and gives its controller life."
+        },
+        {
+          "name": "Generous Gift",
+          "rank": 17,
+          "revealAtWrongGuesses": 4,
+          "reason": "Instant-speed removal for any permanent, with a 3/3 token as compensation."
+        },
+        {
+          "name": "Beast Within",
+          "rank": 15,
+          "revealAtWrongGuesses": 4,
+          "reason": "An instant that destroys any permanent and creates a 3/3 token for its controller."
+        }
+      ]
+    },
+    {
+      "id": "opt",
+      "answer": "Opt",
+      "difficulty": "easy",
+      "candidates": [
+        {
+          "name": "Ponder",
+          "rank": 39,
+          "revealAtWrongGuesses": 0,
+          "reason": "A one-mana blue spell that looks at cards and improves the next draw."
+        },
+        {
+          "name": "Preordain",
+          "rank": 35,
+          "revealAtWrongGuesses": 0,
+          "reason": "A cheap blue cantrip that scries before drawing a card."
+        },
+        {
+          "name": "Peek",
+          "rank": 32,
+          "revealAtWrongGuesses": 0,
+          "reason": "A one-mana blue cantrip that also reveals an opponent's hand."
+        },
+        {
+          "name": "Telling Time",
+          "rank": 27,
+          "revealAtWrongGuesses": 1,
+          "reason": "An instant that examines several cards and selects what to draw."
+        },
+        {
+          "name": "Impulse",
+          "rank": 24,
+          "revealAtWrongGuesses": 1,
+          "reason": "An instant-speed card-selection spell that looks at the top of the library."
+        },
+        {
+          "name": "Consider",
+          "rank": 20,
+          "revealAtWrongGuesses": 4,
+          "reason": "A blue instant that surveils before drawing a card."
+        },
+        {
+          "name": "Serum Visions",
+          "rank": 17,
+          "revealAtWrongGuesses": 4,
+          "reason": "A one-mana blue cantrip that draws first, then scries."
+        },
+        {
+          "name": "Sleight of Hand",
+          "rank": 15,
+          "revealAtWrongGuesses": 4,
+          "reason": "A one-mana spell that looks at two cards and keeps one in hand."
+        }
+      ]
+    },
+    {
+      "id": "arcane-signet",
+      "answer": "Arcane Signet",
+      "difficulty": "easy",
+      "candidates": [
+        {
+          "name": "Commander's Sphere",
+          "rank": 39,
+          "revealAtWrongGuesses": 0,
+          "reason": "A mana rock that taps for colored mana and can be sacrificed to draw a card."
+        },
+        {
+          "name": "Coldsteel Heart",
+          "rank": 35,
+          "revealAtWrongGuesses": 0,
+          "reason": "A two-mana artifact that enters tapped and produces one chosen color."
+        },
+        {
+          "name": "Marble Diamond",
+          "rank": 32,
+          "revealAtWrongGuesses": 0,
+          "reason": "A two-mana artifact that enters tapped and taps for white mana."
+        },
+        {
+          "name": "Fire Diamond",
+          "rank": 27,
+          "revealAtWrongGuesses": 1,
+          "reason": "A two-mana artifact that enters tapped and taps for red mana."
+        },
+        {
+          "name": "Thought Vessel",
+          "rank": 24,
+          "revealAtWrongGuesses": 1,
+          "reason": "A mana rock that also removes the maximum hand-size restriction."
+        },
+        {
+          "name": "Fellwar Stone",
+          "rank": 20,
+          "revealAtWrongGuesses": 4,
+          "reason": "A two-mana artifact that taps for mana based on lands controlled by opponents."
+        },
+        {
+          "name": "Mind Stone",
+          "rank": 17,
+          "revealAtWrongGuesses": 4,
+          "reason": "A two-mana artifact that ramps and can later be sacrificed to draw."
+        },
+        {
+          "name": "Sol Ring",
+          "rank": 15,
+          "revealAtWrongGuesses": 4,
+          "reason": "A highly efficient artifact that taps for two colorless mana."
+        }
+      ]
+    },
+    {
+      "id": "wrath-of-god",
+      "answer": "Wrath of God",
+      "difficulty": "medium",
+      "candidates": [
+        {
+          "name": "Austere Command",
+          "rank": 39,
+          "revealAtWrongGuesses": 0,
+          "reason": "A flexible white sweeper that lets the caster choose which permanent groups to destroy."
+        },
+        {
+          "name": "Farewell",
+          "rank": 35,
+          "revealAtWrongGuesses": 0,
+          "reason": "A white board wipe that can exile selected classes of cards from multiple zones."
+        },
+        {
+          "name": "Vanquish the Horde",
+          "rank": 32,
+          "revealAtWrongGuesses": 0,
+          "reason": "A creature sweeper whose cost decreases with the number of creatures on the battlefield."
+        },
+        {
+          "name": "Toxic Deluge",
+          "rank": 27,
+          "revealAtWrongGuesses": 1,
+          "reason": "A black sweeper that gives creatures -X/-X for life paid."
+        },
+        {
+          "name": "Blasphemous Act",
+          "rank": 24,
+          "revealAtWrongGuesses": 1,
+          "reason": "A red sweeper that deals damage to each creature, with a cost reduction based on creatures."
+        },
+        {
+          "name": "Damnation",
+          "rank": 20,
+          "revealAtWrongGuesses": 4,
+          "reason": "A four-mana sorcery that destroys all creatures without regeneration."
+        },
+        {
+          "name": "Day of Judgment",
+          "rank": 17,
+          "revealAtWrongGuesses": 4,
+          "reason": "A white sorcery that destroys all creatures."
+        },
+        {
+          "name": "Supreme Verdict",
+          "rank": 15,
+          "revealAtWrongGuesses": 4,
+          "reason": "A board wipe that destroys all creatures and cannot be countered."
+        }
+      ]
+    },
+    {
+      "id": "rampant-growth",
+      "answer": "Rampant Growth",
+      "difficulty": "easy",
+      "candidates": [
+        {
+          "name": "Migration Path",
+          "rank": 39,
+          "revealAtWrongGuesses": 0,
+          "reason": "A ramp sorcery that finds basic lands and puts them onto the battlefield tapped."
+        },
+        {
+          "name": "Circuitous Route",
+          "rank": 35,
+          "revealAtWrongGuesses": 0,
+          "reason": "A spell that searches for multiple lands and puts them directly onto the battlefield."
+        },
+        {
+          "name": "Search for Tomorrow",
+          "rank": 32,
+          "revealAtWrongGuesses": 0,
+          "reason": "A green spell that finds a basic land, with suspend providing an alternate timing profile."
+        },
+        {
+          "name": "Into the North",
+          "rank": 27,
+          "revealAtWrongGuesses": 1,
+          "reason": "A two-mana land-ramp spell that can find a snow land."
+        },
+        {
+          "name": "Farseek",
+          "rank": 24,
+          "revealAtWrongGuesses": 1,
+          "reason": "A two-mana spell that searches for a Plains, Island, Swamp, or Mountain card."
+        },
+        {
+          "name": "Sakura-Tribe Elder",
+          "rank": 20,
+          "revealAtWrongGuesses": 4,
+          "reason": "A creature that can sacrifice itself to find a basic land tapped."
+        },
+        {
+          "name": "Wood Elves",
+          "rank": 17,
+          "revealAtWrongGuesses": 4,
+          "reason": "A creature that searches for a Forest and puts it onto the battlefield."
+        },
+        {
+          "name": "Nature's Lore",
+          "rank": 15,
+          "revealAtWrongGuesses": 4,
+          "reason": "A cheap green spell that searches for a Forest and puts it onto the battlefield."
+        }
+      ]
+    },
+    {
+      "id": "brainstorm",
+      "answer": "Brainstorm",
+      "difficulty": "medium",
+      "candidates": [
+        {
+          "name": "Impulse",
+          "rank": 39,
+          "revealAtWrongGuesses": 0,
+          "reason": "An instant-speed blue card-selection spell that looks at multiple cards."
+        },
+        {
+          "name": "Frantic Search",
+          "rank": 35,
+          "revealAtWrongGuesses": 0,
+          "reason": "An instant that draws and discards cards, then untaps lands."
+        },
+        {
+          "name": "Faithless Looting",
+          "rank": 32,
+          "revealAtWrongGuesses": 0,
+          "reason": "A cheap card-selection spell that draws and discards, with flashback."
+        },
+        {
+          "name": "Serum Visions",
+          "rank": 27,
+          "revealAtWrongGuesses": 1,
+          "reason": "A one-mana cantrip followed by library manipulation."
+        },
+        {
+          "name": "Consider",
+          "rank": 24,
+          "revealAtWrongGuesses": 1,
+          "reason": "A one-mana instant that surveils before drawing."
+        },
+        {
+          "name": "Ponder",
+          "rank": 20,
+          "revealAtWrongGuesses": 4,
+          "reason": "A one-mana blue spell that examines and rearranges the top of the library before drawing."
+        },
+        {
+          "name": "Preordain",
+          "rank": 17,
+          "revealAtWrongGuesses": 4,
+          "reason": "A cheap cantrip that scries before replacing itself."
+        },
+        {
+          "name": "Sleight of Hand",
+          "rank": 15,
+          "revealAtWrongGuesses": 4,
+          "reason": "A one-mana sorcery that chooses one card from the top two."
+        }
+      ]
+    },
+    {
+      "id": "dark-ritual",
+      "answer": "Dark Ritual",
+      "difficulty": "medium",
+      "candidates": [
+        {
+          "name": "Rite of Flame",
+          "rank": 39,
+          "revealAtWrongGuesses": 0,
+          "reason": "A red ritual spell that generates mana immediately and scales with copies in graveyards."
+        },
+        {
+          "name": "Mana Geyser",
+          "rank": 35,
+          "revealAtWrongGuesses": 0,
+          "reason": "A red ritual-style spell whose mana output scales with tapped lands opponents control."
+        },
+        {
+          "name": "Seething Song",
+          "rank": 32,
+          "revealAtWrongGuesses": 0,
+          "reason": "A red ritual that converts mana into a larger burst of red mana."
+        },
+        {
+          "name": "Battle Hymn",
+          "rank": 27,
+          "revealAtWrongGuesses": 1,
+          "reason": "A red instant that generates mana based on the number of creatures its caster controls."
+        },
+        {
+          "name": "Bubbling Muck",
+          "rank": 24,
+          "revealAtWrongGuesses": 1,
+          "reason": "A black ritual-like spell that boosts Swamp mana for the turn."
+        },
+        {
+          "name": "Rain of Filth",
+          "rank": 20,
+          "revealAtWrongGuesses": 4,
+          "reason": "A black instant that trades lands for additional black mana during the turn."
+        },
+        {
+          "name": "Culling the Weak",
+          "rank": 17,
+          "revealAtWrongGuesses": 4,
+          "reason": "A black instant that sacrifices a creature to add a burst of black mana."
+        },
+        {
+          "name": "Songs of the Damned",
+          "rank": 15,
+          "revealAtWrongGuesses": 4,
+          "reason": "A one-mana black instant that scales mana production with creatures in the graveyard."
+        }
+      ]
+    },
+    {
+      "id": "kodamas-reach",
+      "answer": "Kodama's Reach",
+      "difficulty": "easy",
+      "candidates": [
+        {
+          "name": "Circuitous Route",
+          "rank": 39,
+          "revealAtWrongGuesses": 0,
+          "reason": "A ramp spell that searches for lands and puts them directly onto the battlefield."
+        },
+        {
+          "name": "Migration Path",
+          "rank": 35,
+          "revealAtWrongGuesses": 0,
+          "reason": "A four-mana spell that finds two basic lands and offers cycling."
+        },
+        {
+          "name": "Search for Tomorrow",
+          "rank": 32,
+          "revealAtWrongGuesses": 0,
+          "reason": "A green spell that finds a basic land and can be cast early via suspend."
+        },
+        {
+          "name": "Farseek",
+          "rank": 27,
+          "revealAtWrongGuesses": 1,
+          "reason": "A two-mana green spell that finds a selected non-Forest basic land type."
+        },
+        {
+          "name": "Three Visits",
+          "rank": 24,
+          "revealAtWrongGuesses": 1,
+          "reason": "A cheap green land search spell that puts a Forest onto the battlefield."
+        },
+        {
+          "name": "Cultivate",
+          "rank": 20,
+          "revealAtWrongGuesses": 4,
+          "reason": "A three-mana sorcery that finds two basic lands, putting one onto the battlefield tapped and one in hand."
+        },
+        {
+          "name": "Rampant Growth",
+          "rank": 17,
+          "revealAtWrongGuesses": 4,
+          "reason": "A two-mana sorcery that searches for one basic land to put onto the battlefield tapped."
+        },
+        {
+          "name": "Nature's Lore",
+          "rank": 15,
+          "revealAtWrongGuesses": 4,
+          "reason": "A low-cost green spell that finds a Forest and puts it onto the battlefield."
+        }
+      ]
+    },
+    {
+      "id": "thoughtseize",
+      "answer": "Thoughtseize",
+      "difficulty": "medium",
+      "candidates": [
+        {
+          "name": "Agonizing Remorse",
+          "rank": 39,
+          "revealAtWrongGuesses": 0,
+          "reason": "A black discard spell that can exile a card from hand or graveyard at a life cost."
+        },
+        {
+          "name": "Despise",
+          "rank": 35,
+          "revealAtWrongGuesses": 0,
+          "reason": "A one-mana discard spell that chooses a creature or planeswalker card from hand."
+        },
+        {
+          "name": "Distress",
+          "rank": 32,
+          "revealAtWrongGuesses": 0,
+          "reason": "A black sorcery that reveals a hand and discards a nonland card."
+        },
+        {
+          "name": "Collective Brutality",
+          "rank": 27,
+          "revealAtWrongGuesses": 1,
+          "reason": "A modal black spell that can make an opponent discard while offering other modes."
+        },
+        {
+          "name": "Hymn to Tourach",
+          "rank": 24,
+          "revealAtWrongGuesses": 1,
+          "reason": "A black spell that forces an opponent to discard two cards at random."
+        },
+        {
+          "name": "Duress",
+          "rank": 20,
+          "revealAtWrongGuesses": 4,
+          "reason": "A one-mana hand-disruption spell that takes a noncreature, nonland card."
+        },
+        {
+          "name": "Inquisition of Kozilek",
+          "rank": 17,
+          "revealAtWrongGuesses": 4,
+          "reason": "A one-mana discard spell targeting a card with mana value three or less."
+        },
+        {
+          "name": "Thought Erasure",
+          "rank": 15,
+          "revealAtWrongGuesses": 4,
+          "reason": "A two-color spell that reveals a hand, discards a nonland card, and surveils."
+        }
+      ]
+    },
+    {
+      "id": "doom-blade",
+      "answer": "Doom Blade",
+      "difficulty": "easy",
+      "candidates": [
+        {
+          "name": "Terror",
+          "rank": 39,
+          "revealAtWrongGuesses": 0,
+          "reason": "A low-cost black instant that destroys a creature with restrictions."
+        },
+        {
+          "name": "Cast Down",
+          "rank": 35,
+          "revealAtWrongGuesses": 0,
+          "reason": "A two-mana black instant that destroys a nonlegendary creature."
+        },
+        {
+          "name": "Murder",
+          "rank": 32,
+          "revealAtWrongGuesses": 0,
+          "reason": "A straightforward black instant that destroys a creature."
+        },
+        {
+          "name": "Heartless Act",
+          "rank": 27,
+          "revealAtWrongGuesses": 1,
+          "reason": "A black instant that destroys a creature or removes counters, depending on its state."
+        },
+        {
+          "name": "Ultimate Price",
+          "rank": 24,
+          "revealAtWrongGuesses": 1,
+          "reason": "A two-mana black instant that destroys a monocolored creature."
+        },
+        {
+          "name": "Infernal Grasp",
+          "rank": 20,
+          "revealAtWrongGuesses": 4,
+          "reason": "An instant-speed creature removal spell that costs its caster life."
+        },
+        {
+          "name": "Go for the Throat",
+          "rank": 17,
+          "revealAtWrongGuesses": 4,
+          "reason": "A two-mana instant that destroys a nonartifact creature."
+        },
+        {
+          "name": "Feed the Swarm",
+          "rank": 15,
+          "revealAtWrongGuesses": 4,
+          "reason": "A black sorcery that can destroy an enchantment or creature for life."
+        }
+      ]
+    },
+    {
+      "id": "negate",
+      "answer": "Negate",
+      "difficulty": "medium",
+      "candidates": [
+        {
+          "name": "Wash Away",
+          "rank": 39,
+          "revealAtWrongGuesses": 0,
+          "reason": "A blue counterspell whose alternate cost can target spells cast from outside hand."
+        },
+        {
+          "name": "Memory Lapse",
+          "rank": 35,
+          "revealAtWrongGuesses": 0,
+          "reason": "A counterspell that delays an opponent's spell by putting it on top of the library."
+        },
+        {
+          "name": "Dispel",
+          "rank": 32,
+          "revealAtWrongGuesses": 0,
+          "reason": "A one-mana answer that counters an instant spell."
+        },
+        {
+          "name": "Mana Leak",
+          "rank": 27,
+          "revealAtWrongGuesses": 1,
+          "reason": "A cheap counterspell that requires extra mana to avoid being countered."
+        },
+        {
+          "name": "Spell Pierce",
+          "rank": 24,
+          "revealAtWrongGuesses": 1,
+          "reason": "A one-mana answer to noncreature spells with a tax clause."
+        },
+        {
+          "name": "Swan Song",
+          "rank": 20,
+          "revealAtWrongGuesses": 4,
+          "reason": "A one-mana instant that counters an enchantment, instant, or sorcery and gives a token."
+        },
+        {
+          "name": "Arcane Denial",
+          "rank": 17,
+          "revealAtWrongGuesses": 4,
+          "reason": "A flexible counterspell that gives card draw to both players."
+        },
+        {
+          "name": "Dovin's Veto",
+          "rank": 15,
+          "revealAtWrongGuesses": 4,
+          "reason": "A counterspell for noncreature spells that cannot be countered."
+        }
+      ]
+    },
+    {
+      "id": "mulldrifter",
+      "answer": "Mulldrifter",
+      "difficulty": "medium",
+      "candidates": [
+        {
+          "name": "Cloudblazer",
+          "rank": 39,
+          "revealAtWrongGuesses": 0,
+          "reason": "A flying creature that gains life and draws cards when it enters."
+        },
+        {
+          "name": "Wall of Omens",
+          "rank": 35,
+          "revealAtWrongGuesses": 0,
+          "reason": "A defensive creature that replaces itself with a card when it enters."
+        },
+        {
+          "name": "Spirited Companion",
+          "rank": 32,
+          "revealAtWrongGuesses": 0,
+          "reason": "A small creature that draws a card on entering the battlefield."
+        },
+        {
+          "name": "Charming Prince",
+          "rank": 27,
+          "revealAtWrongGuesses": 1,
+          "reason": "A small creature with modes including life gain and temporary flicker."
+        },
+        {
+          "name": "Sea Gate Oracle",
+          "rank": 24,
+          "revealAtWrongGuesses": 1,
+          "reason": "A creature that looks at cards and keeps one when it enters."
+        },
+        {
+          "name": "Elvish Visionary",
+          "rank": 20,
+          "revealAtWrongGuesses": 4,
+          "reason": "A two-mana creature that draws a card when it enters the battlefield."
+        },
+        {
+          "name": "Inspiring Overseer",
+          "rank": 17,
+          "revealAtWrongGuesses": 4,
+          "reason": "A flying creature that gains life and draws a card on entry."
+        },
+        {
+          "name": "Behold the Multiverse",
+          "rank": 15,
+          "revealAtWrongGuesses": 4,
+          "reason": "An instant-speed card advantage spell with foretell."
+        }
+      ]
+    },
+    {
+      "id": "eternal-witness",
+      "answer": "Eternal Witness",
+      "difficulty": "medium",
+      "candidates": [
+        {
+          "name": "Phyrexian Reclamation",
+          "rank": 39,
+          "revealAtWrongGuesses": 0,
+          "reason": "An enchantment that returns creatures from the graveyard to hand for a life payment."
+        },
+        {
+          "name": "Archaeomancer",
+          "rank": 35,
+          "revealAtWrongGuesses": 0,
+          "reason": "A creature that returns an instant or sorcery from graveyard to hand."
+        },
+        {
+          "name": "Snapcaster Mage",
+          "rank": 32,
+          "revealAtWrongGuesses": 0,
+          "reason": "A flash creature that grants a graveyard instant or sorcery flashback."
+        },
+        {
+          "name": "Bala Ged Recovery",
+          "rank": 27,
+          "revealAtWrongGuesses": 1,
+          "reason": "A modal double-faced card whose spell face returns a card from graveyard to hand."
+        },
+        {
+          "name": "Noxious Revival",
+          "rank": 24,
+          "revealAtWrongGuesses": 1,
+          "reason": "A low-cost instant that puts a card from a graveyard on top of its owner's library."
+        },
+        {
+          "name": "Regrowth",
+          "rank": 20,
+          "revealAtWrongGuesses": 4,
+          "reason": "A green sorcery that returns a card from the graveyard to hand."
+        },
+        {
+          "name": "Seasons Past",
+          "rank": 17,
+          "revealAtWrongGuesses": 4,
+          "reason": "A spell that returns several cards of different mana values from graveyard to hand."
+        },
+        {
+          "name": "Reclamation Sage",
+          "rank": 15,
+          "revealAtWrongGuesses": 4,
+          "reason": "A creature with an enters-the-battlefield ability that destroys an artifact or enchantment."
+        }
+      ]
+    },
+    {
+      "id": "beast-within",
+      "answer": "Beast Within",
+      "difficulty": "medium",
+      "candidates": [
+        {
+          "name": "Stroke of Midnight",
+          "rank": 39,
+          "revealAtWrongGuesses": 0,
+          "reason": "A white instant that destroys a nonland permanent and creates a small token."
+        },
+        {
+          "name": "Chaos Warp",
+          "rank": 35,
+          "revealAtWrongGuesses": 0,
+          "reason": "A red instant that shuffles a permanent away and may reveal a replacement."
+        },
+        {
+          "name": "Rapid Hybridization",
+          "rank": 32,
+          "revealAtWrongGuesses": 0,
+          "reason": "A one-mana instant that destroys a creature and gives its controller a token creature."
+        },
+        {
+          "name": "Reality Shift",
+          "rank": 27,
+          "revealAtWrongGuesses": 1,
+          "reason": "A blue instant that exiles a creature and gives its controller a manifest replacement."
+        },
+        {
+          "name": "Pongify",
+          "rank": 24,
+          "revealAtWrongGuesses": 1,
+          "reason": "A one-mana instant that destroys a creature and creates an Ape token."
+        },
+        {
+          "name": "Generous Gift",
+          "rank": 20,
+          "revealAtWrongGuesses": 4,
+          "reason": "An instant that can destroy any permanent and compensate its controller with a token."
+        },
+        {
+          "name": "Infernal Grasp",
+          "rank": 17,
+          "revealAtWrongGuesses": 4,
+          "reason": "An instant that destroys a creature at a life cost."
+        },
+        {
+          "name": "Get Lost",
+          "rank": 15,
+          "revealAtWrongGuesses": 4,
+          "reason": "A cheap white answer that destroys a selected permanent type with a token drawback."
+        }
+      ]
+    }
+  ]
+}

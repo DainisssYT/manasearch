@@ -1,0 +1,156 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <base href="../">
+  <title>ManaSearch minigame browser smoke test</title>
+  <link rel="stylesheet" href="minigames.css?v=20261020-117">
+  <style>
+    body { padding: 20px; }
+    #smoke-results { white-space: pre-wrap; font: 13px/1.6 ui-monospace, monospace; }
+    .smoke-pass { color: #16834d; } .smoke-fail { color: #b42318; }
+  </style>
+</head>
+<body>
+  <h1>Minigame browser smoke test</h1>
+  <p>This test uses a tiny mock card API to exercise the minigame UI and persistence without downloading the project’s bundled card data.</p>
+  <pre id="smoke-results">Starting…</pre>
+  <div>
+    <button id="minigames-btn" aria-expanded="false">MINIGAMES</button>
+    <dialog id="minigames-dialog" aria-labelledby="minigames-title">
+      <div class="minigames-dialog-shell">
+        <div class="minigames-dialog-heading"><div><span class="minigames-eyebrow">MANA SEARCH ARCADE</span><h2 id="minigames-title">Minigames</h2><p>Smoke fixture</p></div><button id="minigames-close">×</button></div>
+        <p id="minigames-status" class="minigames-status" role="status" aria-live="polite"></p>
+        <section id="minigames-list-view"><div id="minigames-stats" class="minigames-stats"></div><div id="minigames-registry" class="minigames-registry"></div></section>
+        <section id="minigames-game-view" hidden><div class="minigames-game-nav"><button id="minigames-back" class="minigames-button">← All minigames</button><span id="minigames-mode-label"></span></div><div id="minigames-active-game"></div></section>
+      </div>
+    </dialog>
+  </div>
+  <div id="results-grid">Baseline search result DOM. Minigames must leave this untouched.</div>
+  <ul id="history-list"><li>Baseline search history. Minigames must leave this untouched.</li></ul>
+  <script>
+  (() => {
+    const norm = s => String(s || '').normalize('NFKD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim().replace(/\s+/g, ' ');
+    let cards = new Map();
+    let dataset = null;
+    const datasetPromise = fetch('minigames/puzzles.json').then(r => r.json()).then(data => {
+      dataset = data;
+      for (const puzzle of data.puzzles) {
+        const names = [puzzle.answer, ...puzzle.candidates.map(c => c.name)];
+        for (const name of names) {
+          const key = norm(name);
+          if (!cards.has(key)) {
+            let oracle = 'When this card enters the battlefield, draw a card.';
+            if (name === 'Sol Ring') oracle = '{T}: Add {C}{C}.';
+            if (name === 'Lightning Bolt') oracle = 'Lightning Bolt deals 3 damage to any target.';
+            if (name === 'Doom Blade') oracle = 'Destroy target nonblack creature.';
+            if (name === 'Opt') oracle = 'Scry 1. (Look at the top card of your library. You may put that card on the bottom of your library.) Draw a card.';
+            if (name === 'Cultivate') oracle = 'Search your library for up to two basic land cards, reveal those cards, put one onto the battlefield tapped and the other into your hand, then shuffle.';
+            if (name === 'Sign in Blood') oracle = 'Target player draws two cards and loses 2 life.';
+            cards.set(key, { id: key, name, oracle_text: oracle, type_line: 'Artifact', cmc: 2, color_identity: [], imageUrl: '' });
+          }
+        }
+      }
+      return data;
+    });
+    window.__smokeOpenedCard = '';
+    window.ManaSearchApi = Object.freeze({
+      async ready() { await datasetPromise; return true; },
+      getCardByName(name) { return cards.get(norm(name)) || null; },
+      getCardNames() { return [...cards.values()].map(card => ({ name: card.name })); },
+      getOracleText(card) { return card?.oracle_text || ''; },
+      parseEffects(text) {
+        const value = String(text || '');
+        let fn = null;
+        if (/\badd\b.*(?:\{[wubrgcs]\}|\bmana\b)/i.test(value) || /\btap for mana\b/i.test(value)) fn = 'add_mana';
+        else if (/damage/i.test(value)) fn = 'damage';
+        else if (/counter target spell/i.test(value)) fn = 'counter_spell';
+        else if (/draw/i.test(value)) fn = 'draw_cards';
+        else if (/destroy/i.test(value)) fn = 'destroy';
+        return fn ? [{ action: fn, canonical: { function: fn, outcome: fn }, raw: value }] : [];
+      },
+      scoreEffectMatch(a, b) { return a?.canonical?.function && a.canonical.function === b?.canonical?.function ? 0.8 : 0; },
+      assignEffects(a, b) {
+        for (let i = 0; i < (a || []).length; i++) {
+          for (let j = 0; j < (b || []).length; j++) {
+            if (a[i]?.canonical?.function && a[i].canonical.function === b[j]?.canonical?.function) return { score: 0.8, matches: [[i, j, 0.8]] };
+          }
+        }
+        return { score: 0, matches: [] };
+      },
+      async openCard(name) { window.__smokeOpenedCard = name; return true; }
+    });
+    window.__smokeDatasetPromise = datasetPromise;
+  })();
+  </script>
+  <script type="module" src="minigames.js?v=20261020-117"></script>
+  <script type="module">
+    const out = document.getElementById('smoke-results');
+    const checks = [];
+    const assert = (name, condition, detail = '') => checks.push({ name, pass: !!condition, detail });
+    const waitFor = async (predicate, timeout = 9000) => {
+      const started = Date.now();
+      while (Date.now() - started < timeout) {
+        if (predicate()) return true;
+        await new Promise(resolve => setTimeout(resolve, 40));
+      }
+      return false;
+    };
+    const snapshotMain = () => JSON.stringify({
+      results: document.getElementById('results-grid').innerHTML,
+      history: document.getElementById('history-list').innerHTML,
+      storage: Object.keys(localStorage).filter(key => !key.startsWith('manaSearchMinigames:')).sort().map(key => [key, localStorage.getItem(key)])
+    });
+    const run = async () => {
+      await window.__smokeDatasetPromise;
+      await waitFor(() => window.ManaSearchMinigames && document.getElementById('minigames-btn').onclick === null);
+      localStorage.clear();
+      localStorage.setItem('manaSearchHistory', '["baseline"]');
+      document.getElementById('minigames-btn').click();
+      assert('dialog opens', document.getElementById('minigames-dialog').open);
+      assert('puzzles load', await waitFor(() => /puzzles ready/i.test(document.getElementById('minigames-status').textContent)));
+      const gradingReport = await window.runManaSearchMinigameRegressionSuite();
+      assert('30 ability grading examples', gradingReport.total === 30 && gradingReport.ok, `${gradingReport.passed}/${gradingReport.total} grading examples passed`);
+      const mainBefore = snapshotMain();
+      const practiceButton = [...document.querySelectorAll('#minigames-registry button')].find(button => button.textContent === 'Practice');
+      assert('practice option is present', !!practiceButton);
+      practiceButton?.click();
+      assert('game view opens', await waitFor(() => !document.getElementById('minigames-game-view').hidden && !!document.getElementById('minigames-name-input')));
+      const gameBefore = JSON.parse(localStorage.getItem('manaSearchMinigames:v1:practice') || 'null');
+      const puzzleData = await fetch('minigames/puzzles.json').then(r => r.json());
+      const activePuzzle = puzzleData.puzzles.find(puzzle => puzzle.id === gameBefore?.puzzleId);
+      const firstCandidate = document.querySelector('.minigames-candidate-name')?.textContent;
+      const nameInput = document.getElementById('minigames-name-input');
+      nameInput.value = firstCandidate || activePuzzle?.candidates?.[0]?.name || 'Shock';
+      document.querySelector('.minigames-guess-form').requestSubmit();
+      assert('wrong guess spends one guess', JSON.parse(localStorage.getItem('manaSearchMinigames:v1:practice') || 'null')?.wrongGuesses === 1);
+      assert('clue ladder reveals five candidates after one miss', document.querySelectorAll('.minigames-candidate-card').length === 5);
+      const abilityInput = document.getElementById('minigames-ability-input');
+      abilityInput.value = 'draw a card';
+      document.querySelector('.minigames-ability-form').requestSubmit();
+      assert('valid ability check is saved', JSON.parse(localStorage.getItem('manaSearchMinigames:v1:practice') || 'null')?.abilityChecks.length === 1);
+      const duplicateInput = document.getElementById('minigames-ability-input');
+      duplicateInput.value = 'draw a card';
+      document.querySelector('.minigames-ability-form').requestSubmit();
+      assert('duplicate ability check does not spend another check', JSON.parse(localStorage.getItem('manaSearchMinigames:v1:practice') || 'null')?.abilityChecks.length === 1);
+      const answerInput = document.getElementById('minigames-name-input');
+      answerInput.value = activePuzzle.answer;
+      document.querySelector('.minigames-guess-form').requestSubmit();
+      assert('correct answer wins', await waitFor(() => JSON.parse(localStorage.getItem('manaSearchMinigames:v1:practice') || 'null')?.status === 'won'));
+      assert('ending reveals card and open action', !!document.querySelector('.minigames-answer-reveal .minigames-button-primary'));
+      assert('non-minigame results/history/storage stay untouched', snapshotMain() === mainBefore);
+      document.querySelector('.minigames-answer-reveal .minigames-button-primary')?.click();
+      assert('Open in ManaSearch uses the explicit API action', await waitFor(() => window.__smokeOpenedCard === activePuzzle.answer));
+      out.className = checks.every(check => check.pass) ? 'smoke-pass' : 'smoke-fail';
+      out.textContent = checks.map(check => `${check.pass ? 'PASS' : 'FAIL'} — ${check.name}${check.detail ? ` (${check.detail})` : ''}`).join('\n') + `\n\n${checks.filter(check => check.pass).length}/${checks.length} checks passed.`;
+      document.documentElement.dataset.smoke = checks.every(check => check.pass) ? 'pass' : 'fail';
+    };
+    run().catch(error => {
+      out.className = 'smoke-fail';
+      out.textContent += `\nERROR — ${error?.stack || error}`;
+      document.documentElement.dataset.smoke = 'error';
+    });
+  </script>
+</body>
+</html>

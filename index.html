@@ -5,7 +5,8 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>ManaSearch</title>
-    <link rel="stylesheet" href="style.css?v=20261019-116">
+    <link rel="stylesheet" href="style.css?v=20261020-117">
+    <link rel="stylesheet" href="minigames.css?v=20261020-117">
 </head>
 <body>
     <header class="site-header">
@@ -13,6 +14,7 @@
             <div class="brand-block">
                 <h1>ManaSearch</h1>
                 <p class="brand-subtitle">MTG similarity search by mechanics, function, and context</p>
+                <button type="button" id="minigames-btn" class="header-action-btn guided-tour-header-btn minigames-launch-btn" aria-haspopup="dialog" aria-controls="minigames-dialog" aria-expanded="false">MINIGAMES</button>
             </div>
             <div class="header-actions">
                 <button type="button" id="start-onboarding-tour-btn" class="header-action-btn guided-tour-header-btn" aria-label="Start guided tour">Guided tour</button>
@@ -1000,6 +1002,32 @@
         </div>
     </div>
 
+    <!-- MINIGAMES: isolated dialog; gameplay never runs or changes a similarity search. -->
+    <dialog id="minigames-dialog" class="minigames-dialog" aria-labelledby="minigames-title">
+        <div class="minigames-dialog-shell">
+            <div class="minigames-dialog-heading">
+                <div>
+                    <span class="minigames-eyebrow">MANA SEARCH ARCADE</span>
+                    <h2 id="minigames-title">Minigames</h2>
+                    <p>Practice recognizing card mechanics. Progress and stats are saved in this browser.</p>
+                </div>
+                <button type="button" id="minigames-close" class="minigames-close" aria-label="Close minigames">×</button>
+            </div>
+            <p id="minigames-status" class="minigames-status" role="status" aria-live="polite"></p>
+            <section id="minigames-list-view" class="minigames-list-view" aria-label="Available minigames">
+                <div id="minigames-stats" class="minigames-stats" aria-label="Guess the Source statistics"></div>
+                <div id="minigames-registry" class="minigames-registry"></div>
+            </section>
+            <section id="minigames-game-view" class="minigames-game-view" aria-label="Active minigame" hidden>
+                <div class="minigames-game-nav">
+                    <button type="button" id="minigames-back" class="minigames-button">← All minigames</button>
+                    <span id="minigames-mode-label" class="minigames-mode-label">PRACTICE</span>
+                </div>
+                <div id="minigames-active-game"></div>
+            </section>
+        </div>
+    </dialog>
+
     <!-- CARD COMPARISON MODAL -->
     <div id="compare-modal" class="hidden" role="dialog" aria-modal="true" aria-labelledby="compare-modal-title">
         <div class="modal-content">
@@ -1028,7 +1056,8 @@
         import * as transformers from "https://cdn.jsdelivr.net/npm/@xenova/transformers@2.16.0";
         window.transformers = transformers;
     </script>
-    <script src="pako.min.js?v=20261019-116"></script>
-    <script type="module" src="app.js?v=20261019-116"></script>
+    <script src="pako.min.js?v=20261020-117"></script>
+    <script type="module" src="app.js?v=20261020-117"></script>
+    <script type="module" src="minigames.js?v=20261020-117"></script>
 </body>
 </html>

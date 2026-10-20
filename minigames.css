@@ -1,0 +1,136 @@
+/* v117 — isolated Guess the Source minigame shell and responsive gameplay UI. */
+.minigames-launch-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    margin-top: 9px;
+    min-height: 34px;
+    padding: 6px 11px;
+    font-size: 11px;
+    font-weight: 850;
+    letter-spacing: .12em;
+}
+.minigames-dialog {
+    width: min(1120px, calc(100vw - 32px));
+    max-width: none;
+    max-height: min(92dvh, 940px);
+    padding: 0;
+    overflow: hidden;
+    color: var(--text-main);
+    background: var(--bg-primary);
+    border: 1px solid var(--border-color);
+    border-top: 3px solid var(--accent-color);
+    border-radius: 18px;
+    box-shadow: 0 28px 100px rgba(0, 0, 0, .62);
+}
+.minigames-dialog::backdrop { background: rgba(4, 5, 10, .78); }
+.minigames-dialog-shell {
+    max-height: min(92dvh, 940px);
+    padding: clamp(16px, 3vw, 28px);
+    overflow-y: auto;
+    overscroll-behavior: contain;
+}
+.minigames-dialog-heading { display:flex; align-items:flex-start; justify-content:space-between; gap:20px; }
+.minigames-dialog-heading h2 { margin: 3px 0 2px; font-size: clamp(24px, 3.3vw, 32px); line-height:1.15; }
+.minigames-dialog-heading p { margin: 7px 0 0; max-width: 62ch; color:var(--text-muted); font-size:13px; }
+.minigames-eyebrow { display:block; color:var(--accent-color); font-size:10px; font-weight:900; letter-spacing:.15em; line-height:1.4; }
+.minigames-close { flex:0 0 40px; width:40px; height:40px; min-width:40px; padding:0; display:inline-flex; align-items:center; justify-content:center; border:1px solid var(--border-color); border-radius:11px; color:var(--text-main); background:var(--bg-secondary); font-size:25px; line-height:1; }
+.minigames-status { min-height:0; margin: 12px 0 0; color:var(--text-muted); font-size:12px; }
+.minigames-status:empty { display:none; }
+.minigames-status.is-success { color:#77d5a2; }
+.minigames-status.is-warning { color:#e9bd6e; }
+.minigames-stats { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:9px; margin: 20px 0 16px; }
+.minigames-stat { min-width:0; padding:11px 13px; border:1px solid var(--border-color); border-radius:12px; background:var(--bg-secondary); }
+.minigames-stat-value { display:block; font-size:22px; font-weight:850; line-height:1.25; font-variant-numeric:tabular-nums; }
+.minigames-stat-label { display:block; margin-top:3px; color:var(--text-muted); font-size:10px; text-transform:uppercase; letter-spacing:.07em; }
+.minigames-registry { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px; }
+.minigames-registry-card { min-width:0; padding:17px; border:1px solid var(--border-color); border-radius:14px; background:var(--bg-secondary); display:flex; flex-direction:column; align-items:flex-start; gap:9px; }
+.minigames-registry-card.is-built { border-color:color-mix(in srgb, var(--accent-color) 42%, var(--border-color)); }
+.minigames-registry-card h3 { margin:0; font-size:17px; line-height:1.25; }
+.minigames-registry-card p { margin:0; color:var(--text-muted); font-size:12px; line-height:1.55; }
+.minigames-registry-card-top { display:flex; align-items:center; justify-content:space-between; gap:8px; width:100%; }
+.minigames-registry-kicker { color:var(--text-muted); font-size:9px; letter-spacing:.12em; font-weight:850; }
+.minigames-coming-badge { padding:3px 7px; border:1px solid var(--border-color); border-radius:999px; color:var(--text-muted); font-size:10px; white-space:nowrap; }
+.minigames-registry-detail { margin-top:auto !important; padding-top:3px; }
+.minigames-registry-actions { width:100%; display:flex; gap:8px; margin-top:4px; }
+.minigames-button { min-height:38px; padding:8px 12px; border:1px solid var(--border-color); border-radius:9px; color:var(--text-main); background:var(--bg-accent); font-size:12px; font-weight:750; }
+.minigames-button:hover:not(:disabled) { border-color:var(--accent-color); }
+.minigames-button-primary { color:white; background:var(--accent-color); border-color:var(--accent-color); }
+.minigames-registry-actions .minigames-button { flex:1; }
+.minigames-game-nav { display:flex; align-items:center; justify-content:space-between; gap:12px; margin: 12px 0 16px; }
+.minigames-mode-label { padding:5px 9px; border:1px solid var(--border-color); border-radius:999px; color:var(--text-muted); font-size:10px; font-weight:800; letter-spacing:.1em; }
+.minigames-game-title-row { display:flex; align-items:center; justify-content:space-between; gap:16px; margin-bottom:13px; }
+.minigames-game-title { margin:2px 0 0; font-size:clamp(20px, 3vw, 28px); line-height:1.2; }
+.minigames-progress-row { display:flex; align-items:center; flex-wrap:wrap; gap:10px 15px; margin-bottom:15px; padding:10px 12px; background:var(--bg-secondary); border:1px solid var(--border-color); border-radius:11px; }
+.minigames-guess-dots { display:flex; gap:4px; font-size:17px; line-height:1; letter-spacing:1px; }
+.minigames-guess-dot { color:var(--text-muted); }
+.minigames-guess-dot.is-used { color:#e5a45a; }
+.minigames-progress-label { color:var(--text-muted); font-size:11px; }
+.minigames-game-grid { display:grid; grid-template-columns:minmax(0, 1.55fr) minmax(260px, .8fr); gap:13px; align-items:start; }
+.minigames-section { min-width:0; margin:0 0 13px; padding:15px; border:1px solid var(--border-color); border-radius:13px; background:var(--bg-secondary); }
+.minigames-section h4 { margin:0; font-size:14px; }
+.minigames-section-heading { display:flex; align-items:center; justify-content:space-between; gap:10px; }
+.minigames-section-note { color:var(--text-muted); font-size:10px; }
+.minigames-section-hint { margin:4px 0 11px; color:var(--text-muted); font-size:10px; line-height:1.4; }
+.minigames-candidate-grid { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:9px; }
+.minigames-candidate-card { min-width:0; display:flex; flex-direction:column; align-items:stretch; gap:6px; }
+.minigames-candidate-art { aspect-ratio:5/7; max-height:220px; overflow:hidden; display:flex; justify-content:center; align-items:center; border:1px solid var(--border-color); border-radius:8px; background:var(--bg-accent); }
+.minigames-candidate-art img { display:block; width:100%; height:100%; object-fit:cover; }
+.minigames-card-placeholder { color:var(--text-muted); font-size:10px; font-weight:800; letter-spacing:.1em; }
+.minigames-candidate-name { font-size:10px; line-height:1.3; overflow-wrap:anywhere; }
+.minigames-candidate-reason { margin:0; color:var(--text-muted); font-size:10px; line-height:1.45; }
+.minigames-clue-row { display:grid; grid-template-columns:minmax(80px,.75fr) minmax(0,1fr); gap:9px; padding:10px 0; border-bottom:1px solid var(--border-color); font-size:12px; }
+.minigames-clue-row:last-of-type { border-bottom:0; }
+.minigames-clue-label { color:var(--text-muted); }
+.minigames-clue-value { font-weight:700; overflow-wrap:anywhere; }
+.minigames-clue-row.is-locked .minigames-clue-value { color:var(--text-muted); letter-spacing:.05em; }
+.minigames-input-section { display:grid; grid-template-columns:minmax(0, 1fr); gap:10px; }
+.minigames-guess-form, .minigames-ability-form { display:grid; grid-template-columns:minmax(0,1fr) auto; align-items:end; gap:8px; }
+.minigames-guess-form label, .minigames-ability-form label { grid-column:1 / -1; color:var(--text-muted); font-size:11px; font-weight:750; }
+.minigames-text-input { display:block; width:100%; min-width:0; min-height:40px; padding:9px 11px; box-sizing:border-box; border:1px solid var(--border-color); border-radius:9px; color:var(--text-main); background:var(--bg-primary); font:inherit; font-size:13px; }
+.minigames-input-help { margin:-3px 0 0; color:var(--text-muted); font-size:10px; line-height:1.45; }
+.minigames-known-clues { padding-top:11px; border-top:1px solid var(--border-color); }
+.minigames-known-clues h4 { margin-bottom:8px; }
+.minigames-empty-known { margin:0; color:var(--text-muted); font-size:11px; }
+.minigames-known-check { display:grid; grid-template-columns:23px minmax(0,1fr) auto; gap:8px; align-items:start; padding:9px 0; border-bottom:1px solid var(--border-color); font-size:11px; }
+.minigames-known-check:last-child { border-bottom:0; }
+.minigames-check-mark { width:22px; height:22px; display:flex; align-items:center; justify-content:center; border-radius:7px; font-weight:900; }
+.minigames-known-check.is-green .minigames-check-mark { color:#a4f3c2; background:rgba(28,145,79,.2); }
+.minigames-known-check.is-yellow .minigames-check-mark { color:#ffdb8d; background:rgba(199,142,28,.2); }
+.minigames-known-check.is-grey .minigames-check-mark { color:var(--text-muted); background:var(--bg-accent); }
+.minigames-known-check-text { min-width:0; overflow-wrap:anywhere; }
+.minigames-known-check-grade { color:var(--text-muted); text-align:right; font-size:9px; }
+.minigames-answer-reveal { display:flex; flex-direction:column; align-items:flex-start; gap:8px; margin-top:17px; padding-top:15px; border-top:1px solid var(--border-color); }
+.minigames-answer-reveal h4 { line-height:1.35; }
+.minigames-answer-image { width:min(150px, 100%); border-radius:10px; border:1px solid var(--border-color); }
+.minigames-answer-type { margin:0; color:var(--text-muted); font-size:11px; font-weight:750; }
+.minigames-answer-oracle { margin:0; font-size:12px; white-space:pre-line; line-height:1.55; }
+.minigames-loss-note { margin:0; color:var(--text-muted); font-size:10px; }
+.minigames-ending-panel { display:flex; flex-direction:column; gap:10px; }
+.minigames-ending-panel p { margin:0; color:var(--text-muted); font-size:12px; }
+.minigames-ending-actions { display:flex; flex-wrap:wrap; gap:8px; }
+.minigames-ending-actions .minigames-button { flex:0 0 auto; }
+body:has(.minigames-dialog[open]) { overflow:hidden; }
+
+@media (max-width: 760px) {
+    .minigames-dialog { width:100vw; max-width:none; height:100dvh; max-height:100dvh; margin:0; border-radius:0; border-left:0; border-right:0; }
+    .minigames-dialog-shell { height:100dvh; max-height:100dvh; box-sizing:border-box; padding:calc(14px + env(safe-area-inset-top)) 13px calc(18px + env(safe-area-inset-bottom)); }
+    .minigames-game-grid { grid-template-columns:minmax(0,1fr); }
+    .minigames-candidate-grid { grid-template-columns:repeat(4,minmax(0,1fr)); }
+    .minigames-candidate-art { max-height:none; }
+    .minigames-registry { gap:9px; }
+    .minigames-registry-card { padding:13px; }
+    .minigames-registry-card h3 { font-size:15px; }
+}
+@media (max-width: 440px) {
+    .minigames-stats { grid-template-columns:repeat(2,minmax(0,1fr)); }
+    .minigames-registry { grid-template-columns:minmax(0,1fr); }
+    .minigames-registry-actions { flex-wrap:wrap; }
+    .minigames-candidate-grid { grid-template-columns:repeat(3,minmax(0,1fr)); }
+    .minigames-progress-row { gap:8px 10px; }
+    .minigames-game-title-row { align-items:flex-start; }
+    .minigames-game-title-row > .minigames-button { flex:0 0 auto; }
+    .minigames-known-check { grid-template-columns:23px minmax(0,1fr); }
+    .minigames-known-check-grade { grid-column:2; text-align:left; }
+    .minigames-ending-actions { display:grid; grid-template-columns:minmax(0,1fr); }
+}

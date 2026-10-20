@@ -31719,3 +31719,95 @@ function runManaSearchStaticOnlyRegressionSuite({ log = true } = {}) {
     return report;
 }
 try { window.runManaSearchStaticOnlyRegressionSuite = runManaSearchStaticOnlyRegressionSuite; } catch (_) {}
+
+// A deliberately small bridge for optional integrations such as minigames. It returns detached
+// card summaries and the existing parser/scorer functions; gameplay cannot access app search state,
+// the history store, result rendering, or the active search caches through this object. The single
+// write-capable command is openCard(), which runs only after the player clicks “Open in ManaSearch”.
+const manaSearchMinigameApiCardNameIndex = (() => {
+    let index = null;
+    return () => {
+        if (index) return index;
+        index = new Map();
+        const cards = staticCardCorpusMemory?.cards || [];
+        const keyFor = value => String(value || '').normalize('NFKD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim().replace(/\s+/g, ' ');
+        for (const card of cards) {
+            if (!card?.name) continue;
+            const names = [card.name, ...(Array.isArray(card.card_faces) ? card.card_faces.map(face => face?.name) : [])].filter(Boolean);
+            for (const name of names) {
+                const key = keyFor(name);
+                if (key && !index.has(key)) index.set(key, card);
+            }
+        }
+        return index;
+    };
+})();
+function cloneCardForMinigame(card) {
+    if (!card) return null;
+    const cloneFace = face => ({
+        name: face?.name || '',
+        oracle_text: face?.oracle_text || '',
+        image_uris: face?.image_uris ? { normal: face.image_uris.normal || '', small: face.image_uris.small || '' } : undefined,
+        mana_cost: face?.mana_cost || '',
+        type_line: face?.type_line || ''
+    });
+    return {
+        id: card.id || '',
+        name: card.name || '',
+        oracle_text: card.oracle_text || '',
+        type_line: card.type_line || '',
+        mana_cost: card.mana_cost || '',
+        cmc: card.cmc !== null && card.cmc !== undefined && card.cmc !== '' && Number.isFinite(Number(card.cmc)) ? Number(card.cmc) : null,
+        color_identity: Array.isArray(card.color_identity) ? [...card.color_identity] : [],
+        image_uris: card.image_uris ? { normal: card.image_uris.normal || '', small: card.image_uris.small || '' } : undefined,
+        imageUrl: card.image_uris?.normal || card.card_faces?.[0]?.image_uris?.normal || '',
+        card_faces: Array.isArray(card.card_faces) ? card.card_faces.map(cloneFace) : undefined
+    };
+}
+window.ManaSearchApi = Object.freeze({
+    async ready() {
+        const corpus = await loadStaticCardCorpus();
+        if (!corpus?.cards?.length) throw new Error(staticCardCorpusLoadError || 'The local card catalog is unavailable.');
+        return true;
+    },
+    getCardByName(name) {
+        const direct = getStaticCardByName(name);
+        const card = direct || manaSearchMinigameApiCardNameIndex().get(String(name || '').normalize('NFKD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim().replace(/\s+/g, ' ')) || null;
+        return cloneCardForMinigame(card);
+    },
+    getCardNames() {
+        const corpus = staticCardCorpusMemory;
+        if (!corpus?.cards?.length) return [];
+        const out = [];
+        const seen = new Set();
+        for (const card of corpus.cards) {
+            for (const name of [card?.name, ...(Array.isArray(card?.card_faces) ? card.card_faces.map(face => face?.name) : [])]) {
+                if (!name) continue;
+                const key = String(name).normalize('NFKD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim().replace(/\s+/g, ' ');
+                if (seen.has(key)) continue;
+                seen.add(key);
+                out.push({ name: String(name) });
+            }
+        }
+        return out;
+    },
+    getOracleText(cardOrName) {
+        const card = typeof cardOrName === 'string' ? this.getCardByName(cardOrName) : cardOrName;
+        return getCardOracleText(card);
+    },
+    parseEffects(text, card = null) {
+        return parseMTGEffect(String(text || ''), card || null);
+    },
+    scoreEffectMatch(sourceEffect, candidateEffect, mode = 'variable') {
+        return scoreHighlightEffectMatch(sourceEffect, candidateEffect, mode === 'exact' ? 'exact' : 'variable');
+    },
+    assignEffects(sourceEffects, candidateEffects, mode = 'variable') {
+        return maxOneToOneHighlightAssignment(sourceEffects || [], candidateEffects || [], mode === 'exact' ? 'exact' : 'variable');
+    },
+    async openCard(name) {
+        const canonical = getStaticCardByName(name) || manaSearchMinigameApiCardNameIndex().get(String(name || '').normalize('NFKD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim().replace(/\s+/g, ' ')) || null;
+        if (!canonical) throw new Error(`“${name}” was not found in the local card catalog.`);
+        await loadSourceCard(canonical.name, canonical);
+        return true;
+    }
+});
