@@ -1,6 +1,6 @@
-/* ManaSearch build 20261020-119 */
+/* ManaSearch build 20261029-123 */
 // ManaSearch deployment build marker. Bump this whenever app.js changes so cached-module issues are easy to diagnose.
-const MANASEARCH_APP_BUILD = '20261020-119';
+const MANASEARCH_APP_BUILD = '20261029-123';
 console.info(`[ManaSearch] app.js build ${MANASEARCH_APP_BUILD}`);
 
 // State Management
@@ -5920,19 +5920,22 @@ function extractConditionsAndCosts(text) {
  * @returns {Object|null}
  */
 function parseCounterPlacementEffect(clause) {
-    const text = clause.toLowerCase();
-    const match = text.match(/\bputs?\s+(a|an|one|two|three|four|five|x)\s+([+-]1\/[+-]1)\s+counters?\s+on\s+(target creature|target permanent|each creature|that creature|it)\b/i);
+    const text = String(clause || '').toLowerCase();
+    const match = text.match(/\bputs?\s+(a|an|one|two|three|four|five|six|seven|eight|nine|ten|one or more|a number of|x|\d+)\s+([+-]\d+\/[+-]\d+|[a-z][a-z -]{0,24}?)\s+counters?\s+on\s+(?:(?:up to\s+(?:one|two|three|four|five|six|seven|eight|nine|ten|\d+)\s+)?)(?:(target|each|all|another|a|an|one|this|that|enchanted|equipped|you)\s+)?(creatures?|permanents?|artifacts?|enchantments?|lands?|planeswalkers?|battles?|players?|opponents?|it|them)\b/i);
     if (!match) return null;
 
-    const qtyWords = { a: 1, an: 1, one: 1, two: 2, three: 3, four: 4, five: 5, x: 'X' };
+    const qtyWords = { a: 1, an: 1, one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10, x: 'X', 'one or more': 'ANY', 'a number of': 'ANY' };
     const rawQty = match[1].toLowerCase();
+    const subject = match[4].replace(/s$/, '');
+    const targetWord = (match[3] || '').toLowerCase();
+    const quantity = qtyWords[rawQty] !== undefined ? qtyWords[rawQty] : Number(rawQty);
 
     return {
         action: 'place_counter',
-        object: 'creature',
-        target: /^each\b/.test(match[3]) ? 'each' : (/^target\b/.test(match[3]) ? 'target' : null),
-        counterType: match[2],
-        quantity: qtyWords[rawQty] !== undefined ? qtyWords[rawQty] : null,
+        object: ['it', 'them'].includes(subject) ? 'permanent' : subject,
+        target: targetWord === 'each' || targetWord === 'all' ? targetWord : (targetWord === 'target' ? 'target' : null),
+        counterType: match[2].trim(),
+        quantity,
         restriction: extractMTGRestrictions(text)
     };
 }
@@ -5947,19 +5950,54 @@ function parseCounterPlacementEffect(clause) {
  * @returns {Object|null}
  */
 function parseTapEffect(clause) {
-    const text = clause.toLowerCase();
-    const verbMatch = text.match(/\b(untaps?|taps?)\b/i);
+    const text = String(clause || '').trim().toLowerCase();
+    // Anchor the action after optional imperative wrappers so trigger conditions such as
+    // "Whenever an opponent taps a land" are not mistaken for a tap effect themselves.
+    const verbMatch = text.match(/^(?:(?:then|you may|you can|may)\s+)*(untaps?|taps?)\s+/i);
     if (!verbMatch) return null;
 
-    const { object, target } = extractTargetPhrase(text, ['creature', 'permanent', 'land']);
-    if (!object && !target) return null;
+    const subjectText = text.slice(verbMatch[0].length);
+    const subjectMatch = subjectText.match(/(?:(?:up to\s+)?(one|two|three|four|five|six|seven|eight|nine|ten|\d+)\s+)?(?:(any number of)\s+)?(?:(target|each|all|another|a|an|one|this|that|enchanted|equipped|attacking|blocking|tapped|untapped|non[a-z-]+)\s+)*(creatures?|permanents?|lands?|artifacts?|enchantments?|planeswalkers?|battles?|it|them)\b/i);
+    if (!subjectMatch) return null;
+
+    const subject = subjectMatch[4].replace(/s$/, '');
+    const prefix = subjectMatch[0].toLowerCase();
+    const quantifier = subjectMatch[1]?.toLowerCase();
+    const target = /\btarget\b/i.test(prefix) ? 'target'
+        : /\beach\b/i.test(prefix) ? 'each'
+        : /\ball\b/i.test(prefix) ? 'all'
+        : null;
+    const quantityWords = { one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10 };
+    const quantity = subjectMatch[2] ? 'ANY'
+        : quantifier ? (quantityWords[quantifier] ?? Number(quantifier))
+        : null;
 
     return {
         action: verbMatch[1].toLowerCase().startsWith('untap') ? 'untap' : 'tap',
-        object: object === 'any target' ? 'permanent' : (object || 'permanent'),
+        object: ['it', 'them'].includes(subject) ? 'permanent' : subject,
         target,
+        quantity,
         restriction: extractMTGRestrictions(text)
     };
+}
+
+/**
+ * First-class parsing for common keyword actions whose rules meaning is more specific than
+ * generic text: scry/surveil rearrange or move the top cards, while proliferate adds counters to
+ * existing objects. Their universal text signatures remain active as additional evidence.
+ */
+function parseLibraryActionEffect(clause) {
+    const text = String(clause || '').trim().toLowerCase();
+    const actionMatch = text.match(/^(?:(?:then|you may|you can|may)\s+)*(scry|surveil)\s+(one|two|three|four|five|six|seven|eight|nine|ten|\d+)/i);
+    if (actionMatch) {
+        const quantityWords = { one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10 };
+        const rawQuantity = actionMatch[2].toLowerCase();
+        return { action: actionMatch[1].toLowerCase(), object: 'card', quantity: quantityWords[rawQuantity] ?? Number(rawQuantity), target: null, restriction: extractMTGRestrictions(text) };
+    }
+    if (/^(?:(?:then|you may|you can|may)\s+)*proliferate\b/i.test(text)) {
+        return { action: 'proliferate', object: 'counter', quantity: null, target: null, restriction: extractMTGRestrictions(text) };
+    }
+    return null;
 }
 
 /**
@@ -6851,6 +6889,15 @@ function extractClauseAtoms(effectText, primaryAction) {
     let match;
     let guard = 0;
     while ((match = verbRegex.exec(effectText)) !== null && guard++ < 12) {
+        // A tap/untap verb before the first action separator belongs to a trigger or condition
+        // ("Whenever an opponent taps a land for mana, add {G}"), not to the effect sequence.
+        // Direct imperative tap effects after the comma/then remain parseable.
+        if (/^untaps?$/i.test(match[1]) || /^taps?$/i.test(match[1])) {
+            const prefix = effectText.slice(0, match.index);
+            const triggerStart = prefix.search(/\b(?:when|whenever|if|as long as)\b/i);
+            const precedingSeparator = prefix.search(/[,;]|\bthen\b/i);
+            if (triggerStart >= 0 && precedingSeparator < 0) continue;
+        }
         // Parse from this verb onward, so each atom sees its own object/zones rather than the
         // whole clause's.
         const slice = effectText.slice(match.index);
@@ -7627,6 +7674,7 @@ function parseMTGEffect(oracleText, cardContext = null) {
             parseCounterPlacementEffect(effectText) ||
             parseControlChangeEffect(effectText) ||
             parseTapEffect(effectText) ||
+            parseLibraryActionEffect(effectText) ||
             parseDamageEffect(effectText) ||
             parseManaAbilityEffect(effectText) ||
             parseLifeEffect(effectText) ||
@@ -7806,7 +7854,10 @@ const ACTION_TAXONOMY = {
     // outcomes - tapping down a blocker and untapping your own permanent for an extra activation
     // serve opposite strategic purposes despite the shared verb family.
     tap:         { family: "tap_control",            outcome: "permanent_tapped" },
-    untap:       { family: "tap_control",            outcome: "permanent_untapped" }
+    untap:       { family: "tap_control",            outcome: "permanent_untapped" },
+    scry:        { family: "library_manipulation",   outcome: "library_top_reordered" },
+    surveil:     { family: "library_manipulation",   outcome: "library_top_or_graveyard" },
+    proliferate: { family: "counter_manipulation",   outcome: "existing_counters_increased" }
 };
 
 // Backward-compatible view used anywhere only the coarse family grouping is needed.
@@ -7863,6 +7914,9 @@ const FUNCTION_OUTCOMES = {
     place_counter:    "stats_changed_one_shot",
     tap:              "permanent_tapped",
     untap: "permanent_untapped",
+    scry: "library_top_reordered",
+    surveil: "library_top_or_graveyard",
+    proliferate: "existing_counters_increased",
     cast_timing_permission: "instant_speed_cast_permission",
     mechanic_recruit: "draw_discard_conditional_token_creation",
     mechanic_storied: "persistent_player_designation",
@@ -8034,6 +8088,8 @@ function deriveCanonicalFunction(effect) {
         // Same reasoning as gain_life/lose_life: opposite effects, kept as separate functions
         // rather than one "tap_state_change" that would score a Falter effect and an Untap-all
         // ramp effect as equivalent.
+        fn = a;
+    } else if (a === "scry" || a === "surveil" || a === "proliferate") {
         fn = a;
     } else if (a === "cast_permission") {
         // A real static rules permission to cast a class of spells at instant speed.
@@ -8232,7 +8288,7 @@ const FUNCTION_IMPORTANCE = {
     // card built around it (an "outlast"/counters deck payoff), on par with recursion or a
     // one-shot anthem. Tap/untap are usually a supporting piece of a bigger card (a Falter effect,
     // an untap-lands ramp trick) rather than the point of the card on their own, so they sit lower.
-    place_counter: 0.7, tap: 0.5, untap: 0.5,
+    place_counter: 0.7, tap: 0.5, untap: 0.5, proliferate: 0.55, surveil: 0.35, scry: 0.3,
     cast_timing_permission: 0.98,
     mechanic_recruit: 0.90,
     mechanic_storied: 0.88,
@@ -13643,9 +13699,15 @@ function calculateEffectRelationshipMismatch(parsedA = [], parsedB = []) {
     };
     const a = (Array.isArray(parsedA) ? parsedA : []).map(unwrap).filter(x => x.fn);
     const b = (Array.isArray(parsedB) ? parsedB : []).map(unwrap).filter(x => x.fn);
-    let maxMismatch = 0;
+    // Use the closest same-action pair. Parser/context extraction can represent a single natural
+    // action twice (once with its trigger clause and once as the outcome phrase); taking the worst
+    // cross-pair mismatch incorrectly penalizes a candidate that has a valid matching relationship.
+    // Extra or missing actions are already handled by graph coverage and excess penalties.
+    let bestMismatch = 1;
+    let comparedPairs = 0;
     for (const left of a) for (const right of b) {
         if (left.fn !== right.fn) continue;
+        comparedPairs++;
         let mismatch = 0;
         const le = left.trigger?.event || null, re = right.trigger?.event || null;
         if (le && re && le !== re) mismatch = Math.max(mismatch, 0.82);
@@ -13659,9 +13721,9 @@ function calculateEffectRelationshipMismatch(parsedA = [], parsedB = []) {
         if (left.recipientScope && right.recipientScope && left.recipientScope !== right.recipientScope) mismatch = Math.max(mismatch, 0.62);
         if (left.tokenType && right.tokenType && normalizeMechanicToken(left.tokenType) !== normalizeMechanicToken(right.tokenType)) mismatch = Math.max(mismatch, 0.40);
         if (left.condition && right.condition && left.condition !== right.condition) mismatch = Math.max(mismatch, 0.22);
-        maxMismatch = Math.max(maxMismatch, mismatch);
+        bestMismatch = Math.min(bestMismatch, mismatch);
     }
-    return maxMismatch;
+    return comparedPairs ? bestMismatch : 0;
 }
 
 function shouldUseModalModeIntent(sourceOracleText, hasEffectHighlight = false, highlights = [], effectHighlightCount = 0) {
@@ -13852,8 +13914,9 @@ function calculateMechanicalSimilarityDetailed(parsedA, parsedB, profileA = null
     const relationshipMismatch = calculateEffectRelationshipMismatch(safeA, safeB);
     // Trigger/controller/target contradictions should reduce rank even when both cards share a
     // broad action such as draw, damage, or move a card. Keep some residual similarity for useful
-    // near-matches; the penalty is not a hard exclusion.
-    const relationshipFactor = 1 - (0.42 * relationshipMismatch);
+    // near-matches; the penalty is not a hard exclusion. A distinct trigger event needs enough
+    // separation to overcome broad action and card-type similarities in explicit Search intent.
+    const relationshipFactor = 1 - (0.50 * relationshipMismatch);
     const explicitContrast = inferExplicitMechanicalContrast(safeA, safeB);
     let score = rawScore * repeatabilityFactor * relationshipFactor;
     if (explicitContrast.kind === 'opposite') score = Math.min(score, 0.55);
@@ -13861,7 +13924,7 @@ function calculateMechanicalSimilarityDetailed(parsedA, parsedB, profileA = null
     else if (explicitContrast.kind === 'mana-choice-vs-simultaneous') score = Math.min(0.89, score * 0.94);
     else if (explicitContrast.kind === 'blink-vs-exile-removal') score = Math.min(score, 0.52);
     else if (explicitContrast.kind === 'token-multiplier-vs-token-creation') score = Math.min(score, 0.58);
-    else if (explicitContrast.kind === 'reanimation-vs-graveyard-recursion') score = Math.min(score, 0.72);
+    else if (explicitContrast.kind === 'reanimation-vs-graveyard-recursion') score = Math.min(score * 0.85, 0.72);
 
     return {
         score,
@@ -26260,9 +26323,17 @@ function runManaSearchIntentRegressionSuite() {
         const castTriggerEffects = parseMTGEffect(castTriggerCard.oracle_text);
         annotateEffectRepeatability(intendedTriggerCard, intendedTriggerEffects, intendedTriggerCard.oracle_text);
         annotateEffectRepeatability(castTriggerCard, castTriggerEffects, castTriggerCard.oracle_text);
-        const intendedTriggerScore = calculateMechanicalSimilarityDetailed(inferredTriggerIntent.parsedEffects, intendedTriggerEffects).score;
-        const castTriggerScore = calculateMechanicalSimilarityDetailed(inferredTriggerIntent.parsedEffects, castTriggerEffects).score;
-        check('mechanical-score-prefers-matching-opponent-draw-trigger', intendedTriggerScore > castTriggerScore + 0.05, JSON.stringify({ intendedTriggerScore, castTriggerScore }));
+        const intendedTriggerDetail = calculateMechanicalSimilarityDetailed(inferredTriggerIntent.parsedEffects, intendedTriggerEffects);
+        const castTriggerDetail = calculateMechanicalSimilarityDetailed(inferredTriggerIntent.parsedEffects, castTriggerEffects);
+        const intendedTriggerScore = intendedTriggerDetail.score;
+        const castTriggerScore = castTriggerDetail.score;
+        check('mechanical-score-prefers-matching-opponent-draw-trigger', intendedTriggerScore > castTriggerScore + 0.05, JSON.stringify({
+            intendedTriggerScore, castTriggerScore,
+            sourceEffects: inferredTriggerIntent.parsedEffects.map(effect => ({ function: effect.canonical?.function, trigger: effect.triggerProfile || effect.canonical?.params?.triggerProfile, raw: effect.raw })),
+            intendedEffects: intendedTriggerEffects.map(effect => ({ function: effect.canonical?.function, trigger: effect.triggerProfile || effect.canonical?.params?.triggerProfile, raw: effect.raw })),
+            castEffects: castTriggerEffects.map(effect => ({ function: effect.canonical?.function, trigger: effect.triggerProfile || effect.canonical?.params?.triggerProfile, raw: effect.raw })),
+            intendedMismatch: intendedTriggerDetail.relationshipMismatch, castMismatch: castTriggerDetail.relationshipMismatch
+        }));
 
         const chronicler = { name: 'Chronicler of Heroes', type_line: 'Creature — Centaur Wizard', oracle_text: 'When Chronicler of Heroes enters the battlefield, draw a card if you control a creature with a +1/+1 counter on it.' };
         currentSourceCard = chronicler;
@@ -26347,6 +26418,33 @@ function runMechanicalRegressionSuite() {
             `amount=${trueThree?.manaOutput?.amount}, mode=${trueThree?.manaOutput?.mode}`);
     } catch (error) {
         check('Mana production regression cases', false, error?.message || String(error));
+    }
+
+    try {
+        const untapUpTo = parseMTGEffect('Untap up to two target creatures you control.').find(effect => effect.action === 'untap');
+        const untapPronoun = parseMTGEffect('Untap it.').find(effect => effect.action === 'untap');
+        const tapArticle = parseMTGEffect('Tap a creature you control.').find(effect => effect.action === 'tap');
+        const tapTrigger = parseMTGEffect('Whenever an opponent taps a land for mana, add {G}.');
+        check('Untap recognizes counted target groups and preserves the count', untapUpTo?.canonical?.function === 'untap' && untapUpTo.object === 'creature' && untapUpTo.target === 'target' && untapUpTo.quantity === 2, JSON.stringify(untapUpTo || null));
+        check('Untap recognizes rules-text pronouns', untapPronoun?.canonical?.function === 'untap' && untapPronoun.object === 'permanent', JSON.stringify(untapPronoun || null));
+        check('Tap recognizes non-targeted article objects', tapArticle?.canonical?.function === 'tap' && tapArticle.target === null, JSON.stringify(tapArticle || null));
+        check('Tap in a trigger condition is not misread as the effect', !tapTrigger.some(effect => effect.action === 'tap'));
+
+        const poison = parseMTGEffect('Put two poison counters on target player.').find(effect => effect.action === 'place_counter');
+        const stun = parseMTGEffect('Put a stun counter on target permanent.').find(effect => effect.action === 'place_counter');
+        const plusOne = parseMTGEffect('Put a +1/+1 counter on target creature.').find(effect => effect.action === 'place_counter');
+        check('Counter placement recognizes poison counters on players', poison?.counterType === 'poison' && poison.quantity === 2 && poison.object === 'player' && poison.canonical?.function === 'place_counter', JSON.stringify(poison || null));
+        check('Counter placement recognizes named counters on permanents', stun?.counterType === 'stun' && stun.quantity === 1 && stun.object === 'permanent' && stun.canonical?.function === 'place_counter', JSON.stringify(stun || null));
+        check('Broader counter parsing preserves existing +1/+1 handling', plusOne?.counterType === '+1/+1' && plusOne.quantity === 1 && plusOne.object === 'creature', JSON.stringify(plusOne || null));
+
+        const scry = parseMTGEffect('Scry 2.').find(effect => effect.action === 'scry');
+        const surveil = parseMTGEffect('Surveil one.').find(effect => effect.action === 'surveil');
+        const proliferate = parseMTGEffect('Proliferate.').find(effect => effect.action === 'proliferate');
+        check('Scry parses as a library manipulation effect', scry?.canonical?.function === 'scry' && scry.quantity === 2, JSON.stringify(scry || null));
+        check('Surveil parses as a distinct library-to-graveyard choice effect', surveil?.canonical?.function === 'surveil' && surveil.quantity === 1 && surveil.canonical.outcome !== scry?.canonical?.outcome, JSON.stringify(surveil || null));
+        check('Proliferate parses as existing-counter growth', proliferate?.canonical?.function === 'proliferate' && proliferate.object === 'counter', JSON.stringify(proliferate || null));
+    } catch (error) {
+        check('Expanded parser coverage cases', false, error?.stack || error?.message || String(error));
     }
 
     const failed = checks.filter(item => !item.pass);
@@ -30030,6 +30128,9 @@ function compareEffectDescription(cf) {
         case 'tribal_anthem': return `${duration ? duration + ' ' : ''}change ${scope ? scope + ' ' : ''}creature stats${magnitude ? ` by ${magnitude}` : ''}${subtype ? ` for ${subtype}` : ''}`;
         case 'tap': return `tap${object ? ` ${object}` : ''}`;
         case 'untap': return `untap${object ? ` ${object}` : ''}`;
+        case 'scry': return `scry ${q ?? ''}`.trim();
+        case 'surveil': return `surveil ${q ?? ''}`.trim();
+        case 'proliferate': return 'proliferate existing counters';
         case 'cost_reduction': return magnitude ? `reduce a cost by ${magnitude}` : 'reduce a cost';
         case 'tutor': return `search for${object ? ` ${object}` : ' a card'}`;
         case 'ramp_tutor': return `search for a land or other resource`;

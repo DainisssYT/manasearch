@@ -107,12 +107,12 @@ test('the production scorer applies the new contrast score caps', () => {
   const scorer = app.slice(scorerStart, scorerEnd);
   assert.match(scorer, /blink-vs-exile-removal'\)\s*score\s*=\s*Math\.min\(score,\s*0\.52\)/);
   assert.match(scorer, /token-multiplier-vs-token-creation'\)\s*score\s*=\s*Math\.min\(score,\s*0\.58\)/);
-  assert.match(scorer, /reanimation-vs-graveyard-recursion'\)\s*score\s*=\s*Math\.min\(score,\s*0\.72\)/);
+  assert.match(scorer, /reanimation-vs-graveyard-recursion'\)\s*score\s*=\s*Math\.min\(score\s*\*\s*0\.85,\s*0\.72\)/);
 });
 
 test('highlighting only the draw outcome retains native clause context', () => {
   const helperNames = [
-    'extractHighlightClauseContext', 'isSearchIntentTriggerPhrase', 'isLikelyEffectOutcomeText',
+    'getHighlightSourceAnchor', 'isCompleteTriggerOutcomeText', 'extractHighlightClauseContext', 'isSearchIntentTriggerPhrase', 'isLikelyEffectOutcomeText',
     'getResolutionAfterTrigger', 'composeHighlightIntentOverride', 'annotateHighlightGroups',
     'buildHighlightScoringText'
   ];
@@ -128,7 +128,7 @@ test('highlighting only the draw outcome retains native clause context', () => {
 
 test('an unattached user trigger plus selected draw outcome composes the requested trigger and drops unrelated rider', () => {
   const helperNames = [
-    'extractHighlightClauseContext', 'isSearchIntentTriggerPhrase', 'isLikelyEffectOutcomeText',
+    'getHighlightSourceAnchor', 'isCompleteTriggerOutcomeText', 'extractHighlightClauseContext', 'isSearchIntentTriggerPhrase', 'isLikelyEffectOutcomeText',
     'getResolutionAfterTrigger', 'composeHighlightIntentOverride', 'annotateHighlightGroups',
     'buildHighlightScoringText'
   ];
