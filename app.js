@@ -1,6 +1,6 @@
-/* ManaSearch build 20261029-122 */
+/* ManaSearch build 20261029-123 */
 // ManaSearch deployment build marker. Bump this whenever app.js changes so cached-module issues are easy to diagnose.
-const MANASEARCH_APP_BUILD = '20261029-122';
+const MANASEARCH_APP_BUILD = '20261029-123';
 console.info(`[ManaSearch] app.js build ${MANASEARCH_APP_BUILD}`);
 
 // State Management
@@ -6889,6 +6889,15 @@ function extractClauseAtoms(effectText, primaryAction) {
     let match;
     let guard = 0;
     while ((match = verbRegex.exec(effectText)) !== null && guard++ < 12) {
+        // A tap/untap verb before the first action separator belongs to a trigger or condition
+        // ("Whenever an opponent taps a land for mana, add {G}"), not to the effect sequence.
+        // Direct imperative tap effects after the comma/then remain parseable.
+        if (/^untaps?$/i.test(match[1]) || /^taps?$/i.test(match[1])) {
+            const prefix = effectText.slice(0, match.index);
+            const triggerStart = prefix.search(/\b(?:when|whenever|if|as long as)\b/i);
+            const precedingSeparator = prefix.search(/[,;]|\bthen\b/i);
+            if (triggerStart >= 0 && precedingSeparator < 0) continue;
+        }
         // Parse from this verb onward, so each atom sees its own object/zones rather than the
         // whole clause's.
         const slice = effectText.slice(match.index);
