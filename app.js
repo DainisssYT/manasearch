@@ -1,6 +1,6 @@
-/* ManaSearch build 20261029-121 */
+/* ManaSearch build 20261029-122 */
 // ManaSearch deployment build marker. Bump this whenever app.js changes so cached-module issues are easy to diagnose.
-const MANASEARCH_APP_BUILD = '20261029-121';
+const MANASEARCH_APP_BUILD = '20261029-122';
 console.info(`[ManaSearch] app.js build ${MANASEARCH_APP_BUILD}`);
 
 // State Management
@@ -5920,19 +5920,22 @@ function extractConditionsAndCosts(text) {
  * @returns {Object|null}
  */
 function parseCounterPlacementEffect(clause) {
-    const text = clause.toLowerCase();
-    const match = text.match(/\bputs?\s+(a|an|one|two|three|four|five|x)\s+([+-]1\/[+-]1)\s+counters?\s+on\s+(target creature|target permanent|each creature|that creature|it)\b/i);
+    const text = String(clause || '').toLowerCase();
+    const match = text.match(/\bputs?\s+(a|an|one|two|three|four|five|six|seven|eight|nine|ten|one or more|a number of|x|\d+)\s+([+-]\d+\/[+-]\d+|[a-z][a-z -]{0,24}?)\s+counters?\s+on\s+(?:(?:up to\s+(?:one|two|three|four|five|six|seven|eight|nine|ten|\d+)\s+)?)(?:(target|each|all|another|a|an|one|this|that|enchanted|equipped|you)\s+)?(creatures?|permanents?|artifacts?|enchantments?|lands?|planeswalkers?|battles?|players?|opponents?|it|them)\b/i);
     if (!match) return null;
 
-    const qtyWords = { a: 1, an: 1, one: 1, two: 2, three: 3, four: 4, five: 5, x: 'X' };
+    const qtyWords = { a: 1, an: 1, one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10, x: 'X', 'one or more': 'ANY', 'a number of': 'ANY' };
     const rawQty = match[1].toLowerCase();
+    const subject = match[4].replace(/s$/, '');
+    const targetWord = (match[3] || '').toLowerCase();
+    const quantity = qtyWords[rawQty] !== undefined ? qtyWords[rawQty] : Number(rawQty);
 
     return {
         action: 'place_counter',
-        object: 'creature',
-        target: /^each\b/.test(match[3]) ? 'each' : (/^target\b/.test(match[3]) ? 'target' : null),
-        counterType: match[2],
-        quantity: qtyWords[rawQty] !== undefined ? qtyWords[rawQty] : null,
+        object: ['it', 'them'].includes(subject) ? 'permanent' : subject,
+        target: targetWord === 'each' || targetWord === 'all' ? targetWord : (targetWord === 'target' ? 'target' : null),
+        counterType: match[2].trim(),
+        quantity,
         restriction: extractMTGRestrictions(text)
     };
 }
@@ -5947,19 +5950,54 @@ function parseCounterPlacementEffect(clause) {
  * @returns {Object|null}
  */
 function parseTapEffect(clause) {
-    const text = clause.toLowerCase();
-    const verbMatch = text.match(/\b(untaps?|taps?)\b/i);
+    const text = String(clause || '').trim().toLowerCase();
+    // Anchor the action after optional imperative wrappers so trigger conditions such as
+    // "Whenever an opponent taps a land" are not mistaken for a tap effect themselves.
+    const verbMatch = text.match(/^(?:(?:then|you may|you can|may)\s+)*(untaps?|taps?)\s+/i);
     if (!verbMatch) return null;
 
-    const { object, target } = extractTargetPhrase(text, ['creature', 'permanent', 'land']);
-    if (!object && !target) return null;
+    const subjectText = text.slice(verbMatch[0].length);
+    const subjectMatch = subjectText.match(/(?:(?:up to\s+)?(one|two|three|four|five|six|seven|eight|nine|ten|\d+)\s+)?(?:(any number of)\s+)?(?:(target|each|all|another|a|an|one|this|that|enchanted|equipped|attacking|blocking|tapped|untapped|non[a-z-]+)\s+)*(creatures?|permanents?|lands?|artifacts?|enchantments?|planeswalkers?|battles?|it|them)\b/i);
+    if (!subjectMatch) return null;
+
+    const subject = subjectMatch[4].replace(/s$/, '');
+    const prefix = subjectMatch[0].toLowerCase();
+    const quantifier = subjectMatch[1]?.toLowerCase();
+    const target = /\btarget\b/i.test(prefix) ? 'target'
+        : /\beach\b/i.test(prefix) ? 'each'
+        : /\ball\b/i.test(prefix) ? 'all'
+        : null;
+    const quantityWords = { one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10 };
+    const quantity = subjectMatch[2] ? 'ANY'
+        : quantifier ? (quantityWords[quantifier] ?? Number(quantifier))
+        : null;
 
     return {
         action: verbMatch[1].toLowerCase().startsWith('untap') ? 'untap' : 'tap',
-        object: object === 'any target' ? 'permanent' : (object || 'permanent'),
+        object: ['it', 'them'].includes(subject) ? 'permanent' : subject,
         target,
+        quantity,
         restriction: extractMTGRestrictions(text)
     };
+}
+
+/**
+ * First-class parsing for common keyword actions whose rules meaning is more specific than
+ * generic text: scry/surveil rearrange or move the top cards, while proliferate adds counters to
+ * existing objects. Their universal text signatures remain active as additional evidence.
+ */
+function parseLibraryActionEffect(clause) {
+    const text = String(clause || '').trim().toLowerCase();
+    const actionMatch = text.match(/^(?:(?:then|you may|you can|may)\s+)*(scry|surveil)\s+(one|two|three|four|five|six|seven|eight|nine|ten|\d+)/i);
+    if (actionMatch) {
+        const quantityWords = { one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10 };
+        const rawQuantity = actionMatch[2].toLowerCase();
+        return { action: actionMatch[1].toLowerCase(), object: 'card', quantity: quantityWords[rawQuantity] ?? Number(rawQuantity), target: null, restriction: extractMTGRestrictions(text) };
+    }
+    if (/^(?:(?:then|you may|you can|may)\s+)*proliferate\b/i.test(text)) {
+        return { action: 'proliferate', object: 'counter', quantity: null, target: null, restriction: extractMTGRestrictions(text) };
+    }
+    return null;
 }
 
 /**
@@ -7627,6 +7665,7 @@ function parseMTGEffect(oracleText, cardContext = null) {
             parseCounterPlacementEffect(effectText) ||
             parseControlChangeEffect(effectText) ||
             parseTapEffect(effectText) ||
+            parseLibraryActionEffect(effectText) ||
             parseDamageEffect(effectText) ||
             parseManaAbilityEffect(effectText) ||
             parseLifeEffect(effectText) ||
@@ -7806,7 +7845,10 @@ const ACTION_TAXONOMY = {
     // outcomes - tapping down a blocker and untapping your own permanent for an extra activation
     // serve opposite strategic purposes despite the shared verb family.
     tap:         { family: "tap_control",            outcome: "permanent_tapped" },
-    untap:       { family: "tap_control",            outcome: "permanent_untapped" }
+    untap:       { family: "tap_control",            outcome: "permanent_untapped" },
+    scry:        { family: "library_manipulation",   outcome: "library_top_reordered" },
+    surveil:     { family: "library_manipulation",   outcome: "library_top_or_graveyard" },
+    proliferate: { family: "counter_manipulation",   outcome: "existing_counters_increased" }
 };
 
 // Backward-compatible view used anywhere only the coarse family grouping is needed.
@@ -7863,6 +7905,9 @@ const FUNCTION_OUTCOMES = {
     place_counter:    "stats_changed_one_shot",
     tap:              "permanent_tapped",
     untap: "permanent_untapped",
+    scry: "library_top_reordered",
+    surveil: "library_top_or_graveyard",
+    proliferate: "existing_counters_increased",
     cast_timing_permission: "instant_speed_cast_permission",
     mechanic_recruit: "draw_discard_conditional_token_creation",
     mechanic_storied: "persistent_player_designation",
@@ -8034,6 +8079,8 @@ function deriveCanonicalFunction(effect) {
         // Same reasoning as gain_life/lose_life: opposite effects, kept as separate functions
         // rather than one "tap_state_change" that would score a Falter effect and an Untap-all
         // ramp effect as equivalent.
+        fn = a;
+    } else if (a === "scry" || a === "surveil" || a === "proliferate") {
         fn = a;
     } else if (a === "cast_permission") {
         // A real static rules permission to cast a class of spells at instant speed.
@@ -8232,7 +8279,7 @@ const FUNCTION_IMPORTANCE = {
     // card built around it (an "outlast"/counters deck payoff), on par with recursion or a
     // one-shot anthem. Tap/untap are usually a supporting piece of a bigger card (a Falter effect,
     // an untap-lands ramp trick) rather than the point of the card on their own, so they sit lower.
-    place_counter: 0.7, tap: 0.5, untap: 0.5,
+    place_counter: 0.7, tap: 0.5, untap: 0.5, proliferate: 0.55, surveil: 0.35, scry: 0.3,
     cast_timing_permission: 0.98,
     mechanic_recruit: 0.90,
     mechanic_storied: 0.88,
@@ -26364,6 +26411,33 @@ function runMechanicalRegressionSuite() {
         check('Mana production regression cases', false, error?.message || String(error));
     }
 
+    try {
+        const untapUpTo = parseMTGEffect('Untap up to two target creatures you control.').find(effect => effect.action === 'untap');
+        const untapPronoun = parseMTGEffect('Untap it.').find(effect => effect.action === 'untap');
+        const tapArticle = parseMTGEffect('Tap a creature you control.').find(effect => effect.action === 'tap');
+        const tapTrigger = parseMTGEffect('Whenever an opponent taps a land for mana, add {G}.');
+        check('Untap recognizes counted target groups and preserves the count', untapUpTo?.canonical?.function === 'untap' && untapUpTo.object === 'creature' && untapUpTo.target === 'target' && untapUpTo.quantity === 2, JSON.stringify(untapUpTo || null));
+        check('Untap recognizes rules-text pronouns', untapPronoun?.canonical?.function === 'untap' && untapPronoun.object === 'permanent', JSON.stringify(untapPronoun || null));
+        check('Tap recognizes non-targeted article objects', tapArticle?.canonical?.function === 'tap' && tapArticle.target === null, JSON.stringify(tapArticle || null));
+        check('Tap in a trigger condition is not misread as the effect', !tapTrigger.some(effect => effect.action === 'tap'));
+
+        const poison = parseMTGEffect('Put two poison counters on target player.').find(effect => effect.action === 'place_counter');
+        const stun = parseMTGEffect('Put a stun counter on target permanent.').find(effect => effect.action === 'place_counter');
+        const plusOne = parseMTGEffect('Put a +1/+1 counter on target creature.').find(effect => effect.action === 'place_counter');
+        check('Counter placement recognizes poison counters on players', poison?.counterType === 'poison' && poison.quantity === 2 && poison.object === 'player' && poison.canonical?.function === 'place_counter', JSON.stringify(poison || null));
+        check('Counter placement recognizes named counters on permanents', stun?.counterType === 'stun' && stun.quantity === 1 && stun.object === 'permanent' && stun.canonical?.function === 'place_counter', JSON.stringify(stun || null));
+        check('Broader counter parsing preserves existing +1/+1 handling', plusOne?.counterType === '+1/+1' && plusOne.quantity === 1 && plusOne.object === 'creature', JSON.stringify(plusOne || null));
+
+        const scry = parseMTGEffect('Scry 2.').find(effect => effect.action === 'scry');
+        const surveil = parseMTGEffect('Surveil one.').find(effect => effect.action === 'surveil');
+        const proliferate = parseMTGEffect('Proliferate.').find(effect => effect.action === 'proliferate');
+        check('Scry parses as a library manipulation effect', scry?.canonical?.function === 'scry' && scry.quantity === 2, JSON.stringify(scry || null));
+        check('Surveil parses as a distinct library-to-graveyard choice effect', surveil?.canonical?.function === 'surveil' && surveil.quantity === 1 && surveil.canonical.outcome !== scry?.canonical?.outcome, JSON.stringify(surveil || null));
+        check('Proliferate parses as existing-counter growth', proliferate?.canonical?.function === 'proliferate' && proliferate.object === 'counter', JSON.stringify(proliferate || null));
+    } catch (error) {
+        check('Expanded parser coverage cases', false, error?.stack || error?.message || String(error));
+    }
+
     const failed = checks.filter(item => !item.pass);
     const report = { pass: failed.length === 0, checks };
     if (failed.length) console.warn('[ManaSearch] Mechanical regression suite found failures:', report);
@@ -30045,6 +30119,9 @@ function compareEffectDescription(cf) {
         case 'tribal_anthem': return `${duration ? duration + ' ' : ''}change ${scope ? scope + ' ' : ''}creature stats${magnitude ? ` by ${magnitude}` : ''}${subtype ? ` for ${subtype}` : ''}`;
         case 'tap': return `tap${object ? ` ${object}` : ''}`;
         case 'untap': return `untap${object ? ` ${object}` : ''}`;
+        case 'scry': return `scry ${q ?? ''}`.trim();
+        case 'surveil': return `surveil ${q ?? ''}`.trim();
+        case 'proliferate': return 'proliferate existing counters';
         case 'cost_reduction': return magnitude ? `reduce a cost by ${magnitude}` : 'reduce a cost';
         case 'tutor': return `search for${object ? ` ${object}` : ' a card'}`;
         case 'ramp_tutor': return `search for a land or other resource`;
