@@ -26261,9 +26261,17 @@ function runManaSearchIntentRegressionSuite() {
         const castTriggerEffects = parseMTGEffect(castTriggerCard.oracle_text);
         annotateEffectRepeatability(intendedTriggerCard, intendedTriggerEffects, intendedTriggerCard.oracle_text);
         annotateEffectRepeatability(castTriggerCard, castTriggerEffects, castTriggerCard.oracle_text);
-        const intendedTriggerScore = calculateMechanicalSimilarityDetailed(inferredTriggerIntent.parsedEffects, intendedTriggerEffects).score;
-        const castTriggerScore = calculateMechanicalSimilarityDetailed(inferredTriggerIntent.parsedEffects, castTriggerEffects).score;
-        check('mechanical-score-prefers-matching-opponent-draw-trigger', intendedTriggerScore > castTriggerScore + 0.05, JSON.stringify({ intendedTriggerScore, castTriggerScore }));
+        const intendedTriggerDetail = calculateMechanicalSimilarityDetailed(inferredTriggerIntent.parsedEffects, intendedTriggerEffects);
+        const castTriggerDetail = calculateMechanicalSimilarityDetailed(inferredTriggerIntent.parsedEffects, castTriggerEffects);
+        const intendedTriggerScore = intendedTriggerDetail.score;
+        const castTriggerScore = castTriggerDetail.score;
+        check('mechanical-score-prefers-matching-opponent-draw-trigger', intendedTriggerScore > castTriggerScore + 0.05, JSON.stringify({
+            intendedTriggerScore, castTriggerScore,
+            sourceEffects: inferredTriggerIntent.parsedEffects.map(effect => ({ function: effect.canonical?.function, trigger: effect.triggerProfile || effect.canonical?.params?.triggerProfile, raw: effect.raw })),
+            intendedEffects: intendedTriggerEffects.map(effect => ({ function: effect.canonical?.function, trigger: effect.triggerProfile || effect.canonical?.params?.triggerProfile, raw: effect.raw })),
+            castEffects: castTriggerEffects.map(effect => ({ function: effect.canonical?.function, trigger: effect.triggerProfile || effect.canonical?.params?.triggerProfile, raw: effect.raw })),
+            intendedMismatch: intendedTriggerDetail.relationshipMismatch, castMismatch: castTriggerDetail.relationshipMismatch
+        }));
 
         const chronicler = { name: 'Chronicler of Heroes', type_line: 'Creature — Centaur Wizard', oracle_text: 'When Chronicler of Heroes enters the battlefield, draw a card if you control a creature with a +1/+1 counter on it.' };
         currentSourceCard = chronicler;
