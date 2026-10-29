@@ -112,7 +112,7 @@ test('the production scorer applies the new contrast score caps', () => {
 
 test('highlighting only the draw outcome retains native clause context', () => {
   const helperNames = [
-    'getHighlightSourceAnchor', 'extractHighlightClauseContext', 'isSearchIntentTriggerPhrase', 'isLikelyEffectOutcomeText',
+    'getHighlightSourceAnchor', 'isCompleteTriggerOutcomeText', 'extractHighlightClauseContext', 'isSearchIntentTriggerPhrase', 'isLikelyEffectOutcomeText',
     'getResolutionAfterTrigger', 'composeHighlightIntentOverride', 'annotateHighlightGroups',
     'buildHighlightScoringText'
   ];
@@ -128,7 +128,7 @@ test('highlighting only the draw outcome retains native clause context', () => {
 
 test('an unattached user trigger plus selected draw outcome composes the requested trigger and drops unrelated rider', () => {
   const helperNames = [
-    'getHighlightSourceAnchor', 'extractHighlightClauseContext', 'isSearchIntentTriggerPhrase', 'isLikelyEffectOutcomeText',
+    'getHighlightSourceAnchor', 'isCompleteTriggerOutcomeText', 'extractHighlightClauseContext', 'isSearchIntentTriggerPhrase', 'isLikelyEffectOutcomeText',
     'getResolutionAfterTrigger', 'composeHighlightIntentOverride', 'annotateHighlightGroups',
     'buildHighlightScoringText'
   ];
