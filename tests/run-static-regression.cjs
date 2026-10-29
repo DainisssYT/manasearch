@@ -8,7 +8,6 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const { execFileSync } = require('node:child_process');
-
 const root = path.resolve(__dirname, '..');
 const appPath = path.join(root, 'app.js');
 const htmlPath = path.join(root, 'index.html');
@@ -22,7 +21,6 @@ function check(name, fn) {
   try { fn(); checks.push({ name, pass: true }); }
   catch (error) { checks.push({ name, pass: false, error: error.message }); }
 }
-
 check('app.js parses as a valid browser ES module (including reserved-word rules)', () => execFileSync(process.execPath, ['--check', '--input-type=module'], { input: app, stdio: ['pipe', 'pipe', 'pipe'] }));
 check('HTML references the current cache-busted app.js', () => {
   const match = html.match(/app\.js\?v=([^"']+)/);
@@ -66,9 +64,23 @@ check('mechanical suite contains blink, token-multiplier, and cadence guards', (
     'draw-trigger-condition-is-not-a-draw-outcome'
   ]) assert.ok(app.includes(id), `missing regression case ${id}`);
 });
-check('production score uses the cadence rank factor', () => {
+check('production score applies the cadence rank factor before clamping', () => {
   assert.match(app, /SOURCE_ACQUISITION_CADENCE_RANKING_PENALTY\s*=\s*0\.55/);
-  assert.match(app, /card\.similarityScore\s*=\s*Math\.max[\s\S]{0,180}card\.acquisitionCadenceRankFactor/);
+
+  // Validate the actual scoring pipeline rather than requiring the factor to be repeated in the
+  // final similarityScore assignment. Production code intentionally keeps a named intermediate
+  // score so the cadence adjustment, quantitative penalty, and final [0, 1] clamp are independently
+  // inspectable. The old assertion only accepted one source-code layout and failed despite the
+  // factor already being applied.
+  const scoreStart = app.indexOf('card.similarityBeforeCadenceAdjustment = preCadenceSimilarityScore;');
+  assert.notEqual(scoreStart, -1, 'missing pre-cadence score snapshot');
+  const scoreBlock = app.slice(scoreStart, scoreStart + 700);
+  assert.match(scoreBlock, /const scoreBeforeQuantityPenalty\s*=\s*preCadenceSimilarityScore\s*\*\s*card\.acquisitionCadenceRankFactor\s*;/,
+    'cadence rank factor must multiply the pre-cadence similarity score');
+  assert.match(scoreBlock, /card\.unclampedSimilarityScore\s*=\s*Math\.max\(0,\s*scoreBeforeQuantityPenalty\s*-\s*\(Number\(card\.quantitativeConflictPenalty\)\s*\|\|\s*0\)\)\s*;/,
+    'quantitative conflict penalty must be applied after cadence adjustment');
+  assert.match(scoreBlock, /card\.similarityScore\s*=\s*Math\.max\(0,\s*Math\.min\(1,\s*card\.unclampedSimilarityScore\)\)\s*;/,
+    'final similarity score must clamp the adjusted score to [0, 1]');
 });
 check('mechanical contrast penalties are present', () => {
   assert.match(app, /kind:\s*'blink-vs-exile-removal'/);
@@ -117,20 +129,19 @@ check('static data downloads have deadlines and report a useful failure instead 
   assert.match(app, /staticSearchResourceState\.lastError = errors\.join/);
 });
 check('asset cache-busts match the app build marker and the app module declaration remains async', () => {
-  const build = app.match(/const MANASEARCH_APP_BUILD = ['\"]([^'\"]+)['\"]/);
+  const build = app.match(/const MANASEARCH_APP_BUILD = ['"]([^'"]+)['"]/);
   assert.ok(build, 'missing MANASEARCH_APP_BUILD marker');
   for (const asset of ['app.js', 'pako.min.js', 'style.css']) {
     const escaped = asset.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    const match = html.match(new RegExp(escaped + '\\?v=([^\"\']+)'));
+    const match = html.match(new RegExp(escaped + '\\?v=([^"]+)'));
     assert.ok(match, `missing versioned ${asset} reference`);
     assert.equal(match[1], build[1], `${asset} version does not match app build tag`);
   }
   assert.match(app, /async function scoreCardBatch\(/);
   const deploy = fs.readFileSync(path.join(root, '.github', 'workflows', 'deploy-pages.yml'), 'utf8');
   assert.match(deploy, /BUILD_TAG=.*MANASEARCH_APP_BUILD/);
-  assert.doesNotMatch(deploy, /grep -Fq ['\"](?:app\.js|pako\.min\.js|style\.css)\?v=20261015-\d+['\"]/);
+  assert.doesNotMatch(deploy, /grep -Fq ['"](?:app\.js|pako\.min\.js|style\.css)\?v=20261015-\d+['"]/);
 });
-
 check('both real-card benchmark console entry points load the static fixture when called without arguments', () => {
   assert.match(app, /window\.runManaSearchRealCardBenchmark\s*=\s*runManaSearchRealCardBenchmarkFromConsole/);
   assert.match(app, /window\.runManaSearchRealCardBenchmarkSuite\s*=\s*runManaSearchRealCardBenchmarkSuite/);
@@ -176,7 +187,7 @@ check('test automation files exist', () => {
   assert.ok(fs.existsSync(path.join(root, '.github', 'workflows', 'recover-stuck-pages-deployment.yml')));
   const deploy = fs.readFileSync(path.join(root, '.github', 'workflows', 'deploy-pages.yml'), 'utf8');
   assert.match(deploy, /for f in pako\.min\.js cards\.bin semantic-index\.bin static-data-meta\.json; do/);
-  assert.match(deploy, /cp \"\$f\" _site\//);
+  assert.match(deploy, /cp "\$f" _site\//);
   assert.match(deploy, /cp\s+tests\/fixtures\/mtg-mechanical-benchmark\.json\s+_site\/tests\/fixtures\//);
   assert.match(deploy, /cancel-in-progress:\s*false/);
   assert.match(deploy, /uses:\s*actions\/deploy-pages@v5\.0\.1/);
@@ -190,7 +201,6 @@ check('test automation files exist', () => {
   assert.match(app, /opponentUpkeepLifeLoss/);
   assert.ok(fs.existsSync(path.join(root, 'tests', 'fixtures', 'mtg-mechanical-benchmark.json')));
 });
-
 const failed = checks.filter(x => !x.pass);
 for (const result of checks) console.log(`${result.pass ? 'PASS' : 'FAIL'} ${result.name}${result.error ? ` — ${result.error}` : ''}`);
 console.log(`\nStatic regression checks: ${checks.length - failed.length}/${checks.length} passed.`);
