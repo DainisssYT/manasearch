@@ -1,6 +1,6 @@
-/* ManaSearch build 20261029-120 */
+/* ManaSearch build 20261029-121 */
 // ManaSearch deployment build marker. Bump this whenever app.js changes so cached-module issues are easy to diagnose.
-const MANASEARCH_APP_BUILD = '20261029-120';
+const MANASEARCH_APP_BUILD = '20261029-121';
 console.info(`[ManaSearch] app.js build ${MANASEARCH_APP_BUILD}`);
 
 // State Management
@@ -13643,9 +13643,15 @@ function calculateEffectRelationshipMismatch(parsedA = [], parsedB = []) {
     };
     const a = (Array.isArray(parsedA) ? parsedA : []).map(unwrap).filter(x => x.fn);
     const b = (Array.isArray(parsedB) ? parsedB : []).map(unwrap).filter(x => x.fn);
-    let maxMismatch = 0;
+    // Use the closest same-action pair. Parser/context extraction can represent a single natural
+    // action twice (once with its trigger clause and once as the outcome phrase); taking the worst
+    // cross-pair mismatch incorrectly penalizes a candidate that has a valid matching relationship.
+    // Extra or missing actions are already handled by graph coverage and excess penalties.
+    let bestMismatch = 1;
+    let comparedPairs = 0;
     for (const left of a) for (const right of b) {
         if (left.fn !== right.fn) continue;
+        comparedPairs++;
         let mismatch = 0;
         const le = left.trigger?.event || null, re = right.trigger?.event || null;
         if (le && re && le !== re) mismatch = Math.max(mismatch, 0.82);
@@ -13659,9 +13665,9 @@ function calculateEffectRelationshipMismatch(parsedA = [], parsedB = []) {
         if (left.recipientScope && right.recipientScope && left.recipientScope !== right.recipientScope) mismatch = Math.max(mismatch, 0.62);
         if (left.tokenType && right.tokenType && normalizeMechanicToken(left.tokenType) !== normalizeMechanicToken(right.tokenType)) mismatch = Math.max(mismatch, 0.40);
         if (left.condition && right.condition && left.condition !== right.condition) mismatch = Math.max(mismatch, 0.22);
-        maxMismatch = Math.max(maxMismatch, mismatch);
+        bestMismatch = Math.min(bestMismatch, mismatch);
     }
-    return maxMismatch;
+    return comparedPairs ? bestMismatch : 0;
 }
 
 function shouldUseModalModeIntent(sourceOracleText, hasEffectHighlight = false, highlights = [], effectHighlightCount = 0) {
