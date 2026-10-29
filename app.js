@@ -1,6 +1,6 @@
-/* ManaSearch build 20261020-119 */
+/* ManaSearch build 20261029-120 */
 // ManaSearch deployment build marker. Bump this whenever app.js changes so cached-module issues are easy to diagnose.
-const MANASEARCH_APP_BUILD = '20261020-119';
+const MANASEARCH_APP_BUILD = '20261029-120';
 console.info(`[ManaSearch] app.js build ${MANASEARCH_APP_BUILD}`);
 
 // State Management
@@ -13852,8 +13852,9 @@ function calculateMechanicalSimilarityDetailed(parsedA, parsedB, profileA = null
     const relationshipMismatch = calculateEffectRelationshipMismatch(safeA, safeB);
     // Trigger/controller/target contradictions should reduce rank even when both cards share a
     // broad action such as draw, damage, or move a card. Keep some residual similarity for useful
-    // near-matches; the penalty is not a hard exclusion.
-    const relationshipFactor = 1 - (0.42 * relationshipMismatch);
+    // near-matches; the penalty is not a hard exclusion. A distinct trigger event needs enough
+    // separation to overcome broad action and card-type similarities in explicit Search intent.
+    const relationshipFactor = 1 - (0.50 * relationshipMismatch);
     const explicitContrast = inferExplicitMechanicalContrast(safeA, safeB);
     let score = rawScore * repeatabilityFactor * relationshipFactor;
     if (explicitContrast.kind === 'opposite') score = Math.min(score, 0.55);
@@ -13861,7 +13862,7 @@ function calculateMechanicalSimilarityDetailed(parsedA, parsedB, profileA = null
     else if (explicitContrast.kind === 'mana-choice-vs-simultaneous') score = Math.min(0.89, score * 0.94);
     else if (explicitContrast.kind === 'blink-vs-exile-removal') score = Math.min(score, 0.52);
     else if (explicitContrast.kind === 'token-multiplier-vs-token-creation') score = Math.min(score, 0.58);
-    else if (explicitContrast.kind === 'reanimation-vs-graveyard-recursion') score = Math.min(score, 0.72);
+    else if (explicitContrast.kind === 'reanimation-vs-graveyard-recursion') score = Math.min(score * 0.85, 0.72);
 
     return {
         score,
