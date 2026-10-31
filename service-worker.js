@@ -39,38 +39,52 @@ function canonicalDataRequest(request) {
 }
 
 async function cacheFirst(request) {
-    const cache = await caches.open(CACHE_NAME);
     const originalUrl = new URL(request.url);
     const key = canonicalDataRequest(request);
     const forceNetwork = originalUrl.searchParams.has('retry');
+    let cache = null;
+    try { cache = await caches.open(CACHE_NAME); } catch (_) {}
 
-    if (!forceNetwork) {
-        const cached = await cache.match(key);
-        if (cached) return cached;
+    if (!forceNetwork && cache) {
+        try {
+            const cached = await cache.match(key);
+            if (cached) return cached;
+        } catch (_) {
+            // CacheStorage may be disabled or full; the network path must still work.
+        }
     }
 
-    // CacheStorage keys retain the build-ID query parameter. On a new data build, replace older
-    // entries for the same pathname so old binary revisions do not accumulate on the device.
     const response = await fetch(request);
-    if (response.ok && response.type !== 'opaque') {
-        const existingKeys = await cache.keys();
-        await Promise.all(existingKeys
-            .filter(existing => new URL(existing.url).pathname === originalUrl.pathname && existing.url !== key.url)
-            .map(existing => cache.delete(existing)));
-        await cache.put(key, response.clone());
+    if (response.ok && response.type !== 'opaque' && cache) {
+        try {
+            const existingKeys = await cache.keys();
+            await Promise.all(existingKeys
+                .filter(existing => new URL(existing.url).pathname === originalUrl.pathname && existing.url !== key.url)
+                .map(existing => cache.delete(existing)));
+            await cache.put(key, response.clone());
+        } catch (_) {
+            // Quota/private-browsing failures only disable persistence, never the download.
+        }
     }
     return response;
 }
 
 async function networkFirst(request) {
-    const cache = await caches.open(CACHE_NAME);
+    let cache = null;
+    try { cache = await caches.open(CACHE_NAME); } catch (_) {}
     try {
         const response = await fetch(request, { cache: 'no-store' });
-        if (response.ok && response.type !== 'opaque') await cache.put(request, response.clone());
+        if (response.ok && response.type !== 'opaque' && cache) {
+            try { await cache.put(request, response.clone()); } catch (_) {}
+        }
         return response;
     } catch (error) {
-        const cached = await cache.match(request);
-        if (cached) return cached;
+        if (cache) {
+            try {
+                const cached = await cache.match(request);
+                if (cached) return cached;
+            } catch (_) {}
+        }
         throw error;
     }
 }
