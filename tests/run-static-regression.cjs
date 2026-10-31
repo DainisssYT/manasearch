@@ -12,7 +12,11 @@ const root = path.resolve(__dirname, '..');
 const appPath = path.join(root, 'app.js');
 const htmlPath = path.join(root, 'index.html');
 const cssPath = path.join(root, 'style.css');
+const searchWorkerPath = path.join(root, 'semantic-search-worker.js');
+const serviceWorkerPath = path.join(root, 'service-worker.js');
 const app = fs.readFileSync(appPath, 'utf8');
+const searchWorker = fs.readFileSync(searchWorkerPath, 'utf8');
+const serviceWorker = fs.readFileSync(serviceWorkerPath, 'utf8');
 const html = fs.readFileSync(htmlPath, 'utf8');
 const css = fs.readFileSync(cssPath, 'utf8');
 
@@ -22,6 +26,10 @@ function check(name, fn) {
   catch (error) { checks.push({ name, pass: false, error: error.message }); }
 }
 check('app.js parses as a valid browser ES module (including reserved-word rules)', () => execFileSync(process.execPath, ['--check', '--input-type=module'], { input: app, stdio: ['pipe', 'pipe', 'pipe'] }));
+check('dedicated worker and service worker scripts parse as valid JavaScript', () => {
+  execFileSync(process.execPath, ['--check'], { input: searchWorker, stdio: ['pipe', 'pipe', 'pipe'] });
+  execFileSync(process.execPath, ['--check'], { input: serviceWorker, stdio: ['pipe', 'pipe', 'pipe'] });
+});
 check('HTML references the current cache-busted app.js', () => {
   const match = html.match(/app\.js\?v=([^"']+)/);
   assert.ok(match, 'missing app.js script reference');
@@ -121,12 +129,44 @@ check('CSS braces are balanced', () => {
   }
   assert.equal(depth, 0, 'unclosed CSS block');
 });
-check('static data downloads have deadlines and report a useful failure instead of spinning forever', () => {
+check('static data downloads have deadlines and the worker fallback reports useful failures', () => {
   assert.match(app, /async function fetchStaticAsset\(/);
   assert.match(app, /Static card corpus \(cards\.bin\)/);
   assert.match(app, /Static semantic index \(semantic-index\.bin\)/);
   assert.match(app, /request timed out after/);
-  assert.match(app, /staticSearchResourceState\.lastError = errors\.join/);
+  assert.match(app, /staticCardCorpusLoadError/);
+  assert.match(app, /staticSemanticIndexLoadError/);
+});
+check('search can start when cards.bin is ready while the semantic index loads in the background', () => {
+  assert.match(app, /function staticSearchResourcesReady\(\)\s*\{\s*return staticSearchResourceState\.cards === 'ready';/);
+  assert.match(app, /staticSemanticResourcesPromise = retryStaticSearchResource/);
+  assert.match(app, /requireSemantic = false/);
+  assert.match(app, /Find Similar Cards will unlock as soon as cards\.bin is ready/);
+});
+check('binary loading and semantic nearest-neighbour search use the dedicated worker', () => {
+  assert.match(app, /new Worker\(new URL\('\.\/semantic-search-worker\.js', import\.meta\.url\)/);
+  assert.match(app, /semanticWorkerRequest\('load-cards'/);
+  assert.match(app, /semanticWorkerRequest\('load-semantic-index'/);
+  assert.match(searchWorker, /data\.type === 'load-cards'/);
+  assert.match(searchWorker, /data\.type === 'load-semantic-index'/);
+  assert.match(searchWorker, /data\.type !== 'query'/);
+  assert.match(searchWorker, /vectorInverseNorms/);
+  assert.match(searchWorker, /heapPushTop/);
+});
+check('Service Worker persists the two static binary assets with Cache API', () => {
+  assert.match(app, /navigator\.serviceWorker\.register/);
+  assert.match(serviceWorker, /caches\.open/);
+  assert.match(serviceWorker, /cards\.bin/);
+  assert.match(serviceWorker, /semantic-index\.bin/);
+  assert.match(serviceWorker, /networkFirst/);
+  assert.match(serviceWorker, /cacheFirst/);
+});
+check('maximum displayed result pages default to three and cap only the presentation list', () => {
+  assert.match(app, /maxResultPages: 3/);
+  assert.match(app, /function getDisplayedResultPageLimit\(/);
+  assert.match(app, /const displayCap = getDisplayedResultLimit\(\) \* getDisplayedResultPageLimit\(\)/);
+  assert.match(html, /id="preference-max-result-pages" min="1" max="50"/);
+  assert.match(html, /3 pages × 50 cards = up to 150 displayed results/);
 });
 check('asset cache-busts match the app build marker and the app module declaration remains async', () => {
   const build = app.match(/const MANASEARCH_APP_BUILD = ['"]([^'"]+)['"]/);
@@ -180,13 +220,19 @@ check('selected outcome plus a custom trigger feeds the same context into retrie
   assert.match(app, /trigger-override-drops-unrelated-native-trigger-restrictions/);
   assert.match(app, /sourceTextToParse = \(hasEffectHighlight && targetText\) \? \(buildHighlightScoringText\(effectHighlights, sourceText\)/);
 });
+check('worker scripts are available in the Pages artifact and pass syntax checks', () => {
+  execFileSync(process.execPath, ['--check'], { input: searchWorker, stdio: ['pipe', 'pipe', 'pipe'] });
+  execFileSync(process.execPath, ['--check'], { input: serviceWorker, stdio: ['pipe', 'pipe', 'pipe'] });
+  const deployWorkflow = fs.readFileSync(path.join(root, '.github', 'workflows', 'deploy-pages.yml'), 'utf8');
+  assert.match(deployWorkflow, /semantic-search-worker\.js service-worker\.js/);
+});
 check('test automation files exist', () => {
   assert.ok(fs.existsSync(path.join(root, 'tests', 'run-browser-regression.cjs')));
   assert.ok(fs.existsSync(path.join(root, '.github', 'workflows', 'manasearch-regression-tests.yml')));
   assert.ok(fs.existsSync(path.join(root, '.github', 'workflows', 'deploy-pages.yml')));
   assert.ok(fs.existsSync(path.join(root, '.github', 'workflows', 'recover-stuck-pages-deployment.yml')));
   const deploy = fs.readFileSync(path.join(root, '.github', 'workflows', 'deploy-pages.yml'), 'utf8');
-  assert.match(deploy, /for f in pako\.min\.js cards\.bin semantic-index\.bin static-data-meta\.json; do/);
+  assert.match(deploy, /for f in semantic-search-worker\.js service-worker\.js pako\.min\.js cards\.bin semantic-index\.bin static-data-meta\.json; do/);
   assert.match(deploy, /cp "\$f" _site\//);
   assert.match(deploy, /cp\s+tests\/fixtures\/mtg-mechanical-benchmark\.json\s+_site\/tests\/fixtures\//);
   assert.match(deploy, /cancel-in-progress:\s*false/);

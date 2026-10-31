@@ -5,7 +5,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>ManaSearch</title>
-    <link rel="stylesheet" href="style.css?v=20261029-123">
+    <link rel="stylesheet" href="style.css?v=20261031-124">
 </head>
 <body>
     <header class="site-header">
@@ -370,7 +370,7 @@
                 <button type="button" id="find-similar-btn" class="primary-search-btn" disabled data-feature-tip="Search for cards with similar mechanics, function, and context." data-feature-preview="Source card + highlights + constraints → ranked matches">Find Similar Cards</button>
                 <div id="static-search-status" class="static-search-status" role="status" aria-live="polite">
                     <span id="static-search-status-spinner" class="static-search-status-spinner" aria-hidden="true"></span>
-                    <span id="static-search-status-text" class="static-search-status-text">Loading search data — cards.bin and semantic-index.bin are loading… Find Similar Cards will be available when both files are ready.</span>
+                    <span id="static-search-status-text" class="static-search-status-text">Loading the local card catalog… Find Similar Cards will unlock as soon as cards.bin is ready. Semantic search is prepared in the background.</span>
                     <button type="button" id="static-search-retry-btn" class="static-search-retry-btn hidden">Retry</button>
                 </div>
             </section>
@@ -891,15 +891,27 @@
 
                 <div class="preference-setting">
                     <div class="preference-setting-copy">
-                        <label for="preference-result-limit"><strong>Maximum results displayed</strong></label>
-                        <span>Controls how many ranked cards appear per page. Use the page controls below the results to browse the entire ranked candidate list.</span>
+                        <label for="preference-result-limit"><strong>Results per page</strong></label>
+                        <span>Controls how many ranked cards appear on each results page.</span>
                     </div>
                     <div class="preference-control preference-number-control">
                         <input type="number" id="preference-result-limit" min="1" max="200" step="1" inputmode="numeric" aria-describedby="preference-result-limit-help">
                         <span>per page</span>
                     </div>
                 </div>
-                <p id="preference-result-limit-help" class="preference-help">Recommended: 30–50 cards per page. Every eligible ranked candidate remains available through pagination.</p>
+                <p id="preference-result-limit-help" class="preference-help">Default: 50 cards per page. The maximum number of pages is controlled separately below.</p>
+
+                <div class="preference-setting">
+                    <div class="preference-setting-copy">
+                        <label for="preference-max-result-pages"><strong>Maximum result pages</strong></label>
+                        <span>Limit how many pages of ranked candidates are shown. This only limits the visible result list, not the underlying search or CSV export.</span>
+                    </div>
+                    <div class="preference-control preference-number-control">
+                        <input type="number" id="preference-max-result-pages" min="1" max="50" step="1" inputmode="numeric" aria-describedby="preference-max-result-pages-help">
+                        <span>pages</span>
+                    </div>
+                </div>
+                <p id="preference-max-result-pages-help" class="preference-help">Default: 3 pages × 50 cards = up to 150 displayed results. Change this to show more or fewer pages.</p>
 
                 <div class="preference-setting preference-toggle-setting">
                     <div class="preference-setting-copy">
@@ -1088,8 +1100,8 @@
             dialog.addEventListener('click', event => { if (event.target === dialog && dialog.open) dialog.close(); });
         })();
     </script>
-    <script src="pako.min.js?v=20261029-123"></script>
-    <script type="module" src="app.js?v=20261029-123"></script>
+    <script src="pako.min.js?v=20261031-124"></script>
+    <script type="module" src="app.js?v=20261031-124"></script>
     <style id="minigames-inline-styles">
 /* v119 — self-contained Guess the Source minigame UI and aligned header launcher. */
 .minigames-launch-btn {
