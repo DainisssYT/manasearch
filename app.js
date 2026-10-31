@@ -4647,8 +4647,8 @@ function findDependentOracleContext(sourceText, start, end) {
     if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start || end > text.length) return null;
     const bounds = (position) => {
         let left = 0, right = text.length;
-        for (let i = position - 1; i >= 0; i--) if (/[.!?;\\n]/.test(text[i])) { left = i + 1; break; }
-        for (let i = position; i < text.length; i++) if (/[.!?;\\n]/.test(text[i])) { right = i + 1; break; }
+        for (let i = position - 1; i >= 0; i--) if (/[.!?;\n]/.test(text[i])) { left = i + 1; break; }
+        for (let i = position; i < text.length; i++) if (/[.!?;\n]/.test(text[i])) { right = i + 1; break; }
         return { start: left, end: right, text: text.slice(left, right).trim() };
     };
     const selected = bounds(start), selectedLast = bounds(Math.max(start, end - 1));
@@ -4657,19 +4657,19 @@ function findDependentOracleContext(sourceText, start, end) {
     const consider = (left, right) => {
         const clause = text.slice(left, right).trim();
         if (!clause || (left < end && right > start)) return;
-        const followup = /^(?:then\\b|if you do\\b|if you don'?t\\b|that player\\b|they do\\b|you may\\b|you can\\b|this way\\b|for each\\b|repeat this process\\b|until\\b)/i.test(clause);
-        const governing = /(?:whenever|when|at the beginning of|at the end of|if |after |before |as .* enters|each time|the next time)\\b/i.test(clause) &&
-            /^(?:you|target player|target opponent|that player|each opponent|each player|then|if you|draw|create|exile|return|put|deal|gain|lose)\\b/i.test(selectedText);
+        const followup = /^(?:then\b|if you do\b|if you don'?t\b|that player\b|they do\b|you may\b|you can\b|this way\b|for each\b|repeat this process\b|until\b)/i.test(clause);
+        const governing = /(?:whenever|when|at the beginning of|at the end of|if |after |before |as .* enters|each time|the next time)\b/i.test(clause) &&
+            /^(?:you|target player|target opponent|that player|each opponent|each player|then|if you|draw|create|exile|return|put|deal|gain|lose)\b/i.test(selectedText);
         if (followup || governing) candidates.push({ start: left, end: right, text: clause });
     };
     if (selected.start > 0) {
         let left = 0;
-        for (let i = selected.start - 1; i >= 0; i--) if (/[.!?;\\n]/.test(text[i])) { left = i + 1; break; }
+        for (let i = selected.start - 1; i >= 0; i--) if (/[.!?;\n]/.test(text[i])) { left = i + 1; break; }
         consider(left, selected.start);
     }
     if (selectedLast.end < text.length) {
         let right = text.length;
-        for (let i = selectedLast.end; i < text.length; i++) if (/[.!?;\\n]/.test(text[i])) { right = i + 1; break; }
+        for (let i = selectedLast.end; i < text.length; i++) if (/[.!?;\n]/.test(text[i])) { right = i + 1; break; }
         consider(selectedLast.end, right);
     }
     return candidates.length === 1 ? candidates[0] : null;
@@ -10413,6 +10413,7 @@ function calculateHighlightIntentMatch(profiles, candidateEffects, candidateCard
             }
             structuralScore = clamp01(assignment.score * structuralWeight + coverage * coverageWeight + lexicalSupport * lexicalWeight);
             if (profile.mode === 'avoid') structuralScore = 1 - structuralScore;
+            else if (profile.mode === 'context') structuralScore = 0.5;
         }
 
         // Strong text fallback for explicit user intent. This is intentionally independent of parser
