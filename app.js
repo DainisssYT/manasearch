@@ -10396,6 +10396,9 @@ function calculateHighlightIntentMatch(profiles, candidateEffects, candidateCard
     const candidateOracle = candidateCard ? getCardOracleText(candidateCard) : '';
     const clamp01 = value => Math.max(0, Math.min(1, Number(value) || 0));
     const profileScores = profiles.map(profile => {
+        // Context-only groups provide background for interpretation but do not independently pull
+        // candidates toward or away from a mechanic.
+        if (profile.mode === 'context') return 0.5;
         const sourceEffects = profile.recognizedEffects?.length ? profile.recognizedEffects : (profile.parsedEffects || []);
         let structuralScore = 0;
         let coverage = 0;
@@ -10412,8 +10415,7 @@ function calculateHighlightIntentMatch(profiles, candidateEffects, candidateCard
                 lexicalSupport = profile.exactTexts.filter(t => oracle.includes(String(t).toLocaleLowerCase())).length / profile.exactTexts.length;
             }
             structuralScore = clamp01(assignment.score * structuralWeight + coverage * coverageWeight + lexicalSupport * lexicalWeight);
-            if (profile.mode === 'avoid') structuralScore = 1 - structuralScore;
-            else if (profile.mode === 'context') structuralScore = 0.5;
+
         }
 
         // Strong text fallback for explicit user intent. This is intentionally independent of parser
@@ -10448,7 +10450,8 @@ function calculateHighlightIntentMatch(profiles, candidateEffects, candidateCard
         else if (profile.explicitUserIntent) confidence = Math.max(confidence, 0.78);
         const explicitIntentPriority = profile.userAuthoredOverride ? 1.12 : (strongUserIntent ? 1.08 : (profile.explicitUserIntent ? 1.06 : 1));
         // Do not punish a usable text-only intent because parsing returned no candidate effects.
-        return clamp01(score * explicitIntentPriority * confidence);
+        const finalScore = clamp01(score * explicitIntentPriority * confidence);
+        return profile.mode === 'avoid' ? 1 - finalScore : finalScore;
     });
     const average = profileScores.reduce((a,b) => a+b,0) / profileScores.length;
     const fullCoverage = profileScores.filter(v => v >= 0.55).length / profileScores.length;
