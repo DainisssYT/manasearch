@@ -4664,7 +4664,7 @@ function findDependentOracleContext(sourceText, start, end) {
     };
     if (selected.start > 0) {
         let left = 0;
-        for (let i = selected.start - 1; i >= 0; i--) if (/[.!?;\n]/.test(text[i])) { left = i + 1; break; }
+        for (let i = selected.start - 2; i >= 0; i--) if (/[.!?;\n]/.test(text[i])) { left = i + 1; break; }
         consider(left, selected.start);
     }
     if (selectedLast.end < text.length) {
