@@ -4665,14 +4665,20 @@ function findDependentOracleContext(sourceText, start, end) {
         if (followup || governing) candidates.push({ start: left, end: right, text: clause });
     };
     if (selected.start > 0) {
+        let cursor = selected.start - 1;
+        while (cursor >= 0 && /[\\s.!?;]/.test(text[cursor])) cursor--;
         let left = 0;
-        for (let i = selected.start - 2; i >= 0; i--) if (/[.!?;\n]/.test(text[i])) { left = i + 1; break; }
+        for (let i = cursor; i >= 0; i--) if (/[.!?;\\n]/.test(text[i])) { left = i + 1; break; }
         consider(left, selected.start);
     }
     if (selectedLast.end < text.length) {
-        let right = text.length;
-        for (let i = selectedLast.end; i < text.length; i++) if (/[.!?;\n]/.test(text[i])) { right = i + 1; break; }
-        consider(selectedLast.end, right);
+        let nextSentenceStart = selectedLast.end;
+        while (nextSentenceStart < text.length && /[\\s.!?;]/.test(text[nextSentenceStart])) nextSentenceStart++;
+        if (nextSentenceStart < text.length) {
+            let right = text.length;
+            for (let i = nextSentenceStart; i < text.length; i++) if (/[.!?;\\n]/.test(text[i])) { right = i + 1; break; }
+            consider(nextSentenceStart, right);
+        }
     }
     return candidates.length === 1 ? candidates[0] : null;
 }
