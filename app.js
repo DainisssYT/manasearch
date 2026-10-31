@@ -4691,7 +4691,7 @@ function handleSourceTextSelection(root = sourceCardOracle, field = 'oracle') {
         removeHighlight(existingIndex);
     } else {
         const highlight = {
-            text: trimmed.text, mode: 'exact', origin: 'source', field: canonicalField,
+            text: trimmed.text, mode: getPreferredHighlightMode(), origin: 'source', field: canonicalField,
             colorIndex: nextHighlightColorIndex++ % 4, attachedTo: null
         };
         if (canonicalField === 'type') {
@@ -4702,7 +4702,20 @@ function handleSourceTextSelection(root = sourceCardOracle, field = 'oracle') {
             highlight.start = trimmed.start;
             highlight.end = trimmed.end;
         }
+        const highlightIndex = manualHighlights.length;
         manualHighlights.push(highlight);
+        if (canonicalField === 'oracle' && highlight.mode !== 'context_only' && Number.isFinite(trimmed.start) && Number.isFinite(trimmed.end)) {
+            const dependent = findDependentOracleSentenceRange(originalText, trimmed.start, trimmed.end);
+            if (dependent && !manualHighlights.some(existing => existing.field === 'oracle' && Number.isFinite(existing.start) && Number.isFinite(existing.end) && existing.start < dependent.end && existing.end > dependent.start)) {
+                manualHighlights.push({
+                    text: dependent.text, mode: 'context_only', origin: 'source', field: 'oracle',
+                    start: dependent.start, end: dependent.end,
+                    colorIndex: nextHighlightColorIndex++ % 4,
+                    attachedTo: highlightIndex, intentConnection: 'attached', isAutoContext: true,
+                    contextRelation: dependent.relation
+                });
+            }
+        }
         reapplyOracleHighlights();
         reapplyTypeLineHighlights();
         renderHighlightChips();
@@ -9895,6 +9908,58 @@ function maxOneToOneHighlightAssignment(sourceEffects, candidateEffects, mode) {
 // selected words (for example, "draw a card") loses the trigger condition that makes the effect
 // mechanically distinctive. The selection remains the literal constraint; this expanded context
 // is for mechanic parsing, cadence, intent explanation, and semantic retrieval.
+
+function getOracleSentenceSpans(sourceText) {
+    const text = String(sourceText || '');
+    const spans = [];
+    let start = 0;
+    const add = (from, to) => {
+        let left = from, right = to;
+        while (left < right && /\s/.test(text[left])) left++;
+        while (right > left && /\s/.test(text[right - 1])) right--;
+        if (right > left) spans.push({ start: left, end: right, text: text.slice(left, right) });
+    };
+    for (let i = 0; i < text.length; i++) {
+        const ch = text[i];
+        if (ch === '\n') {
+            add(start, i);
+            start = i + 1;
+            continue;
+        }
+        if (/[.!?]/.test(ch) && (i + 1 >= text.length || /\s/.test(text[i + 1]))) {
+            let boundaryEnd = i + 1;
+            while (boundaryEnd < text.length && /["')\]]/.test(text[boundaryEnd])) boundaryEnd++;
+            add(start, boundaryEnd);
+            start = boundaryEnd;
+            i = boundaryEnd - 1;
+        }
+    }
+    add(start, text.length);
+    return spans;
+}
+
+function findDependentOracleSentenceRange(sourceText, start, end) {
+    const spans = getOracleSentenceSpans(sourceText);
+    if (!spans.length || !Number.isFinite(start) || !Number.isFinite(end)) return null;
+    const currentIndex = spans.findIndex(span => start < span.end && end > span.start);
+    if (currentIndex < 0) return null;
+    const current = spans[currentIndex];
+    const previous = spans[currentIndex - 1];
+    const next = spans[currentIndex + 1];
+    const refersBackward = sentence => /^(?:then|otherwise|if you do|you may (?:cast|play|put|return)|for each of those)\b/i.test(sentence)
+        || /\b(?:that|those)\s+(?:cards?|creatures?|permanents?|spells?|tokens?|objects?)\b/i.test(sentence)
+        || /\b(?:it|them|its|their|this way|that way)\b/i.test(sentence)
+        || /\b(?:the exiled|the revealed|the discarded|the milled|the sacrificed|the returned|the chosen)\s+(?:card|cards|creature|permanent|spell|token)\b/i.test(sentence);
+    const hasAntecedent = sentence => /\b(?:card|cards|creature|creatures|permanent|permanents|spell|spells|token|tokens|object|objects|library|graveyard|exile|exiled|revealed|discarded|sacrificed|returned|created|chosen|searched)\b/i.test(sentence);
+    if (previous && refersBackward(current.text) && hasAntecedent(previous.text)) {
+        return { ...previous, relation: 'selected sentence refers to the previous sentence' };
+    }
+    if (next && refersBackward(next.text) && hasAntecedent(current.text)) {
+        return { ...next, relation: 'following sentence refers to the selected sentence' };
+    }
+    return null;
+}
+
 function extractHighlightClauseContext(sourceText, start, end) {
     const text = String(sourceText || '');
     if (!Number.isFinite(start) || !Number.isFinite(end) || start < 0 || end <= start || end > text.length) return '';
@@ -9905,6 +9970,11 @@ function extractHighlightClauseContext(sourceText, start, end) {
     let right = text.length;
     for (let i = end; i < text.length; i++) {
         if (/[.!?;\n]/.test(text[i])) { right = i + 1; break; }
+    }
+    const dependent = findDependentOracleSentenceRange(text, start, end);
+    if (dependent) {
+        left = Math.min(left, dependent.start);
+        right = Math.max(right, dependent.end);
     }
     return text.slice(left, right).trim();
 }
@@ -10107,6 +10177,7 @@ function annotateHighlightGroups(highlights, sourceText = getCurrentSourceOracle
     for (let i = 1; i < positioned.length; i++) {
         const prev = positioned[i - 1];
         const next = positioned[i];
+        if ((normalizeHighlightMode(prev.highlight.mode) === 'avoid') !== (normalizeHighlightMode(next.highlight.mode) === 'avoid')) continue;
         const gap = String(sourceText || '').slice(prev.anchor.end, next.anchor.start);
         if (!/[.!?\n]/.test(gap) && gap.length <= 96) {
             union(hs.indexOf(prev.highlight), hs.indexOf(next.highlight));
@@ -10125,7 +10196,7 @@ function annotateHighlightGroups(highlights, sourceText = getCurrentSourceOracle
     // makes adding "Whenever an opponent draws a card" beside a selected "draw a card" phrase work
     // without requiring a hidden connection-setting step.
     const validSourceEffectHighlights = hs.filter(h => h && (h.origin !== 'user' || Boolean(h.editedFrom)) && h.field !== 'type' && getHighlightSourceAnchor(h, sourceText));
-    const unconnectedTriggerDetails = hs.filter(h => h?.origin === 'user' && !h.editedFrom && !Number.isInteger(h.attachedTo) && h.intentConnection !== 'independent' && isSearchIntentTriggerPhrase(h.text));
+    const unconnectedTriggerDetails = hs.filter(h => h?.origin === 'user' && normalizeHighlightMode(h.mode) !== 'avoid' && !h.editedFrom && !Number.isInteger(h.attachedTo) && h.intentConnection !== 'independent' && isSearchIntentTriggerPhrase(h.text));
     if (validSourceEffectHighlights.length && unconnectedTriggerDetails.length === 1) {
         // Multiple highlight chips can belong to the same Oracle clause. Count distinct clauses,
         // not chips, so one custom trigger can still connect when the user selected two spans.
@@ -10150,6 +10221,7 @@ function annotateHighlightGroups(highlights, sourceText = getCurrentSourceOracle
         if (targetOriginalIndex === null || targetOriginalIndex === h._highlightIndex) return;
         const targetLocalIndex = indexByOriginal.get(targetOriginalIndex);
         if (targetLocalIndex == null) return;
+        if ((normalizeHighlightMode(h.mode) === 'avoid') !== (normalizeHighlightMode(hs[targetLocalIndex].mode) === 'avoid')) return;
         union(localIndex, targetLocalIndex);
     });
 
@@ -10183,10 +10255,11 @@ function annotateHighlightGroups(highlights, sourceText = getCurrentSourceOracle
             .filter(h => h.origin === 'user' || h.field === 'type' || !getHighlightSourceAnchor(h, sourceText))
             .map(h => h.field === 'type' ? `Card type line: ${String(h.text || '').trim()}` : String(h.text || '').trim())
             .filter(Boolean);
-        const positionedEffectSelections = group.filter(h => h.field !== 'type' && (
-            (h.origin !== 'user' && getHighlightSourceAnchor(h, sourceText)) ||
-            (h.origin === 'user' && h.editedFrom && getHighlightSourceAnchor(h, sourceText))
-        ));
+        const positionedEffectSelections = group.filter(h => h.field !== 'type'
+            && !['context_only', 'avoid'].includes(normalizeHighlightMode(h.mode)) && (
+                (h.origin !== 'user' && getHighlightSourceAnchor(h, sourceText)) ||
+                (h.origin === 'user' && h.editedFrom && getHighlightSourceAnchor(h, sourceText))
+            ));
         const triggerIntentText = connectedIntentTexts.find(isSearchIntentTriggerPhrase) || '';
         const selectedOutcomeTexts = positionedEffectSelections
             .map(h => String(h.origin === 'user' && h.editedFrom ? h.editedFrom.text : h.text || '').trim())
@@ -10283,13 +10356,16 @@ function annotateHighlightGroups(highlights, sourceText = getCurrentSourceOracle
         const parseText = triggerOverrideClause || sourceClauseText || contextText || group.map(h => h.text).filter(Boolean).join(' ');
         const overrideSet = new Set(intentOverrideTexts.map(value => String(value).trim()));
         const remainingIntentTexts = connectedIntentTexts.filter(value => !overrideSet.has(String(value).trim()));
-        const hasExact = group.some(h => h.mode !== 'variable');
-        const hasVariable = group.some(h => h.mode === 'variable');
-        const groupMode = hasExact && hasVariable ? 'mixed' : (hasVariable ? 'variable' : 'exact');
+        const positiveModeHighlights = group.filter(h => !['context_only', 'avoid'].includes(normalizeHighlightMode(h.mode)));
+        const hasExact = positiveModeHighlights.some(h => normalizeHighlightMode(h.mode) === 'exact');
+        const hasVariable = positiveModeHighlights.some(h => normalizeHighlightMode(h.mode) === 'variable');
+        const avoidOnly = group.some(h => normalizeHighlightMode(h.mode) === 'avoid') && positiveModeHighlights.length === 0;
+        const contextOnlyOnly = positiveModeHighlights.length === 0 && !avoidOnly;
+        const groupMode = avoidOnly ? 'avoid' : contextOnlyOnly ? 'context_only' : (hasExact && hasVariable ? 'mixed' : (hasVariable ? 'variable' : 'exact'));
         const benchmarkIntentOnly = group.some(h => h.origin === 'benchmark') && groupMode === 'mixed';
-        const exactTexts = group.filter(h => h.mode !== 'variable').map(h => h.text.trim());
-        const variableTexts = group.filter(h => h.mode === 'variable').map(h => h.text.trim());
-        const modes = group.map(h => h.mode === 'variable' ? 'variable' : 'exact');
+        const exactTexts = positiveModeHighlights.filter(h => normalizeHighlightMode(h.mode) === 'exact').map(h => h.text.trim());
+        const variableTexts = positiveModeHighlights.filter(h => normalizeHighlightMode(h.mode) === 'variable').map(h => h.text.trim());
+        const modes = group.map(h => normalizeHighlightMode(h.mode));
         group.contextText = contextText || group.filter(h => Number.isFinite(h.start)).map(h => h.text.trim()).join(' ');
         group.sourceClauseText = sourceClauseText || group.contextText;
         group.parseText = parseText;
@@ -10303,9 +10379,11 @@ function annotateHighlightGroups(highlights, sourceText = getCurrentSourceOracle
         group.sourceEnd = end;
         group.mode = groupMode;
         group.modes = modes;
+        group.avoidOnly = avoidOnly;
+        group.contextOnlyOnly = contextOnlyOnly;
         group.selections = group.map(h => ({
             text: h.text.trim(),
-            mode: h.mode === 'variable' ? 'variable' : 'exact',
+            mode: normalizeHighlightMode(h.mode),
             intent: h.intent || '',
             origin: h.origin || 'user',
             attachedTo: Number.isInteger(h.attachedTo) ? h.attachedTo : null
@@ -10320,6 +10398,8 @@ function annotateHighlightGroups(highlights, sourceText = getCurrentSourceOracle
             h.groupEnd = end;
             h.groupContextText = group.contextText;
             h.groupMode = groupMode;
+            h.avoidOnly = avoidOnly;
+            h.contextOnlyOnly = contextOnlyOnly;
             h.benchmarkIntentOnly = benchmarkIntentOnly;
         });
     });
