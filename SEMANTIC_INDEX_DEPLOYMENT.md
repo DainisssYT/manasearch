@@ -1,19 +1,28 @@
-# ManaSearch semantic index deployment
+# ManaSearch static data and background search
 
-ManaSearch now prefers a precomputed `semantic-index.bin` generated during the GitHub Pages deployment.
-The deployment workflow fetches Scryfall's `oracle_cards` bulk data, embeds the normalized Oracle text
-with the same `Xenova/all-MiniLM-L6-v2` model used in the browser, quantizes the 384-dimensional vectors
-to int8, and publishes the binary index beside the site files.
+ManaSearch still uses the same free, static data files and performs all card retrieval and similarity
+calculations on the visitor's device. There is no runtime card API, paid backend, EDHREC dependency,
+or server-side search.
 
-The workflow caches the generated binary by Scryfall's `oracle_cards.updated_at` value. That means normal
-app-only pushes reuse the existing semantic index; a new index is generated only when the Scryfall bulk
-revision changes or the cache is unavailable.
+On startup, cards.bin is downloaded and decoded in semantic-search-worker.js. The main UI becomes
+searchable as soon as the local card corpus and lexical index are ready. semantic-index.bin continues
+loading in the background and is decoded in the same worker; once ready, semantic nearest-neighbour
+queries are executed there and the worker retains the original vector buffer.
 
-Visitors download the already-built index in the background. Search never waits for the index. When the
-static asset is available, no browser-side corpus build is performed. Only a failed/missing/invalid static
-asset causes ManaSearch to fall back to the existing IndexedDB client-side build, also in the background.
+The embeddings are generated with mean pooling and normalization before Int8 quantization. The
+worker computes each quantized vector's inverse norm once, then uses a pre-normalized query vector
+and cached candidate inverse norms for cosine comparisons. This avoids recalculating a square root
+for every candidate on every search.
 
-## GitHub Pages setting
+service-worker.js uses the browser Cache API to persist cards.bin and semantic-index.bin between
+visits. The cache keys include the static data build ID from static-data-meta.json, so updated Scryfall
+bulk data is fetched under a new key. The metadata request is network-first with a cached fallback;
+the two large binary assets are cache-first. If Service Workers are unavailable, ManaSearch falls
+back to normal browser HTTP caching and the original local decoders.
 
-In the repository's **Settings → Pages**, set **Source** to **GitHub Actions**. The workflow in
-`.github/workflows/deploy-pages.yml` then publishes the site whenever `main` changes.
+The result page size remains 50 by default. Preferences now also provide a maximum result-page count,
+defaulting to 3 pages (up to 150 visible results). This affects the presentation list only; the
+underlying ranked candidates and CSV export remain unchanged.
+
+The deployment workflow publishes both worker scripts beside the existing static assets. No hosting
+upgrade or paid infrastructure is required.
