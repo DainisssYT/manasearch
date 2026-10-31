@@ -223,7 +223,8 @@ check('selected outcome plus a custom trigger feeds the same context into retrie
 check('worker scripts are available in the Pages artifact and pass syntax checks', () => {
   execFileSync(process.execPath, ['--check'], { input: searchWorker, stdio: ['pipe', 'pipe', 'pipe'] });
   execFileSync(process.execPath, ['--check'], { input: serviceWorker, stdio: ['pipe', 'pipe', 'pipe'] });
-  assert.match(deploy, /semantic-search-worker\.js service-worker\.js/);
+  const deployWorkflow = fs.readFileSync(path.join(root, '.github', 'workflows', 'deploy-pages.yml'), 'utf8');
+  assert.match(deployWorkflow, /semantic-search-worker\.js service-worker\.js/);
 });
 check('test automation files exist', () => {
   assert.ok(fs.existsSync(path.join(root, 'tests', 'run-browser-regression.cjs')));
