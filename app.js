@@ -2376,7 +2376,7 @@ function buildBenchmarkHighlightState(testCase, sourceCard = currentSourceCard) 
 
         resolved.push({
             text,
-            mode: h?.mode === 'variable' ? 'variable' : 'exact',
+            mode: normalizeHighlightMode(h?.mode),
             start,
             end,
             intent: String(h?.intent || testCase?.highlightIntent || '').trim()
@@ -9677,10 +9677,10 @@ function buildHighlightScoringText(highlights, sourceText = getCurrentSourceOrac
         .filter(h => h && typeof h.text === 'string' && h.text.trim());
     if (!hs.length) return '';
 
-    // Use the same explicit grouping logic as the mechanical highlight-intent layer. This means
-    // a user-added search detail can be attached to an actual source selection and contribute to
-    // the semantic target without being mistaken for literal Oracle grammar.
-    const groups = annotateHighlightGroups(hs, sourceText);
+    // Use the same grouping as structural scoring. Avoid tags describe what to down-rank, so they
+    // must never become positive retrieval text. Context-only tags may remain in the source context
+    // of a connected positive group, but are not emitted as independent requirements.
+    const groups = annotateHighlightGroups(hs, sourceText).filter(group => !group.avoidOnly);
     if (!groups.length) return '';
 
     return groups.map(group => {
@@ -10421,7 +10421,9 @@ function buildHighlightIntentProfiles(highlights, sourceCard = currentSourceCard
         // selection of only the outcome phrase. A connected trigger-shaped Search detail is a
         // deliberate override and is composed with that outcome in group.parseText; ordinary
         // Search details (e.g. "produces three colorless mana") remain semantic hints only.
-        let parsedEffects = parseMTGEffect(group.parseText || group.sourceClauseText || group.contextText || group.map(h => h.text).filter(Boolean).join(' '));
+        const parserInput = group.parseText || group.sourceClauseText || group.contextText || group.map(h => h.text).filter(Boolean).join(' ');
+        const parserResult = parseMTGEffectWithDiagnostics(parserInput);
+        let parsedEffects = parserResult.effects;
         parsedEffects.forEach(effect => {
             if (effect && typeof effect === 'object') {
                 effect.contextClause = String(group.parseText || group.sourceClauseText || group.contextText || effect.raw || '').trim();
@@ -10483,7 +10485,10 @@ function buildHighlightIntentProfiles(highlights, sourceCard = currentSourceCard
             parsedEffects,
             recognizedEffects,
             canonicalFunctions,
-            parserConfidence: calculateCardFieldConfidence(parsedEffects).overall || 0,
+            avoidOnly: Boolean(group.avoidOnly),
+            contextOnlyOnly: Boolean(group.contextOnlyOnly),
+            parserConfidence: calculateParserConfidenceReport(parsedEffects, parserInput).score || 0,
+            parserConfidenceReport: calculateParserConfidenceReport(parsedEffects, parserInput),
             canonicalText: canonicalFunctionToText(canonicalFunctions)
         };
     });
@@ -10494,12 +10499,16 @@ function calculateHighlightIntentMatch(profiles, candidateEffects, candidateCard
     const safeEffects = Array.isArray(candidateEffects) ? candidateEffects : [];
     const candidateOracle = candidateCard ? getCardOracleText(candidateCard) : '';
     const clamp01 = value => Math.max(0, Math.min(1, Number(value) || 0));
-    const profileScores = profiles.map(profile => {
+    const positiveProfiles = profiles.filter(profile => !profile.avoidOnly && !profile.contextOnlyOnly);
+    const avoidProfiles = profiles.filter(profile => profile.avoidOnly);
+    const scoreProfile = profile => {
         const sourceEffects = profile.recognizedEffects?.length ? profile.recognizedEffects : (profile.parsedEffects || []);
         let structuralScore = 0;
         let coverage = 0;
         if (sourceEffects.length && safeEffects.length) {
-            const matchingMode = profile.mode === 'mixed' ? 'variable' : profile.mode;
+            // Mixed mode uses flexible structural matching, while Exact fragments stay in the
+            // literal requirement channel and are checked against the same candidate effect below.
+            const matchingMode = profile.mode === 'exact' ? 'exact' : 'variable';
             const assignment = maxOneToOneHighlightAssignment(sourceEffects, safeEffects, matchingMode);
             coverage = sourceEffects.length ? assignment.matches.length / sourceEffects.length : 0;
             const lexicalWeight = profile.benchmarkIntentOnly ? 0.05 : 0.12;
@@ -10513,17 +10522,15 @@ function calculateHighlightIntentMatch(profiles, candidateEffects, candidateCard
             structuralScore = clamp01(assignment.score * structuralWeight + coverage * coverageWeight + lexicalSupport * lexicalWeight);
         }
 
-        // Strong text fallback for explicit user intent. This is intentionally independent of parser
-        // recognition: custom wording such as "take an extra turn" must still steer retrieval/ranking
-        // even if the current rules parser returns only a generic effect for it.
+        // A custom or newly printed phrase can still guide matching even when no canonical action
+        // exists yet. Avoid profiles use the same evidence, but their result is interpreted as a
+        // negative preference below rather than a positive score contribution.
         const explicitQuery = String(profile.explicitIntentText || profile.parseText || profile.searchIntentText || '').trim();
         let textSupport = 0;
         if (profile.explicitUserIntent && explicitQuery && candidateOracle) {
             const simple = clamp01(calculateSimpleSimilarity(explicitQuery, candidateOracle));
             const fuzzy = clamp01(calculateFuzzyTextMatch(explicitQuery, candidateOracle));
             const coverageText = clamp01(lexicalTokenCoverage(explicitQuery, candidateOracle));
-            // Preserve phrase/trigger identity over unordered word overlap; lexical coverage is only
-            // a supplement, not enough on its own to call two mechanically different rules equal.
             textSupport = clamp01(simple * 0.42 + fuzzy * 0.43 + coverageText * 0.15);
         }
 
@@ -10531,9 +10538,6 @@ function calculateHighlightIntentMatch(profiles, candidateEffects, candidateCard
         const strongUserIntent = Boolean(profile.userAuthoredOverride || profile.editedFromSource || (profile.connectedIntentTexts || []).length);
         let score = structuralScore;
         if (profile.explicitUserIntent) {
-            // For user-authored edits, the words they wrote get greater say even when the canonical
-            // parser cannot fully classify the effect. When structure is known it remains the
-            // majority signal; when it is unknown, text intent becomes the safe fallback.
             score = hasRecognizedStructure
                 ? structuralScore * (strongUserIntent ? 0.62 : 0.72) + textSupport * (strongUserIntent ? 0.38 : 0.28)
                 : textSupport * (strongUserIntent ? 0.92 : 0.88) + structuralScore * (strongUserIntent ? 0.08 : 0.12);
@@ -10544,15 +10548,27 @@ function calculateHighlightIntentMatch(profiles, candidateEffects, candidateCard
         else if (strongUserIntent) confidence = Math.max(confidence, 0.84);
         else if (profile.explicitUserIntent) confidence = Math.max(confidence, 0.78);
         const explicitIntentPriority = profile.userAuthoredOverride ? 1.12 : (strongUserIntent ? 1.08 : (profile.explicitUserIntent ? 1.06 : 1));
-        // Do not punish a usable text-only intent because parsing returned no candidate effects.
         return clamp01(score * explicitIntentPriority * confidence);
-    });
-    const average = profileScores.reduce((a,b) => a+b,0) / profileScores.length;
-    const fullCoverage = profileScores.filter(v => v >= 0.55).length / profileScores.length;
-    return clamp01(average * 0.80 + fullCoverage * 0.20);
+    };
+
+    const positiveScores = positiveProfiles.map(scoreProfile);
+    const avoidScores = avoidProfiles.map(scoreProfile);
+    // Context-only groups are intentionally neutral. They provide grammatical context to a
+    // connected selection but cannot independently raise or lower a candidate's match score.
+    const positiveAverage = positiveScores.length
+        ? positiveScores.reduce((sum, value) => sum + value, 0) / positiveScores.length
+        : 1;
+    const avoidAverage = avoidScores.length
+        ? avoidScores.reduce((sum, value) => sum + value, 0) / avoidScores.length
+        : 0;
+    // Avoid is a ranking preference, never a hard filter: even a perfect avoided-effect match only
+    // applies a bounded penalty, preserving candidates that satisfy the user's main intent.
+    const avoidanceMultiplier = Math.max(0.55, 1 - avoidAverage * 0.40);
+    const positiveCoverage = positiveScores.length
+        ? positiveScores.filter(value => value >= 0.55).length / positiveScores.length
+        : 1;
+    return clamp01(positiveAverage * (positiveScores.length ? (0.80 + positiveCoverage * 0.20) : 1) * avoidanceMultiplier);
 }
-
-
 function getHighlightRankingWeight(profiles = [], { hasHighlight = false, hasEffectHighlight = false, hasTypeHighlight = false } = {}) {
     if (!hasHighlight) return 0;
     if (!hasEffectHighlight) return hasTypeHighlight ? 0.18 : 0;
@@ -25976,7 +25992,7 @@ function getSearchIntent(sourceCard, highlights = []) {
         text: String(h?.text || ''),
         field: h?.field || 'oracle',
         colorIndex: Number.isInteger(h?.colorIndex) ? h.colorIndex : 0,
-        mode: h?.mode === 'variable' ? 'variable' : 'exact',
+        mode: normalizeHighlightMode(h?.mode),
         aspects: normalizeHighlightAspects(h?.aspects),
         origin: h?.origin || 'user',
         // Offsets are part of live highlight identity: selecting the same phrase in a different
@@ -26003,9 +26019,8 @@ function getSearchIntent(sourceCard, highlights = []) {
     const effectHighlights = (Array.isArray(highlights) ? highlights : []).filter(h => h?.field !== 'type');
     const typeHighlights = (Array.isArray(highlights) ? highlights : []).filter(h => h?.field === 'type');
     const hasHighlight = effectHighlights.length > 0 || typeHighlights.length > 0;
-    const targetText = hasHighlight
-        ? buildHighlightScoringText(highlights, sourceText)
-        : sourceText;
+    const highlightedScoringText = hasHighlight ? buildHighlightScoringText(highlights, sourceText) : '';
+    const targetText = hasHighlight ? (highlightedScoringText || sourceText) : sourceText;
 
     let parsedEffects;
     if (hasHighlight) {
@@ -26014,11 +26029,9 @@ function getSearchIntent(sourceCard, highlights = []) {
         // is composed into the effective clause so ranking uses that intended trigger, not the
         // source card's unrelated original trigger. Other user details remain semantic hints only.
         const profiles = buildHighlightIntentProfiles(highlights, sourceCard, sourceText);
-        parsedEffects = profiles.flatMap(p => p.recognizedEffects?.length ? p.recognizedEffects : (p.parsedEffects || []));
-        if (!parsedEffects.length) {
-            const sourceOnlyText = (profiles.map(p => p.parseText || p.searchIntentText || p.contextText).filter(Boolean).join('. ') || targetText || sourceText);
-            parsedEffects = parseMTGEffect(sourceOnlyText);
-        }
+        const scoringProfiles = profiles.filter(profile => !profile.avoidOnly && !profile.contextOnlyOnly);
+        parsedEffects = scoringProfiles.flatMap(p => p.recognizedEffects?.length ? p.recognizedEffects : (p.parsedEffects || []));
+        if (!parsedEffects.length) parsedEffects = getCachedParsedEffects(sourceCard, sourceText);
     } else {
         parsedEffects = getCachedParsedEffects(sourceCard, sourceText);
     }
