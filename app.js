@@ -26241,7 +26241,7 @@ function buildSearchIntentPresentationModel(sourceCard = currentSourceCard, high
             const cadence = searchIntentCadenceDescription(effect);
             const trigger = effect.triggerProfile || effect.canonical?.params?.triggerProfile || {};
             const eventKey = trigger.event || cadence.detail || '';
-            const key = `${fn}|${effect.canonical?.outcome || effect.outcome || ''}|${cadence.label}|${eventKey}`;
+            const key = fn + '|' + (effect.canonical?.outcome || effect.outcome || '') + '|' + cadence.label + '|' + eventKey;
             if (seen.has(key)) return null;
             seen.add(key);
             return { effect, fn, ...searchIntentFunctionLabel(effect), cadence, importance: Number(effect.importance) || 0, trigger };
@@ -26253,46 +26253,57 @@ function buildSearchIntentPresentationModel(sourceCard = currentSourceCard, high
     const highlightsView = activeHighlights.filter(h => h && String(h.text || '').trim()).map(h => ({
         text: String(h.text).trim(),
         field: h.field === 'type' ? 'type line' : (h.origin === 'user' ? 'search intent' : 'Oracle text'),
-        mode: h.mode === 'variable' ? 'Flexible' : 'Exact',
+        mode: getHighlightModeLabel(h.mode),
+        modeValue: normalizeHighlightMode(h.mode),
         origin: h.origin === 'user' ? (h.editedFrom ? 'Edited source selection' : 'Search detail') : 'Selected text',
-        attached: Number.isInteger(h.attachedTo)
+        attached: Number.isInteger(h.attachedTo),
+        autoContext: Boolean(h.isAutoContext)
     }));
+    const positiveHighlights = activeHighlights.filter(h => !['avoid', 'context_only'].includes(normalizeHighlightMode(h?.mode)));
+    const avoidHighlights = activeHighlights.filter(h => normalizeHighlightMode(h?.mode) === 'avoid');
+    const contextHighlights = activeHighlights.filter(h => normalizeHighlightMode(h?.mode) === 'context_only');
     const primary = effectViews[0] || null;
     let summary;
     if (primary) {
         const action = primary.label;
         if (primary.cadence.group === 'repeatable_engine') {
             if (primary.effect?.repeatabilityProfile?.kind === 'periodic_trigger') {
-                summary = `Look for cards that ${action} repeatedly${primary.cadence.detail ? ` (${primary.cadence.detail})` : ''}.`;
+                summary = 'Look for cards that ' + action + ' repeatedly' + (primary.cadence.detail ? ' (' + primary.cadence.detail + ')' : '') + '.';
             } else if (primary.effect?.repeatabilityProfile?.kind === 'repeatable_trigger') {
                 const trigger = String(primary.cadence.detail || '').replace(/^repeats when\s*/i, '').trim();
-                summary = `Look for cards that ${action}${trigger ? ` whenever ${trigger}` : ' through repeatable triggered abilities'}.`;
+                summary = 'Look for cards that ' + action + (trigger ? ' whenever ' + trigger : ' through repeatable triggered abilities') + '.';
             } else if (primary.cadence.label === 'Ongoing effect') {
-                summary = `Look for cards that ${action} through an ongoing effect.`;
+                summary = 'Look for cards that ' + action + ' through an ongoing effect.';
             } else {
-                summary = `Look for cards that ${action} through a repeatable ability.`;
+                summary = 'Look for cards that ' + action + ' through a repeatable ability.';
             }
         } else if (primary.cadence.group === 'single_use') {
-            summary = `Look for cards that ${action} in a one-time effect. Recurring effects are related, but their cadence differs.`;
+            summary = 'Look for cards that ' + action + ' in a one-time effect. Recurring effects are related, but their cadence differs.';
         } else {
-            summary = `Look for cards that ${action}, comparing the actual rules outcome and context rather than wording alone.`;
+            summary = 'Look for cards that ' + action + ', comparing the actual rules outcome and context rather than wording alone.';
         }
+    } else if (positiveHighlights.length) {
+        summary = "ManaSearch couldn't fully identify this effect, but your highlighted wording will still influence the search.";
+    } else if (activeHighlights.length) {
+        summary = 'Your Context only and Avoid tags are active. The source card’s broader rules text remains the main search context.';
     } else {
-        const activeText = String(intent.targetText || '').trim();
-        summary = activeHighlights.length
-            ? `The parser did not recognize a canonical action from this selection, but your current highlighted wording remains an active high-priority search intent. ${activeText ? 'The effective intent is shown below and still guides retrieval and ranking.' : 'Semantic text and other available scoring evidence remain active.'}`
-            : 'The selected text did not produce a clear canonical action. ManaSearch will still use the active text, semantic context, card type, and other available scoring evidence.';
+        summary = 'The selected text did not produce a clear canonical action. ManaSearch will still use the active text, semantic context, card type, and other available scoring evidence.';
     }
     if (highlightsView.length) {
-        const exact = highlightsView.some(h => h.mode === 'Exact');
-        const flexible = highlightsView.some(h => h.mode === 'Flexible');
-        const modes = [exact ? 'Exact highlights require matching text in candidate Oracle text' : '', flexible ? 'Flexible highlights focus on matching mechanics even when wording differs' : ''].filter(Boolean);
-        if (modes.length) summary += ` Highlight behavior: ${modes.join('; ')}.`;
+        const exact = highlightsView.some(h => h.modeValue === 'exact');
+        const flexible = highlightsView.some(h => h.modeValue === 'variable');
+        const modes = [
+            exact ? 'Exact requires the same wording in the same candidate rules effect' : '',
+            flexible ? 'Flexible matches the mechanic even when wording differs' : ''
+        ].filter(Boolean);
+        if (modes.length) summary += ' ' + modes.join('; ') + '.';
     }
+    if (contextHighlights.length) summary += ' Context only adds dependent rules text without creating another match requirement.';
+    if (avoidHighlights.length) summary += ' Avoid lowers the ranking of cards with this effect but never filters them out.';
     const aspectHighlights = activeHighlights.filter(h => hasActiveHighlightAspects(h?.aspects));
     if (aspectHighlights.length) {
         const aspectSummary = aspectHighlights.map(h => buildHighlightAspectPreview(h)).filter(Boolean);
-        if (aspectSummary.length) summary += ` Structured highlight requirements: ${aspectSummary.join(' ')}`;
+        if (aspectSummary.length) summary += ' Structured highlight requirements: ' + aspectSummary.join(' ');
     }
     const coverage = effectViews.length > 0;
     const roleViews = roles.slice(0, 3).map(role => ({
@@ -26302,7 +26313,12 @@ function buildSearchIntentPresentationModel(sourceCard = currentSourceCard, high
     }));
     const hasEditedSourceIntent = activeHighlights.some(h => h?.origin === 'user' && h?.editedFrom);
     const focusExplanation = highlightsView.length
-        ? `${hasEditedSourceIntent ? 'Edited highlight wording is an explicit search intent. Its original card-text location is retained only to preserve trigger/condition context; the previous outcome is not silently reused.' : 'The selected spans are the active focus passed to the scorer.'} Exact spans also participate in literal-match requirements; Flexible spans allow the wording or numeric values to differ.`
+        ? (hasEditedSourceIntent
+            ? 'Edited highlight wording is an explicit search intent. Its original card-text location is retained only to preserve trigger/condition context; the previous outcome is not silently reused.'
+            : 'Selected text is the active focus passed to the scorer.')
+            + ' Exact spans are literal requirements; Flexible spans allow mechanical wording differences.'
+            + (contextHighlights.length ? ' Context only spans supply surrounding sentence relationships without being scored as separate effects.' : '')
+            + (avoidHighlights.length ? ' Avoid spans apply a bounded negative ranking preference.' : '')
         : 'No highlight is active, so the scorer uses the source card’s full Oracle text as its target context.';
     const hasExplicitEdit = activeHighlights.some(h => h?.origin === 'user' && h?.editedFrom);
     const rankingEvidence = [
@@ -26310,14 +26326,24 @@ function buildSearchIntentPresentationModel(sourceCard = currentSourceCard, high
             title: 'Explicit highlighted intent',
             detail: hasExplicitEdit
                 ? 'Your edited wording receives a stronger 42% share of the normalized ranking score. The original text location supplies grammar/context only; the prior outcome is not reused as the intended result.'
-                : 'Your selected text and its governing rules clause actively shape parsing, retrieval, and ranking. Exact/Flexible mode controls literal matching versus mechanical flexibility.'
+                : 'Your selected text and its governing rules clause actively shape parsing, retrieval, and ranking. Each tag controls whether a span is a requirement, context, or ranking preference.'
         }] : []),
+        ...(avoidHighlights.length ? [{ title: 'Avoid preferences', detail: 'Candidates with the avoided mechanic receive a bounded score reduction, but remain eligible when they match the main search intent.' }] : []),
         { title: 'Mechanical structure', detail: 'Parsed actions and outcomes, affected objects, targets, quantities, restrictions, conditions, and effect relationships.' },
         { title: 'Repeatability and timing', detail: coverage ? 'Where the parser can identify it, recurring triggers/activations are distinguished from one-time, delayed, and enter-the-battlefield effects.' : 'Cadence will be compared when the source effect can be parsed confidently.' },
-        { title: 'Function, role, and semantic context', detail: roleViews.length ? `Recognized role evidence: ${roleViews.map(r => r.role).join(', ')}. These signals supplement rather than replace mechanical similarity.` : 'Broader function, role, card type, and semantic context supplement mechanical similarity.' }
+        { title: 'Function, role, and semantic context', detail: roleViews.length ? 'Recognized role evidence: ' + roleViews.map(r => r.role).join(', ') + '. These signals supplement rather than replace mechanical similarity.' : 'Broader function, role, card type, and semantic context supplement mechanical similarity.' }
     ];
-    return { sourceName: sourceCard.name || 'Source card', summary, effectViews, highlightsView, roleViews, rankingEvidence, focusExplanation, parsedEffectCount: parsed.length, canonicalEffectCount: effectViews.length, hasHighlight: highlightsView.length > 0, semanticText: intent.semanticText || '', targetText: intent.targetText || sourceText };
+    const parserConfidence = calculateParserConfidenceReport(parsed, intent.targetText || sourceText);
+    return {
+        sourceName: sourceCard.name || 'Source card', summary, effectViews, highlightsView, roleViews,
+        rankingEvidence, focusExplanation, parserConfidence,
+        detailMode: displayPreferences?.searchIntentDetailMode === 'detailed' ? 'detailed' : 'short',
+        parsedEffectCount: parsed.length, canonicalEffectCount: effectViews.length,
+        hasHighlight: highlightsView.length > 0, semanticText: intent.semanticText || '',
+        targetText: intent.targetText || sourceText
+    };
 }
+
 
 function setSearchIntentText(node, text) {
     if (node) node.textContent = String(text ?? '');
@@ -26340,6 +26366,35 @@ function renderManaSearchIntentModel(model) {
         return;
     }
     appendSearchIntentNode(body, 'p', 'search-intent-summary', model.summary);
+    if (model.detailMode !== 'detailed') {
+        if (model.effectViews?.length) {
+            appendSearchIntentNode(body, 'p', 'search-intent-short-recognition',
+                'Recognized: ' + model.effectViews.slice(0, 2).map(view => view.label).join(' · '));
+        }
+        return;
+    }
+
+    const confidence = model.parserConfidence || { label: 'Limited', level: 'limited', fields: [], note: 'The parser could not provide a confidence estimate.' };
+    const confidenceSection = appendSearchIntentNode(body, 'div', 'search-intent-confidence confidence-' + confidence.level);
+    const confidenceHeading = appendSearchIntentNode(confidenceSection, 'div', 'search-intent-confidence-heading');
+    appendSearchIntentNode(confidenceHeading, 'strong', '', 'Parser confidence: ' + confidence.label);
+    appendSearchIntentNode(confidenceHeading, 'span', 'search-intent-confidence-badge', confidence.label);
+    appendSearchIntentNode(confidenceSection, 'p', 'search-intent-confidence-note', confidence.note);
+    if (confidence.fields?.length) {
+        const fields = appendSearchIntentNode(confidenceSection, 'div', 'search-intent-confidence-fields');
+        confidence.fields.forEach(field => {
+            const item = appendSearchIntentNode(fields, 'div', 'search-intent-confidence-field confidence-' + field.level);
+            appendSearchIntentNode(item, 'span', '', field.label);
+            appendSearchIntentNode(item, 'strong', '', field.level === 'high' ? 'High' : field.level === 'medium' ? 'Medium' : 'Limited');
+        });
+    }
+    const stages = appendSearchIntentNode(confidenceSection, 'div', 'search-intent-parser-stages');
+    confidence.stages?.forEach(stage => {
+        const item = appendSearchIntentNode(stages, 'div', 'search-intent-parser-stage');
+        appendSearchIntentNode(item, 'strong', '', stage.label);
+        appendSearchIntentNode(item, 'span', '', stage.detail);
+    });
+
     if (model.hasHighlight && String(model.targetText || '').trim()) {
         const effectiveSection = appendSearchIntentNode(body, 'div', 'search-intent-effective-section');
         appendSearchIntentNode(effectiveSection, 'h4', '', 'Effective intent sent to parsing, retrieval, and ranking');
@@ -26352,11 +26407,15 @@ function renderManaSearchIntentModel(model) {
         appendSearchIntentNode(section, 'h4', '', 'Active highlight focus');
         const chips = appendSearchIntentNode(section, 'div', 'search-intent-chips');
         model.highlightsView.forEach(highlight => {
-            const chip = appendSearchIntentNode(chips, 'span', `search-intent-chip ${highlight.mode === 'Exact' ? 'is-exact' : 'is-flexible'}`);
+            const className = highlight.modeValue === 'exact' ? 'is-exact'
+                : highlight.modeValue === 'variable' ? 'is-flexible'
+                : highlight.modeValue === 'context_only' ? 'is-context-only' : 'is-avoid';
+            const chip = appendSearchIntentNode(chips, 'span', 'search-intent-chip ' + className);
             appendSearchIntentNode(chip, 'strong', '', highlight.mode);
-            appendSearchIntentNode(chip, 'span', '', `“${highlight.text}”`);
+            appendSearchIntentNode(chip, 'span', '', '“' + highlight.text + '”');
             appendSearchIntentNode(chip, 'small', '', highlight.field);
             if (highlight.origin === 'Search detail') chip.title = 'User-added search detail; not asserted to be literal source Oracle wording.';
+            if (highlight.autoContext) chip.title = 'Automatically added because this sentence refers to the highlighted effect. You can change or remove it.';
         });
     }
 
@@ -26370,11 +26429,11 @@ function renderManaSearchIntentModel(model) {
             const title = appendSearchIntentNode(main, 'strong', 'search-intent-effect-title', view.label);
             if (index === 0) title.insertAdjacentText('beforeend', ' · highest parsed importance');
             if (view.detail) appendSearchIntentNode(main, 'p', 'search-intent-effect-detail', view.detail);
-            appendSearchIntentNode(row, 'span', `search-intent-cadence ${view.cadence.group === 'repeatable_engine' ? 'is-repeatable' : view.cadence.group === 'single_use' ? 'is-one-shot' : ''}`, view.cadence.label);
+            appendSearchIntentNode(row, 'span', 'search-intent-cadence ' + (view.cadence.group === 'repeatable_engine' ? 'is-repeatable' : view.cadence.group === 'single_use' ? 'is-one-shot' : ''), view.cadence.label);
             if (view.cadence.detail) appendSearchIntentNode(row, 'p', 'search-intent-cadence-detail', view.cadence.detail);
         });
     } else {
-        appendSearchIntentNode(effectsSection, 'p', 'search-intent-muted', 'No canonical effect was recognized from this active focus. Broader text and semantic evidence remain available.');
+        appendSearchIntentNode(effectsSection, 'p', 'search-intent-muted', "ManaSearch couldn't fully identify this effect, but your highlighted wording will still influence the search.");
     }
 
     if (model.roleViews.length) {
@@ -26383,20 +26442,19 @@ function renderManaSearchIntentModel(model) {
         const roleChips = appendSearchIntentNode(rolesSection, 'div', 'search-intent-chips');
         model.roleViews.forEach(role => {
             const chip = appendSearchIntentNode(roleChips, 'span', 'search-intent-chip is-role', role.role);
-            if (role.anchors.length) chip.title = `Role evidence: ${role.anchors.join(', ')}`;
+            if (role.anchors.length) chip.title = 'Role evidence: ' + role.anchors.join(', ');
         });
     }
 
     const rankingSection = appendSearchIntentNode(body, 'div', 'search-intent-subsection');
     appendSearchIntentNode(rankingSection, 'h4', '', 'What influences ranking');
     const rankingList = appendSearchIntentNode(rankingSection, 'ol', 'search-intent-ranking-list');
-    model.rankingEvidence.forEach((item, index) => {
+    model.rankingEvidence.forEach(item => {
         const li = appendSearchIntentNode(rankingList, 'li', '');
         appendSearchIntentNode(li, 'strong', '', item.title);
         appendSearchIntentNode(li, 'p', '', item.detail);
     });
 }
-
 function refreshManaSearchIntentPanel() {
     const panel = document.getElementById('search-intent-panel');
     const body = document.getElementById('search-intent-body');
