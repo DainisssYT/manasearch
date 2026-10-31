@@ -14,7 +14,7 @@ function normalizeCardName(name) {
 async function fetchArrayBuffer(url, timeoutMs = 60000, cacheMode = 'force-cache') {
     if (typeof AbortController !== 'function') {
         const response = await fetch(url, { method: 'GET', cache: cacheMode });
-        if (!response.ok) throw new Error(\`Request failed (\${response.status}) for \${url}\`);
+        if (!response.ok) throw new Error(`Request failed (${response.status}) for ${url}`);
         return response.arrayBuffer();
     }
     const controller = new AbortController();
@@ -25,10 +25,10 @@ async function fetchArrayBuffer(url, timeoutMs = 60000, cacheMode = 'force-cache
     }, Math.max(1000, Number(timeoutMs) || 60000));
     try {
         const response = await fetch(url, { method: 'GET', cache: cacheMode, signal: controller.signal });
-        if (!response.ok) throw new Error(\`Request failed (\${response.status}) for \${url}\`);
+        if (!response.ok) throw new Error(`Request failed (${response.status}) for ${url}`);
         return await response.arrayBuffer();
     } catch (error) {
-        if (timedOut) throw new Error(\`Request timed out after \${Math.round(timeoutMs / 1000)} seconds.\`);
+        if (timedOut) throw new Error(`Request timed out after ${Math.round(timeoutMs / 1000)} seconds.`);
         throw error;
     } finally {
         clearTimeout(timeout);
@@ -84,7 +84,7 @@ async function loadCards(data) {
     const payloadBytes = view.getUint32(12, true);
     const declaredCount = view.getUint32(16, true);
     const flags = view.getUint32(20, true);
-    if (version !== 1) throw new Error(\`cards.bin version \${version} is not supported.\`);
+    if (version !== 1) throw new Error(`cards.bin version ${version} is not supported.`);
     if (!payloadBytes || 24 + payloadBytes !== buffer.byteLength || flags !== 1) {
         throw new Error('cards.bin header or compressed payload length is invalid.');
     }
@@ -141,7 +141,7 @@ async function loadCards(data) {
                 const ch = text[i];
                 if (ch === ' ' || ch === '\n' || ch === '\r' || ch === '\t' || ch === ',') { i++; continue; }
                 if (ch === ']') { cardsArrayClosed = true; i++; break; }
-                if (ch !== '{') throw new Error(\`cards.bin card array is malformed near item \${sourceCardCount + 1}.\`);
+                if (ch !== '{') throw new Error(`cards.bin card array is malformed near item ${sourceCardCount + 1}.`);
                 inCard = true;
                 depth = 1;
                 inString = false;
@@ -182,7 +182,7 @@ async function loadCards(data) {
     if (inCard) throw new Error('cards.bin ended in the middle of a card record.');
     if (!cardsArrayClosed) throw new Error('cards.bin cards array is truncated.');
     if (declaredCount && sourceCardCount !== declaredCount) {
-        throw new Error(\`cards.bin card count mismatch (\${sourceCardCount} vs \${declaredCount}).\`);
+        throw new Error(`cards.bin card count mismatch (${sourceCardCount} vs ${declaredCount}).`);
     }
     self.postMessage({
         type: 'cards-ready',
@@ -265,7 +265,7 @@ async function loadSemanticIndex(data) {
     const count = view.getUint32(16, true);
     const namesBytes = view.getUint32(20, true);
     const vectorsBytes = view.getUint32(24, true);
-    if (version !== 1) throw new Error(\`semantic-index.bin version \${version} is not supported.\`);
+    if (version !== 1) throw new Error(`semantic-index.bin version ${version} is not supported.`);
     if (!dim || dim > 2048 || !count || !namesBytes || vectorsBytes !== count * dim) {
         throw new Error('semantic-index.bin metadata is invalid.');
     }
