@@ -9164,7 +9164,7 @@ const STRATEGIC_INTENT_ROLES = new Set([
 ]);
 
 function inferRankingIntent(sourceCard, parsedSourceEffects = [], targetText = '', sourceRoleProfile = [], highlights = []) {
-    const exactHighlights = (highlights || []).filter(h => h?.mode !== 'variable');
+    const exactHighlights = (highlights || []).filter(h => h?.mode === 'exact');
     const flexibleHighlights = (highlights || []).filter(h => h?.mode === 'variable');
     const topRole = sourceRoleProfile?.[0];
     const roleIsStrong = Boolean(topRole && STRATEGIC_INTENT_ROLES.has(topRole.role) && topRole.score >= 0.74);
