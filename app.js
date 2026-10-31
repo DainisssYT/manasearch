@@ -1,6 +1,6 @@
 /* ManaSearch build 20261031-124 */
 // ManaSearch deployment build marker. Bump this whenever app.js changes so cached-module issues are easy to diagnose.
-const MANASEARCH_APP_BUILD = '20261031-124';
+const MANASEARCH_APP_BUILD = '20261031-125';
 console.info(`[ManaSearch] app.js build ${MANASEARCH_APP_BUILD}`);
 
 // State Management
