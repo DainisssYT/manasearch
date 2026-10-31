@@ -34,7 +34,7 @@ jobs:
           # ManaSearch runs entirely in each visitor's browser. This step only
           # assembles the static assets that GitHub Pages serves.
           cp index.html app.js style.css _site/
-          for f in pako.min.js cards.bin semantic-index.bin static-data-meta.json; do
+          for f in semantic-search-worker.js service-worker.js pako.min.js cards.bin semantic-index.bin static-data-meta.json; do
             test -s "$f" || { echo "Required static asset missing: $f" >&2; exit 1; }
             cp "$f" _site/
           done
@@ -44,7 +44,7 @@ jobs:
           if [ -s CNAME ]; then cp CNAME _site/; fi
           touch _site/.nojekyll
 
-          for f in index.html app.js style.css pako.min.js cards.bin semantic-index.bin static-data-meta.json tests/fixtures/mtg-mechanical-benchmark.json; do
+          for f in index.html app.js style.css semantic-search-worker.js service-worker.js pako.min.js cards.bin semantic-index.bin static-data-meta.json tests/fixtures/mtg-mechanical-benchmark.json; do
             test -s "_site/$f" || { echo "Publish artifact missing: $f" >&2; exit 1; }
           done
           # Derive the release tag from the app source instead of hard-coding it
