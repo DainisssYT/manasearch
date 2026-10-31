@@ -26160,6 +26160,12 @@ function renderManaSearchIntentModel(model) {
     if (displayPreferences?.searchIntentDetail === 'detailed') {
         appendSearchIntentNode(body, 'p', `search-intent-confidence is-${String(model.parserConfidenceLevel || 'low').toLowerCase()}`,
             `Parser confidence: ${model.parserConfidenceLevel || 'Low'} (${Math.round((Number(model.parserConfidence) || 0) * 100)}%). This is a heuristic estimate of how clearly the current text maps to known effect patterns, not a guarantee of correctness.`);
+    } else {
+        if (model.highlightsView.length) {
+            const focus = model.highlightsView.slice(0, 2).map(h => `${h.mode}: “${h.text}”`).join(' · ');
+            appendSearchIntentNode(body, 'p', 'search-intent-muted', `Active focus: ${focus}${model.highlightsView.length > 2 ? ` · +${model.highlightsView.length - 2} more` : ''}`);
+        }
+        return;
     }
     if (model.hasHighlight && String(model.targetText || '').trim()) {
         const effectiveSection = appendSearchIntentNode(body, 'div', 'search-intent-effective-section');
