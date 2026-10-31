@@ -4658,8 +4658,10 @@ function findDependentOracleContext(sourceText, start, end) {
         const clause = text.slice(left, right).trim();
         if (!clause || (left < end && right > start)) return;
         const followup = /^(?:then\b|if you do\b|if you don'?t\b|that player\b|they do\b|you may\b|you can\b|this way\b|for each\b|repeat this process\b|until\b)/i.test(clause);
-        const governing = /(?:whenever|when|at the beginning of|at the end of|if |after |before |as .* enters|each time|the next time)\b/i.test(clause) &&
-            /^(?:you|target player|target opponent|that player|each opponent|each player|then|if you|draw|create|exile|return|put|deal|gain|lose)\b/i.test(selectedText);
+        const triggerPattern = /(?:whenever|when|at the beginning of|at the end of|if |after |before |as .* enters|each time|the next time)\b/i;
+        const outcomeStart = /^(?:you|target player|target opponent|that player|each opponent|each player|then|if you|draw|create|exile|return|put|deal|gain|lose)\b/i;
+        const governing = (triggerPattern.test(clause) && outcomeStart.test(selectedText)) ||
+            (triggerPattern.test(selectedText) && outcomeStart.test(clause));
         if (followup || governing) candidates.push({ start: left, end: right, text: clause });
     };
     if (selected.start > 0) {
