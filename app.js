@@ -4968,10 +4968,10 @@ function renderHighlightEditor(idx) {
     modeRow.className = 'highlight-edit-row';
     const modeLabel = document.createElement('span');
     modeLabel.className = 'highlight-edit-label-inline';
-    modeLabel.textContent = 'Match:';
+    modeLabel.textContent = 'Tag:';
     modeRow.appendChild(modeLabel);
 
-    let selectedMode = h.mode === 'variable' ? 'variable' : 'exact';
+    let selectedMode = normalizeHighlightMode(h.mode);
     const makeModeButton = (mode, label, titleText) => {
         const btn = document.createElement('button');
         btn.type = 'button';
@@ -4985,9 +4985,11 @@ function renderHighlightEditor(idx) {
         });
         return btn;
     };
-    modeRow.appendChild(makeModeButton('variable', '\u2248 Flexible', 'Match the underlying mechanic/intent; values and wording may differ.'));
-    modeRow.appendChild(makeModeButton('exact', '= Exact', 'Require the text/value to occur literally in a matching card.'));
- 
+    modeRow.appendChild(makeModeButton('variable', '≈ Flexible', 'Prefer the same mechanic; wording and values may differ.'));
+    modeRow.appendChild(makeModeButton('exact', '= Exact', 'Require this wording in the same candidate rules effect.'));
+    modeRow.appendChild(makeModeButton('context_only', '◌ Context only', 'Use this sentence to interpret a connected effect; it is not a separate match requirement.'));
+    modeRow.appendChild(makeModeButton('avoid', '− Avoid', 'Lower candidates with this effect in the ranking; never exclude them outright.'));
+
     const detectedAspect = deriveHighlightAspectKind(h);
     let aspectControls = null;
     if (detectedAspect) {
@@ -5204,14 +5206,24 @@ function renderHighlightChips() {
             ? (Number.isInteger(h.attachedTo) ? `User-added search detail connected to: ${getHighlightParentLabel(h.attachedTo)}` : 'Independent user-added search detail')
             : (h.field === 'type' ? 'Selected from this card\'s type line' : 'Selected from this card\'s Oracle text');
 
-        const modeBtn = document.createElement('button');
-        modeBtn.type = 'button';
-        modeBtn.className = `highlight-mode-btn ${h.mode === 'variable' ? 'mode-variable' : 'mode-exact'}`;
-        modeBtn.textContent = h.mode === 'variable' ? '\u2248 Flexible' : '= Exact';
-        modeBtn.title = h.mode === 'variable'
-            ? 'Flexible: wording/value can differ while the underlying intent should remain similar. Click to require exact text instead.'
-            : 'Exact: the matching card must contain this text/value. Click to make it flexible instead.';
-        modeBtn.addEventListener('click', () => toggleHighlightMode(idx));
+        const modeBtn = document.createElement('select');
+        modeBtn.className = 'highlight-mode-select mode-' + normalizeHighlightMode(h.mode);
+        modeBtn.setAttribute('aria-label', 'Tag for highlighted text: ' + String(h.text || ''));
+        modeBtn.title = normalizeHighlightMode(h.mode) === 'avoid'
+            ? 'Avoid: lower similar cards in the ranking without filtering them out.'
+            : normalizeHighlightMode(h.mode) === 'context_only'
+                ? 'Context only: supplies sentence context without becoming a separate requirement.'
+                : normalizeHighlightMode(h.mode) === 'exact'
+                    ? 'Exact: this wording must occur in the same candidate rules effect.'
+                    : 'Flexible: the underlying mechanic should match even if the wording differs.';
+        [['variable', '≈ Flexible'], ['exact', '= Exact'], ['context_only', '◌ Context only'], ['avoid', '− Avoid']].forEach(([value, label]) => {
+            const option = document.createElement('option');
+            option.value = value;
+            option.textContent = label;
+            modeBtn.appendChild(option);
+        });
+        modeBtn.value = normalizeHighlightMode(h.mode);
+        modeBtn.addEventListener('change', () => setHighlightMode(idx, modeBtn.value));
 
         const label = document.createElement('span');
         label.className = 'highlight-chip-text';
@@ -5334,10 +5346,10 @@ function renderHighlightChips() {
         modeRow.className = 'highlight-add-mode-row';
         const modeLabel = document.createElement('span');
         modeLabel.className = 'highlight-add-mode-label';
-        modeLabel.textContent = 'Match:';
+        modeLabel.textContent = 'Tag:';
         modeRow.appendChild(modeLabel);
 
-        let selectedMode = 'variable';
+        let selectedMode = getPreferredHighlightMode();
         const makeModeButton = (mode, text, title) => {
             const btn = document.createElement('button');
             btn.type = 'button';
@@ -5351,8 +5363,10 @@ function renderHighlightChips() {
             });
             return btn;
         };
-        modeRow.appendChild(makeModeButton('variable', '\u2248 Flexible', 'Match the underlying meaning/mechanics; wording and exact values may differ.'));
-        modeRow.appendChild(makeModeButton('exact', '= Exact', 'Require the added wording/value to occur in the candidate Oracle text.'));
+        modeRow.appendChild(makeModeButton('variable', '≈ Flexible', 'Prefer the same mechanic; wording and values may differ.'));
+        modeRow.appendChild(makeModeButton('exact', '= Exact', 'Require this wording in the same candidate rules effect.'));
+        modeRow.appendChild(makeModeButton('context_only', '◌ Context only', 'Use this wording as context, not as a separate requirement.'));
+        modeRow.appendChild(makeModeButton('avoid', '− Avoid', 'Lower candidates with this effect in the ranking without excluding them.'));
 
         const connectRow = document.createElement('div');
         connectRow.className = 'highlight-add-connection-row';
@@ -5463,13 +5477,20 @@ function renderHighlightChips() {
     }
 }
 
-function toggleHighlightMode(idx) {
+function setHighlightMode(idx, mode) {
     if (!manualHighlights[idx]) return;
-    manualHighlights[idx].mode = manualHighlights[idx].mode === 'variable' ? 'exact' : 'variable';
+    manualHighlights[idx].mode = normalizeHighlightMode(mode);
     renderHighlightChips();
     reapplyOracleHighlights();
     reapplyTypeLineHighlights();
     notifyManaSearchHighlightsChanged();
+}
+
+function toggleHighlightMode(idx) {
+    if (!manualHighlights[idx]) return;
+    const modes = HIGHLIGHT_MATCH_MODES;
+    const current = normalizeHighlightMode(manualHighlights[idx].mode);
+    setHighlightMode(idx, modes[(modes.indexOf(current) + 1) % modes.length]);
 }
 
 function removeHighlight(idx) {
@@ -19831,6 +19852,8 @@ function initApp() {
     const preferenceScoreBreakdown = document.getElementById('preference-score-breakdown');
     const preferenceShowEdhrecButton = document.getElementById('preference-show-edhrec-button');
     const preferenceShowSearchIntent = document.getElementById('preference-show-search-intent');
+    const preferenceDefaultHighlightMode = document.getElementById('preference-default-highlight-mode');
+    const preferenceSearchIntentDetail = document.getElementById('preference-search-intent-detail');
     const preferenceTheme = document.getElementById('preference-theme');
     const preferenceDensity = document.getElementById('preference-result-density');
     const preferenceReduceMotion = document.getElementById('preference-reduce-motion');
@@ -19844,6 +19867,8 @@ function initApp() {
         if (preferenceScoreBreakdown) preferenceScoreBreakdown.checked = Boolean(displayPreferences.showScoreBreakdown);
         if (preferenceShowEdhrecButton) preferenceShowEdhrecButton.checked = displayPreferences.showEdhrecButton !== false;
         if (preferenceShowSearchIntent) preferenceShowSearchIntent.checked = displayPreferences.showSearchIntent === true;
+        if (preferenceDefaultHighlightMode) preferenceDefaultHighlightMode.value = getPreferredHighlightMode();
+        if (preferenceSearchIntentDetail) preferenceSearchIntentDetail.value = displayPreferences.searchIntentDetailMode === 'detailed' ? 'detailed' : 'short';
         if (preferenceTheme) preferenceTheme.value = (displayPreferences.theme === 'light' || displayPreferences.theme === 'dark') ? displayPreferences.theme : 'dark';
         if (preferenceDensity) preferenceDensity.value = displayPreferences.resultDensity || 'comfortable';
         if (preferenceReduceMotion) preferenceReduceMotion.checked = Boolean(displayPreferences.reduceMotion);
@@ -19861,6 +19886,8 @@ function initApp() {
         displayPreferences.showScoreBreakdown = preferenceScoreBreakdown?.checked !== false;
         displayPreferences.showEdhrecButton = preferenceShowEdhrecButton?.checked !== false;
         displayPreferences.showSearchIntent = preferenceShowSearchIntent?.checked === true;
+        displayPreferences.defaultHighlightMode = normalizeHighlightMode(preferenceDefaultHighlightMode?.value, DEFAULT_DISPLAY_PREFERENCES.defaultHighlightMode);
+        displayPreferences.searchIntentDetailMode = ['short', 'detailed'].includes(preferenceSearchIntentDetail?.value) ? preferenceSearchIntentDetail.value : DEFAULT_DISPLAY_PREFERENCES.searchIntentDetailMode;
         displayPreferences.theme = ['dark', 'light'].includes(preferenceTheme?.value) ? preferenceTheme.value : DEFAULT_DISPLAY_PREFERENCES.theme;
         displayPreferences.resultDensity = ['comfortable', 'compact'].includes(preferenceDensity?.value) ? preferenceDensity.value : DEFAULT_DISPLAY_PREFERENCES.resultDensity;
         displayPreferences.reduceMotion = Boolean(preferenceReduceMotion?.checked);
