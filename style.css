@@ -7698,3 +7698,14 @@ body.light-theme .card-actions .edhrec-link-btn:hover {
     .highlight-aspect-row { grid-template-columns: 1fr; gap: 3px; }
     .highlight-aspects { padding: 8px; }
 }
+
+
+/* Clear visual distinction for contextual and negative highlight intent. */
+.highlight-mode-context { border-style: dashed !important; opacity: .82; }
+.highlight-mode-avoid { border-color: var(--danger-color, #c44) !important; }
+.highlight-mode-btn.mode-context { border-style: dashed; }
+.highlight-mode-btn.mode-avoid { color: var(--danger-color, #c44); }
+.search-intent-confidence { border-left: 3px solid var(--border-color); padding: 7px 10px; font-size: 12px; }
+.search-intent-confidence.is-high { border-left-color: #269b62; }
+.search-intent-confidence.is-medium { border-left-color: #c28a22; }
+.search-intent-confidence.is-low { border-left-color: #c44; }
