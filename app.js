@@ -517,7 +517,9 @@ const DEFAULT_DISPLAY_PREFERENCES = Object.freeze({
     includeDigitalCards: false,
     includeTokenEmblemFunnyCards: false,
     showEdhrecButton: true,
-    showSearchIntent: false
+    showSearchIntent: false,
+    highlightDefaultMode: 'variable',
+    searchIntentDetail: 'short'
 });
 let displayPreferences = { ...DEFAULT_DISPLAY_PREFERENCES };
 
@@ -598,7 +600,9 @@ function loadDisplayPreferences() {
         // New preference defaults ON for existing users whose saved settings predate this option.
         showEdhrecButton: stored?.showEdhrecButton !== false,
         // Optional Search intent explanation is off by default, including for users with older saved preferences.
-        showSearchIntent: stored?.showSearchIntent === true
+        showSearchIntent: stored?.showSearchIntent === true,
+        highlightDefaultMode: ['variable', 'exact', 'context', 'avoid'].includes(stored?.highlightDefaultMode) ? stored.highlightDefaultMode : DEFAULT_DISPLAY_PREFERENCES.highlightDefaultMode,
+        searchIntentDetail: stored?.searchIntentDetail === 'detailed' ? 'detailed' : DEFAULT_DISPLAY_PREFERENCES.searchIntentDetail
     };
     return displayPreferences;
 }
@@ -4620,7 +4624,7 @@ function reapplyOracleHighlights() {
     let cursor = 0;
     for (const range of claimed) {
         html += escapeHtmlText(originalText.slice(cursor, range.start));
-        const modeClass = range.mode === 'variable' ? 'highlight-variable' : 'highlight-exact';
+        const modeClass = ({ variable: 'highlight-variable', exact: 'highlight-exact', context: 'highlight-context', avoid: 'highlight-avoid' })[range.mode] || 'highlight-exact';
         html += `<strong class="highlight-active ${modeClass} highlight-color-${range.colorIndex}">${escapeHtmlText(originalText.slice(range.start, range.end))}</strong>`;
         cursor = range.end;
     }
@@ -4667,7 +4671,7 @@ function handleSourceTextSelection(root = sourceCardOracle, field = 'oracle') {
         removeHighlight(existingIndex);
     } else {
         const highlight = {
-            text: trimmed.text, mode: 'exact', origin: 'source', field: canonicalField,
+            text: trimmed.text, mode: canonicalField === 'type' ? 'exact' : (['variable', 'exact', 'context', 'avoid'].includes(displayPreferences?.highlightDefaultMode) ? displayPreferences.highlightDefaultMode : 'variable'), origin: 'source', field: canonicalField,
             colorIndex: nextHighlightColorIndex++ % 4, attachedTo: null
         };
         if (canonicalField === 'type') {
@@ -4934,7 +4938,7 @@ function renderHighlightEditor(idx) {
     modeLabel.textContent = 'Match:';
     modeRow.appendChild(modeLabel);
 
-    let selectedMode = h.mode === 'variable' ? 'variable' : 'exact';
+    let selectedMode = ['variable', 'exact', 'context', 'avoid'].includes(h.mode) ? h.mode : 'exact';
     const makeModeButton = (mode, label, titleText) => {
         const btn = document.createElement('button');
         btn.type = 'button';
@@ -4948,8 +4952,10 @@ function renderHighlightEditor(idx) {
         });
         return btn;
     };
-    modeRow.appendChild(makeModeButton('variable', '\u2248 Flexible', 'Match the underlying mechanic/intent; values and wording may differ.'));
-    modeRow.appendChild(makeModeButton('exact', '= Exact', 'Require the text/value to occur literally in a matching card.'));
+    modeRow.appendChild(makeModeButton('variable', '≈ Flexible', 'Prefer similar mechanics; wording and values may differ.'));
+    modeRow.appendChild(makeModeButton('exact', '= Exact', 'Require this wording to occur in the matching card.'));
+    modeRow.appendChild(makeModeButton('context', 'Context only', 'Use this text to understand nearby effects, without making it a requirement.'));
+    modeRow.appendChild(makeModeButton('avoid', 'Avoid', 'Prefer cards that do not match this effect or wording.'));
  
     const detectedAspect = deriveHighlightAspectKind(h);
     let aspectControls = null;
@@ -5169,11 +5175,11 @@ function renderHighlightChips() {
 
         const modeBtn = document.createElement('button');
         modeBtn.type = 'button';
-        modeBtn.className = `highlight-mode-btn ${h.mode === 'variable' ? 'mode-variable' : 'mode-exact'}`;
-        modeBtn.textContent = h.mode === 'variable' ? '\u2248 Flexible' : '= Exact';
-        modeBtn.title = h.mode === 'variable'
-            ? 'Flexible: wording/value can differ while the underlying intent should remain similar. Click to require exact text instead.'
-            : 'Exact: the matching card must contain this text/value. Click to make it flexible instead.';
+        const modeLabels = { variable: '≈ Flexible', exact: '= Exact', context: 'Context only', avoid: 'Avoid' };
+        const safeMode = ['variable', 'exact', 'context', 'avoid'].includes(h.mode) ? h.mode : 'exact';
+        modeBtn.className = `highlight-mode-btn mode-${safeMode}`;
+        modeBtn.textContent = modeLabels[safeMode];
+        modeBtn.title = ({ variable: 'Flexible: prefer similar mechanics while allowing wording and values to differ.', exact: 'Exact: the matching card must contain this wording.', context: 'Context only: use this to interpret nearby text, not as a separate requirement.', avoid: 'Avoid: favor candidates that do not match this effect or wording.' })[safeMode];
         modeBtn.addEventListener('click', () => toggleHighlightMode(idx));
 
         const label = document.createElement('span');
@@ -5300,7 +5306,7 @@ function renderHighlightChips() {
         modeLabel.textContent = 'Match:';
         modeRow.appendChild(modeLabel);
 
-        let selectedMode = 'variable';
+        let selectedMode = ['variable', 'exact', 'context', 'avoid'].includes(displayPreferences?.highlightDefaultMode) ? displayPreferences.highlightDefaultMode : 'variable';
         const makeModeButton = (mode, text, title) => {
             const btn = document.createElement('button');
             btn.type = 'button';
@@ -5314,8 +5320,10 @@ function renderHighlightChips() {
             });
             return btn;
         };
-        modeRow.appendChild(makeModeButton('variable', '\u2248 Flexible', 'Match the underlying meaning/mechanics; wording and exact values may differ.'));
-        modeRow.appendChild(makeModeButton('exact', '= Exact', 'Require the added wording/value to occur in the candidate Oracle text.'));
+        modeRow.appendChild(makeModeButton('variable', '≈ Flexible', 'Prefer similar mechanics; wording and values may differ.'));
+        modeRow.appendChild(makeModeButton('exact', '= Exact', 'Require this wording to occur in candidate Oracle text.'));
+        modeRow.appendChild(makeModeButton('context', 'Context only', 'Use this as context without making it a separate requirement.'));
+        modeRow.appendChild(makeModeButton('avoid', 'Avoid', 'Prefer candidates that do not match this effect or wording.'));
 
         const connectRow = document.createElement('div');
         connectRow.className = 'highlight-add-connection-row';
@@ -5428,7 +5436,9 @@ function renderHighlightChips() {
 
 function toggleHighlightMode(idx) {
     if (!manualHighlights[idx]) return;
-    manualHighlights[idx].mode = manualHighlights[idx].mode === 'variable' ? 'exact' : 'variable';
+    const modes = ['variable', 'exact', 'context', 'avoid'];
+    const current = modes.includes(manualHighlights[idx].mode) ? manualHighlights[idx].mode : 'exact';
+    manualHighlights[idx].mode = modes[(modes.indexOf(current) + 1) % modes.length];
     renderHighlightChips();
     reapplyOracleHighlights();
     reapplyTypeLineHighlights();
@@ -10208,13 +10218,15 @@ function annotateHighlightGroups(highlights, sourceText = getCurrentSourceOracle
         const parseText = triggerOverrideClause || sourceClauseText || contextText || group.map(h => h.text).filter(Boolean).join(' ');
         const overrideSet = new Set(intentOverrideTexts.map(value => String(value).trim()));
         const remainingIntentTexts = connectedIntentTexts.filter(value => !overrideSet.has(String(value).trim()));
-        const hasExact = group.some(h => h.mode !== 'variable');
-        const hasVariable = group.some(h => h.mode === 'variable');
-        const groupMode = hasExact && hasVariable ? 'mixed' : (hasVariable ? 'variable' : 'exact');
+        const intentModes = group.map(h => h.mode || 'variable').filter(mode => mode !== 'context');
+        const hasExact = intentModes.includes('exact');
+        const hasVariable = intentModes.includes('variable');
+        const allAvoid = intentModes.length > 0 && intentModes.every(mode => mode === 'avoid');
+        const groupMode = allAvoid ? 'avoid' : (hasExact && hasVariable ? 'mixed' : (hasVariable ? 'variable' : (hasExact ? 'exact' : 'context')));
         const benchmarkIntentOnly = group.some(h => h.origin === 'benchmark') && groupMode === 'mixed';
-        const exactTexts = group.filter(h => h.mode !== 'variable').map(h => h.text.trim());
+        const exactTexts = group.filter(h => h.mode === 'exact').map(h => h.text.trim());
         const variableTexts = group.filter(h => h.mode === 'variable').map(h => h.text.trim());
-        const modes = group.map(h => h.mode === 'variable' ? 'variable' : 'exact');
+        const modes = group.map(h => ['variable', 'exact', 'context', 'avoid'].includes(h.mode) ? h.mode : 'exact');
         group.contextText = contextText || group.filter(h => Number.isFinite(h.start)).map(h => h.text.trim()).join(' ');
         group.sourceClauseText = sourceClauseText || group.contextText;
         group.parseText = parseText;
@@ -10344,7 +10356,7 @@ function calculateHighlightIntentMatch(profiles, candidateEffects, candidateCard
         let structuralScore = 0;
         let coverage = 0;
         if (sourceEffects.length && safeEffects.length) {
-            const matchingMode = profile.mode === 'mixed' ? 'variable' : profile.mode;
+            const matchingMode = ['exact', 'variable'].includes(profile.mode) ? profile.mode : 'variable';
             const assignment = maxOneToOneHighlightAssignment(sourceEffects, safeEffects, matchingMode);
             coverage = sourceEffects.length ? assignment.matches.length / sourceEffects.length : 0;
             const lexicalWeight = profile.benchmarkIntentOnly ? 0.05 : 0.12;
@@ -10356,6 +10368,7 @@ function calculateHighlightIntentMatch(profiles, candidateEffects, candidateCard
                 lexicalSupport = profile.exactTexts.filter(t => oracle.includes(String(t).toLocaleLowerCase())).length / profile.exactTexts.length;
             }
             structuralScore = clamp01(assignment.score * structuralWeight + coverage * coverageWeight + lexicalSupport * lexicalWeight);
+            if (profile.mode === 'avoid') structuralScore = 1 - structuralScore;
         }
 
         // Strong text fallback for explicit user intent. This is intentionally independent of parser
@@ -18430,7 +18443,7 @@ function getCardOracleText(card) {
  * A trailing period on an Exact highlight is a semantic hard boundary, not formatting.
  */
 function matchesExactHighlightConstraints(card, highlights = []) {
-    const exactHighlights = (highlights || []).filter(h => h && h.mode !== 'variable' && !h.benchmarkIntentOnly && typeof h.text === 'string' && h.text.trim());
+    const exactHighlights = (highlights || []).filter(h => h && h.mode === 'exact' && !h.benchmarkIntentOnly && typeof h.text === 'string' && h.text.trim());
     if (!exactHighlights.length) return true;
     const oracle = getCardOracleText(card);
     if (!oracle) return false;
@@ -19613,6 +19626,10 @@ function initApp() {
         if (preferenceScoreBreakdown) preferenceScoreBreakdown.checked = Boolean(displayPreferences.showScoreBreakdown);
         if (preferenceShowEdhrecButton) preferenceShowEdhrecButton.checked = displayPreferences.showEdhrecButton !== false;
         if (preferenceShowSearchIntent) preferenceShowSearchIntent.checked = displayPreferences.showSearchIntent === true;
+        const preferenceHighlightDefaultMode = document.getElementById('preference-highlight-default-mode');
+        const preferenceSearchIntentDetail = document.getElementById('preference-search-intent-detail');
+        if (preferenceHighlightDefaultMode) preferenceHighlightDefaultMode.value = displayPreferences.highlightDefaultMode || 'variable';
+        if (preferenceSearchIntentDetail) preferenceSearchIntentDetail.value = displayPreferences.searchIntentDetail || 'short';
         if (preferenceTheme) preferenceTheme.value = (displayPreferences.theme === 'light' || displayPreferences.theme === 'dark') ? displayPreferences.theme : 'dark';
         if (preferenceDensity) preferenceDensity.value = displayPreferences.resultDensity || 'comfortable';
         if (preferenceReduceMotion) preferenceReduceMotion.checked = Boolean(displayPreferences.reduceMotion);
@@ -19630,6 +19647,10 @@ function initApp() {
         displayPreferences.showScoreBreakdown = preferenceScoreBreakdown?.checked !== false;
         displayPreferences.showEdhrecButton = preferenceShowEdhrecButton?.checked !== false;
         displayPreferences.showSearchIntent = preferenceShowSearchIntent?.checked === true;
+        const preferenceHighlightDefaultMode = document.getElementById('preference-highlight-default-mode');
+        const preferenceSearchIntentDetail = document.getElementById('preference-search-intent-detail');
+        displayPreferences.highlightDefaultMode = ['variable', 'exact', 'context', 'avoid'].includes(preferenceHighlightDefaultMode?.value) ? preferenceHighlightDefaultMode.value : 'variable';
+        displayPreferences.searchIntentDetail = ['short', 'detailed'].includes(preferenceSearchIntentDetail?.value) ? preferenceSearchIntentDetail.value : 'short';
         displayPreferences.theme = ['dark', 'light'].includes(preferenceTheme?.value) ? preferenceTheme.value : DEFAULT_DISPLAY_PREFERENCES.theme;
         displayPreferences.resultDensity = ['comfortable', 'compact'].includes(preferenceDensity?.value) ? preferenceDensity.value : DEFAULT_DISPLAY_PREFERENCES.resultDensity;
         displayPreferences.reduceMotion = Boolean(preferenceReduceMotion?.checked);
@@ -25998,7 +26019,7 @@ function buildSearchIntentPresentationModel(sourceCard = currentSourceCard, high
     const highlightsView = activeHighlights.filter(h => h && String(h.text || '').trim()).map(h => ({
         text: String(h.text).trim(),
         field: h.field === 'type' ? 'type line' : (h.origin === 'user' ? 'search intent' : 'Oracle text'),
-        mode: h.mode === 'variable' ? 'Flexible' : 'Exact',
+        mode: ({ variable: 'Flexible', exact: 'Exact', context: 'Context only', avoid: 'Avoid' })[h.mode] || 'Exact',
         origin: h.origin === 'user' ? (h.editedFrom ? 'Edited source selection' : 'Search detail') : 'Selected text',
         attached: Number.isInteger(h.attachedTo)
     }));
@@ -26031,7 +26052,9 @@ function buildSearchIntentPresentationModel(sourceCard = currentSourceCard, high
     if (highlightsView.length) {
         const exact = highlightsView.some(h => h.mode === 'Exact');
         const flexible = highlightsView.some(h => h.mode === 'Flexible');
-        const modes = [exact ? 'Exact highlights require matching text in candidate Oracle text' : '', flexible ? 'Flexible highlights focus on matching mechanics even when wording differs' : ''].filter(Boolean);
+        const contextOnly = highlightsView.some(h => h.mode === 'Context only');
+        const avoid = highlightsView.some(h => h.mode === 'Avoid');
+        const modes = [exact ? 'Exact highlights require matching text in candidate Oracle text' : '', flexible ? 'Flexible highlights focus on matching mechanics even when wording differs' : '', contextOnly ? 'Context-only highlights clarify nearby effects without adding a separate requirement' : '', avoid ? 'Avoid highlights softly favor candidates with different mechanics or wording' : ''].filter(Boolean);
         if (modes.length) summary += ` Highlight behavior: ${modes.join('; ')}.`;
     }
     const aspectHighlights = activeHighlights.filter(h => hasActiveHighlightAspects(h?.aspects));
@@ -26040,6 +26063,10 @@ function buildSearchIntentPresentationModel(sourceCard = currentSourceCard, high
         if (aspectSummary.length) summary += ` Structured highlight requirements: ${aspectSummary.join(' ')}`;
     }
     const coverage = effectViews.length > 0;
+    const confidenceScores = parsed.map(effect => calculateCardFieldConfidence([effect]).overall).filter(Number.isFinite);
+    const parserConfidence = confidenceScores.length ? confidenceScores.reduce((sum, value) => sum + value, 0) / confidenceScores.length : 0;
+    const parserConfidenceLevel = parserConfidence >= 0.75 ? 'High' : parserConfidence >= 0.45 ? 'Medium' : 'Low';
+    if (!effectViews.length && activeHighlights.some(h => h.field !== 'type')) summary = `ManaSearch couldn't fully identify this effect, but your highlighted wording will still influence the search.`;
     const roleViews = roles.slice(0, 3).map(role => ({
         role: SEARCH_INTENT_ROLE_LABELS[role.role] || String(role.role || '').replace(/_/g, ' '),
         score: Number(role.score) || 0,
@@ -26061,7 +26088,7 @@ function buildSearchIntentPresentationModel(sourceCard = currentSourceCard, high
         { title: 'Repeatability and timing', detail: coverage ? 'Where the parser can identify it, recurring triggers/activations are distinguished from one-time, delayed, and enter-the-battlefield effects.' : 'Cadence will be compared when the source effect can be parsed confidently.' },
         { title: 'Function, role, and semantic context', detail: roleViews.length ? `Recognized role evidence: ${roleViews.map(r => r.role).join(', ')}. These signals supplement rather than replace mechanical similarity.` : 'Broader function, role, card type, and semantic context supplement mechanical similarity.' }
     ];
-    return { sourceName: sourceCard.name || 'Source card', summary, effectViews, highlightsView, roleViews, rankingEvidence, focusExplanation, parsedEffectCount: parsed.length, canonicalEffectCount: effectViews.length, hasHighlight: highlightsView.length > 0, semanticText: intent.semanticText || '', targetText: intent.targetText || sourceText };
+    return { sourceName: sourceCard.name || 'Source card', summary, effectViews, highlightsView, roleViews, rankingEvidence, focusExplanation, parsedEffectCount: parsed.length, canonicalEffectCount: effectViews.length, parserConfidence, parserConfidenceLevel, hasHighlight: highlightsView.length > 0, semanticText: intent.semanticText || '', targetText: intent.targetText || sourceText };
 }
 
 function setSearchIntentText(node, text) {
@@ -26085,6 +26112,10 @@ function renderManaSearchIntentModel(model) {
         return;
     }
     appendSearchIntentNode(body, 'p', 'search-intent-summary', model.summary);
+    if (displayPreferences?.searchIntentDetail === 'detailed') {
+        appendSearchIntentNode(body, 'p', `search-intent-confidence is-${String(model.parserConfidenceLevel || 'low').toLowerCase()}`,
+            `Parser confidence: ${model.parserConfidenceLevel || 'Low'} (${Math.round((Number(model.parserConfidence) || 0) * 100)}%). This is a heuristic estimate of how clearly the current text maps to known effect patterns, not a guarantee of correctness.`);
+    }
     if (model.hasHighlight && String(model.targetText || '').trim()) {
         const effectiveSection = appendSearchIntentNode(body, 'div', 'search-intent-effective-section');
         appendSearchIntentNode(effectiveSection, 'h4', '', 'Effective intent sent to parsing, retrieval, and ranking');
