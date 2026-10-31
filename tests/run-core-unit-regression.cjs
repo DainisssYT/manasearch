@@ -148,19 +148,17 @@ test('an unattached user trigger plus selected draw outcome composes the request
 
 test('dependent adjacent Oracle sentences are inferred as context in either selection direction', () => {
   const blocks = extractFunction('findDependentOracleContext');
-  const sourceText = 'Whenever an opponent draws a card.\\nYou draw a card.';
+  const sourceText = 'Whenever an opponent draws a card.\nYou draw a card.';
   const triggerStart = sourceText.indexOf('Whenever');
-  const triggerEnd = sourceText.indexOf('\\n');
+  const triggerEnd = sourceText.indexOf('\n');
   const outcomeStart = sourceText.indexOf('You draw');
-  const sandbox = { results: null };
-  vm.runInNewContext(`${blocks}
-    this.results = [
-      findDependentOracleContext(sourceText, outcomeStart, sourceText.length),
-      findDependentOracleContext(sourceText, triggerStart, triggerEnd)
-    ];
-  `, { ...sandbox, sourceText });
-  assert.equal(sandbox.results, null);
+  const sandbox = { sourceText, results: null };
+  vm.runInNewContext(`${blocks}\nthis.results = [\n  findDependentOracleContext(sourceText, outcomeStart, sourceText.length),\n  findDependentOracleContext(sourceText, triggerStart, triggerEnd)\n];`, sandbox);
+  assert.equal(sandbox.results.length, 2);
+  assert.match(sandbox.results[0].text, /Whenever an opponent draws a card/i);
+  assert.match(sandbox.results[1].text, /You draw a card/i);
 });
+
 const failed = cases.filter(c => !c.pass);
 for (const c of cases) console.log(`${c.pass ? 'PASS' : 'FAIL'} ${c.name}${c.error ? ` — ${c.error}` : ''}`);
 console.log(`\nCore mechanical unit checks: ${cases.length - failed.length}/${cases.length} passed.`);
