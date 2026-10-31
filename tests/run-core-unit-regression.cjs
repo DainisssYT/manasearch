@@ -152,7 +152,7 @@ test('dependent adjacent Oracle sentences are inferred as context in either sele
   const triggerStart = sourceText.indexOf('Whenever');
   const triggerEnd = sourceText.indexOf('\n');
   const outcomeStart = sourceText.indexOf('You draw');
-  const sandbox = { sourceText, results: null };
+  const sandbox = { sourceText, triggerStart, triggerEnd, outcomeStart, results: null };
   vm.runInNewContext(`${blocks}\nthis.results = [\n  findDependentOracleContext(sourceText, outcomeStart, sourceText.length),\n  findDependentOracleContext(sourceText, triggerStart, triggerEnd)\n];`, sandbox);
   assert.equal(sandbox.results.length, 2);
   assert.match(sandbox.results[0].text, /Whenever an opponent draws a card/i);
