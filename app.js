@@ -1,6 +1,6 @@
-/* ManaSearch build 20261029-123 */
+/* ManaSearch build 20261031-124 */
 // ManaSearch deployment build marker. Bump this whenever app.js changes so cached-module issues are easy to diagnose.
-const MANASEARCH_APP_BUILD = '20261029-123';
+const MANASEARCH_APP_BUILD = '20261031-124';
 console.info(`[ManaSearch] app.js build ${MANASEARCH_APP_BUILD}`);
 
 // State Management
@@ -508,6 +508,7 @@ const THEME_KEY = 'manamatch_theme';
 const DISPLAY_PREFERENCES_KEY = 'manasearch_display_preferences_v1';
 const DEFAULT_DISPLAY_PREFERENCES = Object.freeze({
     maxResults: 50,
+    maxResultPages: 3,
     showScoreBreakdown: true,
     theme: 'dark',
     resultDensity: 'comfortable',
@@ -562,6 +563,12 @@ function clampDisplayResultLimit(value) {
     return Math.max(1, Math.min(200, Math.round(parsed)));
 }
 
+function clampDisplayResultPageLimit(value) {
+    const parsed = Number(value);
+    if (!Number.isFinite(parsed)) return DEFAULT_DISPLAY_PREFERENCES.maxResultPages;
+    return Math.max(1, Math.min(50, Math.round(parsed)));
+}
+
 function loadLegacyThemePreference() {
     try {
         const legacy = localStorage.getItem(THEME_KEY);
@@ -580,6 +587,7 @@ function loadDisplayPreferences() {
     }
     displayPreferences = {
         maxResults: clampDisplayResultLimit(stored?.maxResults ?? DEFAULT_DISPLAY_PREFERENCES.maxResults),
+        maxResultPages: clampDisplayResultPageLimit(stored?.maxResultPages ?? DEFAULT_DISPLAY_PREFERENCES.maxResultPages),
         showScoreBreakdown: stored?.showScoreBreakdown !== false,
         theme: (stored?.theme === 'light' || stored?.theme === 'dark') ? stored.theme : (loadLegacyThemePreference() || DEFAULT_DISPLAY_PREFERENCES.theme),
         resultDensity: ['comfortable', 'compact'].includes(stored?.resultDensity) ? stored.resultDensity : DEFAULT_DISPLAY_PREFERENCES.resultDensity,
@@ -835,6 +843,10 @@ if (typeof window !== 'undefined') window.removeRecentSearchCard = removeRecentS
 
 function getDisplayedResultLimit() {
     return clampDisplayResultLimit(displayPreferences?.maxResults);
+}
+
+function getDisplayedResultPageLimit() {
+    return clampDisplayResultPageLimit(displayPreferences?.maxResultPages);
 }
 
 function resolveTheme(theme = displayPreferences?.theme) {
@@ -2914,7 +2926,7 @@ async function runBenchmarkSuite(searchFn) {
         percent: 5
     });
     await backgroundAwareDelay(0);
-    const staticReadyForBenchmark = staticSearchResourcesReady() || await loadStaticSearchResources();
+    const staticReadyForBenchmark = await loadStaticSearchResources({ requireSemantic: true });
     if (!staticReadyForBenchmark || !staticCardCorpusMemory?.cards?.length || fullSemanticIndexMemory?.source !== 'static') {
         throw new Error('Benchmark requires the bundled cards.bin and semantic-index.bin. Runtime Scryfall card fetches are disabled. Check static-data-meta.json and the two .bin assets.');
     }
@@ -16284,6 +16296,7 @@ const staticSearchResourceState = {
     lastError: ''
 };
 let staticSearchResourcesPromise = null;
+let staticSemanticResourcesPromise = null;
 
 function setStaticSearchResourceState(resource, state) {
     if (!(resource in staticSearchResourceState)) return;
@@ -16291,54 +16304,50 @@ function setStaticSearchResourceState(resource, state) {
     updateStaticSearchAvailability();
 }
 
+// The main search is allowed to start as soon as cards.bin is usable. The semantic index is
+// deliberately optional during startup and joins later searches automatically when ready.
 function staticSearchResourcesReady() {
-    return staticSearchResourceState.ready === true;
+    return staticSearchResourceState.cards === 'ready';
+}
+
+function staticSearchResourcesComplete() {
+    return staticSearchResourceState.cards === 'ready' && staticSearchResourceState.semantic === 'ready';
 }
 
 function updateStaticSearchStatus(message = null) {
     if (!staticSearchStatus || !staticSearchStatusText) return;
 
-    const { cards, semantic, loading, ready, failed } = staticSearchResourceState;
+    const { cards, semantic, loading, failed } = staticSearchResourceState;
     staticSearchStatus.classList.remove('is-loading', 'is-ready', 'is-error');
 
-    if (loading) {
-        const readyLabels = [];
-        const pendingLabels = [];
-        const failedLabels = [];
-        if (cards === 'ready') readyLabels.push('cards.bin');
-        else if (cards === 'failed') failedLabels.push('cards.bin');
-        else if (cards === 'loading' || cards === 'idle') pendingLabels.push('cards.bin');
-        if (semantic === 'ready') readyLabels.push('semantic-index.bin');
-        else if (semantic === 'failed') failedLabels.push('semantic-index.bin');
-        else if (semantic === 'loading' || semantic === 'idle') pendingLabels.push('semantic-index.bin');
-
-        let detail = 'cards.bin and semantic-index.bin are loading…';
-        if (failedLabels.length) {
-            const failedText = `${failedLabels.join(' and ')} unavailable`;
-            const pendingText = pendingLabels.length ? `; still loading ${pendingLabels.join(' and ')}…` : '';
-            detail = `${failedText}${pendingText}`;
-        } else if (readyLabels.length && pendingLabels.length) {
-            detail = `${readyLabels.join(' and ')} ready; loading ${pendingLabels.join(' and ')}…`;
-        } else if (readyLabels.length) {
-            detail = `${readyLabels.join(' and ')} ready; verifying the remaining search data…`;
-        }
-        staticSearchStatusText.textContent = message || `Loading search data — ${detail} Find Similar Cards will be available when both files are ready.`;
+    if (!staticSearchResourcesReady() && loading) {
+        staticSearchStatusText.textContent = message || 'Loading the local card catalog… Find Similar Cards will unlock as soon as cards.bin is ready. Semantic search is prepared in the background.';
         staticSearchStatus.classList.add('is-loading');
         if (staticSearchStatusSpinner) staticSearchStatusSpinner.classList.remove('hidden');
         if (staticSearchRetryBtn) staticSearchRetryBtn.classList.add('hidden');
-    } else if (ready) {
-        staticSearchStatusText.textContent = message || 'Search data ready — cards.bin and semantic-index.bin are loaded.';
-        staticSearchStatus.classList.add('is-ready');
-        if (staticSearchStatusSpinner) staticSearchStatusSpinner.classList.add('hidden');
-        if (staticSearchRetryBtn) staticSearchRetryBtn.classList.add('hidden');
-    } else if (failed) {
+    } else if (failed || cards === 'failed') {
         const failureDetail = String(staticSearchResourceState.lastError || '').trim();
-        staticSearchStatusText.textContent = message || `Search data could not be loaded after 3 attempts. Find Similar Cards is disabled.${failureDetail ? ` Details: ${failureDetail}` : ''}`;
+        staticSearchStatusText.textContent = message || `The local card catalog could not be loaded after 3 attempts. Find Similar Cards is disabled until cards.bin loads.${failureDetail ? ` Details: ${failureDetail}` : ''}`;
         staticSearchStatus.classList.add('is-error');
         if (staticSearchStatusSpinner) staticSearchStatusSpinner.classList.add('hidden');
         if (staticSearchRetryBtn) staticSearchRetryBtn.classList.remove('hidden');
+    } else if (staticSearchResourcesReady() && semantic === 'ready') {
+        staticSearchStatusText.textContent = message || 'Local card catalog and semantic index are ready. Search runs locally on this device.';
+        staticSearchStatus.classList.add('is-ready');
+        if (staticSearchStatusSpinner) staticSearchStatusSpinner.classList.add('hidden');
+        if (staticSearchRetryBtn) staticSearchRetryBtn.classList.add('hidden');
+    } else if (staticSearchResourcesReady() && semantic === 'failed') {
+        staticSearchStatusText.textContent = message || 'Card data is ready. The semantic index could not be loaded, but local card searches remain available.';
+        staticSearchStatus.classList.add('is-ready');
+        if (staticSearchStatusSpinner) staticSearchStatusSpinner.classList.add('hidden');
+        if (staticSearchRetryBtn) staticSearchRetryBtn.classList.add('hidden');
+    } else if (staticSearchResourcesReady()) {
+        staticSearchStatusText.textContent = message || 'Card data is ready — you can search now. The semantic index is still loading in the background.';
+        staticSearchStatus.classList.add('is-ready');
+        if (staticSearchStatusSpinner) staticSearchStatusSpinner.classList.add('hidden');
+        if (staticSearchRetryBtn) staticSearchRetryBtn.classList.add('hidden');
     } else {
-        staticSearchStatusText.textContent = message || 'Search data is preparing…';
+        staticSearchStatusText.textContent = message || 'Preparing local search data…';
         staticSearchStatus.classList.add('is-loading');
         if (staticSearchStatusSpinner) staticSearchStatusSpinner.classList.remove('hidden');
         if (staticSearchRetryBtn) staticSearchRetryBtn.classList.add('hidden');
@@ -16346,13 +16355,11 @@ function updateStaticSearchStatus(message = null) {
 }
 
 function updateStaticSearchAvailability() {
-    const ready = staticSearchResourceState.cards === 'ready' && staticSearchResourceState.semantic === 'ready';
+    const ready = staticSearchResourceState.cards === 'ready';
     staticSearchResourceState.ready = ready;
 
     if (staticSearchStatus) {
-        if (staticSearchResourceState.loading) {
-            staticSearchStatus.classList.remove('hidden');
-        } else if (ready || staticSearchResourceState.failed) {
+        if (staticSearchResourceState.loading || ready || staticSearchResourceState.failed) {
             staticSearchStatus.classList.remove('hidden');
         }
     }
@@ -16361,7 +16368,7 @@ function updateStaticSearchAvailability() {
         const hasSource = Boolean(currentSourceCard);
         findSimilarBtn.disabled = !(hasSource && ready);
         findSimilarBtn.setAttribute('aria-disabled', String(!(hasSource && ready)));
-        findSimilarBtn.setAttribute('aria-busy', String(staticSearchResourceState.loading));
+        findSimilarBtn.setAttribute('aria-busy', String(staticSearchResourceState.loading && !ready));
     }
 
     updateStaticSearchStatus();
@@ -16376,45 +16383,41 @@ async function retryStaticSearchResource(resourceLabel, loader) {
     let lastError = null;
     for (let attempt = 1; attempt <= STATIC_SEARCH_RESOURCE_MAX_ATTEMPTS; attempt++) {
         try {
-            updateStaticSearchStatus(`Loading ${resourceLabel}… attempt ${attempt}/${STATIC_SEARCH_RESOURCE_MAX_ATTEMPTS}. Find Similar Cards is disabled until the search data is ready.`);
             return await loader(attempt);
         } catch (error) {
             lastError = error;
             console.warn(`[ManaSearch] ${resourceLabel} load attempt ${attempt}/${STATIC_SEARCH_RESOURCE_MAX_ATTEMPTS} failed:`, error?.message || String(error));
-            if (attempt < STATIC_SEARCH_RESOURCE_MAX_ATTEMPTS) {
-                updateStaticSearchStatus(`${resourceLabel} could not be accessed yet. Retrying automatically (${attempt + 1}/${STATIC_SEARCH_RESOURCE_MAX_ATTEMPTS})… Find Similar Cards remains disabled.`);
-                await waitForStaticSearchRetry(attempt);
-            }
+            if (attempt < STATIC_SEARCH_RESOURCE_MAX_ATTEMPTS) await waitForStaticSearchRetry(attempt);
         }
     }
     throw lastError || new Error(`${resourceLabel} could not be loaded.`);
 }
 
-async function loadStaticSearchResources({ forceRetry = false } = {}) {
-    if (staticSearchResourceState.ready && !forceRetry) return true;
-    if (staticSearchResourcesPromise && !forceRetry) return staticSearchResourcesPromise;
-
+async function loadStaticSearchResources({ forceRetry = false, requireSemantic = false } = {}) {
     if (forceRetry) {
         staticSearchResourcesPromise = null;
+        staticSemanticResourcesPromise = null;
         staticCardCorpusPromise = null;
         staticSemanticIndexPromise = null;
         staticCardCorpusLoadError = null;
         staticSemanticIndexLoadError = null;
         staticSearchResourceState.cards = 'idle';
         staticSearchResourceState.semantic = 'idle';
+        staticSearchResourceState.loading = false;
+        staticSearchResourceState.ready = false;
         staticSearchResourceState.failed = false;
         staticSearchResourceState.lastError = '';
     }
 
-    staticSearchResourceState.loading = true;
-    staticSearchResourceState.failed = false;
-    staticSearchResourceState.lastError = '';
-    updateStaticSearchAvailability();
+    if (!staticSearchResourcesPromise) {
+        staticSearchResourceState.loading = true;
+        staticSearchResourceState.failed = false;
+        staticSearchResourceState.lastError = '';
+        staticSearchResourceState.cards = 'loading';
+        staticSearchResourceState.semantic = 'loading';
+        updateStaticSearchAvailability();
 
-    staticSearchResourcesPromise = (async () => {
         const cardPromise = retryStaticSearchResource('cards.bin', async (attempt) => {
-            // Force a fresh network attempt after the first failure so a transient cached 404/5xx
-            // cannot be mistaken for a persistent asset failure.
             const corpus = await loadStaticCardCorpus({ retryAttempt: attempt });
             if (!corpus) throw new Error(staticCardCorpusLoadError || 'cards.bin is unavailable.');
             return corpus;
@@ -16424,51 +16427,48 @@ async function loadStaticSearchResources({ forceRetry = false } = {}) {
             return corpus;
         }).catch(error => {
             staticSearchResourceState.cards = 'failed';
+            staticSearchResourceState.failed = true;
+            staticSearchResourceState.lastError = error?.message || String(error);
             updateStaticSearchAvailability();
             throw error;
         });
 
-        const semanticPromise = retryStaticSearchResource('semantic-index.bin', async (attempt) => {
+        // This promise is intentionally not awaited by the page-readiness promise below.
+        // Search can begin on the local card corpus while semantic-index.bin is prepared.
+        staticSemanticResourcesPromise = retryStaticSearchResource('semantic-index.bin', async (attempt) => {
             const index = await loadStaticSemanticIndex({ retryAttempt: attempt });
             if (!index) throw new Error(staticSemanticIndexLoadError || 'semantic-index.bin is unavailable.');
             return index;
         }).then(index => {
             staticSearchResourceState.semantic = 'ready';
             updateStaticSearchAvailability();
-            return index;
+            return true;
         }).catch(error => {
             staticSearchResourceState.semantic = 'failed';
+            staticSemanticIndexLoadError = error?.message || String(error);
+            console.info('ManaSearch semantic search will remain optional for this visit:', staticSemanticIndexLoadError);
             updateStaticSearchAvailability();
-            throw error;
+            return false;
         });
 
-        const [cardsResult, semanticResult] = await Promise.allSettled([cardPromise, semanticPromise]);
-        const errors = [];
-        if (cardsResult.status === 'rejected') errors.push(`cards.bin: ${cardsResult.reason?.message || cardsResult.reason}`);
-        if (semanticResult.status === 'rejected') errors.push(`semantic-index.bin: ${semanticResult.reason?.message || semanticResult.reason}`);
-        if (errors.length) {
-            staticSearchResourceState.failed = true;
-            staticSearchResourceState.lastError = errors.join(' | ');
+        staticSearchResourcesPromise = cardPromise.then(() => {
+            staticSearchResourceState.loading = false;
+            staticSearchResourceState.failed = false;
+            staticSearchResourceState.lastError = '';
+            updateStaticSearchAvailability();
+            return true;
+        }).catch(() => {
             staticSearchResourceState.loading = false;
             updateStaticSearchAvailability();
             return false;
-        }
+        });
+    }
 
-        staticSearchResourceState.loading = false;
-        staticSearchResourceState.failed = false;
-        staticSearchResourceState.lastError = '';
-        updateStaticSearchAvailability();
-        return true;
-    })().catch(error => {
-        staticSearchResourceState.loading = false;
-        staticSearchResourceState.failed = true;
-        staticSearchResourceState.lastError = error?.message || String(error);
-        updateStaticSearchAvailability();
-        return false;
-    });
-
-    return staticSearchResourcesPromise;
+    const cardsReady = await staticSearchResourcesPromise;
+    if (!cardsReady || !requireSemantic) return cardsReady;
+    return await staticSemanticResourcesPromise === true;
 }
+
 
 function getStaticAssetsBaseUrl() {
     // Resolve data next to this module, not relative to the current address bar URL. On a
@@ -16493,7 +16493,35 @@ function getStaticDataMetaUrl() {
     }
 }
 
+let staticDataServiceWorkerPromise = null;
+async function ensureStaticDataServiceWorker() {
+    if (staticDataServiceWorkerPromise) return staticDataServiceWorkerPromise;
+    staticDataServiceWorkerPromise = (async () => {
+        if (typeof navigator === 'undefined' || !('serviceWorker' in navigator) || location.protocol === 'file:') return false;
+        try {
+            const scriptUrl = new URL('./service-worker.js', import.meta.url);
+            const scopeUrl = new URL('.', import.meta.url);
+            await navigator.serviceWorker.register(scriptUrl.href, {
+                scope: scopeUrl.pathname,
+                updateViaCache: 'none'
+            });
+            // Let the first visit use the Cache API too. The timeout is only a fallback for
+            // browsers where service-worker activation/claim is delayed or restricted.
+            await Promise.race([
+                navigator.serviceWorker.ready,
+                new Promise(resolve => setTimeout(resolve, 1800))
+            ]);
+            return true;
+        } catch (error) {
+            console.info('[ManaSearch] Persistent asset cache unavailable; browser HTTP caching will be used.', error?.message || error);
+            return false;
+        }
+    })();
+    return staticDataServiceWorkerPromise;
+}
+
 async function loadStaticDataMetadata() {
+    await ensureStaticDataServiceWorker();
     if (staticDataBuildCacheKey) return staticDataBuildCacheKey;
     if (staticDataMetaPromise) return staticDataMetaPromise;
     staticDataMetaPromise = (async () => {
@@ -16850,31 +16878,52 @@ async function loadStaticCardCorpus({ retryAttempt = 1 } = {}) {
     if (staticCardCorpusMemory?.source === 'static') return staticCardCorpusMemory;
     if (staticCardCorpusPromise) return staticCardCorpusPromise;
     staticCardCorpusPromise = (async () => {
-        // Resolve the current static-data build ID before constructing cards.bin's URL.
-        // Without this await, a newly generated cards.bin could be requested under the
-        // old compatibility cache key while semantic-index.bin correctly used the new one.
         await loadStaticDataMetadata();
-        const { value: buffer } = await fetchStaticAsset(getStaticCardCorpusUrl(retryAttempt), {
-            method: 'GET',
-            cache: retryAttempt > 1 ? 'no-store' : 'force-cache',
-            headers: { 'Accept': 'application/octet-stream,*/*;q=0.8' }
-        }, { label: 'Static card corpus (cards.bin)', timeoutMs: 60000, responseType: 'arrayBuffer' });
-        const corpus = await runWhenIdle(() => parseStaticCardCorpusBinary(buffer), { timeout: 3500 });
+        const url = getStaticCardCorpusUrl(retryAttempt);
+        let corpus = null;
+        try {
+            const preparedCards = [];
+            const loaded = await semanticWorkerRequest('load-cards', {
+                url,
+                expectedBuildId: staticDataBuildId || '',
+                timeoutMs: 60000,
+                cacheMode: retryAttempt > 1 ? 'no-store' : 'force-cache'
+            }, [], sourceCards => {
+                for (const sourceCard of sourceCards || []) {
+                    const card = prepareStaticCardRecord(sourceCard);
+                    if (card) preparedCards.push(card);
+                }
+            });
+            if (!loaded || !preparedCards.length) throw new Error('The search worker returned an empty card corpus.');
+            corpus = await runWhenIdle(() => buildStaticCardCorpusIndex(preparedCards, {
+                version: loaded.version,
+                payloadBuildId: loaded.payloadBuildId || '',
+                expectedBuildId: staticDataBuildId || '',
+                byteLength: loaded.byteLength
+            }), { timeout: 3500 });
+        } catch (workerError) {
+            // Older browsers that block dedicated workers retain the original local parser.
+            // The normal path downloads/decompresses/parses cards.bin inside semantic-search-worker.js.
+            console.info('[ManaSearch] Card-data worker unavailable; using the yielding main-thread parser.', workerError?.message || workerError);
+            const { value: buffer } = await fetchStaticAsset(url, {
+                method: 'GET',
+                cache: retryAttempt > 1 ? 'no-store' : 'force-cache',
+                headers: { 'Accept': 'application/octet-stream,*/*;q=0.8' }
+            }, { label: 'Static card corpus (cards.bin)', timeoutMs: 60000, responseType: 'arrayBuffer' });
+            corpus = await runWhenIdle(() => parseStaticCardCorpusBinary(buffer), { timeout: 3500 });
+        }
         staticCardCorpusMemory = corpus;
-        console.info(`Precomputed card corpus loaded: ${corpus.total.toLocaleString()} cards.`);
+        console.info(`Precomputed card corpus loaded in worker: ${corpus.total.toLocaleString()} cards.`);
         return corpus;
     })().catch(error => {
         staticCardCorpusLoadError = error?.message || String(error);
         console.warn('Precomputed card corpus unavailable; search remains local-only and will stay disabled until cards.bin loads:', staticCardCorpusLoadError);
         return null;
     }).finally(() => {
-        // A failed attempt must not permanently poison the promise. The coordinated resource
-        // loader can retry the asset, while successful loads are retained in memory above.
         staticCardCorpusPromise = null;
     });
     return staticCardCorpusPromise;
 }
-
 function preloadStaticCardCorpus() {
     return loadStaticCardCorpus();
 }
@@ -17561,14 +17610,68 @@ async function loadStaticSemanticIndex({ retryAttempt = 1 } = {}) {
     staticSemanticIndexPromise = (async () => {
         await loadStaticDataMetadata();
         const url = getStaticSemanticIndexUrl(retryAttempt);
-        const { value: buffer } = await fetchStaticAsset(url, {
-            method: 'GET',
-            cache: retryAttempt > 1 ? 'no-store' : 'force-cache',
-            headers: { 'Accept': 'application/octet-stream,*/*;q=0.8' }
-        }, { label: 'Static semantic index (semantic-index.bin)', timeoutMs: 60000, responseType: 'arrayBuffer' });
-        const index = await runWhenIdle(() => parseStaticSemanticIndexBinary(buffer), { timeout: 3500 });
+        let index = null;
+        try {
+            const loaded = await semanticWorkerRequest('load-semantic-index', {
+                url,
+                timeoutMs: 60000,
+                cacheMode: retryAttempt > 1 ? 'no-store' : 'force-cache'
+            });
+            const names = Array.isArray(loaded?.names) ? loaded.names : [];
+            const normalizedNames = Array.isArray(loaded?.normalizedNames) ? loaded.normalizedNames : [];
+            const dim = Number(loaded?.dim) || 0;
+            const count = Number(loaded?.count) || names.length;
+            if (!dim || !count || names.length !== count || normalizedNames.length !== count ||
+                !(loaded.vectorBuffer instanceof ArrayBuffer) || !(loaded.normBuffer instanceof ArrayBuffer)) {
+                throw new Error('The search worker returned incomplete semantic-index metadata.');
+            }
+            const vectors = new Int8Array(loaded.vectorBuffer);
+            const vectorNormSquares = new Float32Array(loaded.normBuffer);
+            if (vectors.length !== count * dim || vectorNormSquares.length !== count) {
+                throw new Error('The search worker returned a truncated semantic vector table.');
+            }
+            const nameToIndex = new Map();
+            for (let row = 0; row < count; row++) {
+                const key = normalizedNames[row] || normalizeCardNameForIdentity(names[row]);
+                if (key && !nameToIndex.has(key)) nameToIndex.set(key, row);
+            }
+            index = {
+                dim,
+                total: count,
+                source: 'static',
+                nameToIndex,
+                chunks: [{
+                    names,
+                    normalizedNames,
+                    nameToIndex,
+                    ids: [],
+                    cards: null,
+                    vectors,
+                    vectorNormSquares,
+                    count
+                }]
+            };
+            const baseline = Number(loaded.baseline);
+            if (Number.isFinite(baseline)) {
+                semanticCosineBaseline = Math.max(0.18, Math.min(0.52, baseline));
+                semanticCosineBaselineReady = true;
+            }
+            // The worker already owns the original vectors and inverse norms; this identity check
+            // prevents a second ~14 MiB vector-buffer copy during the first query.
+            semanticSearchWorkerIndex = index;
+            index.byteLength = Number(loaded.byteLength) || 0;
+        } catch (workerError) {
+            console.info('[ManaSearch] Semantic index worker load unavailable; using the yielding local parser.', workerError?.message || workerError);
+            const { value: buffer } = await fetchStaticAsset(url, {
+                method: 'GET',
+                cache: retryAttempt > 1 ? 'no-store' : 'force-cache',
+                headers: { 'Accept': 'application/octet-stream,*/*;q=0.8' }
+            }, { label: 'Static semantic index (semantic-index.bin)', timeoutMs: 60000, responseType: 'arrayBuffer' });
+            index = await runWhenIdle(() => parseStaticSemanticIndexBinary(buffer), { timeout: 3500 });
+            index.staticUrl = url;
+            index.byteLength = buffer.byteLength;
+        }
         index.staticUrl = url;
-        index.byteLength = buffer.byteLength;
         fullSemanticIndexMemory = index;
         console.info(`Precomputed semantic index loaded: ${index.total.toLocaleString()} cards, ${index.dim}-dimensional vectors.`);
         return index;
@@ -17577,13 +17680,10 @@ async function loadStaticSemanticIndex({ retryAttempt = 1 } = {}) {
         console.info('Precomputed semantic index unavailable; local lexical search may continue without semantic retrieval:', staticSemanticIndexLoadError);
         return null;
     }).finally(() => {
-        // Let a failed attempt be retried by the coordinated loader. A successful index remains
-        // available through fullSemanticIndexMemory.
         staticSemanticIndexPromise = null;
     });
     return staticSemanticIndexPromise;
 }
-
 // Fast access to a card's already-computed Oracle vector from semantic-index.bin. This is used
 // for scoring candidates too, not only retrieval: generating an embedding for the same Oracle text
 // again is redundant when the bundled quantized vector already exists. Custom highlights and
@@ -17723,153 +17823,61 @@ const semanticSearchWorkerPending = new Map();
 const staticSemanticQueryStats = { workerQueries: 0, workerElapsedMs: 0, workerFailures: 0, fallbackQueries: 0, fallbackElapsedMs: 0 };
 
 function createSemanticSearchWorker() {
-    const code = `
-        let indexChunks = [];
-        let indexDim = 384;
-        let ready = false;
-        let latestGeneration = -1;
-        function cosineAgainstQuantized(queryVector, vector, dim, queryNorm, vectorNormSquared) {
-            let dot = 0;
-            for (let i = 0; i < dim; i++) dot += (Number(queryVector[i]) || 0) * (vector[i] || 0);
-            if (queryNorm <= 0 || vectorNormSquared <= 0) return 0;
-            return dot / (Math.sqrt(queryNorm) * Math.sqrt(vectorNormSquared));
-        }
-        function heapSwap(heap, a, b) { const t = heap[a]; heap[a] = heap[b]; heap[b] = t; }
-        function heapUp(heap, index) {
-            while (index > 0) {
-                const parent = Math.floor((index - 1) / 2);
-                if (heap[parent].similarity <= heap[index].similarity) break;
-                heapSwap(heap, parent, index); index = parent;
-            }
-        }
-        function heapDown(heap, index) {
-            while (true) {
-                const left = index * 2 + 1, right = left + 1;
-                let smallest = index;
-                if (left < heap.length && heap[left].similarity < heap[smallest].similarity) smallest = left;
-                if (right < heap.length && heap[right].similarity < heap[smallest].similarity) smallest = right;
-                if (smallest === index) break;
-                heapSwap(heap, smallest, index); index = smallest;
-            }
-        }
-        function heapPushTop(heap, item, cap) {
-            if (heap.length < cap) { heap.push(item); heapUp(heap, heap.length - 1); return; }
-            if (item.similarity <= heap[0].similarity) return;
-            heap[0] = item; heapDown(heap, 0);
-        }
-        self.onmessage = function(event) {
-            const data = event.data || {};
-            if (Number.isFinite(data.generation)) latestGeneration = Math.max(latestGeneration, Number(data.generation));
-            if (data.type === 'init') {
-                try {
-                    indexDim = Number(data.dim) || 384;
-                    indexChunks = (data.chunks || []).map(chunk => ({
-                        names: chunk.names || [],
-                        normalizedNames: chunk.normalizedNames || null,
-                        ids: chunk.ids || [],
-                        vectors: new Int8Array(chunk.buffer, chunk.byteOffset || 0, chunk.byteLength),
-                        vectorNormSquares: chunk.normBuffer ? new Float32Array(chunk.normBuffer) : (chunk.vectorNormSquares || null),
-                        count: Number(chunk.count) || (chunk.names || []).length
-                    }));
-                    ready = true;
-                    self.postMessage({ type: 'ready', requestId: data.requestId });
-                } catch (error) {
-                    self.postMessage({ type: 'init-error', requestId: data.requestId, error: error?.message || String(error) });
-                }
-                return;
-            }
-            if (data.type !== 'query' || !ready) return;
-            try {
-                const query = new Float32Array(data.queryBuffer);
-                const dim = indexDim;
-                let queryNorm = 0;
-                for (let i = 0; i < dim; i++) {
-                    const q = Number(query[i]) || 0;
-                    queryNorm += q * q;
-                }
-                const excludeKey = String(data.excludeKey || '');
-                const limit = Math.max(1, Number(data.limit) || 72);
-                const minSimilarity = Number.isFinite(data.minSimilarity) ? data.minSimilarity : 0.42;
-                const baseline = Number.isFinite(data.baseline) ? data.baseline : 0.30;
-                const cap = Math.max(limit * 2, 32);
-                const heap = [];
-                for (const chunk of indexChunks) {
-                    if (Number.isFinite(data.generation) && data.generation < latestGeneration) {
-                        self.postMessage({ type: 'result', requestId: data.requestId, results: [], cancelled: true });
-                        return;
-                    }
-                    for (let i = 0; i < chunk.count; i++) {
-                        if ((i & 2047) === 0 && Number.isFinite(data.generation) && data.generation < latestGeneration) {
-                            self.postMessage({ type: 'result', requestId: data.requestId, results: [], cancelled: true });
-                            return;
-                        }
-                        const name = chunk.names[i] || '';
-                        if (!name) continue;
-                        const normalizedName = chunk.normalizedNames?.[i] || name.toLowerCase().replace(/\\s+/g, ' ').trim();
-                        if (normalizedName === excludeKey) continue;
-                        const vector = chunk.vectors.subarray(i * dim, (i + 1) * dim);
-                        let vectorNormSquared = chunk.vectorNormSquares?.[i] || 0;
-                        // Compatibility fallback for older/partial indexes without precomputed norms.
-                        if (!(vectorNormSquared > 0)) {
-                            for (let j = 0; j < dim; j++) vectorNormSquared += (vector[j] || 0) * (vector[j] || 0);
-                        }
-                        const rawCos = cosineAgainstQuantized(query, vector, dim, queryNorm, vectorNormSquared);
-                        const calibrated = Math.max(0, Math.min(1, (rawCos - baseline) / Math.max(0.05, 1 - baseline)));
-                        if (calibrated >= minSimilarity) heapPushTop(heap, { name, id: chunk.ids?.[i] || null, similarity: calibrated, _normalizedName: normalizedName }, cap);
-                    }
-                }
-                heap.sort((a, b) => b.similarity - a.similarity);
-                const seen = new Set();
-                const results = [];
-                for (const item of heap) {
-                    const key = item._normalizedName || String(item.name || '').toLowerCase().replace(/\\s+/g, ' ').trim();
-                    if (!key || seen.has(key)) continue;
-                    seen.add(key);
-                    results.push({ name: item.name, id: item.id || null, similarity: item.similarity });
-                    if (results.length >= limit) break;
-                }
-                self.postMessage({ type: 'result', requestId: data.requestId, results });
-            } catch (error) {
-                self.postMessage({ type: 'query-error', requestId: data.requestId, error: error?.message || String(error) });
-            }
-        };
-    `;
-    const blob = new Blob([code], { type: 'application/javascript' });
-    const url = URL.createObjectURL(blob);
-    const worker = new Worker(url);
-    URL.revokeObjectURL(url);
+    if (typeof Worker !== 'function') throw new Error('Dedicated Web Workers are not supported in this browser.');
+    const worker = new Worker(new URL('./semantic-search-worker.js', import.meta.url), {
+        name: 'ManaSearch data and semantic search'
+    });
     worker.onmessage = event => {
         const data = event.data || {};
         const pending = semanticSearchWorkerPending.get(data.requestId);
         if (!pending) return;
-        if (data.type === 'ready' || data.type === 'init-error' || data.type === 'query-error' || data.type === 'result') {
+        if (data.type === 'cards-chunk') {
+            try {
+                if (typeof pending.onChunk === 'function') pending.onChunk(data.cards || []);
+            } catch (error) {
+                semanticSearchWorkerPending.delete(data.requestId);
+                pending.reject(error);
+            }
+            return;
+        }
+        if (['ready', 'result', 'cards-ready', 'semantic-ready'].includes(data.type)) {
             semanticSearchWorkerPending.delete(data.requestId);
-            if (data.type === 'ready') pending.resolve(true);
-            else if (data.type === 'result') pending.resolve(data.results || []);
-            else pending.reject(new Error(data.error || 'Semantic worker failed.'));
+            pending.resolve(data);
+        } else if (['init-error', 'query-error', 'load-error'].includes(data.type)) {
+            semanticSearchWorkerPending.delete(data.requestId);
+            pending.reject(new Error(data.error || 'ManaSearch worker request failed.'));
         }
     };
-    worker.onerror = error => {
-        const message = error?.message || 'Semantic search worker failed.';
+    const failWorker = error => {
+        const message = error?.message || 'ManaSearch search worker failed.';
         for (const pending of semanticSearchWorkerPending.values()) pending.reject(new Error(message));
         semanticSearchWorkerPending.clear();
         semanticSearchWorkerInitPromise = null;
         semanticSearchWorkerIndex = null;
         try { worker.terminate(); } catch (_) {}
-        semanticSearchWorker = null;
+        if (semanticSearchWorker === worker) semanticSearchWorker = null;
     };
+    worker.onerror = failWorker;
+    worker.onmessageerror = () => failWorker(new Error('ManaSearch worker message could not be decoded.'));
     return worker;
 }
 
-function semanticWorkerRequest(type, payload, transfer = []) {
-    if (!semanticSearchWorker) return Promise.reject(new Error('Semantic search worker is unavailable.'));
+function semanticWorkerRequest(type, payload, transfer = [], onChunk = null) {
+    if (!semanticSearchWorker) {
+        try { semanticSearchWorker = createSemanticSearchWorker(); }
+        catch (error) { return Promise.reject(error); }
+    }
     const requestId = ++semanticSearchWorkerRequestId;
     return new Promise((resolve, reject) => {
-        semanticSearchWorkerPending.set(requestId, { resolve, reject });
+        semanticSearchWorkerPending.set(requestId, { resolve, reject, onChunk });
         try { semanticSearchWorker.postMessage({ type, requestId, ...payload }, transfer); }
-        catch (error) { semanticSearchWorkerPending.delete(requestId); reject(error); }
+        catch (error) {
+            semanticSearchWorkerPending.delete(requestId);
+            reject(error);
+        }
     });
 }
+
 
 async function ensureSemanticWorkerIndex(index) {
     if (!index || !index.chunks?.length) throw new Error('Semantic index is empty.');
@@ -19574,6 +19582,7 @@ function initApp() {
     const savePreferencesBtn = document.getElementById('save-preferences-btn');
     const resetPreferencesBtn = document.getElementById('reset-preferences-btn');
     const preferenceResultLimit = document.getElementById('preference-result-limit');
+    const preferenceMaxResultPages = document.getElementById('preference-max-result-pages');
     const preferenceScoreBreakdown = document.getElementById('preference-score-breakdown');
     const preferenceShowEdhrecButton = document.getElementById('preference-show-edhrec-button');
     const preferenceShowSearchIntent = document.getElementById('preference-show-search-intent');
@@ -19586,6 +19595,7 @@ function initApp() {
 
     function syncPreferencesControls() {
         if (preferenceResultLimit) preferenceResultLimit.value = String(getDisplayedResultLimit());
+        if (preferenceMaxResultPages) preferenceMaxResultPages.value = String(getDisplayedResultPageLimit());
         if (preferenceScoreBreakdown) preferenceScoreBreakdown.checked = Boolean(displayPreferences.showScoreBreakdown);
         if (preferenceShowEdhrecButton) preferenceShowEdhrecButton.checked = displayPreferences.showEdhrecButton !== false;
         if (preferenceShowSearchIntent) preferenceShowSearchIntent.checked = displayPreferences.showSearchIntent === true;
@@ -19599,8 +19609,10 @@ function initApp() {
 
     function commitPreferences() {
         const previousPageSize = getDisplayedResultLimit();
+        const previousPageLimit = getDisplayedResultPageLimit();
         displayPreferences.maxResults = clampDisplayResultLimit(preferenceResultLimit?.value);
-        if (displayPreferences.maxResults !== previousPageSize) currentResultsPage = 1;
+        displayPreferences.maxResultPages = clampDisplayResultPageLimit(preferenceMaxResultPages?.value);
+        if (displayPreferences.maxResults !== previousPageSize || displayPreferences.maxResultPages !== previousPageLimit) currentResultsPage = 1;
         displayPreferences.showScoreBreakdown = preferenceScoreBreakdown?.checked !== false;
         displayPreferences.showEdhrecButton = preferenceShowEdhrecButton?.checked !== false;
         displayPreferences.showSearchIntent = preferenceShowSearchIntent?.checked === true;
@@ -19648,6 +19660,9 @@ function initApp() {
     });
     preferenceResultLimit?.addEventListener('change', () => {
         preferenceResultLimit.value = String(clampDisplayResultLimit(preferenceResultLimit.value));
+    });
+    preferenceMaxResultPages?.addEventListener('change', () => {
+        preferenceMaxResultPages.value = String(clampDisplayResultPageLimit(preferenceMaxResultPages.value));
     });
 
     historyList = document.getElementById('history-list');
@@ -26476,8 +26491,8 @@ async function findSimilarCards() {
         }
         if (!staticSearchResourcesReady()) {
             updateStaticSearchStatus(staticSearchResourceState.failed
-                ? 'Search data is unavailable. Find Similar Cards remains disabled until cards.bin and semantic-index.bin can be loaded.'
-                : 'Search data is still loading. Find Similar Cards will unlock when cards.bin and semantic-index.bin are ready.');
+                ? 'The local card catalog is unavailable. Find Similar Cards remains disabled until cards.bin can be loaded.'
+                : 'The local card catalog is still loading. Find Similar Cards will unlock as soon as cards.bin is ready; the semantic index loads in the background.');
             return;
         }
     }
@@ -28909,6 +28924,9 @@ function getRenderableResultCards(cards) {
     if (!Array.isArray(cards)) return [];
     const seenNames = new Set();
     const renderable = [];
+    // This is a display cap only: the ranked candidate pool, Search Deeper state, and CSV export
+    // remain untouched. Page size and max pages are independently configurable preferences.
+    const displayCap = getDisplayedResultLimit() * getDisplayedResultPageLimit();
     for (const card of cards) {
         const key = normalizeCardNameForIdentity(card?.name || '');
         if (!key || seenNames.has(key)) continue;
@@ -28916,6 +28934,7 @@ function getRenderableResultCards(cards) {
         if (!isAllowedByCandidatePreferences(card)) continue;
         seenNames.add(key);
         renderable.push(card);
+        if (renderable.length >= displayCap) break;
     }
     return renderable;
 }
