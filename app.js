@@ -4642,6 +4642,39 @@ function notifyManaSearchHighlightsChanged() {
     }));
 }
 
+function findDependentOracleContext(sourceText, start, end) {
+    const text = String(sourceText || '');
+    if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start || end > text.length) return null;
+    const bounds = (position) => {
+        let left = 0, right = text.length;
+        for (let i = position - 1; i >= 0; i--) if (/[.!?;\\n]/.test(text[i])) { left = i + 1; break; }
+        for (let i = position; i < text.length; i++) if (/[.!?;\\n]/.test(text[i])) { right = i + 1; break; }
+        return { start: left, end: right, text: text.slice(left, right).trim() };
+    };
+    const selected = bounds(start), selectedLast = bounds(Math.max(start, end - 1));
+    const selectedText = text.slice(selected.start, selectedLast.end).trim();
+    const candidates = [];
+    const consider = (left, right) => {
+        const clause = text.slice(left, right).trim();
+        if (!clause || (left < end && right > start)) return;
+        const followup = /^(?:then\\b|if you do\\b|if you don'?t\\b|that player\\b|they do\\b|you may\\b|you can\\b|this way\\b|for each\\b|repeat this process\\b|until\\b)/i.test(clause);
+        const governing = /(?:whenever|when|at the beginning of|at the end of|if |after |before |as .* enters|each time|the next time)\\b/i.test(clause) &&
+            /^(?:you|target player|target opponent|that player|each opponent|each player|then|if you|draw|create|exile|return|put|deal|gain|lose)\\b/i.test(selectedText);
+        if (followup || governing) candidates.push({ start: left, end: right, text: clause });
+    };
+    if (selected.start > 0) {
+        let left = 0;
+        for (let i = selected.start - 1; i >= 0; i--) if (/[.!?;\\n]/.test(text[i])) { left = i + 1; break; }
+        consider(left, selected.start);
+    }
+    if (selectedLast.end < text.length) {
+        let right = text.length;
+        for (let i = selectedLast.end; i < text.length; i++) if (/[.!?;\\n]/.test(text[i])) { right = i + 1; break; }
+        consider(selectedLast.end, right);
+    }
+    return candidates.length === 1 ? candidates[0] : null;
+}
+
 function handleSourceTextSelection(root = sourceCardOracle, field = 'oracle') {
     if (!root) return;
     const selection = window.getSelection?.();
@@ -4683,6 +4716,15 @@ function handleSourceTextSelection(root = sourceCardOracle, field = 'oracle') {
             highlight.end = trimmed.end;
         }
         manualHighlights.push(highlight);
+        // Preserve a clearly dependent adjacent sentence as context-only, never as a hard match.
+        if (canonicalField === 'oracle' && Number.isFinite(trimmed.start) && Number.isFinite(trimmed.end)) {
+            const dependent = findDependentOracleContext(originalText, trimmed.start, trimmed.end);
+            if (dependent && !manualHighlights.some(h => h.field === 'oracle' && h.start === dependent.start && h.end === dependent.end)) {
+                manualHighlights.push({ text: dependent.text, mode: 'context', origin: 'auto-context', field: 'oracle',
+                    start: dependent.start, end: dependent.end, attachedTo: manualHighlights.length - 1,
+                    colorIndex: nextHighlightColorIndex++ % 4, inferredRelationship: 'adjacent-dependent-sentence' });
+            }
+        }
         reapplyOracleHighlights();
         reapplyTypeLineHighlights();
         renderHighlightChips();
@@ -5156,7 +5198,7 @@ function renderHighlightChips() {
 
     manualHighlights.forEach((h, idx) => {
         const chip = document.createElement('div');
-        chip.className = `card-chip highlight-chip highlight-color-${Number.isInteger(h.colorIndex) ? h.colorIndex % 4 : 0} ${h.field === 'type' ? 'highlight-type-chip' : ''} ${h.origin === 'user' ? 'highlight-user-chip' : 'highlight-source-chip'} ${Number.isInteger(h.attachedTo) ? 'highlight-linked-chip' : ''}`;
+        chip.className = `card-chip highlight-chip highlight-color-${Number.isInteger(h.colorIndex) ? h.colorIndex % 4 : 0} ${h.field === 'type' ? 'highlight-type-chip' : ''} ${h.origin === 'user' ? 'highlight-user-chip' : 'highlight-source-chip'} ${Number.isInteger(h.attachedTo) ? 'highlight-linked-chip' : ''} ${h.mode === 'context' ? 'highlight-mode-context' : h.mode === 'avoid' ? 'highlight-mode-avoid' : ''}`;
 
         if (Number.isInteger(h.attachedTo) && manualHighlights[h.attachedTo]) {
             const linked = document.createElement('span');
@@ -5168,10 +5210,12 @@ function renderHighlightChips() {
 
         const origin = document.createElement('span');
         origin.className = 'highlight-origin-label';
-        origin.textContent = h.origin === 'user' ? '+' : (h.field === 'type' ? 'Type' : 'Highlight');
-        origin.title = h.origin === 'user'
-            ? (Number.isInteger(h.attachedTo) ? `User-added search detail connected to: ${getHighlightParentLabel(h.attachedTo)}` : 'Independent user-added search detail')
-            : (h.field === 'type' ? 'Selected from this card\'s type line' : 'Selected from this card\'s Oracle text');
+        origin.textContent = h.origin === 'auto-context' ? 'Context' : (h.origin === 'user' ? '+' : (h.field === 'type' ? 'Type' : 'Highlight'));
+        origin.title = h.origin === 'auto-context'
+            ? 'Automatically included because this adjacent sentence appears dependent on your selection. It is context-only and is not a mandatory match.'
+            : h.origin === 'user'
+                ? (Number.isInteger(h.attachedTo) ? `User-added search detail connected to: ${getHighlightParentLabel(h.attachedTo)}` : 'Independent user-added search detail')
+                : (h.field === 'type' ? 'Selected from this card\'s type line' : 'Selected from this card\'s Oracle text');
 
         const modeBtn = document.createElement('button');
         modeBtn.type = 'button';
