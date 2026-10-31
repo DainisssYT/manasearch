@@ -16407,6 +16407,8 @@ async function loadStaticSearchResources({ forceRetry = false, requireSemantic =
         staticSearchResourceState.ready = false;
         staticSearchResourceState.failed = false;
         staticSearchResourceState.lastError = '';
+        fullSemanticIndexUnavailable = false;
+        fullSemanticIndexUnavailableReason = null;
     }
 
     if (!staticSearchResourcesPromise) {
@@ -17801,6 +17803,19 @@ function calibrateSemanticCosineFromVectors(vectors) {
 async function ensureFullSemanticIndex() {
     // The only supported full-corpus index is the precomputed deployment asset.
     if (fullSemanticIndexMemory?.source === 'static') return fullSemanticIndexMemory;
+
+    // Main searches may start while the background semantic download is still in flight.
+    // Join the coordinated retry promise instead of starting a competing request or marking
+    // the semantic index permanently unavailable after an early transient failure.
+    if (staticSemanticResourcesPromise && staticSemanticResourcesPromise) {
+        const available = await staticSemanticResourcesPromise;
+        if (fullSemanticIndexMemory?.source === 'static') return fullSemanticIndexMemory;
+        if (!available || staticSearchResourceState.semantic === 'failed') {
+            fullSemanticIndexUnavailable = true;
+            fullSemanticIndexUnavailableReason = staticSemanticIndexLoadError || 'Precomputed semantic index unavailable.';
+            return null;
+        }
+    }
     if (fullSemanticIndexUnavailable) return null;
 
     const staticIndex = await loadStaticSemanticIndex();
@@ -17811,10 +17826,9 @@ async function ensureFullSemanticIndex() {
     return null;
 }
 
-// V21 performance: full-corpus cosine search runs in a Web Worker so scanning the prebuilt
-// ~30k-card vector set never monopolizes the page's main thread. The static index's vector buffer is
-// transferred to the worker (not copied), keeping memory overhead low. The fallback index can use
-// the same worker once it exists.
+// V21/V22 performance: binary loading, decoding, and full-corpus cosine search run in a dedicated
+// worker. The worker keeps its own vector store and sends a copy to the main thread only for the
+// candidate-scoring helpers that reuse the precomputed Oracle vectors.
 let semanticSearchWorker = null;
 let semanticSearchWorkerIndex = null;
 let semanticSearchWorkerInitPromise = null;
