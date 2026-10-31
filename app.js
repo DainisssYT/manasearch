@@ -506,6 +506,26 @@ const HISTORY_DISMISSED_KEY = 'manamatch_history_dismissed';
 const FAVORITES_KEY = 'manamatch_favorites';
 const THEME_KEY = 'manamatch_theme';
 const DISPLAY_PREFERENCES_KEY = 'manasearch_display_preferences_v1';
+const HIGHLIGHT_MATCH_MODES = Object.freeze(['variable', 'exact', 'context_only', 'avoid']);
+
+function normalizeHighlightMode(mode, fallback = 'exact') {
+    const value = String(mode || '').trim().toLowerCase().replace(/[ -]+/g, '_');
+    if (value === 'flexible') return 'variable';
+    if (HIGHLIGHT_MATCH_MODES.includes(value)) return value;
+    return HIGHLIGHT_MATCH_MODES.includes(fallback) ? fallback : 'exact';
+}
+
+function getHighlightModeLabel(mode) {
+    const value = normalizeHighlightMode(mode);
+    return value === 'variable' ? 'Flexible'
+        : value === 'exact' ? 'Exact'
+        : value === 'context_only' ? 'Context only' : 'Avoid';
+}
+
+function getPreferredHighlightMode() {
+    return normalizeHighlightMode(displayPreferences?.defaultHighlightMode, 'variable');
+}
+
 const DEFAULT_DISPLAY_PREFERENCES = Object.freeze({
     maxResults: 50,
     maxResultPages: 3,
@@ -517,7 +537,9 @@ const DEFAULT_DISPLAY_PREFERENCES = Object.freeze({
     includeDigitalCards: false,
     includeTokenEmblemFunnyCards: false,
     showEdhrecButton: true,
-    showSearchIntent: false
+    showSearchIntent: false,
+    defaultHighlightMode: 'variable',
+    searchIntentDetailMode: 'short'
 });
 let displayPreferences = { ...DEFAULT_DISPLAY_PREFERENCES };
 
@@ -597,8 +619,10 @@ function loadDisplayPreferences() {
         includeTokenEmblemFunnyCards: stored?.includeTokenEmblemFunnyCards === true,
         // New preference defaults ON for existing users whose saved settings predate this option.
         showEdhrecButton: stored?.showEdhrecButton !== false,
-        // Optional Search intent explanation is off by default, including for users with older saved preferences.
-        showSearchIntent: stored?.showSearchIntent === true
+        // Optional Search intent explanation remains off unless the user explicitly enables it.
+        showSearchIntent: stored?.showSearchIntent === true,
+        defaultHighlightMode: normalizeHighlightMode(stored?.defaultHighlightMode, DEFAULT_DISPLAY_PREFERENCES.defaultHighlightMode),
+        searchIntentDetailMode: ['short', 'detailed'].includes(stored?.searchIntentDetailMode) ? stored.searchIntentDetailMode : DEFAULT_DISPLAY_PREFERENCES.searchIntentDetailMode
     };
     return displayPreferences;
 }
@@ -4620,7 +4644,7 @@ function reapplyOracleHighlights() {
     let cursor = 0;
     for (const range of claimed) {
         html += escapeHtmlText(originalText.slice(cursor, range.start));
-        const modeClass = range.mode === 'variable' ? 'highlight-variable' : 'highlight-exact';
+        const modeClass = 'highlight-' + normalizeHighlightMode(range.mode);
         html += `<strong class="highlight-active ${modeClass} highlight-color-${range.colorIndex}">${escapeHtmlText(originalText.slice(range.start, range.end))}</strong>`;
         cursor = range.end;
     }
@@ -6868,6 +6892,57 @@ function calculateCardFieldConfidence(parsedEffects) {
     return result;
 }
 
+
+/**
+ * Parser diagnostics adapter. The rules parser stays deterministic and local; this wrapper exposes
+ * its stages and a qualitative coverage estimate so the UI can show uncertainty without claiming
+ * that a heuristic score is a calibrated probability.
+ */
+function calculateParserConfidenceReport(parsedEffects, sourceText = '') {
+    const effects = (Array.isArray(parsedEffects) ? parsedEffects : []).filter(effect => effect && !effect.isCostEffect);
+    const recognized = effects.filter(effect => effect.action && effect.action !== 'generic');
+    const canonical = recognized.filter(effect => effect.canonical?.function);
+    const fieldConfidence = calculateCardFieldConfidence(effects);
+    const recognitionRatio = effects.length ? recognized.length / effects.length : 0;
+    const canonicalRatio = recognized.length ? canonical.length / recognized.length : 0;
+    const score = effects.length
+        ? Math.max(0, Math.min(1, fieldConfidence.overall * 0.65 + recognitionRatio * 0.25 + canonicalRatio * 0.10))
+        : 0;
+    const level = score >= 0.76 ? 'high' : score >= 0.45 ? 'medium' : 'limited';
+    const labels = { high: 'High', medium: 'Medium', limited: 'Limited' };
+    const fieldLabels = {
+        action: 'Action', object: 'Affected object', zone: 'Zone movement',
+        target: 'Target', restriction: 'Restrictions', quantity: 'Quantity', condition: 'Condition'
+    };
+    const fields = Object.entries(fieldLabels).map(([key, label]) => {
+        const value = Math.max(0, Math.min(1, Number(fieldConfidence[key]) || 0));
+        return { key, label, score: value, level: value >= 0.76 ? 'high' : value >= 0.45 ? 'medium' : 'limited' };
+    });
+    const sentenceCount = typeof getOracleSentenceSpans === 'function' ? getOracleSentenceSpans(sourceText).length : 0;
+    return {
+        score, level, label: labels[level], fields,
+        effects: effects.length, recognized: recognized.length, canonical: canonical.length,
+        unresolved: Math.max(0, effects.length - recognized.length),
+        sentenceCount,
+        stages: [
+            { label: 'Text segmented', detail: sentenceCount + ' rules sentence(s)' },
+            { label: 'Effects recognized', detail: recognized.length + ' of ' + effects.length + ' parsed effect(s)' },
+            { label: 'Canonical effects', detail: canonical.length + ' standardized effect(s)' },
+            { label: 'Relationships', detail: effects.some(effect => effect.triggerProfile || effect.relationships?.length || effect.durationProfile) ? 'Context relationships attached where recognized' : 'No additional relationship signals identified' }
+        ],
+        note: 'This is a heuristic estimate of parser coverage, not a probability that every field is correct.'
+    };
+}
+
+function parseMTGEffectWithDiagnostics(oracleText, cardContext = null) {
+    const sourceText = String(oracleText || '');
+    const effects = parseMTGEffect(sourceText, cardContext);
+    return {
+        effects,
+        diagnostics: calculateParserConfidenceReport(effects, sourceText)
+    };
+}
+
 // Verbs that can each introduce an independent effect inside a single clause. Conjugated forms
 // (puts?, returns?, destroys?) included for the same reason as parseZoneMovementEffect's own
 // gate - a third-person "each player puts..." construction needs the same recognition as the
@@ -9110,7 +9185,7 @@ const STRATEGIC_INTENT_ROLES = new Set([
 ]);
 
 function inferRankingIntent(sourceCard, parsedSourceEffects = [], targetText = '', sourceRoleProfile = [], highlights = []) {
-    const exactHighlights = (highlights || []).filter(h => h?.mode !== 'variable');
+    const exactHighlights = (highlights || []).filter(h => normalizeHighlightMode(h?.mode) === 'exact');
     const flexibleHighlights = (highlights || []).filter(h => h?.mode === 'variable');
     const topRole = sourceRoleProfile?.[0];
     const roleIsStrong = Boolean(topRole && STRATEGIC_INTENT_ROLES.has(topRole.role) && topRole.score >= 0.74);
@@ -18430,7 +18505,7 @@ function getCardOracleText(card) {
  * A trailing period on an Exact highlight is a semantic hard boundary, not formatting.
  */
 function matchesExactHighlightConstraints(card, highlights = []) {
-    const exactHighlights = (highlights || []).filter(h => h && h.mode !== 'variable' && !h.benchmarkIntentOnly && typeof h.text === 'string' && h.text.trim());
+    const exactHighlights = (highlights || []).filter(h => h && normalizeHighlightMode(h.mode) === 'exact' && !h.benchmarkIntentOnly && typeof h.text === 'string' && h.text.trim());
     if (!exactHighlights.length) return true;
     const oracle = getCardOracleText(card);
     if (!oracle) return false;
@@ -18443,7 +18518,7 @@ function matchesExactHighlightConstraints(card, highlights = []) {
 
 function explainExactHighlightFailures(card, highlights = []) {
     const oracle = getCardOracleText(card);
-    return (highlights || []).filter(h => h && h.mode !== 'variable' && !h.benchmarkIntentOnly && typeof h.text === 'string' && h.text.trim()).flatMap(h => {
+    return (highlights || []).filter(h => h && normalizeHighlightMode(h.mode) === 'exact' && !h.benchmarkIntentOnly && typeof h.text === 'string' && h.text.trim()).flatMap(h => {
         if ((hasActiveHighlightAspects(h.aspects) || (!h.aspects && deriveHighlightAspectKind(h)?.kind === 'mana' && /^(?:\s*\{[wubrgc]\}\s*)+$/i.test(h.text))) && deriveHighlightAspectKind(h)) {
             const result = highlightAspectEffectMatches(h, card);
             return result.matches ? [] : [{ field: 'highlight aspect', expected: buildHighlightAspectPreview(h), actual: result.reason || 'candidate effect did not satisfy the structured requirement' }];
