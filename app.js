@@ -18595,36 +18595,96 @@ function getCardOracleText(card) {
     return card?.oracle_text || (card?.card_faces ? card.card_faces.map(f => f.oracle_text || '').join(' ') : '');
 }
 
+function doesOracleContainExactHighlightGroup(oracleText, exactHighlights) {
+    const highlights = Array.isArray(exactHighlights) ? exactHighlights : [];
+    if (!highlights.length) return true;
+    const spans = getOracleSentenceSpans(oracleText);
+    const candidateContexts = spans.map(span => extractHighlightClauseContext(oracleText, span.start, span.end)).filter(Boolean);
+    if (!candidateContexts.length && String(oracleText || '').trim()) candidateContexts.push(String(oracleText).trim());
+    return candidateContexts.some(context => highlights.every(highlight => {
+        const requirement = parseExactHighlightRequirement(highlight.text);
+        return !requirement.text || exactHighlightOccursInOracle(context, requirement);
+    }));
+}
+
 /**
- * Exact-highlight constraint: every Exact highlight must literally occur in the candidate's
- * Oracle text. Flexible highlights are deliberately ignored and remain semantic/ranking intent.
- * A trailing period on an Exact highlight is a semantic hard boundary, not formatting.
+ * Exact is the only hard text constraint. All Exact fragments from one selected source effect
+ * must be present together in a single candidate effect/context; a phrase in an unrelated rule
+ * sentence cannot accidentally satisfy the selected requirement. Flexible, Context only, and Avoid
+ * tags never become literal filters.
  */
 function matchesExactHighlightConstraints(card, highlights = []) {
-    const exactHighlights = (highlights || []).filter(h => h && normalizeHighlightMode(h.mode) === 'exact' && !h.benchmarkIntentOnly && typeof h.text === 'string' && h.text.trim());
+    const exactHighlights = (highlights || []).filter(h => h && normalizeHighlightMode(h.mode) === 'exact'
+        && !h.benchmarkIntentOnly && typeof h.text === 'string' && h.text.trim());
     if (!exactHighlights.length) return true;
     const oracle = getCardOracleText(card);
     if (!oracle) return false;
-    return exactHighlights.every(highlight => {
-        if ((hasActiveHighlightAspects(highlight.aspects) || (!highlight.aspects && deriveHighlightAspectKind(highlight)?.kind === 'mana' && /^(?:\s*\{[wubrgc]\}\s*)+$/i.test(highlight.text))) && deriveHighlightAspectKind(highlight)) return highlightAspectEffectMatches(highlight, card).matches;
+
+    const isAspectRequirement = h =>
+        (hasActiveHighlightAspects(h.aspects) || (!h.aspects && deriveHighlightAspectKind(h)?.kind === 'mana' && /^\s*(?:\{[wubrgc]\}\s*)+$/i.test(h.text)))
+        && deriveHighlightAspectKind(h);
+    const aspectHighlights = exactHighlights.filter(isAspectRequirement);
+    if (aspectHighlights.some(highlight => !highlightAspectEffectMatches(highlight, card).matches)) return false;
+
+    const literalHighlights = exactHighlights.filter(h => !isAspectRequirement(h));
+    const typeHighlights = literalHighlights.filter(h => h.field === 'type');
+    if (typeHighlights.some(highlight => {
         const requirement = parseExactHighlightRequirement(highlight.text);
-        return !requirement.text || exactHighlightOccursInOracle(oracle, requirement);
-    });
+        return requirement.text && !exactHighlightOccursInOracle(oracle, requirement);
+    })) return false;
+
+    const effectHighlights = literalHighlights.filter(h => h.field !== 'type');
+    if (!effectHighlights.length) return true;
+    const sourceGroups = annotateHighlightGroups(highlights, getCurrentSourceOracleText())
+        .map(group => group.filter(h => h.field !== 'type' && normalizeHighlightMode(h.mode) === 'exact'
+            && !h.benchmarkIntentOnly && typeof h.text === 'string' && h.text.trim()))
+        .filter(group => group.length);
+    const exactGroups = sourceGroups.length ? sourceGroups : effectHighlights.map(highlight => [highlight]);
+    return exactGroups.every(group => doesOracleContainExactHighlightGroup(oracle, group));
 }
 
 function explainExactHighlightFailures(card, highlights = []) {
     const oracle = getCardOracleText(card);
-    return (highlights || []).filter(h => h && normalizeHighlightMode(h.mode) === 'exact' && !h.benchmarkIntentOnly && typeof h.text === 'string' && h.text.trim()).flatMap(h => {
-        if ((hasActiveHighlightAspects(h.aspects) || (!h.aspects && deriveHighlightAspectKind(h)?.kind === 'mana' && /^(?:\s*\{[wubrgc]\}\s*)+$/i.test(h.text))) && deriveHighlightAspectKind(h)) {
+    const exactHighlights = (highlights || []).filter(h => h && normalizeHighlightMode(h.mode) === 'exact'
+        && !h.benchmarkIntentOnly && typeof h.text === 'string' && h.text.trim());
+    const failures = [];
+    const isAspectRequirement = h =>
+        (hasActiveHighlightAspects(h.aspects) || (!h.aspects && deriveHighlightAspectKind(h)?.kind === 'mana' && /^\s*(?:\{[wubrgc]\}\s*)+$/i.test(h.text)))
+        && deriveHighlightAspectKind(h);
+    for (const h of exactHighlights) {
+        if (isAspectRequirement(h)) {
             const result = highlightAspectEffectMatches(h, card);
-            return result.matches ? [] : [{ field: 'highlight aspect', expected: buildHighlightAspectPreview(h), actual: result.reason || 'candidate effect did not satisfy the structured requirement' }];
+            if (!result.matches) failures.push({ field: 'highlight aspect', expected: buildHighlightAspectPreview(h), actual: result.reason || 'candidate effect did not satisfy the structured requirement' });
+            continue;
         }
-        const requirement = parseExactHighlightRequirement(h.text);
-        if (!requirement.text || exactHighlightOccursInOracle(oracle, requirement)) return [];
-        return [{ field: 'exact highlight', expected: h.text.trim(), actual: requirement.requiresSentenceTerminalPeriod ? 'sentence boundary missing' : 'text not present in candidate Oracle text' }];
-    });
+        if (h.field === 'type') {
+            const requirement = parseExactHighlightRequirement(h.text);
+            if (requirement.text && !exactHighlightOccursInOracle(oracle, requirement)) failures.push({ field: 'exact highlight', expected: h.text.trim(), actual: 'text not present in candidate Oracle text' });
+        }
+    }
+    const effectHighlights = exactHighlights.filter(h => h.field !== 'type' && !isAspectRequirement(h));
+    const groups = annotateHighlightGroups(highlights, getCurrentSourceOracleText())
+        .map(group => group.filter(h => h.field !== 'type' && normalizeHighlightMode(h.mode) === 'exact'
+            && !h.benchmarkIntentOnly && typeof h.text === 'string' && h.text.trim()))
+        .filter(group => group.length);
+    const exactGroups = groups.length ? groups : effectHighlights.map(h => [h]);
+    const contexts = getOracleSentenceSpans(oracle).map(span => extractHighlightClauseContext(oracle, span.start, span.end));
+    for (const group of exactGroups) {
+        if (doesOracleContainExactHighlightGroup(oracle, group)) continue;
+        for (const h of group) {
+            const requirement = parseExactHighlightRequirement(h.text);
+            const textExistsElsewhere = requirement.text && contexts.some(context => exactHighlightOccursInOracle(context, requirement));
+            failures.push({
+                field: 'exact highlight',
+                expected: h.text.trim(),
+                actual: textExistsElsewhere
+                    ? 'wording appears in the card, but not together in the same effect as the other Exact fragments'
+                    : (requirement.requiresSentenceTerminalPeriod ? 'sentence boundary missing' : 'text not present in the candidate effect')
+            });
+        }
+    }
+    return failures;
 }
-
 function calculateFuzzyTextMatch(sourceText, targetText) {
     if (!sourceText || !targetText) return 0;
 
@@ -21805,10 +21865,10 @@ function installManaSearchOnboarding() {
 
     const sourceOracleHighlights = () => (Array.isArray(manualHighlights) ? manualHighlights : [])
         .filter(h => h && h.origin === 'source' && h.field !== 'type' && String(h.text || '').trim());
-    const hasExactAnchor = () => sourceOracleHighlights().some(h => h.mode !== 'variable');
+    const hasExactAnchor = () => sourceOracleHighlights().some(h => normalizeHighlightMode(h.mode) === 'exact');
     const hasMixedHighlightModes = () => {
         const items = sourceOracleHighlights();
-        return items.length >= 2 && items.some(h => h.mode !== 'variable') && items.some(h => h.mode === 'variable');
+        return items.length >= 2 && items.some(h => normalizeHighlightMode(h.mode) === 'exact') && items.some(h => normalizeHighlightMode(h.mode) === 'variable');
     };
     const skipHighlightTutorial = () => {
         waitingForHighlight = '';
@@ -22166,7 +22226,7 @@ function installManaSearchOnboarding() {
             if (!waitingForHighlight && !waitingForMixedMode) return;
         }
         const items = sourceOracleHighlights();
-        if (waitingForHighlight === 'first' && items.some(h => h.mode !== 'variable')) {
+        if (waitingForHighlight === 'first' && items.some(h => normalizeHighlightMode(h.mode) === 'exact')) {
             waitingForHighlight = '';
             currentStep = 3;
             secondHighlightAdded = false;
@@ -26888,7 +26948,7 @@ async function findSimilarCards() {
     const exactHighlightQueries = [];
     if (hasHighlight) {
         const seenExactQueries = new Set();
-        for (const highlight of searchHighlightsSnapshot.filter(h => h?.mode !== 'variable' && !h.benchmarkIntentOnly && typeof h.text === 'string' && h.text.trim())) {
+        for (const highlight of searchHighlightsSnapshot.filter(h => normalizeHighlightMode(h?.mode) === 'exact' && !h.benchmarkIntentOnly && typeof h.text === 'string' && h.text.trim())) {
             const literal = highlight.text.trim().replaceAll('\\', '\\\\').replaceAll('"', '\\"');
             const prefix = highlight.field === 'type' ? 'type' : 'oracle';
             const key = `${prefix}:${literal.toLowerCase()}`;
@@ -27908,7 +27968,7 @@ for (const card of rawCandidates) {
 // Stage 2: Passed hard filters set
 const passedFilterNames = new Set(filteredCandidates.map(c => (c.name || '').toLowerCase()));
 const countPassedFiltersRaw = filteredCandidates.length;
-const exactHighlightConstraintCount = searchHighlightsSnapshot.filter(h => h?.mode !== 'variable' && !h.benchmarkIntentOnly && typeof h.text === 'string' && h.text.trim()).length;
+const exactHighlightConstraintCount = searchHighlightsSnapshot.filter(h => normalizeHighlightMode(h?.mode) === 'exact' && !h.benchmarkIntentOnly && typeof h.text === 'string' && h.text.trim()).length;
 
 // Dedupe by card NAME rather than Scryfall's print id - different printings (different set,
 // frame, or art) of the same card have different ids but are the same card for search purposes,
@@ -28358,7 +28418,7 @@ if (candidates.length > 0) {
             // global UI state if the user changes/removes a highlight after the initial search.
             highlightConstraints: (searchHighlightsSnapshot || []).map(h => ({
                 text: typeof h?.text === 'string' ? h.text : '',
-                mode: h?.mode === 'variable' ? 'variable' : 'exact'
+                mode: normalizeHighlightMode(h?.mode)
             }))
         }
     } : null;
