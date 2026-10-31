@@ -948,6 +948,34 @@
 
                 <div class="preference-setting">
                     <div class="preference-setting-copy">
+                        <label for="preference-highlight-default-mode"><strong>Default highlight behavior</strong></label>
+                        <span>Choose how newly selected Oracle text influences search. You can still change any highlight individually.</span>
+                    </div>
+                    <div class="preference-control">
+                        <select id="preference-highlight-default-mode" class="preference-select" aria-label="Default highlight behavior">
+                            <option value="variable">Flexible (recommended)</option>
+                            <option value="exact">Exact</option>
+                            <option value="context">Context only</option>
+                            <option value="avoid">Avoid</option>
+                        </select>
+                    </div>
+                </div>
+
+                <div class="preference-setting">
+                    <div class="preference-setting-copy">
+                        <label for="preference-search-intent-detail"><strong>Search intent explanation</strong></label>
+                        <span>Short keeps the interface simple. In-depth also shows parser confidence and interpretation details.</span>
+                    </div>
+                    <div class="preference-control">
+                        <select id="preference-search-intent-detail" class="preference-select" aria-label="Search intent explanation detail">
+                            <option value="short">Short (recommended)</option>
+                            <option value="detailed">In-depth</option>
+                        </select>
+                    </div>
+                </div>
+
+                <div class="preference-setting">
+                    <div class="preference-setting-copy">
                         <label for="preference-result-density"><strong>Result card density</strong></label>
                         <span>Compact reduces spacing and information padding when you want to scan more cards quickly.</span>
                     </div>
