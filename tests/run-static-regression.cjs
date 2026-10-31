@@ -247,6 +247,17 @@ check('test automation files exist', () => {
   assert.match(app, /opponentUpkeepLifeLoss/);
   assert.ok(fs.existsSync(path.join(root, 'tests', 'fixtures', 'mtg-mechanical-benchmark.json')));
 });
+check('highlight intent modes, conservative dependent context, and confidence preferences are wired', () => {
+  assert.match(app, /highlightDefaultMode: 'variable'/);
+  assert.match(app, /function findDependentOracleContext\(/);
+  assert.match(app, /inferredRelationship: 'adjacent-dependent-sentence'/);
+  assert.match(app, /profile\.mode === 'avoid'/);
+  assert.match(app, /profile\.mode === 'context'/);
+  assert.match(app, /ManaSearch couldn't fully identify this effect, but your highlighted wording will still influence the search\./);
+  assert.match(html, /id="preference-highlight-default-mode"/);
+  assert.match(html, /id="preference-search-intent-detail"/);
+  assert.match(app, /Parser confidence:/);
+});
 const failed = checks.filter(x => !x.pass);
 for (const result of checks) console.log(`${result.pass ? 'PASS' : 'FAIL'} ${result.name}${result.error ? ` — ${result.error}` : ''}`);
 console.log(`\nStatic regression checks: ${checks.length - failed.length}/${checks.length} passed.`);
