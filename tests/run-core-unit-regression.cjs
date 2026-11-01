@@ -169,7 +169,7 @@ test('highlight mechanic groups merge, retain preferred defaults, and dissolve w
     'setHighlightMechanicGroupRelationshipInHighlights',
     'removeHighlightFromMechanicGroupState'
   ];
-  const blocks = helperNames.map(name => extractFunction(name)).join('\\n');
+  const blocks = helperNames.map(name => extractFunction(name)).join('\n');
   const sandbox = { result: null };
   const script = blocks + `
     const highlights = [
