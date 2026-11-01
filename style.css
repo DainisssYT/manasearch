@@ -7709,3 +7709,127 @@ body.light-theme .card-actions .edhrec-link-btn:hover {
 .search-intent-confidence.is-high { border-left-color: #269b62; }
 .search-intent-confidence.is-medium { border-left-color: #c28a22; }
 .search-intent-confidence.is-low { border-left-color: #c44; }
+
+
+/* Advanced groups of highlighted mechanics. Prefer is the safe default; Required is opt-in. */
+.highlight-grouping-panel {
+    width: min(820px, 100%);
+    margin: 12px auto 4px;
+    padding: 10px 12px;
+    border: 1px solid var(--border-color);
+    border-radius: 9px;
+    background: var(--bg-accent);
+    text-align: left;
+}
+.highlight-grouping-panel > summary {
+    cursor: pointer;
+    font-weight: 600;
+}
+.highlight-grouping-help,
+.highlight-grouping-empty {
+    margin: 7px 0;
+    color: var(--text-muted);
+    font-size: 12px;
+    line-height: 1.45;
+}
+.highlight-group-card {
+    margin-top: 9px;
+    padding: 10px;
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    background: var(--bg-primary);
+    transition: border-color .12s ease, background .12s ease;
+}
+.highlight-group-card.is-drop-target,
+.highlight-chip.is-drop-target {
+    border-color: var(--accent-color) !important;
+    background: var(--bg-accent);
+}
+.highlight-group-header,
+.highlight-group-member {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 9px;
+}
+.highlight-group-relationship {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    color: var(--text-muted);
+    font-size: 12px;
+}
+.highlight-group-relationship select {
+    max-width: 210px;
+    padding: 6px 8px;
+    font-size: 12px;
+}
+.highlight-group-members {
+    display: grid;
+    gap: 5px;
+    margin-top: 8px;
+}
+.highlight-group-member {
+    min-width: 0;
+    padding: 5px 7px;
+    border-radius: 6px;
+    background: var(--bg-secondary);
+    font-size: 12px;
+}
+.highlight-group-member > span {
+    min-width: 0;
+    overflow-wrap: anywhere;
+}
+.highlight-group-ungroup {
+    flex: 0 0 auto;
+    padding: 4px 7px;
+    font-size: 11px;
+}
+.highlight-mechanic-group-badge {
+    display: inline-flex;
+    flex: 0 0 auto;
+    align-items: center;
+    justify-content: center;
+    min-width: 22px;
+    height: 20px;
+    margin-right: 2px;
+    border: 1px solid var(--accent-color);
+    border-radius: 999px;
+    color: var(--text-main);
+    font-size: 10px;
+    font-weight: 700;
+}
+.highlight-mechanic-group-member {
+    border-style: dashed;
+}
+.highlight-chip[draggable="true"] { cursor: grab; }
+.highlight-chip.is-dragging { opacity: .45; }
+.highlight-chip:focus-within,
+.highlight-group-card:focus-within {
+    outline: 2px solid var(--accent-color);
+    outline-offset: 2px;
+}
+.highlight-mechanic-group-editor {
+    display: grid;
+    grid-template-columns: minmax(105px, auto) minmax(0, 1fr);
+    gap: 6px 10px;
+    align-items: center;
+    margin-top: 7px;
+}
+.highlight-mechanic-group-editor select {
+    min-width: 0;
+}
+@media (max-width: 560px) {
+    .highlight-group-header,
+    .highlight-group-member {
+        align-items: flex-start;
+        flex-direction: column;
+    }
+    .highlight-group-relationship {
+        width: 100%;
+        align-items: flex-start;
+        flex-direction: column;
+    }
+    .highlight-group-relationship select { max-width: 100%; width: 100%; }
+    .highlight-mechanic-group-editor { grid-template-columns: 1fr; }
+}
