@@ -1,6 +1,6 @@
-/* ManaSearch build 20261031-124 */
+/* ManaSearch build 20261101-129 */
 // ManaSearch deployment build marker. Bump this whenever app.js changes so cached-module issues are easy to diagnose.
-const MANASEARCH_APP_BUILD = '20261031-124';
+const MANASEARCH_APP_BUILD = '20261101-129';
 console.info(`[ManaSearch] app.js build ${MANASEARCH_APP_BUILD}`);
 
 // State Management
@@ -115,6 +115,7 @@ const SESSION_SEMANTIC_CORPUS_LIMIT = 4000;
 // informs mechanical/semantic parsing.
 let manualHighlights = [];
 let nextHighlightColorIndex = 0;
+let nextHighlightMechanicGroupId = 1;
 let highlightComposerOpen = false;
 let highlightEditIndex = null;
 let sortSelect;
@@ -517,7 +518,9 @@ const DEFAULT_DISPLAY_PREFERENCES = Object.freeze({
     includeDigitalCards: false,
     includeTokenEmblemFunnyCards: false,
     showEdhrecButton: true,
-    showSearchIntent: false
+    showSearchIntent: false,
+    highlightDefaultMode: 'variable',
+    searchIntentDetail: 'short'
 });
 let displayPreferences = { ...DEFAULT_DISPLAY_PREFERENCES };
 
@@ -598,7 +601,9 @@ function loadDisplayPreferences() {
         // New preference defaults ON for existing users whose saved settings predate this option.
         showEdhrecButton: stored?.showEdhrecButton !== false,
         // Optional Search intent explanation is off by default, including for users with older saved preferences.
-        showSearchIntent: stored?.showSearchIntent === true
+        showSearchIntent: stored?.showSearchIntent === true,
+        highlightDefaultMode: ['variable', 'exact', 'context', 'avoid'].includes(stored?.highlightDefaultMode) ? stored.highlightDefaultMode : DEFAULT_DISPLAY_PREFERENCES.highlightDefaultMode,
+        searchIntentDetail: stored?.searchIntentDetail === 'detailed' ? 'detailed' : DEFAULT_DISPLAY_PREFERENCES.searchIntentDetail
     };
     return displayPreferences;
 }
@@ -4620,7 +4625,7 @@ function reapplyOracleHighlights() {
     let cursor = 0;
     for (const range of claimed) {
         html += escapeHtmlText(originalText.slice(cursor, range.start));
-        const modeClass = range.mode === 'variable' ? 'highlight-variable' : 'highlight-exact';
+        const modeClass = ({ variable: 'highlight-variable', exact: 'highlight-exact', context: 'highlight-context', avoid: 'highlight-avoid' })[range.mode] || 'highlight-exact';
         html += `<strong class="highlight-active ${modeClass} highlight-color-${range.colorIndex}">${escapeHtmlText(originalText.slice(range.start, range.end))}</strong>`;
         cursor = range.end;
     }
@@ -4633,9 +4638,51 @@ function reapplyOracleHighlights() {
  * occurrence can be re-rendered without accidentally highlighting every matching phrase.
  */
 function notifyManaSearchHighlightsChanged() {
+    if (typeof REQUIRED_MECHANIC_PROFILE_CACHE !== 'undefined') REQUIRED_MECHANIC_PROFILE_CACHE.delete(manualHighlights);
     window.dispatchEvent(new CustomEvent('manasearch:source-highlights-changed', {
-        detail: { highlights: manualHighlights.map(h => ({ text: h.text, mode: h.mode, field: h.field, origin: h.origin })) }
+        detail: { highlights: manualHighlights.map(h => ({ text: h.text, mode: h.mode, field: h.field, origin: h.origin, mechanicGroupId: h.mechanicGroupId || null, mechanicGroupRelationship: h.mechanicGroupRelationship || 'preferred' })) }
     }));
+}
+
+function findDependentOracleContext(sourceText, start, end) {
+    const text = String(sourceText || '');
+    if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start || end > text.length) return null;
+    const bounds = (position) => {
+        let left = 0, right = text.length;
+        for (let i = position - 1; i >= 0; i--) if (/[.!?;\n]/.test(text[i])) { left = i + 1; break; }
+        for (let i = position; i < text.length; i++) if (/[.!?;\n]/.test(text[i])) { right = i + 1; break; }
+        return { start: left, end: right, text: text.slice(left, right).trim() };
+    };
+    const selected = bounds(start), selectedLast = bounds(Math.max(start, end - 1));
+    const selectedText = text.slice(selected.start, selectedLast.end).trim();
+    const candidates = [];
+    const consider = (left, right) => {
+        const clause = text.slice(left, right).trim();
+        if (!clause || (left < end && right > start)) return;
+        const followup = /^(?:then\b|if you do\b|if you don'?t\b|that player\b|they do\b|you may\b|you can\b|this way\b|for each\b|repeat this process\b|until\b)/i.test(clause);
+        const triggerPattern = /(?:whenever|when|at the beginning of|at the end of|if |after |before |as .* enters|each time|the next time)\b/i;
+        const outcomeStart = /^(?:you|target player|target opponent|that player|each opponent|each player|then|if you|draw|create|exile|return|put|deal|gain|lose)\b/i;
+        const governing = (triggerPattern.test(clause) && outcomeStart.test(selectedText)) ||
+            (triggerPattern.test(selectedText) && outcomeStart.test(clause));
+        if (followup || governing) candidates.push({ start: left, end: right, text: clause });
+    };
+    if (selected.start > 0) {
+        let cursor = selected.start - 1;
+        while (cursor >= 0 && /[\s.!?;]/.test(text[cursor])) cursor--;
+        let left = 0;
+        for (let i = cursor; i >= 0; i--) if (/[.!?;\n]/.test(text[i])) { left = i + 1; break; }
+        consider(left, selected.start);
+    }
+    if (selectedLast.end < text.length) {
+        let nextSentenceStart = selectedLast.end;
+        while (nextSentenceStart < text.length && /[\s.!?;]/.test(text[nextSentenceStart])) nextSentenceStart++;
+        if (nextSentenceStart < text.length) {
+            let right = text.length;
+            for (let i = nextSentenceStart; i < text.length; i++) if (/[.!?;\n]/.test(text[i])) { right = i + 1; break; }
+            consider(nextSentenceStart, right);
+        }
+    }
+    return candidates.length === 1 ? candidates[0] : null;
 }
 
 function handleSourceTextSelection(root = sourceCardOracle, field = 'oracle') {
@@ -4667,7 +4714,7 @@ function handleSourceTextSelection(root = sourceCardOracle, field = 'oracle') {
         removeHighlight(existingIndex);
     } else {
         const highlight = {
-            text: trimmed.text, mode: 'exact', origin: 'source', field: canonicalField,
+            text: trimmed.text, mode: canonicalField === 'type' ? 'exact' : (['variable', 'exact', 'context', 'avoid'].includes(displayPreferences?.highlightDefaultMode) ? displayPreferences.highlightDefaultMode : 'variable'), origin: 'source', field: canonicalField,
             colorIndex: nextHighlightColorIndex++ % 4, attachedTo: null
         };
         if (canonicalField === 'type') {
@@ -4679,6 +4726,15 @@ function handleSourceTextSelection(root = sourceCardOracle, field = 'oracle') {
             highlight.end = trimmed.end;
         }
         manualHighlights.push(highlight);
+        // Preserve a clearly dependent adjacent sentence as context-only, never as a hard match.
+        if (canonicalField === 'oracle' && Number.isFinite(trimmed.start) && Number.isFinite(trimmed.end)) {
+            const dependent = findDependentOracleContext(originalText, trimmed.start, trimmed.end);
+            if (dependent && !manualHighlights.some(h => h.field === 'oracle' && h.start === dependent.start && h.end === dependent.end)) {
+                manualHighlights.push({ text: dependent.text, mode: 'context', origin: 'auto-context', field: 'oracle',
+                    start: dependent.start, end: dependent.end, attachedTo: manualHighlights.length - 1,
+                    colorIndex: nextHighlightColorIndex++ % 4, inferredRelationship: 'adjacent-dependent-sentence' });
+            }
+        }
         reapplyOracleHighlights();
         reapplyTypeLineHighlights();
         renderHighlightChips();
@@ -4934,7 +4990,7 @@ function renderHighlightEditor(idx) {
     modeLabel.textContent = 'Match:';
     modeRow.appendChild(modeLabel);
 
-    let selectedMode = h.mode === 'variable' ? 'variable' : 'exact';
+    let selectedMode = ['variable', 'exact', 'context', 'avoid'].includes(h.mode) ? h.mode : 'exact';
     const makeModeButton = (mode, label, titleText) => {
         const btn = document.createElement('button');
         btn.type = 'button';
@@ -4948,8 +5004,10 @@ function renderHighlightEditor(idx) {
         });
         return btn;
     };
-    modeRow.appendChild(makeModeButton('variable', '\u2248 Flexible', 'Match the underlying mechanic/intent; values and wording may differ.'));
-    modeRow.appendChild(makeModeButton('exact', '= Exact', 'Require the text/value to occur literally in a matching card.'));
+    modeRow.appendChild(makeModeButton('variable', '≈ Flexible', 'Prefer similar mechanics; wording and values may differ.'));
+    modeRow.appendChild(makeModeButton('exact', '= Exact', 'Require this wording to occur in the matching card.'));
+    modeRow.appendChild(makeModeButton('context', 'Context only', 'Use this text to understand nearby effects, without making it a requirement.'));
+    modeRow.appendChild(makeModeButton('avoid', 'Avoid', 'Prefer cards that do not match this effect or wording.'));
  
     const detectedAspect = deriveHighlightAspectKind(h);
     let aspectControls = null;
@@ -5037,6 +5095,58 @@ function renderHighlightEditor(idx) {
     connectRow.appendChild(connectLabel);
     connectRow.appendChild(connectSelect);
 
+
+    const mechanicGroupRow = document.createElement('div');
+    mechanicGroupRow.className = 'highlight-edit-row highlight-mechanic-group-editor';
+    const mechanicGroupLabel = document.createElement('label');
+    mechanicGroupLabel.className = 'highlight-edit-label-inline';
+    mechanicGroupLabel.textContent = 'Group with:';
+    const mechanicGroupSelect = document.createElement('select');
+    mechanicGroupSelect.className = 'highlight-edit-select';
+    mechanicGroupSelect.setAttribute('aria-label', 'Group this mechanic with another highlight');
+    const ungroupedOption = document.createElement('option');
+    ungroupedOption.value = '';
+    ungroupedOption.textContent = 'Not grouped';
+    mechanicGroupSelect.appendChild(ungroupedOption);
+    let currentMechanicGroupPeer = '';
+    manualHighlights.forEach((candidate, candidateIndex) => {
+        if (candidateIndex === idx || !candidate || candidate.field === 'type' || !String(candidate.text || '').trim()) return;
+        const option = document.createElement('option');
+        option.value = String(candidateIndex);
+        const candidateText = String(candidate.text || '');
+        option.textContent = 'Group with: ' + (candidateText.length > 48 ? candidateText.slice(0, 45) + '…' : candidateText);
+        mechanicGroupSelect.appendChild(option);
+        if (h.mechanicGroupId && candidate.mechanicGroupId === h.mechanicGroupId && !currentMechanicGroupPeer) {
+            currentMechanicGroupPeer = String(candidateIndex);
+        }
+    });
+    mechanicGroupSelect.value = currentMechanicGroupPeer;
+    mechanicGroupLabel.htmlFor = 'highlight-edit-mechanic-group-' + idx;
+    mechanicGroupSelect.id = mechanicGroupLabel.htmlFor;
+    mechanicGroupRow.appendChild(mechanicGroupLabel);
+    mechanicGroupRow.appendChild(mechanicGroupSelect);
+    const mechanicGroupRelationshipLabel = document.createElement('label');
+    mechanicGroupRelationshipLabel.className = 'highlight-edit-label-inline';
+    mechanicGroupRelationshipLabel.textContent = 'Group behavior:';
+    const mechanicGroupRelationshipSelect = document.createElement('select');
+    mechanicGroupRelationshipSelect.className = 'highlight-edit-select';
+    mechanicGroupRelationshipSelect.setAttribute('aria-label', 'Mechanic group behavior');
+    [['preferred', 'Prefer together (default)'], ['required', 'Require all mechanics']].forEach(([value, label]) => {
+        const option = document.createElement('option');
+        option.value = value;
+        option.textContent = label;
+        mechanicGroupRelationshipSelect.appendChild(option);
+    });
+    mechanicGroupRelationshipSelect.value = normalizeHighlightMechanicGroupRelationship(h.mechanicGroupRelationship);
+    mechanicGroupRelationshipLabel.htmlFor = 'highlight-edit-mechanic-group-behavior-' + idx;
+    mechanicGroupRelationshipSelect.id = mechanicGroupRelationshipLabel.htmlFor;
+    mechanicGroupRow.appendChild(mechanicGroupRelationshipLabel);
+    mechanicGroupRow.appendChild(mechanicGroupRelationshipSelect);
+    if (h.field === 'type') mechanicGroupRow.hidden = true;
+    const mechanicGroupHelp = document.createElement('div');
+    mechanicGroupHelp.className = 'highlight-edit-help';
+    mechanicGroupHelp.textContent = 'Groups default to Prefer (ranking only). Required checks every grouped mechanic and filters only when both sides parse confidently; otherwise ManaSearch keeps the candidate.';
+
     const help = document.createElement('div');
     help.className = 'highlight-edit-help';
     help.textContent = h.origin === 'user'
@@ -5109,6 +5219,25 @@ function renderHighlightEditor(idx) {
             }
         }
 
+
+        const mechanicGroupTarget = /^\d+$/.test(mechanicGroupSelect.value) ? Number(mechanicGroupSelect.value) : null;
+        if (mechanicGroupTarget !== null && mechanicGroupTarget !== idx) {
+            const sourceGroupId = String(manualHighlights[idx]?.mechanicGroupId || '').trim();
+            const targetGroupId = String(manualHighlights[mechanicGroupTarget]?.mechanicGroupId || '').trim();
+            manualHighlights = mergeHighlightMechanicGroupMembership(
+                manualHighlights, idx, mechanicGroupTarget,
+                targetGroupId || sourceGroupId || createHighlightMechanicGroupId()
+            );
+        } else {
+            manualHighlights = removeHighlightFromMechanicGroupState(manualHighlights, idx);
+        }
+        const savedMechanicGroupId = String(manualHighlights[idx]?.mechanicGroupId || '').trim();
+        if (savedMechanicGroupId) {
+            manualHighlights = setHighlightMechanicGroupRelationshipInHighlights(
+                manualHighlights, savedMechanicGroupId, mechanicGroupRelationshipSelect.value
+            );
+        }
+
         highlightEditIndex = null;
         reapplyOracleHighlights();
         reapplyTypeLineHighlights();
@@ -5135,6 +5264,8 @@ function renderHighlightEditor(idx) {
     editor.appendChild(modeRow);
     if (aspectControls) editor.appendChild(aspectControls);
     editor.appendChild(connectRow);
+    editor.appendChild(mechanicGroupRow);
+    editor.appendChild(mechanicGroupHelp);
     editor.appendChild(help);
     editor.appendChild(actions);
     return editor;
@@ -5150,7 +5281,40 @@ function renderHighlightChips() {
 
     manualHighlights.forEach((h, idx) => {
         const chip = document.createElement('div');
-        chip.className = `card-chip highlight-chip highlight-color-${Number.isInteger(h.colorIndex) ? h.colorIndex % 4 : 0} ${h.field === 'type' ? 'highlight-type-chip' : ''} ${h.origin === 'user' ? 'highlight-user-chip' : 'highlight-source-chip'} ${Number.isInteger(h.attachedTo) ? 'highlight-linked-chip' : ''}`;
+        chip.className = `card-chip highlight-chip highlight-color-${Number.isInteger(h.colorIndex) ? h.colorIndex % 4 : 0} ${h.field === 'type' ? 'highlight-type-chip' : ''} ${h.origin === 'user' ? 'highlight-user-chip' : 'highlight-source-chip'} ${Number.isInteger(h.attachedTo) ? 'highlight-linked-chip' : ''} ${h.mode === 'context' ? 'highlight-mode-context' : h.mode === 'avoid' ? 'highlight-mode-avoid' : ''}`;
+
+        if (h.mechanicGroupId) chip.classList.add('highlight-mechanic-group-member');
+        chip.draggable = h.field !== 'type';
+        if (chip.draggable) {
+            chip.addEventListener('dragstart', event => {
+                if (!event.dataTransfer) return;
+                event.dataTransfer.setData('text/plain', String(idx));
+                event.dataTransfer.effectAllowed = 'move';
+                chip.classList.add('is-dragging');
+            });
+            chip.addEventListener('dragend', () => {
+                chip.classList.remove('is-dragging');
+                document.querySelectorAll('.highlight-chip.is-drop-target').forEach(node => node.classList.remove('is-drop-target'));
+            });
+            chip.addEventListener('dragover', event => { event.preventDefault(); chip.classList.add('is-drop-target'); });
+            chip.addEventListener('dragleave', () => chip.classList.remove('is-drop-target'));
+            chip.addEventListener('drop', event => {
+                event.preventDefault();
+                chip.classList.remove('is-drop-target');
+                const sourceIndex = Number(event.dataTransfer?.getData('text/plain'));
+                if (Number.isInteger(sourceIndex) && sourceIndex !== idx) groupHighlightMechanics(sourceIndex, idx);
+            });
+        }
+        const mechanicGroupNumbers = new Map(getHighlightMechanicGroups(manualHighlights).map((group, index) => [group.id, index + 1]));
+        const mechanicGroupNumber = mechanicGroupNumbers.get(String(h.mechanicGroupId || ''));
+        if (mechanicGroupNumber) {
+            const groupBadge = document.createElement('span');
+            groupBadge.className = 'highlight-mechanic-group-badge';
+            groupBadge.textContent = 'G' + mechanicGroupNumber;
+            groupBadge.title = normalizeHighlightMechanicGroupRelationship(h.mechanicGroupRelationship) === 'required'
+                ? 'Required mechanic group ' + mechanicGroupNumber : 'Preferred mechanic group ' + mechanicGroupNumber;
+            chip.appendChild(groupBadge);
+        }
 
         if (Number.isInteger(h.attachedTo) && manualHighlights[h.attachedTo]) {
             const linked = document.createElement('span');
@@ -5162,18 +5326,20 @@ function renderHighlightChips() {
 
         const origin = document.createElement('span');
         origin.className = 'highlight-origin-label';
-        origin.textContent = h.origin === 'user' ? '+' : (h.field === 'type' ? 'Type' : 'Highlight');
-        origin.title = h.origin === 'user'
-            ? (Number.isInteger(h.attachedTo) ? `User-added search detail connected to: ${getHighlightParentLabel(h.attachedTo)}` : 'Independent user-added search detail')
-            : (h.field === 'type' ? 'Selected from this card\'s type line' : 'Selected from this card\'s Oracle text');
+        origin.textContent = h.origin === 'auto-context' ? 'Context' : (h.origin === 'user' ? '+' : (h.field === 'type' ? 'Type' : 'Highlight'));
+        origin.title = h.origin === 'auto-context'
+            ? 'Automatically included because this adjacent sentence appears dependent on your selection. It is context-only and is not a mandatory match.'
+            : h.origin === 'user'
+                ? (Number.isInteger(h.attachedTo) ? `User-added search detail connected to: ${getHighlightParentLabel(h.attachedTo)}` : 'Independent user-added search detail')
+                : (h.field === 'type' ? 'Selected from this card\'s type line' : 'Selected from this card\'s Oracle text');
 
         const modeBtn = document.createElement('button');
         modeBtn.type = 'button';
-        modeBtn.className = `highlight-mode-btn ${h.mode === 'variable' ? 'mode-variable' : 'mode-exact'}`;
-        modeBtn.textContent = h.mode === 'variable' ? '\u2248 Flexible' : '= Exact';
-        modeBtn.title = h.mode === 'variable'
-            ? 'Flexible: wording/value can differ while the underlying intent should remain similar. Click to require exact text instead.'
-            : 'Exact: the matching card must contain this text/value. Click to make it flexible instead.';
+        const modeLabels = { variable: '≈ Flexible', exact: '= Exact', context: 'Context only', avoid: 'Avoid' };
+        const safeMode = ['variable', 'exact', 'context', 'avoid'].includes(h.mode) ? h.mode : 'exact';
+        modeBtn.className = `highlight-mode-btn mode-${safeMode}`;
+        modeBtn.textContent = modeLabels[safeMode];
+        modeBtn.title = ({ variable: 'Flexible: prefer similar mechanics while allowing wording and values to differ.', exact: 'Exact: the matching card must contain this wording.', context: 'Context only: use this to interpret nearby text, not as a separate requirement.', avoid: 'Avoid: favor candidates that do not match this effect or wording.' })[safeMode];
         modeBtn.addEventListener('click', () => toggleHighlightMode(idx));
 
         const label = document.createElement('span');
@@ -5230,6 +5396,7 @@ function renderHighlightChips() {
     });
 
     container.appendChild(chipsRow);
+    renderHighlightMechanicGroups(container);
 
     const relatedHighlightsToggle = document.getElementById('related-use-highlights');
     if (relatedHighlightsToggle) {
@@ -5300,7 +5467,7 @@ function renderHighlightChips() {
         modeLabel.textContent = 'Match:';
         modeRow.appendChild(modeLabel);
 
-        let selectedMode = 'variable';
+        let selectedMode = ['variable', 'exact', 'context', 'avoid'].includes(displayPreferences?.highlightDefaultMode) ? displayPreferences.highlightDefaultMode : 'variable';
         const makeModeButton = (mode, text, title) => {
             const btn = document.createElement('button');
             btn.type = 'button';
@@ -5314,8 +5481,10 @@ function renderHighlightChips() {
             });
             return btn;
         };
-        modeRow.appendChild(makeModeButton('variable', '\u2248 Flexible', 'Match the underlying meaning/mechanics; wording and exact values may differ.'));
-        modeRow.appendChild(makeModeButton('exact', '= Exact', 'Require the added wording/value to occur in the candidate Oracle text.'));
+        modeRow.appendChild(makeModeButton('variable', '≈ Flexible', 'Prefer similar mechanics; wording and values may differ.'));
+        modeRow.appendChild(makeModeButton('exact', '= Exact', 'Require this wording to occur in candidate Oracle text.'));
+        modeRow.appendChild(makeModeButton('context', 'Context only', 'Use this as context without making it a separate requirement.'));
+        modeRow.appendChild(makeModeButton('avoid', 'Avoid', 'Prefer candidates that do not match this effect or wording.'));
 
         const connectRow = document.createElement('div');
         connectRow.className = 'highlight-add-connection-row';
@@ -5426,9 +5595,192 @@ function renderHighlightChips() {
     }
 }
 
+
+function normalizeHighlightMechanicGroupRelationship(value) {
+    return value === 'required' ? 'required' : 'preferred';
+}
+function getHighlightMechanicGroups(highlights = []) {
+    const groups = new Map();
+    (Array.isArray(highlights) ? highlights : []).forEach((highlight, index) => {
+        if (!highlight || highlight.field === 'type') return;
+        const id = String(highlight.mechanicGroupId || '').trim();
+        if (!id) return;
+        if (!groups.has(id)) groups.set(id, { id, relationship: 'preferred', members: [] });
+        const group = groups.get(id);
+        group.members.push({ highlight, index });
+        if (highlight.mechanicGroupRelationship === 'required') group.relationship = 'required';
+    });
+    return Array.from(groups.values()).filter(group => group.members.length >= 2);
+}
+function normalizeHighlightMechanicGroupMembership(highlights = []) {
+    const next = (Array.isArray(highlights) ? highlights : []).map(highlight => ({ ...highlight }));
+    const counts = new Map();
+    next.forEach(highlight => {
+        const id = String(highlight?.mechanicGroupId || '').trim();
+        if (id && highlight.field !== 'type') counts.set(id, (counts.get(id) || 0) + 1);
+    });
+    next.forEach(highlight => {
+        const id = String(highlight?.mechanicGroupId || '').trim();
+        if (id && (highlight.field === 'type' || (counts.get(id) || 0) < 2)) {
+            delete highlight.mechanicGroupId;
+            delete highlight.mechanicGroupRelationship;
+        }
+    });
+    return next;
+}
+function mergeHighlightMechanicGroupMembership(highlights, sourceIndex, targetIndex, groupId) {
+    const original = Array.isArray(highlights) ? highlights : [];
+    if (!Number.isInteger(sourceIndex) || !Number.isInteger(targetIndex) ||
+        sourceIndex < 0 || targetIndex < 0 || sourceIndex >= original.length ||
+        targetIndex >= original.length || sourceIndex === targetIndex) return original;
+    const source = original[sourceIndex], target = original[targetIndex];
+    if (!source || !target || source.field === 'type' || target.field === 'type') return original;
+    const sourceId = String(source.mechanicGroupId || '').trim();
+    const targetId = String(target.mechanicGroupId || '').trim();
+    const chosenId = targetId || sourceId || String(groupId || '').trim();
+    if (!chosenId) return original;
+    let relationship = 'preferred';
+    if (sourceId && targetId && sourceId === targetId) {
+        relationship = source.mechanicGroupRelationship === 'required' || target.mechanicGroupRelationship === 'required' ? 'required' : 'preferred';
+    } else if (sourceId && targetId) {
+        relationship = source.mechanicGroupRelationship === 'required' && target.mechanicGroupRelationship === 'required' ? 'required' : 'preferred';
+    } else if (sourceId) relationship = normalizeHighlightMechanicGroupRelationship(source.mechanicGroupRelationship);
+    else if (targetId) relationship = normalizeHighlightMechanicGroupRelationship(target.mechanicGroupRelationship);
+    const mergedIds = new Set([sourceId, targetId].filter(Boolean));
+    const next = original.map((highlight, index) => {
+        const copy = { ...highlight };
+        const belongs = index === sourceIndex || index === targetIndex || mergedIds.has(String(copy.mechanicGroupId || '').trim());
+        if (belongs && copy.field !== 'type') {
+            copy.mechanicGroupId = chosenId;
+            copy.mechanicGroupRelationship = relationship;
+        }
+        return copy;
+    });
+    return normalizeHighlightMechanicGroupMembership(next);
+}
+function setHighlightMechanicGroupRelationshipInHighlights(highlights, groupId, relationship) {
+    const id = String(groupId || '').trim();
+    if (!id) return Array.isArray(highlights) ? highlights : [];
+    const normalized = normalizeHighlightMechanicGroupRelationship(relationship);
+    return (Array.isArray(highlights) ? highlights : []).map(highlight =>
+        String(highlight?.mechanicGroupId || '').trim() === id
+            ? { ...highlight, mechanicGroupRelationship: normalized } : { ...highlight });
+}
+function removeHighlightFromMechanicGroupState(highlights, index) {
+    const next = (Array.isArray(highlights) ? highlights : []).map(highlight => ({ ...highlight }));
+    if (!Number.isInteger(index) || index < 0 || index >= next.length) return next;
+    delete next[index].mechanicGroupId;
+    delete next[index].mechanicGroupRelationship;
+    return normalizeHighlightMechanicGroupMembership(next);
+}
+function createHighlightMechanicGroupId() {
+    return 'mechanic-group-' + Date.now().toString(36) + '-' + nextHighlightMechanicGroupId++;
+}
+function groupHighlightMechanics(sourceIndex, targetIndex) {
+    if (!manualHighlights[sourceIndex] || !manualHighlights[targetIndex] ||
+        manualHighlights[sourceIndex].field === 'type' || manualHighlights[targetIndex].field === 'type') return false;
+    const sourceId = String(manualHighlights[sourceIndex].mechanicGroupId || '').trim();
+    const targetId = String(manualHighlights[targetIndex].mechanicGroupId || '').trim();
+    const groupId = targetId || sourceId || createHighlightMechanicGroupId();
+    manualHighlights = mergeHighlightMechanicGroupMembership(manualHighlights, sourceIndex, targetIndex, groupId);
+    renderHighlightChips();
+    notifyManaSearchHighlightsChanged();
+    return true;
+}
+function setHighlightMechanicGroupRelationship(groupId, relationship) {
+    if (!String(groupId || '').trim()) return;
+    manualHighlights = setHighlightMechanicGroupRelationshipInHighlights(manualHighlights, groupId, relationship);
+    renderHighlightChips();
+    notifyManaSearchHighlightsChanged();
+}
+function removeHighlightFromMechanicGroup(index) {
+    manualHighlights = removeHighlightFromMechanicGroupState(manualHighlights, index);
+    renderHighlightChips();
+    notifyManaSearchHighlightsChanged();
+}
+function renderHighlightMechanicGroups(container) {
+    const eligibleCount = manualHighlights.filter(highlight => highlight && highlight.field !== 'type' && String(highlight.text || '').trim()).length;
+    if (eligibleCount < 2) return;
+    const groups = getHighlightMechanicGroups(manualHighlights);
+    const panel = document.createElement('details');
+    panel.className = 'highlight-grouping-panel';
+    panel.open = false;
+    const summary = document.createElement('summary');
+    summary.textContent = groups.length ? 'Advanced mechanic groups (' + groups.length + ')' : 'Advanced mechanic groups';
+    panel.appendChild(summary);
+    const explanation = document.createElement('p');
+    explanation.className = 'highlight-grouping-help';
+    explanation.textContent = 'Drag one Oracle highlight onto another to group mechanics. Groups start as Prefer and affect ranking only. Choose Required only when every mechanic in that group must be present; uncertain parser results will not filter cards.';
+    panel.appendChild(explanation);
+    if (!groups.length) {
+        const empty = document.createElement('p');
+        empty.className = 'highlight-grouping-empty';
+        empty.textContent = 'No groups yet. Use Edit → Group with as a keyboard-accessible alternative.';
+        panel.appendChild(empty);
+    }
+    groups.forEach((group, groupIndex) => {
+        const card = document.createElement('div');
+        card.className = 'highlight-group-card';
+        card.setAttribute('role', 'group');
+        card.setAttribute('aria-label', 'Mechanic group ' + (groupIndex + 1));
+        card.addEventListener('dragover', event => { event.preventDefault(); card.classList.add('is-drop-target'); });
+        card.addEventListener('dragleave', () => card.classList.remove('is-drop-target'));
+        card.addEventListener('drop', event => {
+            event.preventDefault();
+            card.classList.remove('is-drop-target');
+            const sourceIndex = Number(event.dataTransfer?.getData('text/plain'));
+            const targetIndex = group.members[0]?.index;
+            if (Number.isInteger(sourceIndex) && Number.isInteger(targetIndex)) groupHighlightMechanics(sourceIndex, targetIndex);
+        });
+        const header = document.createElement('div');
+        header.className = 'highlight-group-header';
+        const title = document.createElement('strong');
+        title.textContent = 'Group ' + (groupIndex + 1);
+        header.appendChild(title);
+        const relationshipLabel = document.createElement('label');
+        relationshipLabel.className = 'highlight-group-relationship';
+        relationshipLabel.textContent = 'Relationship';
+        const relationshipSelect = document.createElement('select');
+        relationshipSelect.setAttribute('aria-label', 'Relationship for mechanic group ' + (groupIndex + 1));
+        [['preferred', 'Prefer together'], ['required', 'Require all mechanics']].forEach(([value, label]) => {
+            const option = document.createElement('option');
+            option.value = value;
+            option.textContent = label;
+            relationshipSelect.appendChild(option);
+        });
+        relationshipSelect.value = group.relationship;
+        relationshipSelect.addEventListener('change', () => setHighlightMechanicGroupRelationship(group.id, relationshipSelect.value));
+        relationshipLabel.appendChild(relationshipSelect);
+        header.appendChild(relationshipLabel);
+        card.appendChild(header);
+        const members = document.createElement('div');
+        members.className = 'highlight-group-members';
+        group.members.forEach(({ highlight, index }) => {
+            const member = document.createElement('div');
+            member.className = 'highlight-group-member';
+            const text = document.createElement('span');
+            text.textContent = String(highlight.text || '').length > 72 ? String(highlight.text).slice(0, 69) + '…' : String(highlight.text || '');
+            text.title = String(highlight.text || '');
+            member.appendChild(text);
+            const ungroup = document.createElement('button');
+            ungroup.type = 'button';
+            ungroup.className = 'highlight-group-ungroup';
+            ungroup.textContent = 'Remove';
+            ungroup.setAttribute('aria-label', 'Remove ' + String(highlight.text || 'highlight') + ' from mechanic group');
+            ungroup.addEventListener('click', () => removeHighlightFromMechanicGroup(index));
+            member.appendChild(ungroup);
+            members.appendChild(member);
+        });
+        card.appendChild(members);
+        panel.appendChild(card);
+    });
+    container.appendChild(panel);
+}
 function toggleHighlightMode(idx) {
     if (!manualHighlights[idx]) return;
-    manualHighlights[idx].mode = manualHighlights[idx].mode === 'variable' ? 'exact' : 'variable';
+    const modes = ['variable', 'exact', 'context', 'avoid'];
+    const current = modes.includes(manualHighlights[idx].mode) ? manualHighlights[idx].mode : 'exact';
+    manualHighlights[idx].mode = modes[(modes.indexOf(current) + 1) % modes.length];
     renderHighlightChips();
     reapplyOracleHighlights();
     reapplyTypeLineHighlights();
@@ -5446,6 +5798,7 @@ function removeHighlight(idx) {
     });
     if (highlightEditIndex === idx) highlightEditIndex = null;
     else if (Number.isInteger(highlightEditIndex) && highlightEditIndex > idx) highlightEditIndex -= 1;
+    manualHighlights = normalizeHighlightMechanicGroupMembership(manualHighlights);
     renderHighlightChips();
     reapplyOracleHighlights();
     reapplyTypeLineHighlights();
@@ -9110,7 +9463,7 @@ const STRATEGIC_INTENT_ROLES = new Set([
 ]);
 
 function inferRankingIntent(sourceCard, parsedSourceEffects = [], targetText = '', sourceRoleProfile = [], highlights = []) {
-    const exactHighlights = (highlights || []).filter(h => h?.mode !== 'variable');
+    const exactHighlights = (highlights || []).filter(h => h?.mode === 'exact');
     const flexibleHighlights = (highlights || []).filter(h => h?.mode === 'variable');
     const topRole = sourceRoleProfile?.[0];
     const roleIsStrong = Boolean(topRole && STRATEGIC_INTENT_ROLES.has(topRole.role) && topRole.score >= 0.74);
@@ -10208,13 +10561,15 @@ function annotateHighlightGroups(highlights, sourceText = getCurrentSourceOracle
         const parseText = triggerOverrideClause || sourceClauseText || contextText || group.map(h => h.text).filter(Boolean).join(' ');
         const overrideSet = new Set(intentOverrideTexts.map(value => String(value).trim()));
         const remainingIntentTexts = connectedIntentTexts.filter(value => !overrideSet.has(String(value).trim()));
-        const hasExact = group.some(h => h.mode !== 'variable');
-        const hasVariable = group.some(h => h.mode === 'variable');
-        const groupMode = hasExact && hasVariable ? 'mixed' : (hasVariable ? 'variable' : 'exact');
+        const intentModes = group.map(h => h.mode || 'variable').filter(mode => mode !== 'context');
+        const hasExact = intentModes.includes('exact');
+        const hasVariable = intentModes.includes('variable');
+        const allAvoid = intentModes.length > 0 && intentModes.every(mode => mode === 'avoid');
+        const groupMode = allAvoid ? 'avoid' : (hasExact && hasVariable ? 'mixed' : (hasVariable ? 'variable' : (hasExact ? 'exact' : 'context')));
         const benchmarkIntentOnly = group.some(h => h.origin === 'benchmark') && groupMode === 'mixed';
-        const exactTexts = group.filter(h => h.mode !== 'variable').map(h => h.text.trim());
+        const exactTexts = group.filter(h => h.mode === 'exact').map(h => h.text.trim());
         const variableTexts = group.filter(h => h.mode === 'variable').map(h => h.text.trim());
-        const modes = group.map(h => h.mode === 'variable' ? 'variable' : 'exact');
+        const modes = group.map(h => ['variable', 'exact', 'context', 'avoid'].includes(h.mode) ? h.mode : 'exact');
         group.contextText = contextText || group.filter(h => Number.isFinite(h.start)).map(h => h.text.trim()).join(' ');
         group.sourceClauseText = sourceClauseText || group.contextText;
         group.parseText = parseText;
@@ -10299,9 +10654,41 @@ function buildHighlightIntentProfiles(highlights, sourceCard = currentSourceCard
             }
         }
 
+
+
+        const exactConstraints = group
+            .filter(h => h.mode === 'exact' && !h.benchmarkIntentOnly && typeof h.text === 'string' && h.text.trim())
+            .map(h => {
+                // When the selected words themselves identify an action (e.g. "draw a card"),
+                // bind to the corresponding source effect rather than any other action parsed
+                // from the same Oracle sentence. Trigger-only anchors use the full profile below.
+                const selectedParsedEffects = parseMTGEffect(h.text)
+                    .filter(effect => effect?.action && effect.action !== 'generic');
+                const alignedSourceEffects = selectedParsedEffects.length
+                    ? recognizedEffects.filter(sourceEffect => selectedParsedEffects.some(selectedEffect =>
+                        scoreHighlightEffectMatch(selectedEffect, sourceEffect, 'variable') >= EXACT_HIGHLIGHT_EFFECT_MATCH_THRESHOLD
+                    ))
+                    : [];
+                const sourceEffects = alignedSourceEffects.length ? alignedSourceEffects : selectedParsedEffects;
+                return {
+                    text: String(h.text).trim(),
+                    requirement: parseExactHighlightRequirement(h.text),
+                    highlight: h,
+                    sourceEffects,
+                    sourceParserConfidence: sourceEffects.length ? calculateCardFieldConfidence(sourceEffects).overall || 0 : 0
+                };
+            });
+        const mechanicGroupIds = [...new Set(group.map(h => String(h.mechanicGroupId || '').trim()).filter(Boolean))];
+        const mechanicGroupMemberships = mechanicGroupIds.map(id => ({
+            id,
+            relationship: group.some(h => String(h.mechanicGroupId || '').trim() === id && h.mechanicGroupRelationship === 'required')
+                ? 'required' : 'preferred'
+        }));
         return {
             index,
             groupId: index,
+            mechanicGroupMemberships,
+            exactConstraints,
             text: group.contextText,
             contextText: group.contextText,
             searchIntentText: group.searchIntentText,
@@ -10334,17 +10721,96 @@ function buildHighlightIntentProfiles(highlights, sourceCard = currentSourceCard
     });
 }
 
+
+function aggregateHighlightIntentGroupScores(profiles, profileScores) {
+    const independentScores = [];
+    const groupedScores = new Map();
+    (Array.isArray(profiles) ? profiles : []).forEach((profile, index) => {
+        const score = Math.max(0, Math.min(1, Number(profileScores?.[index]) || 0));
+        const memberships = Array.isArray(profile?.mechanicGroupMemberships) ? profile.mechanicGroupMemberships : [];
+        const uniqueMemberships = new Map();
+        memberships.forEach(membership => {
+            const id = String(membership?.id || '').trim();
+            if (id) uniqueMemberships.set(id, membership.relationship === 'required' ? 'required' : 'preferred');
+        });
+        if (!uniqueMemberships.size) { independentScores.push(score); return; }
+        uniqueMemberships.forEach((relationship, id) => {
+            if (!groupedScores.has(id)) groupedScores.set(id, { relationship, scores: [] });
+            const group = groupedScores.get(id);
+            if (relationship === 'required') group.relationship = 'required';
+            group.scores.push(score);
+        });
+    });
+    const result = [...independentScores];
+    groupedScores.forEach(group => {
+        if (group.scores.length <= 1) result.push(group.scores[0] || 0);
+        else if (group.relationship === 'required') result.push(Math.min(...group.scores));
+        else {
+            const average = group.scores.reduce((sum, value) => sum + value, 0) / group.scores.length;
+            const coverage = group.scores.filter(value => value >= 0.55).length / group.scores.length;
+            result.push(Math.min(1, average + coverage * 0.08));
+        }
+    });
+    return result;
+}
+const REQUIRED_MECHANIC_PROFILE_CACHE = new WeakMap();
+function getRequiredMechanicProfileGroups(highlights = []) {
+    const input = Array.isArray(highlights) ? highlights : [];
+    const cached = REQUIRED_MECHANIC_PROFILE_CACHE.get(input);
+    if (cached) return cached;
+    if (!input.some(highlight => highlight?.mechanicGroupId && highlight?.mechanicGroupRelationship === 'required')) {
+        REQUIRED_MECHANIC_PROFILE_CACHE.set(input, []);
+        return [];
+    }
+    const grouped = new Map();
+    for (const profile of buildHighlightIntentProfiles(input, currentSourceCard, getCurrentSourceOracleText(currentSourceCard))) {
+        (Array.isArray(profile.mechanicGroupMemberships) ? profile.mechanicGroupMemberships : [])
+            .filter(membership => membership.relationship === 'required')
+            .forEach(membership => {
+                if (!grouped.has(membership.id)) grouped.set(membership.id, { id: membership.id, profiles: [] });
+                grouped.get(membership.id).profiles.push(profile);
+            });
+    }
+    const groups = Array.from(grouped.values()).filter(group => group.profiles.length > 0);
+    REQUIRED_MECHANIC_PROFILE_CACHE.set(input, groups);
+    return groups;
+}
+function matchesRequiredMechanicGroups(card, highlights = []) {
+    const groups = getRequiredMechanicProfileGroups(highlights);
+    if (!groups.length) return true;
+    const oracle = getCardOracleText(card);
+    if (!String(oracle || '').trim()) return true;
+    let candidateEffects;
+    try { candidateEffects = getCachedParsedEffects(card, oracle); }
+    catch (error) { return true; }
+    const candidateConfidence = calculateCardFieldConfidence(candidateEffects).overall || 0;
+    const candidateHasRecognizedEffects = candidateEffects.some(effect => effect?.action && effect.action !== 'generic');
+    if (candidateConfidence < 0.45 || !candidateHasRecognizedEffects) return true;
+    for (const group of groups) {
+        for (const profile of group.profiles) {
+            if (profile.mode === 'context' || profile.mode === 'avoid') continue;
+            const sourceEffects = profile.recognizedEffects?.length ? profile.recognizedEffects : (profile.parsedEffects || []);
+            if (!sourceEffects.length || (Number(profile.parserConfidence) || 0) < 0.45) continue;
+            const score = calculateHighlightIntentMatch([profile], candidateEffects, card);
+            if (score < 0.30) return false;
+        }
+    }
+    return true;
+}
 function calculateHighlightIntentMatch(profiles, candidateEffects, candidateCard = null) {
     if (!profiles?.length) return 0;
     const safeEffects = Array.isArray(candidateEffects) ? candidateEffects : [];
     const candidateOracle = candidateCard ? getCardOracleText(candidateCard) : '';
     const clamp01 = value => Math.max(0, Math.min(1, Number(value) || 0));
     const profileScores = profiles.map(profile => {
+        // Context-only groups provide background for interpretation but do not independently pull
+        // candidates toward or away from a mechanic.
+        if (profile.mode === 'context') return 0.5;
         const sourceEffects = profile.recognizedEffects?.length ? profile.recognizedEffects : (profile.parsedEffects || []);
         let structuralScore = 0;
         let coverage = 0;
         if (sourceEffects.length && safeEffects.length) {
-            const matchingMode = profile.mode === 'mixed' ? 'variable' : profile.mode;
+            const matchingMode = ['exact', 'variable'].includes(profile.mode) ? profile.mode : 'variable';
             const assignment = maxOneToOneHighlightAssignment(sourceEffects, safeEffects, matchingMode);
             coverage = sourceEffects.length ? assignment.matches.length / sourceEffects.length : 0;
             const lexicalWeight = profile.benchmarkIntentOnly ? 0.05 : 0.12;
@@ -10356,6 +10822,7 @@ function calculateHighlightIntentMatch(profiles, candidateEffects, candidateCard
                 lexicalSupport = profile.exactTexts.filter(t => oracle.includes(String(t).toLocaleLowerCase())).length / profile.exactTexts.length;
             }
             structuralScore = clamp01(assignment.score * structuralWeight + coverage * coverageWeight + lexicalSupport * lexicalWeight);
+
         }
 
         // Strong text fallback for explicit user intent. This is intentionally independent of parser
@@ -10390,10 +10857,12 @@ function calculateHighlightIntentMatch(profiles, candidateEffects, candidateCard
         else if (profile.explicitUserIntent) confidence = Math.max(confidence, 0.78);
         const explicitIntentPriority = profile.userAuthoredOverride ? 1.12 : (strongUserIntent ? 1.08 : (profile.explicitUserIntent ? 1.06 : 1));
         // Do not punish a usable text-only intent because parsing returned no candidate effects.
-        return clamp01(score * explicitIntentPriority * confidence);
+        const finalScore = clamp01(score * explicitIntentPriority * confidence);
+        return profile.mode === 'avoid' ? 1 - finalScore : finalScore;
     });
-    const average = profileScores.reduce((a,b) => a+b,0) / profileScores.length;
-    const fullCoverage = profileScores.filter(v => v >= 0.55).length / profileScores.length;
+    const intentUnitScores = aggregateHighlightIntentGroupScores(profiles, profileScores);
+    const average = intentUnitScores.reduce((a,b) => a+b,0) / intentUnitScores.length;
+    const fullCoverage = intentUnitScores.filter(v => v >= 0.55).length / intentUnitScores.length;
     return clamp01(average * 0.80 + fullCoverage * 0.20);
 }
 
@@ -18429,31 +18898,178 @@ function getCardOracleText(card) {
  * Oracle text. Flexible highlights are deliberately ignored and remain semantic/ranking intent.
  * A trailing period on an Exact highlight is a semantic hard boundary, not formatting.
  */
+
+const EXACT_HIGHLIGHT_PROFILE_CACHE = new WeakMap();
+const EXACT_HIGHLIGHT_EFFECT_MATCH_THRESHOLD = 0.42;
+
+function getExactHighlightIntentProfiles(highlights = []) {
+    const input = Array.isArray(highlights) ? highlights : [];
+    if (!input.length) return [];
+    const sourceCard = currentSourceCard;
+    const sourceText = getCurrentSourceOracleText(sourceCard) || '';
+    const signature = JSON.stringify({
+        source: String(sourceCard?.id || '') + '|' + normalizeCardNameForIdentity(sourceCard?.name || '') + '|' + sourceText,
+        highlights: input.map(h => ({
+            text: String(h?.text || ''),
+            mode: String(h?.mode || ''),
+            field: h?.field || 'oracle',
+            origin: h?.origin || '',
+            start: Number.isInteger(h?.start) ? h.start : null,
+            end: Number.isInteger(h?.end) ? h.end : null,
+            attachedTo: Number.isInteger(h?.attachedTo) ? h.attachedTo : null,
+            intentConnection: h?.intentConnection || '',
+            editedFrom: String(h?.editedFrom?.text || ''),
+            aspects: normalizeHighlightAspects(h?.aspects),
+            benchmarkIntentOnly: Boolean(h?.benchmarkIntentOnly)
+        }))
+    });
+    const cached = EXACT_HIGHLIGHT_PROFILE_CACHE.get(input);
+    if (cached?.signature === signature) return cached.profiles;
+    const profiles = buildHighlightIntentProfiles(input, sourceCard, sourceText)
+        .filter(profile => Array.isArray(profile.exactConstraints) && profile.exactConstraints.length > 0);
+    EXACT_HIGHLIGHT_PROFILE_CACHE.set(input, { signature, profiles });
+    return profiles;
+}
+
+function exactHighlightRequirementMatchesCandidateEffect(candidateEffect, constraint) {
+    const requirement = constraint?.requirement || parseExactHighlightRequirement(constraint?.text || '');
+    if (!requirement.text) return true;
+    const effectText = String(candidateEffect?.raw || '');
+    if (exactHighlightOccursInOracle(effectText, requirement)) return true;
+
+    // A trigger-only Exact selection can govern a later split clause (for example, the
+    // outcome after "then"). In that case the parser retains the owning rule as parentRuleText.
+    // Non-trigger outcome text must occur in this specific effect's own raw text.
+    const isTriggerAnchor = isSearchIntentTriggerPhrase(constraint?.text || '');
+    const parentRuleText = isTriggerAnchor ? String(candidateEffect?.parentRuleText || '') : '';
+    return Boolean(parentRuleText && exactHighlightOccursInOracle(parentRuleText, requirement));
+}
+
+function exactHighlightConstraintHasStructuredAspects(highlight) {
+    return Boolean(
+        hasActiveHighlightAspects(highlight?.aspects) ||
+        (!highlight?.aspects && deriveHighlightAspectKind(highlight)?.kind === 'mana' &&
+            /^(?:\s*\{[wubrgc]\}\s*)+$/i.test(String(highlight?.text || '')))
+    );
+}
+
+function matchesExactHighlightEffectBinding(profile, constraint, candidateEffects) {
+    const effects = Array.isArray(candidateEffects) ? candidateEffects : [];
+    if (!effects.length) return true;
+    const anchoredEffects = effects.filter(effect => exactHighlightRequirementMatchesCandidateEffect(effect, constraint));
+    if (!anchoredEffects.length) return false;
+
+    const hasAnchorSpecificSourceEffects = Array.isArray(constraint.sourceEffects) && constraint.sourceEffects.length > 0;
+    const sourceEffects = hasAnchorSpecificSourceEffects
+        ? constraint.sourceEffects
+        : (profile.recognizedEffects?.length
+            ? profile.recognizedEffects
+            : (Array.isArray(profile.parsedEffects) ? profile.parsedEffects : []));
+    const sourceIsReliable = Boolean(
+        sourceEffects.some(effect => effect?.action && effect.action !== 'generic') &&
+        (hasAnchorSpecificSourceEffects
+            ? Number(constraint.sourceParserConfidence) >= 0.45
+            : Number(profile.parserConfidence) >= 0.45)
+    );
+    const matchingMode = profile.mode === 'exact' ? 'exact' : 'variable';
+
+    for (const candidateEffect of anchoredEffects) {
+        const candidateConfidence = calculateCardFieldConfidence([candidateEffect]).overall || 0;
+        const candidateIsReliable = Boolean(
+            candidateEffect?.action && candidateEffect.action !== 'generic' &&
+            candidateConfidence >= 0.45
+        );
+
+        // If either effect cannot be parsed confidently, retain the text-anchored candidate.
+        // A heuristic parser gap must not become a newly invented hard exclusion.
+        if (!sourceIsReliable || !candidateIsReliable) return true;
+
+        const highlight = constraint.highlight || { text: constraint.text, mode: 'exact' };
+        if (exactHighlightConstraintHasStructuredAspects(highlight)) {
+            const effectCard = { oracle_text: String(candidateEffect.raw || candidateEffect.parentRuleText || '') };
+            if (!highlightAspectEffectMatches(highlight, effectCard).matches) continue;
+        }
+
+        const hasMechanicalPair = sourceEffects.some(sourceEffect =>
+            scoreHighlightEffectMatch(sourceEffect, candidateEffect, matchingMode) >= EXACT_HIGHLIGHT_EFFECT_MATCH_THRESHOLD
+        );
+        if (hasMechanicalPair) return true;
+    }
+    return false;
+}
+
 function matchesExactHighlightConstraints(card, highlights = []) {
-    const exactHighlights = (highlights || []).filter(h => h && h.mode !== 'variable' && !h.benchmarkIntentOnly && typeof h.text === 'string' && h.text.trim());
+    if (!matchesRequiredMechanicGroups(card, highlights)) return false;
+    const exactHighlights = (highlights || []).filter(h => h && h.mode === 'exact' && !h.benchmarkIntentOnly && typeof h.text === 'string' && h.text.trim());
     if (!exactHighlights.length) return true;
     const oracle = getCardOracleText(card);
     if (!oracle) return false;
-    return exactHighlights.every(highlight => {
-        if ((hasActiveHighlightAspects(highlight.aspects) || (!highlight.aspects && deriveHighlightAspectKind(highlight)?.kind === 'mana' && /^(?:\s*\{[wubrgc]\}\s*)+$/i.test(highlight.text))) && deriveHighlightAspectKind(highlight)) return highlightAspectEffectMatches(highlight, card).matches;
+
+    // Preserve the existing literal behavior for type-line selections. Oracle mechanics are
+    // checked separately below so a phrase on an unrelated ability cannot satisfy an Exact
+    // highlight for another effect.
+    const typeLineHighlights = exactHighlights.filter(highlight => highlight.field === 'type');
+    for (const highlight of typeLineHighlights) {
         const requirement = parseExactHighlightRequirement(highlight.text);
-        return !requirement.text || exactHighlightOccursInOracle(oracle, requirement);
-    });
+        if (requirement.text && !exactHighlightOccursInOracle(oracle, requirement)) return false;
+    }
+
+    const effectHighlights = exactHighlights.filter(highlight => highlight.field !== 'type');
+    if (!effectHighlights.length) return true;
+    let candidateEffects;
+    try {
+        candidateEffects = getCachedParsedEffects(card, oracle);
+    } catch (error) {
+        // A parse failure is not reliable enough to reject a candidate on a new effect-binding rule.
+        return true;
+    }
+    if (!Array.isArray(candidateEffects) || !candidateEffects.length) return true;
+
+    const profiles = getExactHighlightIntentProfiles(highlights);
+    if (!profiles.length) return true;
+    return profiles.every(profile =>
+        (profile.exactConstraints || []).every(constraint =>
+            matchesExactHighlightEffectBinding(profile, constraint, candidateEffects)
+        )
+    );
 }
 
 function explainExactHighlightFailures(card, highlights = []) {
     const oracle = getCardOracleText(card);
-    return (highlights || []).filter(h => h && h.mode !== 'variable' && !h.benchmarkIntentOnly && typeof h.text === 'string' && h.text.trim()).flatMap(h => {
-        if ((hasActiveHighlightAspects(h.aspects) || (!h.aspects && deriveHighlightAspectKind(h)?.kind === 'mana' && /^(?:\s*\{[wubrgc]\}\s*)+$/i.test(h.text))) && deriveHighlightAspectKind(h)) {
-            const result = highlightAspectEffectMatches(h, card);
-            return result.matches ? [] : [{ field: 'highlight aspect', expected: buildHighlightAspectPreview(h), actual: result.reason || 'candidate effect did not satisfy the structured requirement' }];
+    const failures = [];
+    const exactHighlights = (highlights || []).filter(h => h && h.mode === 'exact' && !h.benchmarkIntentOnly && typeof h.text === 'string' && h.text.trim());
+    exactHighlights.filter(h => h.field === 'type').forEach(highlight => {
+        const requirement = parseExactHighlightRequirement(highlight.text);
+        if (requirement.text && !exactHighlightOccursInOracle(oracle, requirement)) {
+            failures.push({
+                field: 'exact highlight',
+                expected: highlight.text.trim(),
+                actual: requirement.requiresSentenceTerminalPeriod ? 'sentence boundary missing' : 'text not present in candidate Oracle text'
+            });
         }
-        const requirement = parseExactHighlightRequirement(h.text);
-        if (!requirement.text || exactHighlightOccursInOracle(oracle, requirement)) return [];
-        return [{ field: 'exact highlight', expected: h.text.trim(), actual: requirement.requiresSentenceTerminalPeriod ? 'sentence boundary missing' : 'text not present in candidate Oracle text' }];
     });
-}
 
+    const effectHighlights = exactHighlights.filter(h => h.field !== 'type');
+    if (!effectHighlights.length) return failures;
+    let candidateEffects = [];
+    try { candidateEffects = getCachedParsedEffects(card, oracle); } catch (error) { /* explain below as an association miss */ }
+    const profiles = getExactHighlightIntentProfiles(highlights);
+    for (const profile of profiles) {
+        for (const constraint of profile.exactConstraints || []) {
+            if (matchesExactHighlightEffectBinding(profile, constraint, candidateEffects)) continue;
+            const requirement = constraint.requirement || parseExactHighlightRequirement(constraint.text);
+            const appearsSomewhere = requirement.text && exactHighlightOccursInOracle(oracle, requirement);
+            failures.push({
+                field: 'exact highlight effect binding',
+                expected: String(constraint.text || '').trim(),
+                actual: appearsSomewhere
+                    ? 'text appears on the card, but not on the candidate effect that matches the highlighted mechanic'
+                    : (requirement.requiresSentenceTerminalPeriod ? 'sentence boundary missing within the candidate effect' : 'text not present within a candidate effect')
+            });
+        }
+    }
+    return failures;
+}
 function calculateFuzzyTextMatch(sourceText, targetText) {
     if (!sourceText || !targetText) return 0;
 
@@ -19613,6 +20229,10 @@ function initApp() {
         if (preferenceScoreBreakdown) preferenceScoreBreakdown.checked = Boolean(displayPreferences.showScoreBreakdown);
         if (preferenceShowEdhrecButton) preferenceShowEdhrecButton.checked = displayPreferences.showEdhrecButton !== false;
         if (preferenceShowSearchIntent) preferenceShowSearchIntent.checked = displayPreferences.showSearchIntent === true;
+        const preferenceHighlightDefaultMode = document.getElementById('preference-highlight-default-mode');
+        const preferenceSearchIntentDetail = document.getElementById('preference-search-intent-detail');
+        if (preferenceHighlightDefaultMode) preferenceHighlightDefaultMode.value = displayPreferences.highlightDefaultMode || 'variable';
+        if (preferenceSearchIntentDetail) preferenceSearchIntentDetail.value = displayPreferences.searchIntentDetail || 'short';
         if (preferenceTheme) preferenceTheme.value = (displayPreferences.theme === 'light' || displayPreferences.theme === 'dark') ? displayPreferences.theme : 'dark';
         if (preferenceDensity) preferenceDensity.value = displayPreferences.resultDensity || 'comfortable';
         if (preferenceReduceMotion) preferenceReduceMotion.checked = Boolean(displayPreferences.reduceMotion);
@@ -19630,6 +20250,10 @@ function initApp() {
         displayPreferences.showScoreBreakdown = preferenceScoreBreakdown?.checked !== false;
         displayPreferences.showEdhrecButton = preferenceShowEdhrecButton?.checked !== false;
         displayPreferences.showSearchIntent = preferenceShowSearchIntent?.checked === true;
+        const preferenceHighlightDefaultMode = document.getElementById('preference-highlight-default-mode');
+        const preferenceSearchIntentDetail = document.getElementById('preference-search-intent-detail');
+        displayPreferences.highlightDefaultMode = ['variable', 'exact', 'context', 'avoid'].includes(preferenceHighlightDefaultMode?.value) ? preferenceHighlightDefaultMode.value : 'variable';
+        displayPreferences.searchIntentDetail = ['short', 'detailed'].includes(preferenceSearchIntentDetail?.value) ? preferenceSearchIntentDetail.value : 'short';
         displayPreferences.theme = ['dark', 'light'].includes(preferenceTheme?.value) ? preferenceTheme.value : DEFAULT_DISPLAY_PREFERENCES.theme;
         displayPreferences.resultDensity = ['comfortable', 'compact'].includes(preferenceDensity?.value) ? preferenceDensity.value : DEFAULT_DISPLAY_PREFERENCES.resultDensity;
         displayPreferences.reduceMotion = Boolean(preferenceReduceMotion?.checked);
@@ -25821,8 +26445,10 @@ function getSearchIntent(sourceCard, highlights = []) {
         text: String(h?.text || ''),
         field: h?.field || 'oracle',
         colorIndex: Number.isInteger(h?.colorIndex) ? h.colorIndex : 0,
-        mode: h?.mode === 'variable' ? 'variable' : 'exact',
+        mode: ['variable', 'exact', 'context', 'avoid'].includes(h?.mode) ? h.mode : 'exact',
         aspects: normalizeHighlightAspects(h?.aspects),
+        mechanicGroupId: String(h?.mechanicGroupId || ''),
+        mechanicGroupRelationship: normalizeHighlightMechanicGroupRelationship(h?.mechanicGroupRelationship),
         origin: h?.origin || 'user',
         // Offsets are part of live highlight identity: selecting the same phrase in a different
         // clause can produce a different grammatical context and therefore a different intent.
@@ -25998,9 +26624,11 @@ function buildSearchIntentPresentationModel(sourceCard = currentSourceCard, high
     const highlightsView = activeHighlights.filter(h => h && String(h.text || '').trim()).map(h => ({
         text: String(h.text).trim(),
         field: h.field === 'type' ? 'type line' : (h.origin === 'user' ? 'search intent' : 'Oracle text'),
-        mode: h.mode === 'variable' ? 'Flexible' : 'Exact',
+        mode: ({ variable: 'Flexible', exact: 'Exact', context: 'Context only', avoid: 'Avoid' })[h.mode] || 'Exact',
         origin: h.origin === 'user' ? (h.editedFrom ? 'Edited source selection' : 'Search detail') : 'Selected text',
-        attached: Number.isInteger(h.attachedTo)
+        attached: Number.isInteger(h.attachedTo),
+        mechanicGroupId: String(h.mechanicGroupId || ''),
+        mechanicGroupRelationship: normalizeHighlightMechanicGroupRelationship(h.mechanicGroupRelationship)
     }));
     const primary = effectViews[0] || null;
     let summary;
@@ -26031,7 +26659,9 @@ function buildSearchIntentPresentationModel(sourceCard = currentSourceCard, high
     if (highlightsView.length) {
         const exact = highlightsView.some(h => h.mode === 'Exact');
         const flexible = highlightsView.some(h => h.mode === 'Flexible');
-        const modes = [exact ? 'Exact highlights require matching text in candidate Oracle text' : '', flexible ? 'Flexible highlights focus on matching mechanics even when wording differs' : ''].filter(Boolean);
+        const contextOnly = highlightsView.some(h => h.mode === 'Context only');
+        const avoid = highlightsView.some(h => h.mode === 'Avoid');
+        const modes = [exact ? 'Exact highlights require matching text in candidate Oracle text' : '', flexible ? 'Flexible highlights focus on matching mechanics even when wording differs' : '', contextOnly ? 'Context-only highlights clarify nearby effects without adding a separate requirement' : '', avoid ? 'Avoid highlights softly favor candidates with different mechanics or wording' : ''].filter(Boolean);
         if (modes.length) summary += ` Highlight behavior: ${modes.join('; ')}.`;
     }
     const aspectHighlights = activeHighlights.filter(h => hasActiveHighlightAspects(h?.aspects));
@@ -26040,6 +26670,16 @@ function buildSearchIntentPresentationModel(sourceCard = currentSourceCard, high
         if (aspectSummary.length) summary += ` Structured highlight requirements: ${aspectSummary.join(' ')}`;
     }
     const coverage = effectViews.length > 0;
+    const confidenceScores = parsed.map(effect => calculateCardFieldConfidence([effect]).overall).filter(Number.isFinite);
+    const parserConfidence = confidenceScores.length ? confidenceScores.reduce((sum, value) => sum + value, 0) / confidenceScores.length : 0;
+    const parserConfidenceLevel = parserConfidence >= 0.75 ? 'High' : parserConfidence >= 0.45 ? 'Medium' : 'Low';
+    if (!effectViews.length && activeHighlights.some(h => h.field !== 'type')) summary = `ManaSearch couldn't fully identify this effect, but your highlighted wording will still influence the search.`;
+    const mechanicGroups = getHighlightMechanicGroups(activeHighlights);
+    if (mechanicGroups.length) {
+        const requiredGroups = mechanicGroups.filter(group => group.relationship === 'required').length;
+        const preferredGroups = mechanicGroups.length - requiredGroups;
+        summary += ` Mechanic groups: ${requiredGroups} required and ${preferredGroups} preferred. Required groups use conservative checks; uncertain parses remain eligible.`;
+    }
     const roleViews = roles.slice(0, 3).map(role => ({
         role: SEARCH_INTENT_ROLE_LABELS[role.role] || String(role.role || '').replace(/_/g, ' '),
         score: Number(role.score) || 0,
@@ -26061,7 +26701,7 @@ function buildSearchIntentPresentationModel(sourceCard = currentSourceCard, high
         { title: 'Repeatability and timing', detail: coverage ? 'Where the parser can identify it, recurring triggers/activations are distinguished from one-time, delayed, and enter-the-battlefield effects.' : 'Cadence will be compared when the source effect can be parsed confidently.' },
         { title: 'Function, role, and semantic context', detail: roleViews.length ? `Recognized role evidence: ${roleViews.map(r => r.role).join(', ')}. These signals supplement rather than replace mechanical similarity.` : 'Broader function, role, card type, and semantic context supplement mechanical similarity.' }
     ];
-    return { sourceName: sourceCard.name || 'Source card', summary, effectViews, highlightsView, roleViews, rankingEvidence, focusExplanation, parsedEffectCount: parsed.length, canonicalEffectCount: effectViews.length, hasHighlight: highlightsView.length > 0, semanticText: intent.semanticText || '', targetText: intent.targetText || sourceText };
+    return { sourceName: sourceCard.name || 'Source card', summary, effectViews, highlightsView, roleViews, rankingEvidence, focusExplanation, parsedEffectCount: parsed.length, canonicalEffectCount: effectViews.length, parserConfidence, parserConfidenceLevel, hasHighlight: highlightsView.length > 0, semanticText: intent.semanticText || '', targetText: intent.targetText || sourceText };
 }
 
 function setSearchIntentText(node, text) {
@@ -26085,6 +26725,16 @@ function renderManaSearchIntentModel(model) {
         return;
     }
     appendSearchIntentNode(body, 'p', 'search-intent-summary', model.summary);
+    if (displayPreferences?.searchIntentDetail === 'detailed') {
+        appendSearchIntentNode(body, 'p', `search-intent-confidence is-${String(model.parserConfidenceLevel || 'low').toLowerCase()}`,
+            `Parser confidence: ${model.parserConfidenceLevel || 'Low'} (${Math.round((Number(model.parserConfidence) || 0) * 100)}%). This is a heuristic estimate of how clearly the current text maps to known effect patterns, not a guarantee of correctness.`);
+    } else {
+        if (model.highlightsView.length) {
+            const focus = model.highlightsView.slice(0, 2).map(h => `${h.mode}: “${h.text}”`).join(' · ');
+            appendSearchIntentNode(body, 'p', 'search-intent-muted', `Active focus: ${focus}${model.highlightsView.length > 2 ? ` · +${model.highlightsView.length - 2} more` : ''}`);
+        }
+        return;
+    }
     if (model.hasHighlight && String(model.targetText || '').trim()) {
         const effectiveSection = appendSearchIntentNode(body, 'div', 'search-intent-effective-section');
         appendSearchIntentNode(effectiveSection, 'h4', '', 'Effective intent sent to parsing, retrieval, and ranking');

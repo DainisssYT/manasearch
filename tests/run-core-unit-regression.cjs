@@ -146,6 +146,131 @@ test('an unattached user trigger plus selected draw outcome composes the request
   assert.doesNotMatch(sandbox.output, /opponent casts a spell|unless that player pays/i);
 });
 
+test('dependent adjacent Oracle sentences are inferred as context in either selection direction', () => {
+  const blocks = extractFunction('findDependentOracleContext');
+  const sourceText = 'Whenever an opponent draws a card.\nYou draw a card.';
+  const triggerStart = sourceText.indexOf('Whenever');
+  const triggerEnd = sourceText.indexOf('\n');
+  const outcomeStart = sourceText.indexOf('You draw');
+  const sandbox = { sourceText, triggerStart, triggerEnd, outcomeStart, results: null };
+  vm.runInNewContext(`${blocks}\nthis.results = [\n  findDependentOracleContext(sourceText, outcomeStart, sourceText.length),\n  findDependentOracleContext(sourceText, triggerStart, triggerEnd)\n];`, sandbox);
+  assert.equal(sandbox.results.length, 2);
+  assert.match(sandbox.results[0].text, /Whenever an opponent draws a card/i);
+  assert.match(sandbox.results[1].text, /You draw a card/i);
+});
+
+
+test('highlight mechanic groups merge, retain preferred defaults, and dissolve when one member is removed', () => {
+  const helperNames = [
+    'normalizeHighlightMechanicGroupRelationship',
+    'getHighlightMechanicGroups',
+    'normalizeHighlightMechanicGroupMembership',
+    'mergeHighlightMechanicGroupMembership',
+    'setHighlightMechanicGroupRelationshipInHighlights',
+    'removeHighlightFromMechanicGroupState'
+  ];
+  const extracted = helperNames.map(name => [name, extractFunction(name)]);
+  extracted.forEach(([name, source]) => {
+    try { new vm.Script(source); } catch (error) { throw new Error(name + ' extraction failed: ' + error.message); }
+  });
+  const blocks = extracted.map(([, source]) => source).join('\n');
+  const sandbox = { result: null };
+  const script = blocks + `
+    const highlights = [
+      { text: 'draw a card', field: 'oracle', mode: 'variable' },
+      { text: 'create a token', field: 'oracle', mode: 'variable' },
+      { text: 'gain life', field: 'oracle', mode: 'variable' }
+    ];
+    const preferred = mergeHighlightMechanicGroupMembership(highlights, 0, 1, 'group-1');
+    const initialGroups = getHighlightMechanicGroups(preferred);
+    const required = setHighlightMechanicGroupRelationshipInHighlights(preferred, 'group-1', 'required');
+    const requiredGroups = getHighlightMechanicGroups(required);
+    const remaining = removeHighlightFromMechanicGroupState(required, 1);
+    this.result = { preferred: initialGroups[0]?.relationship, required: requiredGroups[0]?.relationship,
+      requiredMembers: requiredGroups[0]?.members.length, remainingGroups: getHighlightMechanicGroups(remaining).length,
+      remainingHasGroupId: Boolean(remaining[0]?.mechanicGroupId) };
+  `;
+  vm.runInNewContext(script, sandbox);
+  assert.equal(sandbox.result.preferred, 'preferred');
+  assert.equal(sandbox.result.required, 'required');
+  assert.equal(sandbox.result.requiredMembers, 2);
+  assert.equal(sandbox.result.remainingGroups, 0);
+  assert.equal(sandbox.result.remainingHasGroupId, false);
+});
+
+test('preferred mechanic groups aggregate as a ranking preference while required groups use weakest-member coverage', () => {
+  const blocks = extractFunction('aggregateHighlightIntentGroupScores');
+  const sandbox = { result: null };
+  const script = blocks + `
+    const profiles = [
+      { mechanicGroupMemberships: [{ id: 'preferred', relationship: 'preferred' }] },
+      { mechanicGroupMemberships: [{ id: 'preferred', relationship: 'preferred' }] },
+      { mechanicGroupMemberships: [{ id: 'required', relationship: 'required' }] },
+      { mechanicGroupMemberships: [{ id: 'required', relationship: 'required' }] },
+      {}
+    ];
+    this.result = aggregateHighlightIntentGroupScores(profiles, [0.8, 0.2, 0.9, 0.1, 0.6]);
+  `;
+  vm.runInNewContext(script, sandbox);
+  assert.equal(sandbox.result.length, 3);
+  assert.ok(sandbox.result.some(value => Math.abs(value - 0.54) < 1e-9), 'expected preferred co-occurrence boost, got ' + sandbox.result);
+  assert.ok(sandbox.result.includes(0.1), 'required groups should use the weakest member');
+  assert.ok(sandbox.result.includes(0.6), 'ungrouped highlights should retain their independent score');
+});
+
+
+
+test('Exact highlight text must be on the same candidate effect that matches the source mechanic', () => {
+  const helperNames = [
+    'exactHighlightRequirementMatchesCandidateEffect',
+    'exactHighlightConstraintHasStructuredAspects',
+    'matchesExactHighlightEffectBinding'
+  ];
+  const extracted = helperNames.map(name => [name, extractFunction(name)]);
+  extracted.forEach(([name, source]) => {
+    try { new vm.Script(source); } catch (error) { throw new Error(name + ' extraction failed: ' + error.message); }
+  });
+  const blocks = extracted.map(([, source]) => source).join('\n');
+  const sandbox = {
+    result: null,
+    exactHighlightOccursInOracle: (text, requirement) => {
+      const normalize = value => String(value || '').toLowerCase().replace(/[^a-z0-9 ]/g, ' ').replace(/\s+/g, ' ').trim();
+      return (' ' + normalize(text) + ' ').includes(' ' + normalize(requirement?.text) + ' ');
+    },
+    isSearchIntentTriggerPhrase: text => /^(?:when|whenever|at the beginning of)/i.test(String(text || '').trim()),
+    calculateCardFieldConfidence: effects => ({ overall: Number(effects?.[0]?.testConfidence ?? 0.9) }),
+    scoreHighlightEffectMatch: (source, candidate) => source?.action === candidate?.action ? 0.9 : 0,
+    hasActiveHighlightAspects: () => false,
+    deriveHighlightAspectKind: () => null,
+    highlightAspectEffectMatches: () => ({ matches: true })
+  };
+  const script = "const EXACT_HIGHLIGHT_EFFECT_MATCH_THRESHOLD = 0.42;\n" + blocks + '\n' + [
+    "const profile = { mode: 'exact', parserConfidence: 0.9, recognizedEffects: [{ action: 'create_token' }], parsedEffects: [{ action: 'create_token' }] };",
+    "const constraint = { text: 'draw a card', requirement: { text: 'draw a card', requiresSentenceTerminalPeriod: false } };",
+    "const unrelatedPhrase = matchesExactHighlightEffectBinding(profile, constraint, [",
+    "  { action: 'draw', raw: 'Draw a card.', testConfidence: 0.95 },",
+    "  { action: 'create_token', raw: 'Create a token.', testConfidence: 0.95 }",
+    "]);",
+    "const sameEffect = matchesExactHighlightEffectBinding(profile, constraint, [",
+    "  { action: 'create_token', raw: 'Create a token, then draw a card.', testConfidence: 0.95 }",
+    "]);",
+    "const uncertainParse = matchesExactHighlightEffectBinding(profile, constraint, [",
+    "  { action: 'generic', raw: 'Draw a card.', testConfidence: 0.1 }",
+    "]);",
+    "const triggerParentContext = matchesExactHighlightEffectBinding(",
+    "  { ...profile, recognizedEffects: [{ action: 'draw' }], parsedEffects: [{ action: 'draw' }] },",
+    "  { text: 'Whenever a creature enters the battlefield', requirement: { text: 'whenever a creature enters the battlefield', requiresSentenceTerminalPeriod: false } },",
+    "  [{ action: 'draw', raw: 'draw a card', parentRuleText: 'Whenever a creature enters the battlefield, draw a card.', testConfidence: 0.95 }]",
+    ");",
+    "this.result = { unrelatedPhrase, sameEffect, uncertainParse, triggerParentContext };"
+  ].join('\n');
+  vm.runInNewContext(script, sandbox);
+  assert.equal(sandbox.result.unrelatedPhrase, false, 'an Exact phrase on an unrelated effect must not satisfy another mechanic');
+  assert.equal(sandbox.result.sameEffect, true, 'the exact phrase and mechanical match on one effect should pass');
+  assert.equal(sandbox.result.uncertainParse, true, 'uncertain parsing must fail open rather than reject the candidate');
+  assert.equal(sandbox.result.triggerParentContext, true, 'an Exact trigger can bind to its split outcome through parent-rule context');
+});
+
 const failed = cases.filter(c => !c.pass);
 for (const c of cases) console.log(`${c.pass ? 'PASS' : 'FAIL'} ${c.name}${c.error ? ` — ${c.error}` : ''}`);
 console.log(`\nCore mechanical unit checks: ${cases.length - failed.length}/${cases.length} passed.`);

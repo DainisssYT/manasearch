@@ -247,6 +247,55 @@ check('test automation files exist', () => {
   assert.match(app, /opponentUpkeepLifeLoss/);
   assert.ok(fs.existsSync(path.join(root, 'tests', 'fixtures', 'mtg-mechanical-benchmark.json')));
 });
+check('highlight intent modes, conservative dependent context, and confidence preferences are wired', () => {
+  assert.match(app, /highlightDefaultMode: 'variable'/);
+  assert.match(app, /function findDependentOracleContext\(/);
+  assert.match(app, /inferredRelationship: 'adjacent-dependent-sentence'/);
+  assert.match(app, /profile\.mode === 'avoid'/);
+  assert.match(app, /profile\.mode === 'context'/);
+  assert.match(app, /ManaSearch couldn't fully identify this effect, but your highlighted wording will still influence the search\./);
+  assert.match(html, /id="preference-highlight-default-mode"/);
+  assert.match(html, /id="preference-search-intent-detail"/);
+  assert.match(app, /Parser confidence:/);
+});
+
+check('advanced mechanic groups default to Preferred and expose accessible grouping plus conservative Required matching', () => {
+  assert.match(app, /function getHighlightMechanicGroups\(/);
+  assert.match(app, /function mergeHighlightMechanicGroupMembership\(/);
+  assert.match(app, /function renderHighlightMechanicGroups\(/);
+  assert.match(app, /chip\.addEventListener\('dragstart'/);
+  assert.match(app, /chip\.addEventListener\('drop'/);
+  assert.match(app, /textContent = 'Group with:'/);
+  assert.match(app, /Prefer together \(default\)/);
+  assert.match(app, /Require all mechanics/);
+  assert.match(app, /mechanicGroupRelationship: normalizeHighlightMechanicGroupRelationship/);
+  assert.match(app, /function aggregateHighlightIntentGroupScores\(/);
+  assert.match(app, /group\.relationship === 'required'\) result\.push\(Math\.min\(\.\.\.group\.scores\)\)/);
+  assert.match(app, /function matchesRequiredMechanicGroups\(/);
+  assert.match(app, /if \(!String\(oracle \|\| ''\)\.trim\(\)\) return true/);
+  assert.match(app, /catch \(error\) \{ return true; \}/);
+  assert.match(app, /candidateConfidence < 0\.45/);
+  assert.match(app, /profile\.parserConfidence\) \|\| 0\) < 0\.45/);
+  assert.match(app, /if \(!matchesRequiredMechanicGroups\(card, highlights\)\) return false/);
+});
+
+check('advanced mechanic groups remain collapsed until the user opens them', () => {
+  assert.match(app, /panel\.open = false/);
+});
+
+
+check('Exact highlights bind literal text to the same parsed candidate effect used for mechanical matching', () => {
+  assert.match(app, /exactConstraints,/);
+  assert.match(app, /function exactHighlightRequirementMatchesCandidateEffect\(/);
+  assert.match(app, /function matchesExactHighlightEffectBinding\(/);
+  assert.match(app, /scoreHighlightEffectMatch\(sourceEffect, candidateEffect, matchingMode\) >= EXACT_HIGHLIGHT_EFFECT_MATCH_THRESHOLD/);
+  assert.match(app, /function getExactHighlightIntentProfiles\(/);
+  assert.match(app, /text appears on the card, but not on the candidate effect that matches the highlighted mechanic/);
+  assert.doesNotMatch(app, /return !requirement\.text \|\| exactHighlightOccursInOracle\(oracle, requirement\)/,
+    'Exact Oracle highlights must not use a card-wide literal occurrence as their hard-filter decision');
+  assert.match(app, /if \(!sourceIsReliable \|\| !candidateIsReliable\) return true/);
+});
+
 const failed = checks.filter(x => !x.pass);
 for (const result of checks) console.log(`${result.pass ? 'PASS' : 'FAIL'} ${result.name}${result.error ? ` — ${result.error}` : ''}`);
 console.log(`\nStatic regression checks: ${checks.length - failed.length}/${checks.length} passed.`);
