@@ -1,6 +1,6 @@
-/* ManaSearch build 20261101-128 */
+/* ManaSearch build 20261101-129 */
 // ManaSearch deployment build marker. Bump this whenever app.js changes so cached-module issues are easy to diagnose.
-const MANASEARCH_APP_BUILD = '20261101-128';
+const MANASEARCH_APP_BUILD = '20261101-129';
 console.info(`[ManaSearch] app.js build ${MANASEARCH_APP_BUILD}`);
 
 // State Management
@@ -10658,11 +10658,26 @@ function buildHighlightIntentProfiles(highlights, sourceCard = currentSourceCard
 
         const exactConstraints = group
             .filter(h => h.mode === 'exact' && !h.benchmarkIntentOnly && typeof h.text === 'string' && h.text.trim())
-            .map(h => ({
-                text: String(h.text).trim(),
-                requirement: parseExactHighlightRequirement(h.text),
-                highlight: h
-            }));
+            .map(h => {
+                // When the selected words themselves identify an action (e.g. "draw a card"),
+                // bind to the corresponding source effect rather than any other action parsed
+                // from the same Oracle sentence. Trigger-only anchors use the full profile below.
+                const selectedParsedEffects = parseMTGEffect(h.text)
+                    .filter(effect => effect?.action && effect.action !== 'generic');
+                const alignedSourceEffects = selectedParsedEffects.length
+                    ? recognizedEffects.filter(sourceEffect => selectedParsedEffects.some(selectedEffect =>
+                        scoreHighlightEffectMatch(selectedEffect, sourceEffect, 'variable') >= EXACT_HIGHLIGHT_EFFECT_MATCH_THRESHOLD
+                    ))
+                    : [];
+                const sourceEffects = alignedSourceEffects.length ? alignedSourceEffects : selectedParsedEffects;
+                return {
+                    text: String(h.text).trim(),
+                    requirement: parseExactHighlightRequirement(h.text),
+                    highlight: h,
+                    sourceEffects,
+                    sourceParserConfidence: sourceEffects.length ? calculateCardFieldConfidence(sourceEffects).overall || 0 : 0
+                };
+            });
         const mechanicGroupIds = [...new Set(group.map(h => String(h.mechanicGroupId || '').trim()).filter(Boolean))];
         const mechanicGroupMemberships = mechanicGroupIds.map(id => ({
             id,
@@ -18944,12 +18959,17 @@ function matchesExactHighlightEffectBinding(profile, constraint, candidateEffect
     const anchoredEffects = effects.filter(effect => exactHighlightRequirementMatchesCandidateEffect(effect, constraint));
     if (!anchoredEffects.length) return false;
 
-    const sourceEffects = profile.recognizedEffects?.length
-        ? profile.recognizedEffects
-        : (Array.isArray(profile.parsedEffects) ? profile.parsedEffects : []);
+    const hasAnchorSpecificSourceEffects = Array.isArray(constraint.sourceEffects) && constraint.sourceEffects.length > 0;
+    const sourceEffects = hasAnchorSpecificSourceEffects
+        ? constraint.sourceEffects
+        : (profile.recognizedEffects?.length
+            ? profile.recognizedEffects
+            : (Array.isArray(profile.parsedEffects) ? profile.parsedEffects : []));
     const sourceIsReliable = Boolean(
-        profile.recognizedEffects?.length &&
-        Number(profile.parserConfidence) >= 0.45
+        sourceEffects.some(effect => effect?.action && effect.action !== 'generic') &&
+        (hasAnchorSpecificSourceEffects
+            ? Number(constraint.sourceParserConfidence) >= 0.45
+            : Number(profile.parserConfidence) >= 0.45)
     );
     const matchingMode = profile.mode === 'exact' ? 'exact' : 'variable';
 
