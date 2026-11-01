@@ -1,6 +1,6 @@
 /* ManaSearch build 20261101-129 */
 // ManaSearch deployment build marker. Bump this whenever app.js changes so cached-module issues are easy to diagnose.
-const MANASEARCH_APP_BUILD = '20261101-129';
+const MANASEARCH_APP_BUILD = '20261101-130';
 console.info(`[ManaSearch] app.js build ${MANASEARCH_APP_BUILD}`);
 
 // State Management
@@ -18420,6 +18420,14 @@ function getSemanticWorkerExcludeKey(excludeName) {
     return String(excludeName || '').toLowerCase().replace(/\s+/g, ' ').trim();
 }
 
+function normalizeSemanticWorkerQueryResults(response) {
+    // The worker resolves with its full message envelope: { type: 'result', results: [...] }.
+    // The yielding main-thread fallback already returns an array, so accept both contracts.
+    if (Array.isArray(response)) return response;
+    if (response && Array.isArray(response.results)) return response.results;
+    return [];
+}
+
 async function findFullSemanticMatches(index, sourceVector, excludeName, limit = FULL_SEMANTIC_INDEX_SEARCH_LIMIT, minSimilarity = 0.42) {
     if (!index || !sourceVector) return [];
     const owningSearchRequestId = searchRequestId;
@@ -18448,7 +18456,7 @@ async function findFullSemanticMatches(index, sourceVector, excludeName, limit =
         if (cancelled()) return [];
         staticSemanticQueryStats.workerQueries++;
         staticSemanticQueryStats.workerElapsedMs += Math.max(0, getManaResponsivenessNow() - semanticQueryStartedAt);
-        return results || [];
+        return normalizeSemanticWorkerQueryResults(results);
     } catch (workerError) {
         if (!benchmarkLocal) staticSemanticQueryStats.workerFailures++;
         if (cancelled()) return [];

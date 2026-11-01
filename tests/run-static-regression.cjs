@@ -296,6 +296,15 @@ check('Exact highlights bind literal text to the same parsed candidate effect us
   assert.match(app, /if \(!sourceIsReliable \|\| !candidateIsReliable\) return true/);
 });
 
+check('semantic worker response envelopes are normalized before array-based result merging', () => {
+  assert.match(app, /function normalizeSemanticWorkerQueryResults\(response\)/);
+  assert.match(app, /Array\.isArray\(response\.results\)/);
+  const start = app.indexOf('async function findFullSemanticMatches(');
+  const end = app.indexOf('async function findFullSemanticExactMatches(', start);
+  assert.ok(start >= 0 && end > start, 'semantic search function boundaries must exist');
+  assert.match(app.slice(start, end), /return normalizeSemanticWorkerQueryResults\(results\)/);
+});
+
 const failed = checks.filter(x => !x.pass);
 for (const result of checks) console.log(`${result.pass ? 'PASS' : 'FAIL'} ${result.name}${result.error ? ` — ${result.error}` : ''}`);
 console.log(`\nStatic regression checks: ${checks.length - failed.length}/${checks.length} passed.`);
