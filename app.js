@@ -1,6 +1,6 @@
-/* ManaSearch build 20261101-126 */
+/* ManaSearch build 20261101-127 */
 // ManaSearch deployment build marker. Bump this whenever app.js changes so cached-module issues are easy to diagnose.
-const MANASEARCH_APP_BUILD = '20261101-126';
+const MANASEARCH_APP_BUILD = '20261101-127';
 console.info(`[ManaSearch] app.js build ${MANASEARCH_APP_BUILD}`);
 
 // State Management
@@ -5704,7 +5704,7 @@ function renderHighlightMechanicGroups(container) {
     const groups = getHighlightMechanicGroups(manualHighlights);
     const panel = document.createElement('details');
     panel.className = 'highlight-grouping-panel';
-    panel.open = groups.length > 0;
+    panel.open = false;
     const summary = document.createElement('summary');
     summary.textContent = groups.length ? 'Advanced mechanic groups (' + groups.length + ')' : 'Advanced mechanic groups';
     panel.appendChild(summary);
