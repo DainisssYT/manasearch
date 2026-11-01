@@ -218,6 +218,59 @@ test('preferred mechanic groups aggregate as a ranking preference while required
   assert.ok(sandbox.result.includes(0.6), 'ungrouped highlights should retain their independent score');
 });
 
+
+
+test('Exact highlight text must be on the same candidate effect that matches the source mechanic', () => {
+  const helperNames = [
+    'exactHighlightRequirementMatchesCandidateEffect',
+    'exactHighlightConstraintHasStructuredAspects',
+    'matchesExactHighlightEffectBinding'
+  ];
+  const extracted = helperNames.map(name => [name, extractFunction(name)]);
+  extracted.forEach(([name, source]) => {
+    try { new vm.Script(source); } catch (error) { throw new Error(name + ' extraction failed: ' + error.message); }
+  });
+  const blocks = extracted.map(([, source]) => source).join('\n');
+  const sandbox = {
+    result: null,
+    exactHighlightOccursInOracle: (text, requirement) => {
+      const normalize = value => String(value || '').toLowerCase().replace(/[^a-z0-9 ]/g, ' ').replace(/\s+/g, ' ').trim();
+      return (' ' + normalize(text) + ' ').includes(' ' + normalize(requirement?.text) + ' ');
+    },
+    isSearchIntentTriggerPhrase: text => /^(?:when|whenever|at the beginning of)/i.test(String(text || '').trim()),
+    calculateCardFieldConfidence: effects => ({ overall: Number(effects?.[0]?.testConfidence ?? 0.9) }),
+    scoreHighlightEffectMatch: (source, candidate) => source?.action === candidate?.action ? 0.9 : 0,
+    hasActiveHighlightAspects: () => false,
+    deriveHighlightAspectKind: () => null,
+    highlightAspectEffectMatches: () => ({ matches: true })
+  };
+  const script = blocks + '\n' + [
+    "const profile = { mode: 'exact', parserConfidence: 0.9, recognizedEffects: [{ action: 'create_token' }], parsedEffects: [{ action: 'create_token' }] };",
+    "const constraint = { text: 'draw a card', requirement: { text: 'draw a card', requiresSentenceTerminalPeriod: false } };",
+    "const unrelatedPhrase = matchesExactHighlightEffectBinding(profile, constraint, [",
+    "  { action: 'draw', raw: 'Draw a card.', testConfidence: 0.95 },",
+    "  { action: 'create_token', raw: 'Create a token.', testConfidence: 0.95 }",
+    "]);",
+    "const sameEffect = matchesExactHighlightEffectBinding(profile, constraint, [",
+    "  { action: 'create_token', raw: 'Create a token, then draw a card.', testConfidence: 0.95 }",
+    "]);",
+    "const uncertainParse = matchesExactHighlightEffectBinding(profile, constraint, [",
+    "  { action: 'generic', raw: 'Draw a card.', testConfidence: 0.1 }",
+    "]);",
+    "const triggerParentContext = matchesExactHighlightEffectBinding(",
+    "  { ...profile, recognizedEffects: [{ action: 'draw' }], parsedEffects: [{ action: 'draw' }] },",
+    "  { text: 'Whenever a creature enters the battlefield', requirement: { text: 'whenever a creature enters the battlefield', requiresSentenceTerminalPeriod: false } },",
+    "  [{ action: 'draw', raw: 'draw a card', parentRuleText: 'Whenever a creature enters the battlefield, draw a card.', testConfidence: 0.95 }]",
+    ");",
+    "this.result = { unrelatedPhrase, sameEffect, uncertainParse, triggerParentContext };"
+  ].join('\n');
+  vm.runInNewContext(script, sandbox);
+  assert.equal(sandbox.result.unrelatedPhrase, false, 'an Exact phrase on an unrelated effect must not satisfy another mechanic');
+  assert.equal(sandbox.result.sameEffect, true, 'the exact phrase and mechanical match on one effect should pass');
+  assert.equal(sandbox.result.uncertainParse, true, 'uncertain parsing must fail open rather than reject the candidate');
+  assert.equal(sandbox.result.triggerParentContext, true, 'an Exact trigger can bind to its split outcome through parent-rule context');
+});
+
 const failed = cases.filter(c => !c.pass);
 for (const c of cases) console.log(`${c.pass ? 'PASS' : 'FAIL'} ${c.name}${c.error ? ` — ${c.error}` : ''}`);
 console.log(`\nCore mechanical unit checks: ${cases.length - failed.length}/${cases.length} passed.`);
