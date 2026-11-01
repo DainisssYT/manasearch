@@ -279,6 +279,10 @@ check('advanced mechanic groups default to Preferred and expose accessible group
   assert.match(app, /if \(!matchesRequiredMechanicGroups\(card, highlights\)\) return false/);
 });
 
+check('advanced mechanic groups remain collapsed until the user opens them', () => {
+  assert.match(app, /panel\.open = false/);
+});
+
 const failed = checks.filter(x => !x.pass);
 for (const result of checks) console.log(`${result.pass ? 'PASS' : 'FAIL'} ${result.name}${result.error ? ` — ${result.error}` : ''}`);
 console.log(`\nStatic regression checks: ${checks.length - failed.length}/${checks.length} passed.`);
