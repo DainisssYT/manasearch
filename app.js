@@ -1,6 +1,6 @@
-/* ManaSearch build 20261101-127 */
+/* ManaSearch build 20261101-128 */
 // ManaSearch deployment build marker. Bump this whenever app.js changes so cached-module issues are easy to diagnose.
-const MANASEARCH_APP_BUILD = '20261101-127';
+const MANASEARCH_APP_BUILD = '20261101-128';
 console.info(`[ManaSearch] app.js build ${MANASEARCH_APP_BUILD}`);
 
 // State Management
@@ -10655,6 +10655,14 @@ function buildHighlightIntentProfiles(highlights, sourceCard = currentSourceCard
         }
 
 
+
+        const exactConstraints = group
+            .filter(h => h.mode === 'exact' && !h.benchmarkIntentOnly && typeof h.text === 'string' && h.text.trim())
+            .map(h => ({
+                text: String(h.text).trim(),
+                requirement: parseExactHighlightRequirement(h.text),
+                highlight: h
+            }));
         const mechanicGroupIds = [...new Set(group.map(h => String(h.mechanicGroupId || '').trim()).filter(Boolean))];
         const mechanicGroupMemberships = mechanicGroupIds.map(id => ({
             id,
@@ -10665,6 +10673,7 @@ function buildHighlightIntentProfiles(highlights, sourceCard = currentSourceCard
             index,
             groupId: index,
             mechanicGroupMemberships,
+            exactConstraints,
             text: group.contextText,
             contextText: group.contextText,
             searchIntentText: group.searchIntentText,
@@ -18874,32 +18883,173 @@ function getCardOracleText(card) {
  * Oracle text. Flexible highlights are deliberately ignored and remain semantic/ranking intent.
  * A trailing period on an Exact highlight is a semantic hard boundary, not formatting.
  */
+
+const EXACT_HIGHLIGHT_PROFILE_CACHE = new WeakMap();
+const EXACT_HIGHLIGHT_EFFECT_MATCH_THRESHOLD = 0.42;
+
+function getExactHighlightIntentProfiles(highlights = []) {
+    const input = Array.isArray(highlights) ? highlights : [];
+    if (!input.length) return [];
+    const sourceCard = currentSourceCard;
+    const sourceText = getCurrentSourceOracleText(sourceCard) || '';
+    const signature = JSON.stringify({
+        source: String(sourceCard?.id || '') + '|' + normalizeCardNameForIdentity(sourceCard?.name || '') + '|' + sourceText,
+        highlights: input.map(h => ({
+            text: String(h?.text || ''),
+            mode: String(h?.mode || ''),
+            field: h?.field || 'oracle',
+            origin: h?.origin || '',
+            start: Number.isInteger(h?.start) ? h.start : null,
+            end: Number.isInteger(h?.end) ? h.end : null,
+            attachedTo: Number.isInteger(h?.attachedTo) ? h.attachedTo : null,
+            intentConnection: h?.intentConnection || '',
+            editedFrom: String(h?.editedFrom?.text || ''),
+            aspects: normalizeHighlightAspects(h?.aspects),
+            benchmarkIntentOnly: Boolean(h?.benchmarkIntentOnly)
+        }))
+    });
+    const cached = EXACT_HIGHLIGHT_PROFILE_CACHE.get(input);
+    if (cached?.signature === signature) return cached.profiles;
+    const profiles = buildHighlightIntentProfiles(input, sourceCard, sourceText)
+        .filter(profile => Array.isArray(profile.exactConstraints) && profile.exactConstraints.length > 0);
+    EXACT_HIGHLIGHT_PROFILE_CACHE.set(input, { signature, profiles });
+    return profiles;
+}
+
+function exactHighlightRequirementMatchesCandidateEffect(candidateEffect, constraint) {
+    const requirement = constraint?.requirement || parseExactHighlightRequirement(constraint?.text || '');
+    if (!requirement.text) return true;
+    const effectText = String(candidateEffect?.raw || '');
+    if (exactHighlightOccursInOracle(effectText, requirement)) return true;
+
+    // A trigger-only Exact selection can govern a later split clause (for example, the
+    // outcome after "then"). In that case the parser retains the owning rule as parentRuleText.
+    // Non-trigger outcome text must occur in this specific effect's own raw text.
+    const isTriggerAnchor = isSearchIntentTriggerPhrase(constraint?.text || '');
+    const parentRuleText = isTriggerAnchor ? String(candidateEffect?.parentRuleText || '') : '';
+    return Boolean(parentRuleText && exactHighlightOccursInOracle(parentRuleText, requirement));
+}
+
+function exactHighlightConstraintHasStructuredAspects(highlight) {
+    return Boolean(
+        hasActiveHighlightAspects(highlight?.aspects) ||
+        (!highlight?.aspects && deriveHighlightAspectKind(highlight)?.kind === 'mana' &&
+            /^(?:\s*\{[wubrgc]\}\s*)+$/i.test(String(highlight?.text || '')))
+    );
+}
+
+function matchesExactHighlightEffectBinding(profile, constraint, candidateEffects) {
+    const effects = Array.isArray(candidateEffects) ? candidateEffects : [];
+    if (!effects.length) return true;
+    const anchoredEffects = effects.filter(effect => exactHighlightRequirementMatchesCandidateEffect(effect, constraint));
+    if (!anchoredEffects.length) return false;
+
+    const sourceEffects = profile.recognizedEffects?.length
+        ? profile.recognizedEffects
+        : (Array.isArray(profile.parsedEffects) ? profile.parsedEffects : []);
+    const sourceIsReliable = Boolean(
+        profile.recognizedEffects?.length &&
+        Number(profile.parserConfidence) >= 0.45
+    );
+    const matchingMode = profile.mode === 'exact' ? 'exact' : 'variable';
+
+    for (const candidateEffect of anchoredEffects) {
+        const candidateConfidence = calculateCardFieldConfidence([candidateEffect]).overall || 0;
+        const candidateIsReliable = Boolean(
+            candidateEffect?.action && candidateEffect.action !== 'generic' &&
+            candidateConfidence >= 0.45
+        );
+
+        // If either effect cannot be parsed confidently, retain the text-anchored candidate.
+        // A heuristic parser gap must not become a newly invented hard exclusion.
+        if (!sourceIsReliable || !candidateIsReliable) return true;
+
+        const highlight = constraint.highlight || { text: constraint.text, mode: 'exact' };
+        if (exactHighlightConstraintHasStructuredAspects(highlight)) {
+            const effectCard = { oracle_text: String(candidateEffect.raw || candidateEffect.parentRuleText || '') };
+            if (!highlightAspectEffectMatches(highlight, effectCard).matches) continue;
+        }
+
+        const hasMechanicalPair = sourceEffects.some(sourceEffect =>
+            scoreHighlightEffectMatch(sourceEffect, candidateEffect, matchingMode) >= EXACT_HIGHLIGHT_EFFECT_MATCH_THRESHOLD
+        );
+        if (hasMechanicalPair) return true;
+    }
+    return false;
+}
+
 function matchesExactHighlightConstraints(card, highlights = []) {
     if (!matchesRequiredMechanicGroups(card, highlights)) return false;
     const exactHighlights = (highlights || []).filter(h => h && h.mode === 'exact' && !h.benchmarkIntentOnly && typeof h.text === 'string' && h.text.trim());
     if (!exactHighlights.length) return true;
     const oracle = getCardOracleText(card);
     if (!oracle) return false;
-    return exactHighlights.every(highlight => {
-        if ((hasActiveHighlightAspects(highlight.aspects) || (!highlight.aspects && deriveHighlightAspectKind(highlight)?.kind === 'mana' && /^(?:\s*\{[wubrgc]\}\s*)+$/i.test(highlight.text))) && deriveHighlightAspectKind(highlight)) return highlightAspectEffectMatches(highlight, card).matches;
+
+    // Preserve the existing literal behavior for type-line selections. Oracle mechanics are
+    // checked separately below so a phrase on an unrelated ability cannot satisfy an Exact
+    // highlight for another effect.
+    const typeLineHighlights = exactHighlights.filter(highlight => highlight.field === 'type');
+    for (const highlight of typeLineHighlights) {
         const requirement = parseExactHighlightRequirement(highlight.text);
-        return !requirement.text || exactHighlightOccursInOracle(oracle, requirement);
-    });
+        if (requirement.text && !exactHighlightOccursInOracle(oracle, requirement)) return false;
+    }
+
+    const effectHighlights = exactHighlights.filter(highlight => highlight.field !== 'type');
+    if (!effectHighlights.length) return true;
+    let candidateEffects;
+    try {
+        candidateEffects = getCachedParsedEffects(card, oracle);
+    } catch (error) {
+        // A parse failure is not reliable enough to reject a candidate on a new effect-binding rule.
+        return true;
+    }
+    if (!Array.isArray(candidateEffects) || !candidateEffects.length) return true;
+
+    const profiles = getExactHighlightIntentProfiles(highlights);
+    if (!profiles.length) return true;
+    return profiles.every(profile =>
+        (profile.exactConstraints || []).every(constraint =>
+            matchesExactHighlightEffectBinding(profile, constraint, candidateEffects)
+        )
+    );
 }
 
 function explainExactHighlightFailures(card, highlights = []) {
     const oracle = getCardOracleText(card);
-    return (highlights || []).filter(h => h && h.mode === 'exact' && !h.benchmarkIntentOnly && typeof h.text === 'string' && h.text.trim()).flatMap(h => {
-        if ((hasActiveHighlightAspects(h.aspects) || (!h.aspects && deriveHighlightAspectKind(h)?.kind === 'mana' && /^(?:\s*\{[wubrgc]\}\s*)+$/i.test(h.text))) && deriveHighlightAspectKind(h)) {
-            const result = highlightAspectEffectMatches(h, card);
-            return result.matches ? [] : [{ field: 'highlight aspect', expected: buildHighlightAspectPreview(h), actual: result.reason || 'candidate effect did not satisfy the structured requirement' }];
+    const failures = [];
+    const exactHighlights = (highlights || []).filter(h => h && h.mode === 'exact' && !h.benchmarkIntentOnly && typeof h.text === 'string' && h.text.trim());
+    exactHighlights.filter(h => h.field === 'type').forEach(highlight => {
+        const requirement = parseExactHighlightRequirement(highlight.text);
+        if (requirement.text && !exactHighlightOccursInOracle(oracle, requirement)) {
+            failures.push({
+                field: 'exact highlight',
+                expected: highlight.text.trim(),
+                actual: requirement.requiresSentenceTerminalPeriod ? 'sentence boundary missing' : 'text not present in candidate Oracle text'
+            });
         }
-        const requirement = parseExactHighlightRequirement(h.text);
-        if (!requirement.text || exactHighlightOccursInOracle(oracle, requirement)) return [];
-        return [{ field: 'exact highlight', expected: h.text.trim(), actual: requirement.requiresSentenceTerminalPeriod ? 'sentence boundary missing' : 'text not present in candidate Oracle text' }];
     });
-}
 
+    const effectHighlights = exactHighlights.filter(h => h.field !== 'type');
+    if (!effectHighlights.length) return failures;
+    let candidateEffects = [];
+    try { candidateEffects = getCachedParsedEffects(card, oracle); } catch (error) { /* explain below as an association miss */ }
+    const profiles = getExactHighlightIntentProfiles(highlights);
+    for (const profile of profiles) {
+        for (const constraint of profile.exactConstraints || []) {
+            if (matchesExactHighlightEffectBinding(profile, constraint, candidateEffects)) continue;
+            const requirement = constraint.requirement || parseExactHighlightRequirement(constraint.text);
+            const appearsSomewhere = requirement.text && exactHighlightOccursInOracle(oracle, requirement);
+            failures.push({
+                field: 'exact highlight effect binding',
+                expected: String(constraint.text || '').trim(),
+                actual: appearsSomewhere
+                    ? 'text appears on the card, but not on the candidate effect that matches the highlighted mechanic'
+                    : (requirement.requiresSentenceTerminalPeriod ? 'sentence boundary missing within the candidate effect' : 'text not present within a candidate effect')
+            });
+        }
+    }
+    return failures;
+}
 function calculateFuzzyTextMatch(sourceText, targetText) {
     if (!sourceText || !targetText) return 0;
 
