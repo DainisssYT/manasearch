@@ -258,6 +258,27 @@ check('highlight intent modes, conservative dependent context, and confidence pr
   assert.match(html, /id="preference-search-intent-detail"/);
   assert.match(app, /Parser confidence:/);
 });
+
+check('advanced mechanic groups default to Preferred and expose accessible grouping plus conservative Required matching', () => {
+  assert.match(app, /function getHighlightMechanicGroups\(/);
+  assert.match(app, /function mergeHighlightMechanicGroupMembership\(/);
+  assert.match(app, /function renderHighlightMechanicGroups\(/);
+  assert.match(app, /chip\.addEventListener\('dragstart'/);
+  assert.match(app, /chip\.addEventListener\('drop'/);
+  assert.match(app, /textContent = 'Group with:'/);
+  assert.match(app, /Prefer together \(default\)/);
+  assert.match(app, /Require all mechanics/);
+  assert.match(app, /mechanicGroupRelationship: normalizeHighlightMechanicGroupRelationship/);
+  assert.match(app, /function aggregateHighlightIntentGroupScores\(/);
+  assert.match(app, /group\.relationship === 'required'\) result\.push\(Math\.min\(\.\.\.group\.scores\)\)/);
+  assert.match(app, /function matchesRequiredMechanicGroups\(/);
+  assert.match(app, /if \(!String\(oracle \|\| ''\)\.trim\(\)\) return true/);
+  assert.match(app, /catch \(error\) \{ return true; \}/);
+  assert.match(app, /candidateConfidence < 0\.45/);
+  assert.match(app, /profile\.parserConfidence\) \|\| 0\) < 0\.45/);
+  assert.match(app, /if \(!matchesRequiredMechanicGroups\(card, highlights\)\) return false/);
+});
+
 const failed = checks.filter(x => !x.pass);
 for (const result of checks) console.log(`${result.pass ? 'PASS' : 'FAIL'} ${result.name}${result.error ? ` — ${result.error}` : ''}`);
 console.log(`\nStatic regression checks: ${checks.length - failed.length}/${checks.length} passed.`);
