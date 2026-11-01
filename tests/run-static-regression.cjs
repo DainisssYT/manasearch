@@ -283,6 +283,19 @@ check('advanced mechanic groups remain collapsed until the user opens them', () 
   assert.match(app, /panel\.open = false/);
 });
 
+
+check('Exact highlights bind literal text to the same parsed candidate effect used for mechanical matching', () => {
+  assert.match(app, /exactConstraints,/);
+  assert.match(app, /function exactHighlightRequirementMatchesCandidateEffect\(/);
+  assert.match(app, /function matchesExactHighlightEffectBinding\(/);
+  assert.match(app, /scoreHighlightEffectMatch\(sourceEffect, candidateEffect, matchingMode\) >= EXACT_HIGHLIGHT_EFFECT_MATCH_THRESHOLD/);
+  assert.match(app, /function getExactHighlightIntentProfiles\(/);
+  assert.match(app, /text appears on the card, but not on the candidate effect that matches the highlighted mechanic/);
+  assert.doesNotMatch(app, /return !requirement\\.text \\|\\| exactHighlightOccursInOracle\\(oracle, requirement\\)/,
+    'Exact Oracle highlights must not use a card-wide literal occurrence as their hard-filter decision');
+  assert.match(app, /if \\(!sourceIsReliable \\|\\| !candidateIsReliable\\) return true/);
+});
+
 const failed = checks.filter(x => !x.pass);
 for (const result of checks) console.log(`${result.pass ? 'PASS' : 'FAIL'} ${result.name}${result.error ? ` — ${result.error}` : ''}`);
 console.log(`\nStatic regression checks: ${checks.length - failed.length}/${checks.length} passed.`);
