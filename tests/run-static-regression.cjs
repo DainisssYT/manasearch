@@ -291,9 +291,9 @@ check('Exact highlights bind literal text to the same parsed candidate effect us
   assert.match(app, /scoreHighlightEffectMatch\(sourceEffect, candidateEffect, matchingMode\) >= EXACT_HIGHLIGHT_EFFECT_MATCH_THRESHOLD/);
   assert.match(app, /function getExactHighlightIntentProfiles\(/);
   assert.match(app, /text appears on the card, but not on the candidate effect that matches the highlighted mechanic/);
-  assert.doesNotMatch(app, /return !requirement\\.text \\|\\| exactHighlightOccursInOracle\\(oracle, requirement\\)/,
+  assert.doesNotMatch(app, /return !requirement\.text \|\| exactHighlightOccursInOracle\(oracle, requirement\)/,
     'Exact Oracle highlights must not use a card-wide literal occurrence as their hard-filter decision');
-  assert.match(app, /if \\(!sourceIsReliable \\|\\| !candidateIsReliable\\) return true/);
+  assert.match(app, /if \(!sourceIsReliable \|\| !candidateIsReliable\) return true/);
 });
 
 const failed = checks.filter(x => !x.pass);
