@@ -159,6 +159,61 @@ test('dependent adjacent Oracle sentences are inferred as context in either sele
   assert.match(sandbox.results[1].text, /You draw a card/i);
 });
 
+
+test('highlight mechanic groups merge, retain preferred defaults, and dissolve when one member is removed', () => {
+  const helperNames = [
+    'normalizeHighlightMechanicGroupRelationship',
+    'getHighlightMechanicGroups',
+    'normalizeHighlightMechanicGroupMembership',
+    'mergeHighlightMechanicGroupMembership',
+    'setHighlightMechanicGroupRelationshipInHighlights',
+    'removeHighlightFromMechanicGroupState'
+  ];
+  const blocks = helperNames.map(name => extractFunction(name)).join('\\n');
+  const sandbox = { result: null };
+  const script = blocks + `
+    const highlights = [
+      { text: 'draw a card', field: 'oracle', mode: 'variable' },
+      { text: 'create a token', field: 'oracle', mode: 'variable' },
+      { text: 'gain life', field: 'oracle', mode: 'variable' }
+    ];
+    const preferred = mergeHighlightMechanicGroupMembership(highlights, 0, 1, 'group-1');
+    const initialGroups = getHighlightMechanicGroups(preferred);
+    const required = setHighlightMechanicGroupRelationshipInHighlights(preferred, 'group-1', 'required');
+    const requiredGroups = getHighlightMechanicGroups(required);
+    const remaining = removeHighlightFromMechanicGroupState(required, 1);
+    this.result = { preferred: initialGroups[0]?.relationship, required: requiredGroups[0]?.relationship,
+      requiredMembers: requiredGroups[0]?.members.length, remainingGroups: getHighlightMechanicGroups(remaining).length,
+      remainingHasGroupId: Boolean(remaining[0]?.mechanicGroupId) };
+  `;
+  vm.runInNewContext(script, sandbox);
+  assert.equal(sandbox.result.preferred, 'preferred');
+  assert.equal(sandbox.result.required, 'required');
+  assert.equal(sandbox.result.requiredMembers, 2);
+  assert.equal(sandbox.result.remainingGroups, 0);
+  assert.equal(sandbox.result.remainingHasGroupId, false);
+});
+
+test('preferred mechanic groups aggregate as a ranking preference while required groups use weakest-member coverage', () => {
+  const blocks = extractFunction('aggregateHighlightIntentGroupScores');
+  const sandbox = { result: null };
+  const script = blocks + `
+    const profiles = [
+      { mechanicGroupMemberships: [{ id: 'preferred', relationship: 'preferred' }] },
+      { mechanicGroupMemberships: [{ id: 'preferred', relationship: 'preferred' }] },
+      { mechanicGroupMemberships: [{ id: 'required', relationship: 'required' }] },
+      { mechanicGroupMemberships: [{ id: 'required', relationship: 'required' }] },
+      {}
+    ];
+    this.result = aggregateHighlightIntentGroupScores(profiles, [0.8, 0.2, 0.9, 0.1, 0.6]);
+  `;
+  vm.runInNewContext(script, sandbox);
+  assert.equal(sandbox.result.length, 3);
+  assert.ok(Math.abs(sandbox.result[0] - 0.54) < 1e-9, 'expected preferred co-occurrence boost, got ' + sandbox.result[0]);
+  assert.equal(sandbox.result[1], 0.1);
+  assert.equal(sandbox.result[2], 0.6);
+});
+
 const failed = cases.filter(c => !c.pass);
 for (const c of cases) console.log(`${c.pass ? 'PASS' : 'FAIL'} ${c.name}${c.error ? ` — ${c.error}` : ''}`);
 console.log(`\nCore mechanical unit checks: ${cases.length - failed.length}/${cases.length} passed.`);
