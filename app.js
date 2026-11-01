@@ -5264,6 +5264,8 @@ function renderHighlightEditor(idx) {
     editor.appendChild(modeRow);
     if (aspectControls) editor.appendChild(aspectControls);
     editor.appendChild(connectRow);
+    editor.appendChild(mechanicGroupRow);
+    editor.appendChild(mechanicGroupHelp);
     editor.appendChild(help);
     editor.appendChild(actions);
     return editor;
