@@ -244,7 +244,7 @@ test('Exact highlight text must be on the same candidate effect that matches the
     deriveHighlightAspectKind: () => null,
     highlightAspectEffectMatches: () => ({ matches: true })
   };
-  const script = blocks + '\n' + [
+  const script = "const EXACT_HIGHLIGHT_EFFECT_MATCH_THRESHOLD = 0.42;\n" + blocks + '\n' + [
     "const profile = { mode: 'exact', parserConfidence: 0.9, recognizedEffects: [{ action: 'create_token' }], parsedEffects: [{ action: 'create_token' }] };",
     "const constraint = { text: 'draw a card', requirement: { text: 'draw a card', requiresSentenceTerminalPeriod: false } };",
     "const unrelatedPhrase = matchesExactHighlightEffectBinding(profile, constraint, [",
