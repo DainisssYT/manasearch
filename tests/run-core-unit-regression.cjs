@@ -271,6 +271,27 @@ test('Exact highlight text must be on the same candidate effect that matches the
   assert.equal(sandbox.result.triggerParentContext, true, 'an Exact trigger can bind to its split outcome through parent-rule context');
 });
 
+test('semantic worker query envelopes are unwrapped into arrays without breaking fallback arrays', () => {
+  const normalizer = sliceBetween(
+    'function normalizeSemanticWorkerQueryResults(',
+    'async function findFullSemanticMatches('
+  );
+  const sandbox = {};
+  vm.runInNewContext(normalizer + `
+    this.results = [
+      normalizeSemanticWorkerQueryResults({ type: 'result', results: [{ name: 'Thought Vessel', similarity: 0.82 }] }),
+      normalizeSemanticWorkerQueryResults([{ name: 'Mind Stone', similarity: 0.78 }]),
+      normalizeSemanticWorkerQueryResults({ type: 'result', results: { unexpected: true } }),
+      normalizeSemanticWorkerQueryResults(null)
+    ];
+  `, sandbox);
+  assert.equal(Array.isArray(sandbox.results[0]), true);
+  assert.equal(JSON.stringify(sandbox.results[0]), JSON.stringify([{ name: 'Thought Vessel', similarity: 0.82 }]));
+  assert.equal(JSON.stringify(sandbox.results[1]), JSON.stringify([{ name: 'Mind Stone', similarity: 0.78 }]));
+  assert.deepEqual(Array.from(sandbox.results[2]), []);
+  assert.deepEqual(Array.from(sandbox.results[3]), []);
+});
+
 const failed = cases.filter(c => !c.pass);
 for (const c of cases) console.log(`${c.pass ? 'PASS' : 'FAIL'} ${c.name}${c.error ? ` — ${c.error}` : ''}`);
 console.log(`\nCore mechanical unit checks: ${cases.length - failed.length}/${cases.length} passed.`);
