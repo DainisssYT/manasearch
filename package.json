@@ -3,7 +3,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build-static-data": "node scripts/build-static-data.mjs"
+    "build-static-data": "node scripts/build-static-data.mjs",
+    "test": "node --test"
   },
   "dependencies": {
     "@xenova/transformers": "2.16.0"
