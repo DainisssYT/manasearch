@@ -26463,7 +26463,7 @@ function buildFunctionalRetrievalQueries(sourceCard, parsedEffects, excludeSelf,
 
 function buildNoHighlightSemanticIntentText(sourceCard, sourceText, parsedEffects) {
     const full = normalizeOracleForEmbedding(sourceText, sourceCard?.name || '');
-    if (!full) return '';
+    if (!full) return buildSourceSemanticQueryTexts(sourceCard, '').join('. ');
     const effects = (parsedEffects || []).filter(e => e?.canonical).slice().sort((a,b)=>(Number(b.importance)||0)-(Number(a.importance)||0));
     const canonical = getCanonicalFunctions(effects).slice(0, 4);
     const primary = canonical[0] ? canonicalFunctionToText([canonical[0]]) : '';
@@ -26480,7 +26480,9 @@ function buildSourceSemanticQueryTexts(sourceCard, fallbackText, maxWords = 96) 
             oracle_text: getCurrentSourceOracleText(sourceCard) || fallbackText || '',
             mana_cost: sourceCard?.mana_cost,
             type_line: sourceCard?.type_line,
-            colors: sourceCard?.colors
+            colors: sourceCard?.colors,
+            hand_modifier: sourceCard?.hand_modifier,
+            life_modifier: sourceCard?.life_modifier
         }];
     if (Array.isArray(sourceCard?.card_faces) && sourceCard.card_faces.length && String(sourceCard.oracle_text || '').trim()) {
         const faceOracle = faces.map(face => String(face?.oracle_text || '')).filter(Boolean).join(' ');
@@ -26520,6 +26522,8 @@ function buildSourceSemanticQueryTexts(sourceCard, fallbackText, maxWords = 96) 
         if (face?.toughness) contextParts.push('toughness ' + face.toughness);
         if (face?.loyalty) contextParts.push('loyalty ' + face.loyalty);
         if (face?.defense) contextParts.push('defense ' + face.defense);
+        if (face?.hand_modifier) contextParts.push('hand modifier ' + face.hand_modifier);
+        if (face?.life_modifier) contextParts.push('life modifier ' + face.life_modifier);
         const context = contextParts.join('. ');
 
         const addDocument = abilityText => {
@@ -26529,6 +26533,10 @@ function buildSourceSemanticQueryTexts(sourceCard, fallbackText, maxWords = 96) 
                 documents.push(normalized);
             }
         };
+        if (!lines.length) {
+            addDocument('card profile');
+            continue;
+        }
         for (const line of lines) {
             const words = line.split(/\s+/);
             if (words.length <= maxWords) {
@@ -28180,7 +28188,7 @@ async function findSimilarCards() {
                 const normalizedFullSourceOracle = normalizeOracleForEmbedding(getCurrentSourceOracleText(currentSourceCard), currentSourceCard.name);
                 const canUseIndexedSourceVector = false; // multi-row semantic index: the first row is only one ability, not a whole-card vector
                 const indexedSourceVector = canUseIndexedSourceVector ? getStaticSemanticVectorAsFloat32(currentSourceCard, index) : null;
-                const oracleVector = indexedSourceVector || await getCachedEmbedding(normalizedOracleTarget, ex);
+                const oracleVector = indexedSourceVector || (normalizedOracleTarget ? await getCachedEmbedding(normalizedOracleTarget, ex) : null);
                 if (!semanticRetrievalVector && !oracleVector) return { index, queryVector: null, semanticRetrievalVector: null, matches: [], hydrated: [] };
 
                 const limit = benchmarkUseLocalOracleCorpus
@@ -28194,7 +28202,8 @@ async function findSimilarCards() {
                 // intent query and protects later abilities from input-token truncation.
                 if (!hasHighlight) {
                     const abilityTexts = buildSourceSemanticQueryTexts(currentSourceCard, semanticIntentTextForScoring);
-                    const abilityVectors = await Promise.all(abilityTexts.map(text => getCachedEmbedding(text, ex)));
+                    const distinctAbilityTexts = abilityTexts.length === 1 && abilityTexts[0] === queryText ? [] : abilityTexts;
+                    const abilityVectors = await Promise.all(distinctAbilityTexts.map(text => getCachedEmbedding(text, ex)));
                     const abilityLimit = Math.max(12, Math.ceil(limit / Math.max(1, abilityVectors.length)));
                     abilityVectors.forEach((vector, abilityIndex) => {
                         if (vector) queryJobs.push({
