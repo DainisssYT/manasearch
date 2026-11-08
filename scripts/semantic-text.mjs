@@ -95,6 +95,8 @@ function faceDescriptors(card) {
       toughness: face?.toughness || '',
       loyalty: face?.loyalty || '',
       defense: face?.defense || '',
+      handModifier: face?.hand_modifier || '',
+      lifeModifier: face?.life_modifier || '',
       oracleText: face?.oracle_text || '',
       keywords: Array.isArray(card.keywords) ? card.keywords.join(' ') : ''
     }));
@@ -113,6 +115,8 @@ function faceDescriptors(card) {
         toughness: card.toughness || '',
         loyalty: card.loyalty || '',
         defense: card.defense || '',
+        handModifier: card.hand_modifier || '',
+        lifeModifier: card.life_modifier || '',
         oracleText: wholeOracle,
         keywords: Array.isArray(card.keywords) ? card.keywords.join(' ') : ''
       });
@@ -129,6 +133,8 @@ function faceDescriptors(card) {
     toughness: card?.toughness || '',
     loyalty: card?.loyalty || '',
     defense: card?.defense || '',
+    handModifier: card?.hand_modifier || '',
+    lifeModifier: card?.life_modifier || '',
     oracleText: card?.oracle_text || '',
     keywords: Array.isArray(card?.keywords) ? card.keywords.join(' ') : ''
   }];
@@ -143,7 +149,6 @@ export function buildSemanticDocuments(cards, options = {}) {
     const faces = faceDescriptors(card);
     for (const face of faces) {
       const abilities = splitAbilityText(face.oracleText, maxWords, overlapWords);
-      if (!abilities.length) continue;
       const context = [
         face.name && `card face ${face.name}`,
         face.typeLine && `type ${face.typeLine}`,
@@ -157,8 +162,15 @@ export function buildSemanticDocuments(cards, options = {}) {
         face.power && `power ${face.power}`,
         face.toughness && `toughness ${face.toughness}`,
         face.loyalty && `loyalty ${face.loyalty}`,
-        face.defense && `defense ${face.defense}`
+        face.defense && `defense ${face.defense}`,
+        face.handModifier && `hand modifier ${face.handModifier}`,
+        face.lifeModifier && `life modifier ${face.lifeModifier}`
       ].filter(Boolean).join('. ');
+      if (!abilities.length) {
+        const profile = normalizeOracleForEmbedding(`card profile ${context}`, face.name || card.name);
+        if (profile) documents.push({ name: card.name, text: profile, face: face.name, abilityIndex: -1, kind: 'profile' });
+        continue;
+      }
       for (let i = 0; i < abilities.length; i++) {
         const normalized = normalizeOracleForEmbedding(`${context}. ability ${abilities[i]}`, face.name || card.name);
         if (normalized) documents.push({ name: card.name, text: normalized, face: face.name, abilityIndex: i });
