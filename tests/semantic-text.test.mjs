@@ -40,3 +40,16 @@ test('long abilities are chunked with overlap instead of being discarded', () =>
   assert.match(docs[0].text, /ruleword0/);
   assert.ok(docs.some(doc => /ruleword409/.test(doc.text)));
 });
+
+test('card-level Oracle text is retained when face records omit it', () => {
+  const docs = buildSemanticDocuments([{
+    name: 'Fallback Transform',
+    oracle_text: 'Whenever this card attacks, draw a card.',
+    card_faces: [
+      { name: 'Front', type_line: 'Creature', oracle_text: '' },
+      { name: 'Back', type_line: 'Enchantment', oracle_text: '' }
+    ]
+  }]);
+  assert.ok(docs.length > 0);
+  assert.ok(docs.some(doc => /attacks/.test(doc.text) && /draw a card/.test(doc.text)));
+});
