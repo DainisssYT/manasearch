@@ -205,8 +205,14 @@ function calibrateSemanticBaseline(vectors, count, dim, normSquares) {
     const vectorCount = Math.min(96, count);
     if (vectorCount < 12) return 0.30;
     const sample = [];
+    // Spread calibration rows over the entire index. With per-ability documents, adjacent rows
+    // can belong to the same card; sampling only the first 96 rows overweights early cards and
+    // makes the estimated background cosine artificially high.
     for (let i = 0; i < vectorCount; i++) {
-        const row = vectors.subarray(i * dim, (i + 1) * dim);
+        const rowIndex = vectorCount === count
+            ? i
+            : Math.floor(i * (count - 1) / (vectorCount - 1));
+        const row = vectors.subarray(rowIndex * dim, (rowIndex + 1) * dim);
         const f = new Float32Array(dim);
         for (let j = 0; j < dim; j++) f[j] = row[j] / 127;
         sample.push(f);
