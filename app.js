@@ -1,7 +1,11 @@
 /* ManaSearch build 20261108-131 */
 // ManaSearch deployment build marker. Bump this whenever app.js changes so cached-module issues are easy to diagnose.
-const MANASEARCH_APP_BUILD = '20261108-131';
+const MANASEARCH_APP_BUILD = '20261108-132';
 console.info(`[ManaSearch] app.js build ${MANASEARCH_APP_BUILD}`);
+
+// The source-query and static-index builders share one representation so both sides
+// embed the same normalized face/ability/metadata documents.
+import { buildSemanticDocuments, mergeSemanticRetrievalRanks } from './scripts/semantic-text.mjs';
 
 // State Management
 let currentSourceCard = null;
@@ -16721,7 +16725,7 @@ let semanticCosineBaselineReady = false;
 const STATIC_CARD_CORPUS_FILENAME = 'cards.bin';
 const STATIC_CARD_CORPUS_VERSION = 1;
 const STATIC_CARD_CORPUS_MAGIC = 'MSCARD1G';
-const STATIC_CARD_CORPUS_CACHE_VERSION = '20261108-80';
+const STATIC_CARD_CORPUS_CACHE_VERSION = '20261108-81';
 const STATIC_DATA_META_FILENAME = 'static-data-meta.json';
 
 // A failed/stalled static asset request must not leave the initial search status spinning forever.
@@ -25365,6 +25369,17 @@ async function scoreCardBatch({
             signalParts.forEach(part => { part[1] *= 0.92; });
             signalParts.push([methodSignal, 0.08]);
         }
+        // A small, bounded retrieval-consensus channel rewards cards found by several
+        // independent semantic views and cards matching multiple source abilities. It is
+        // supporting evidence only: mechanical/function matching remains the main ranking basis.
+        const semanticRrfSignal = Math.max(0, Math.min(1, Number(card._semanticRetrievalRrfScoreRatio) || 0));
+        const semanticAbilityCoverageSignal = Math.max(0, Math.min(1, Number(card._semanticAbilityCoverageRatio) || 0));
+        const semanticRetrievalConsensus = semanticRrfSignal * 0.60 + semanticAbilityCoverageSignal * 0.40;
+        if (semanticRrfSignal > 0 || semanticAbilityCoverageSignal > 0) {
+            const retrievalWeight = 0.035;
+            signalParts.forEach(part => { part[1] *= (1 - retrievalWeight); });
+            signalParts.push([semanticRetrievalConsensus, retrievalWeight]);
+        }
         const refinementWeightTotal = signalParts.reduce((sum, part) => sum + part[1], 0) || 1;
         const refinementSignal = Math.max(0, Math.min(1,
             signalParts.reduce((sum, part) => sum + Math.max(0, Math.min(1, Number(part[0]) || 0)) * part[1], 0) / refinementWeightTotal
@@ -25377,7 +25392,7 @@ async function scoreCardBatch({
             ? (1 - (0.50 * (1 - relatedConsensus.score) * Math.max(0, Math.min(1, relatedIntentProfile.confidence))))
             : 1;
         card.relatedConsensusGate = relatedConsensusGate;
-        card.rankingEvidence = { mechanical: structural, mechanicalTrusted: structuralTrusted, mechanicalConfidence, rawSemantic, functionSemantic: functionSemanticAugmented, roleSemantic, highlightIntent: Number(card.highlightIntentScore) || 0, highlightIntentWeight: highlightBlend.weight, explicitUserIntent: highlightBlend.explicitUserIntent, baseChannelScore, effectCoverage, balancedCoverage, primaryEffectMatch, rankingRefinementSignal: refinementSignal, modalModeSimilarity: modalSignal, evidenceAgreement: agreement, retrievalSimilarity: Number(card._semanticRetrievalSimilarity) || 0, rankingIntent: rankingIntent.kind, rankingIntentRole: rankingIntent.role || null, rankingIntentConfidence: rankingIntent.confidence, relatedConsensus: relatedConsensus ? { score: relatedConsensus.score, functionMatch: relatedConsensus.functionMatch, quantityFit: relatedConsensus.quantityFit, roleFit: relatedConsensus.roleFit, artifactFit: relatedConsensus.artifactFit, dominantFunction: relatedIntentProfile?.dominantFunction || null, targetQuantity: relatedIntentProfile?.numericTarget ?? null, confidence: relatedIntentProfile?.confidence || 0 } : null };
+        card.rankingEvidence = { mechanical: structural, mechanicalTrusted: structuralTrusted, mechanicalConfidence, rawSemantic, functionSemantic: functionSemanticAugmented, roleSemantic, highlightIntent: Number(card.highlightIntentScore) || 0, highlightIntentWeight: highlightBlend.weight, explicitUserIntent: highlightBlend.explicitUserIntent, baseChannelScore, effectCoverage, balancedCoverage, primaryEffectMatch, rankingRefinementSignal: refinementSignal, modalModeSimilarity: modalSignal, evidenceAgreement: agreement, retrievalSimilarity: Number(card._semanticRetrievalSimilarity) || 0, semanticRrfAgreement: semanticRrfSignal, semanticAbilityCoverage: semanticAbilityCoverageSignal, semanticRetrievalConsensus, rankingIntent: rankingIntent.kind, rankingIntentRole: rankingIntent.role || null, rankingIntentConfidence: rankingIntent.confidence, relatedConsensus: relatedConsensus ? { score: relatedConsensus.score, functionMatch: relatedConsensus.functionMatch, quantityFit: relatedConsensus.quantityFit, roleFit: relatedConsensus.roleFit, artifactFit: relatedConsensus.artifactFit, dominantFunction: relatedIntentProfile?.dominantFunction || null, targetQuantity: relatedIntentProfile?.numericTarget ?? null, confidence: relatedIntentProfile?.confidence || 0 } : null };
         const consensusAdjustment = relatedConsensus ? relatedConsensusDelta * 0.22 : 0;
         const relationshipMismatch = Math.max(0, Math.min(1, Number(card.mechanicalBreakdown?.relationshipMismatch) || 0));
         const strategicRoleAnchored = roleAnchoredHighlight || shouldUseStrategicRoleAnchor(
@@ -26492,85 +26507,21 @@ function buildNoHighlightSemanticIntentText(sourceCard, sourceText, parsedEffect
 }
 
 
-function buildSourceSemanticQueryTexts(sourceCard, fallbackText, maxWords = 96) {
-    let faces = Array.isArray(sourceCard?.card_faces) && sourceCard.card_faces.length
-        ? sourceCard.card_faces
-        : [{
-            name: sourceCard?.name || '',
-            oracle_text: getCurrentSourceOracleText(sourceCard) || fallbackText || '',
-            mana_cost: sourceCard?.mana_cost,
-            type_line: sourceCard?.type_line,
-            colors: sourceCard?.colors,
-            hand_modifier: sourceCard?.hand_modifier,
-            life_modifier: sourceCard?.life_modifier
-        }];
-    if (Array.isArray(sourceCard?.card_faces) && sourceCard.card_faces.length && String(sourceCard.oracle_text || '').trim()) {
-        const faceOracle = faces.map(face => String(face?.oracle_text || '')).filter(Boolean).join(' ');
-        const normalizedWhole = String(sourceCard.oracle_text).replace(/\s+/g, ' ').trim();
-        const normalizedFaces = faceOracle.replace(/\s+/g, ' ').trim();
-        if (normalizedWhole && normalizedWhole !== normalizedFaces) {
-            faces = [...faces, {
-                name: sourceCard.name || '',
-                oracle_text: sourceCard.oracle_text,
-                mana_cost: sourceCard.mana_cost,
-                type_line: sourceCard.type_line,
-                colors: sourceCard.colors,
-                color_indicator: ''
-            }];
-        }
+function buildSourceSemanticQueryTexts(sourceCard, fallbackText, maxWords = 32) {
+    const source = sourceCard && typeof sourceCard === 'object' ? { ...sourceCard } : {};
+    const faceText = Array.isArray(source.card_faces)
+        ? source.card_faces.map(face => String(face?.oracle_text || '')).join(' ').trim()
+        : '';
+    if (!String(source.oracle_text || '').trim() && !faceText && String(fallbackText || '').trim()) {
+        source.oracle_text = String(fallbackText);
     }
-    const cardKeywords = Array.isArray(sourceCard?.keywords) ? sourceCard.keywords.join(' ') : '';
-    const colorIdentity = Array.isArray(sourceCard?.color_identity) ? sourceCard.color_identity.join(' ') : '';
-    const producedMana = Array.isArray(sourceCard?.produced_mana) ? sourceCard.produced_mana.join(' ') : '';
-    const documents = [];
-    const seen = new Set();
-
-    for (const face of faces) {
-        const faceText = String(face?.oracle_text || '');
-        const lines = faceText.split(/\n+/).map(line => line.trim()).filter(Boolean);
-        const contextParts = [];
-        if (face?.name) contextParts.push('card face ' + face.name);
-        if (sourceCard?.layout) contextParts.push('layout ' + sourceCard.layout);
-        if (face?.type_line) contextParts.push('type ' + face.type_line);
-        if (face?.mana_cost) contextParts.push('mana cost ' + face.mana_cost);
-        if (Array.isArray(face?.colors) && face.colors.length) contextParts.push('colors ' + face.colors.join(' '));
-        if (face?.color_indicator) contextParts.push('color indicator ' + face.color_indicator);
-        if (cardKeywords) contextParts.push('keywords ' + cardKeywords);
-        if (colorIdentity) contextParts.push('color identity ' + colorIdentity);
-        if (producedMana) contextParts.push('produces ' + producedMana + ' mana');
-        if (Number.isFinite(Number(sourceCard?.cmc))) contextParts.push('mana value ' + sourceCard.cmc);
-        if (face?.power) contextParts.push('power ' + face.power);
-        if (face?.toughness) contextParts.push('toughness ' + face.toughness);
-        if (face?.loyalty) contextParts.push('loyalty ' + face.loyalty);
-        if (face?.defense) contextParts.push('defense ' + face.defense);
-        if (face?.hand_modifier) contextParts.push('hand modifier ' + face.hand_modifier);
-        if (face?.life_modifier) contextParts.push('life modifier ' + face.life_modifier);
-        const context = contextParts.join('. ');
-
-        const addDocument = abilityText => {
-            const normalized = normalizeOracleForEmbedding(context + '. ability ' + abilityText, face?.name || sourceCard?.name || '');
-            if (normalized && !seen.has(normalized)) {
-                seen.add(normalized);
-                documents.push(normalized);
-            }
-        };
-        if (!lines.length) {
-            addDocument('card profile');
-            continue;
-        }
-        for (const line of lines) {
-            const words = line.split(/\s+/);
-            if (words.length <= maxWords) {
-                addDocument(line);
-                continue;
-            }
-            const overlap = 24;
-            for (let offset = 0; offset < words.length; offset += maxWords - overlap) {
-                addDocument(words.slice(offset, Math.min(words.length, offset + maxWords)).join(' '));
-            }
-        }
-    }
-    return documents.length ? documents : (fallbackText ? [fallbackText] : []);
+    // This is deliberately the same helper and split configuration used by the static
+    // index builder. A source face, ability, or metadata field therefore receives the same
+    // semantic representation as the corresponding candidate-side document.
+    return buildSemanticDocuments([source], {
+        maxWords: Math.max(16, Number(maxWords) || 32),
+        overlapWords: 8
+    }).map(document => document.text).filter(Boolean);
 }
 
 function getSearchIntent(sourceCard, highlights = []) {
@@ -28236,14 +28187,11 @@ async function findSimilarCards() {
                     });
                 }
                 const querySets = await Promise.all(queryJobs.map(q => findFullSemanticMatches(index, q.vector, currentSourceCard.name, q.limit, q.threshold)));
-                const mergedMatches = new Map();
-                querySets.forEach((set, qi) => (set || []).forEach(item => {
-                    const key = normalizeCardNameForIdentity(item.name);
-                    const prev = mergedMatches.get(key);
-                    const view = queryJobs[qi].view;
-                    mergedMatches.set(key, prev ? { ...prev, similarity: Math.max(prev.similarity || 0, item.similarity || 0), _semanticViews: [...new Set([...(prev._semanticViews || []), view])] } : { ...item, _semanticViews: [view] });
-                }));
-                const matches = Array.from(mergedMatches.values()).sort((a,b)=>(b.similarity||0)-(a.similarity||0)).slice(0, limit);
+                const matches = mergeSemanticRetrievalRanks(
+                    querySets,
+                    queryJobs.map(query => query.view),
+                    { rrfK: 60 }
+                ).slice(0, limit);
                 const exactMatches = benchmarkUseLocalOracleCorpus && hasHighlight
                     ? await findFullSemanticExactMatches(index, searchHighlightsSnapshot, currentSourceCard.name, 1024)
                     : [];
@@ -28267,17 +28215,27 @@ async function findSimilarCards() {
                             .map(x => ({
                                 ...x.card,
                                 _semanticRetrievalSimilarity: x.similarity || 0,
+                                _semanticRetrievalRrfScoreRatio: x._semanticRrfScoreRatio || 0,
+                                _semanticAbilityCoverage: x._semanticAbilityCoverage || 0,
+                                _semanticAbilityTotal: x._semanticAbilityTotal || 0,
+                                _semanticAbilityCoverageRatio: x._semanticAbilityCoverageRatio || 0,
+                                _semanticRetrievalViews: x._semanticViews || [],
                                 _semanticRetrievalSource: exactKeys.has(normalizeCardNameForIdentity(x.name))
                                     ? 'benchmark-full-index-exact'
                                     : 'benchmark-full-index'
                             }));
                     } else {
-                        const scoreByName = new Map(Array.from(byName.values()).map(x => [normalizeCardNameForIdentity(x.name), x.similarity]));
+                        const evidenceByName = new Map(Array.from(byName.values()).map(item => [normalizeCardNameForIdentity(item.name), item]));
                         const localCards = Array.from(byName.values()).map(item => {
                             const card = getStaticCardByName(item.name);
                             return card ? {
                                 ...card,
                                 _semanticRetrievalSimilarity: item.similarity || 0,
+                                _semanticRetrievalRrfScoreRatio: item._semanticRrfScoreRatio || 0,
+                                _semanticAbilityCoverage: item._semanticAbilityCoverage || 0,
+                                _semanticAbilityTotal: item._semanticAbilityTotal || 0,
+                                _semanticAbilityCoverageRatio: item._semanticAbilityCoverageRatio || 0,
+                                _semanticRetrievalViews: item._semanticViews || [],
                                 _semanticRetrievalSource: 'full-index-local-corpus'
                             } : null;
                         }).filter(Boolean);
@@ -28285,11 +28243,19 @@ async function findSimilarCards() {
                         const missingNames = Array.from(byName.values()).filter(item => !localNames.has(normalizeCardNameForIdentity(item.name)));
                         if (missingNames.length) {
                             const fetched = await hydrateCardsFromLocalCorpus(missingNames.map(x => ({ name: x.name })));
-                            localCards.push(...(fetched || []).map(card => ({
-                                ...card,
-                                _semanticRetrievalSimilarity: scoreByName.get(normalizeCardNameForIdentity(card.name)) || 0,
-                                _semanticRetrievalSource: 'full-index-local-corpus-fallback'
-                            })));
+                            localCards.push(...(fetched || []).map(card => {
+                                const evidence = evidenceByName.get(normalizeCardNameForIdentity(card.name));
+                                return {
+                                    ...card,
+                                    _semanticRetrievalSimilarity: evidence?.similarity || 0,
+                                    _semanticRetrievalRrfScoreRatio: evidence?._semanticRrfScoreRatio || 0,
+                                    _semanticAbilityCoverage: evidence?._semanticAbilityCoverage || 0,
+                                    _semanticAbilityTotal: evidence?._semanticAbilityTotal || 0,
+                                    _semanticAbilityCoverageRatio: evidence?._semanticAbilityCoverageRatio || 0,
+                                    _semanticRetrievalViews: evidence?._semanticViews || [],
+                                    _semanticRetrievalSource: 'full-index-local-corpus-fallback'
+                                };
+                            }));
                         }
                         hydrated = localCards;
                     }
