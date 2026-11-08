@@ -26472,7 +26472,7 @@ function buildNoHighlightSemanticIntentText(sourceCard, sourceText, parsedEffect
 }
 
 
-function buildSourceSemanticQueryTexts(sourceCard, fallbackText, maxWords = 140) {
+function buildSourceSemanticQueryTexts(sourceCard, fallbackText, maxWords = 96) {
     let faces = Array.isArray(sourceCard?.card_faces) && sourceCard.card_faces.length
         ? sourceCard.card_faces
         : [{
