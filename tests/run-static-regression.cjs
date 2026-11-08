@@ -14,9 +14,17 @@ const htmlPath = path.join(root, 'index.html');
 const cssPath = path.join(root, 'style.css');
 const searchWorkerPath = path.join(root, 'semantic-search-worker.js');
 const serviceWorkerPath = path.join(root, 'service-worker.js');
+const semanticTextPath = path.join(root, 'scripts', 'semantic-text.mjs');
+const semanticBuilderPath = path.join(root, 'scripts', 'build-static-data.mjs');
+const deployWorkflowPath = path.join(root, '.github', 'workflows', 'deploy-pages.yml');
+const browserRunnerPath = path.join(root, 'tests', 'run-browser-regression.cjs');
 const app = fs.readFileSync(appPath, 'utf8');
 const searchWorker = fs.readFileSync(searchWorkerPath, 'utf8');
 const serviceWorker = fs.readFileSync(serviceWorkerPath, 'utf8');
+const semanticText = fs.readFileSync(semanticTextPath, 'utf8');
+const semanticBuilder = fs.readFileSync(semanticBuilderPath, 'utf8');
+const deployWorkflow = fs.readFileSync(deployWorkflowPath, 'utf8');
+const browserRunner = fs.readFileSync(browserRunnerPath, 'utf8');
 const html = fs.readFileSync(htmlPath, 'utf8');
 const css = fs.readFileSync(cssPath, 'utf8');
 
@@ -294,6 +302,30 @@ check('Exact highlights bind literal text to the same parsed candidate effect us
   assert.doesNotMatch(app, /return !requirement\.text \|\| exactHighlightOccursInOracle\(oracle, requirement\)/,
     'Exact Oracle highlights must not use a card-wide literal occurrence as their hard-filter decision');
   assert.match(app, /if \(!sourceIsReliable \|\| !candidateIsReliable\) return true/);
+});
+
+check('source and candidate semantic documents share one tokenizer-verified representation', () => {
+  assert.match(app, /from ['"]\.\/scripts\/semantic-text\.mjs['"]/);
+  assert.match(app, /buildSemanticDocuments\(\[source\]/);
+  assert.match(app, /await enforceSemanticTokenBudget\(documents, tokenizer/);
+  assert.match(app, /mergeSemanticRetrievalRanks\(querySets/);
+  assert.match(app, /_semanticAbilityCoverageRatio/);
+  assert.match(semanticText, /export function buildSemanticDocuments/);
+  assert.match(semanticText, /export async function enforceSemanticTokenBudget/);
+  assert.match(semanticText, /export function mergeSemanticRetrievalRanks/);
+});
+
+check('static index builder verifies real model tokens and disables truncation', () => {
+  assert.match(semanticBuilder, /extractor\.tokenizer/);
+  assert.match(semanticBuilder, /maxTokens:\s*240/);
+  assert.match(semanticBuilder, /truncation:\s*false/);
+  assert.match(semanticBuilder, /semantic_max_tokens:\s*240/);
+  assert.match(semanticBuilder, /BUILDER_VERSION = 6/);
+});
+
+check('Pages publishes the shared semantic module and browser tests serve ESM with JavaScript MIME', () => {
+  assert.match(deployWorkflow, /cp scripts\/semantic-text\.mjs _site\/scripts\//);
+  assert.match(browserRunner, /['"]\.mjs['"]:\s*['"]text\/javascript; charset=utf-8['"]/);
 });
 
 check('semantic worker response envelopes are normalized before array-based result merging', () => {
