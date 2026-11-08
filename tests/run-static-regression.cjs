@@ -308,7 +308,7 @@ check('source and candidate semantic documents share one tokenizer-verified repr
   assert.match(app, /from ['"]\.\/scripts\/semantic-text\.mjs['"]/);
   assert.match(app, /buildSemanticDocuments\(\[source\]/);
   assert.match(app, /await enforceSemanticTokenBudget\(documents, tokenizer/);
-  assert.match(app, /mergeSemanticRetrievalRanks\(querySets/);
+  assert.match(app, /mergeSemanticRetrievalRanks\(\s*querySets/);
   assert.match(app, /_semanticAbilityCoverageRatio/);
   assert.match(semanticText, /export function buildSemanticDocuments/);
   assert.match(semanticText, /export async function enforceSemanticTokenBudget/);
