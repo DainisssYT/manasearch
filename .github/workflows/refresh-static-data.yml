@@ -1,0 +1,68 @@
+name: Refresh ManaSearch static card data
+
+on:
+  schedule:
+    - cron: '17 3 * * 0'
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'scripts/build-static-data.mjs'
+      - 'scripts/semantic-text.mjs'
+      - 'package.json'
+      - '.github/workflows/refresh-static-data.yml'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: manasearch-static-data-refresh
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    steps:
+      - name: Check out main
+        uses: actions/checkout@v6
+        with:
+          ref: main
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+
+      - name: Install semantic-index builder dependency
+        run: npm install --no-audit --no-fund
+
+      - name: Build fresh card and semantic indexes
+        run: npm run build-static-data
+
+      - name: Validate the new static-data manifest
+        run: |
+          node --input-type=module <<'NODE'
+          import fs from 'node:fs';
+          const meta = JSON.parse(fs.readFileSync('static-data-meta.json', 'utf8'));
+          if (meta.builder_version !== 5) throw new Error(`Expected builder version 5, got ${meta.builder_version}`);
+          if (!meta.card_count || !meta.semantic_document_count) throw new Error('Static-data manifest has empty card or semantic-document counts.');
+          if (meta.embedding_dimension !== 384) throw new Error(`Unexpected embedding dimension: ${meta.embedding_dimension}`);
+          for (const file of ['cards.bin', 'semantic-index.bin']) {
+            if (!fs.statSync(file).size) throw new Error(`${file} is empty.`);
+          }
+          console.log(JSON.stringify(meta, null, 2));
+          NODE
+
+      - name: Commit refreshed static assets when changed
+        run: |
+          set -euo pipefail
+          if git diff --quiet -- cards.bin semantic-index.bin static-data-meta.json; then
+            echo 'Static card data is already current; no commit is needed.'
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add cards.bin semantic-index.bin static-data-meta.json
+          git commit -m 'Refresh ManaSearch static card and semantic indexes'
+          git push origin main
