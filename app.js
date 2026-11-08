@@ -1,6 +1,6 @@
 /* ManaSearch build 20261101-129 */
 // ManaSearch deployment build marker. Bump this whenever app.js changes so cached-module issues are easy to diagnose.
-const MANASEARCH_APP_BUILD = '20261101-130';
+const MANASEARCH_APP_BUILD = '20261108-131';
 console.info(`[ManaSearch] app.js build ${MANASEARCH_APP_BUILD}`);
 
 // State Management
@@ -16700,7 +16700,7 @@ let semanticCosineBaselineReady = false;
 const STATIC_CARD_CORPUS_FILENAME = 'cards.bin';
 const STATIC_CARD_CORPUS_VERSION = 1;
 const STATIC_CARD_CORPUS_MAGIC = 'MSCARD1G';
-const STATIC_CARD_CORPUS_CACHE_VERSION = '20261015-79';
+const STATIC_CARD_CORPUS_CACHE_VERSION = '20261108-80';
 const STATIC_DATA_META_FILENAME = 'static-data-meta.json';
 
 // A failed/stalled static asset request must not leave the initial search status spinning forever.
@@ -17949,7 +17949,7 @@ const FULL_SEMANTIC_INDEX_SEARCH_LIMIT = 96;
 const STATIC_SEMANTIC_INDEX_FILENAME = 'semantic-index.bin';
 const STATIC_SEMANTIC_INDEX_VERSION = 1;
 const STATIC_SEMANTIC_INDEX_MAGIC = 'MSIDX1';
-const STATIC_SEMANTIC_INDEX_CACHE_VERSION = '20261015-79';
+const STATIC_SEMANTIC_INDEX_CACHE_VERSION = '20261108-80';
 let staticSemanticIndexPromise = null;
 let staticSemanticIndexAttempted = false;
 let staticSemanticIndexLoadError = null;
@@ -18463,16 +18463,11 @@ async function findFullSemanticMatches(index, sourceVector, excludeName, limit =
         enteredFallback = true;
         if (!benchmarkLocal) console.info('Semantic worker unavailable; using yielding main-thread semantic scan where possible:', workerError?.message || workerError);
         const excludeKey = normalizeCardNameForIdentity(excludeName || '');
-        const best = [];
-        const keepCap = Math.max(limit * 2, 32);
+        const bestByCard = new Map();
         const pushBest = item => {
-            best.push(item);
-            // Periodic pruning bounds memory without sorting on every matching card. The previous
-            // per-hit sort could itself monopolize the main thread when the worker path failed.
-            if (best.length > keepCap * 2) {
-                best.sort((a, b) => b.similarity - a.similarity);
-                best.length = keepCap;
-            }
+            const key = normalizeCardNameForIdentity(item.name);
+            const previous = bestByCard.get(key);
+            if (!previous || item.similarity > previous.similarity) bestByCard.set(key, item);
         };
         let sourceQueryNormSquared = 0;
         for (let qi = 0; qi < sourceVector.length; qi++) sourceQueryNormSquared += (Number(sourceVector[qi]) || 0) ** 2;
@@ -18502,16 +18497,8 @@ async function findFullSemanticMatches(index, sourceVector, excludeName, limit =
             await yieldForManaSearchResponsiveness();
             if (cancelled()) throw createSearchCancellationError();
         }
-        const sortedBest = await sortManaArrayResponsively(best, (a, b) => b.similarity - a.similarity);
-        const seen = new Set();
-        const output = sortedBest
-            .filter(x => {
-                const k = normalizeCardNameForIdentity(x.name);
-                if (seen.has(k)) return false;
-                seen.add(k);
-                return true;
-            })
-            .slice(0, limit);
+        const sortedBest = await sortManaArrayResponsively(Array.from(bestByCard.values()), (a, b) => b.similarity - a.similarity);
+        const output = sortedBest.slice(0, limit);
         if (enteredFallback) {
             staticSemanticQueryStats.fallbackQueries++;
             staticSemanticQueryStats.fallbackElapsedMs += Math.max(0, getManaResponsivenessNow() - semanticQueryStartedAt);
@@ -26341,7 +26328,7 @@ function buildSynergyRetrievalQuery(sourceCard, parsedEffects, excludeSelf) {
     return parts.length ? `(${[...new Set(parts)].join(' or ')}) ${excludeSelf}`.trim() : null;
 }
 
-function buildFunctionalRetrievalQueries(sourceCard, parsedEffects, excludeSelf, maxFunctions = 2) {
+function buildFunctionalRetrievalQueries(sourceCard, parsedEffects, excludeSelf, maxFunctions = 4) {
     const sourceText = (sourceCard.oracle_text || (sourceCard.card_faces ? sourceCard.card_faces.map(f => f.oracle_text).join(' ') : '')).toLowerCase();
 
     // Take the top functions by importance, not merely the first parsed effect - a card whose
@@ -26351,7 +26338,7 @@ function buildFunctionalRetrievalQueries(sourceCard, parsedEffects, excludeSelf,
 
     const descriptors = [];
     const seenQueries = new Set();
-    const addQuery = (parts, narrow) => {
+    const addQuery = (parts, narrow, functionIndex = -1) => {
         const body = parts.filter(Boolean).join(' ').trim();
         if (!body) return;
         const query = `${body} ${excludeSelf}`.trim();
@@ -26363,39 +26350,39 @@ function buildFunctionalRetrievalQueries(sourceCard, parsedEffects, excludeSelf,
         const dedupeKey = body.toLowerCase().split(/\s+/).sort().join(' ');
         if (seenQueries.has(dedupeKey)) return;
         seenQueries.add(dedupeKey);
-        descriptors.push({ query, narrow });
+        descriptors.push({ query, narrow, functionIndex });
     };
 
-    for (const cf of canonicals) {
+    for (const [functionIndex, cf] of canonicals.entries()) {
         const vocab = FUNCTION_RETRIEVAL_VOCAB[cf.function];
         const p = cf.params || {};
 
         // Formulation 0 - targeted phrase lanes. They run before broad parameter/tag fallbacks so
         // result caps don't starve a less common but genuinely equivalent wording variant.
         if (Array.isArray(vocab?.targetedQueries)) {
-            for (const targetedQuery of vocab.targetedQueries) addQuery([targetedQuery], true);
+            for (const targetedQuery of vocab.targetedQueries) addQuery([targetedQuery], true, functionIndex);
         }
 
         // Formulation 1 - canonical Oracle wording for this function (requires vocab).
         if (vocab?.phrases?.length) {
-            addQuery([`(${vocab.phrases.map(ph => `o:"${ph}"`).join(' or ')})`], true);
+            addQuery([`(${vocab.phrases.map(ph => `o:"${ph}"`).join(' or ')})`], true, functionIndex);
         }
 
         // Formulation 2 - zone-based: describe the movement rather than the verb, so a card using
         // completely different wording for the same zone transition is still reachable.
         if (p.from && p.to) {
-            addQuery([`o:"${p.from}"`, `o:"${p.to}"`, p.object ? `o:"${p.object}"` : null], true);
+            addQuery([`o:"${p.from}"`, `o:"${p.to}"`, p.object ? `o:"${p.object}"` : null], true, functionIndex);
         }
 
         // Formulation 3 - parameterized: subtype/magnitude/object specifics (requires vocab).
         if (vocab?.paramTemplate) {
             const templated = vocab.paramTemplate(p);
-            if (templated) addQuery([templated], true);
+            if (templated) addQuery([templated], true, functionIndex);
         }
 
         // Formulation 4 - tag-based, using Scryfall's own oracle-tag index where one exists.
         if (vocab?.otag) {
-            addQuery([`otag:${vocab.otag}`], true);
+            addQuery([`otag:${vocab.otag}`], true, functionIndex);
         }
 
         // Formulation 5 - generic feature combination, requiring NO vocabulary entry at all. This
@@ -26404,7 +26391,7 @@ function buildFunctionalRetrievalQueries(sourceCard, parsedEffects, excludeSelf,
         // real multi-feature AND query straight from its structural params (review Priority 3;
         // review Priority 14, "feature combinations").
         const combo = buildGenericFeatureCombinationQuery(cf);
-        if (combo) addQuery([combo], true);
+        if (combo) addQuery([combo], true, functionIndex);
     }
 
     // Generic structural fallback for any function with no vocabulary entry yet: build a query
@@ -26433,7 +26420,27 @@ function buildFunctionalRetrievalQueries(sourceCard, parsedEffects, excludeSelf,
         }
     }
 
-    return descriptors.slice(0, 5);
+    const selected = [];
+    const offsets = new Map();
+    const functionOrder = [...new Set(descriptors.map(item => item.functionIndex).filter(index => index >= 0))];
+    while (selected.length < 5) {
+        let added = false;
+        for (const functionIndex of functionOrder) {
+            const offset = offsets.get(functionIndex) || 0;
+            const candidate = descriptors.filter(item => item.functionIndex === functionIndex)[offset];
+            if (!candidate) continue;
+            selected.push(candidate);
+            offsets.set(functionIndex, offset + 1);
+            added = true;
+            if (selected.length >= 5) break;
+        }
+        if (!added) break;
+    }
+    for (const candidate of descriptors) {
+        if (selected.length >= 5) break;
+        if (candidate.functionIndex < 0 && !selected.includes(candidate)) selected.push(candidate);
+    }
+    return selected;
 }
 
 function buildNoHighlightSemanticIntentText(sourceCard, sourceText, parsedEffects) {
@@ -26446,6 +26453,58 @@ function buildNoHighlightSemanticIntentText(sourceCard, sourceText, parsedEffect
     return [full, primary ? `primary gameplay focus ${primary}` : '', secondary ? `secondary gameplay effects ${secondary}` : ''].filter(Boolean).join('. ');
 }
 
+
+function buildSourceSemanticQueryTexts(sourceCard, fallbackText, maxWords = 160) {
+    const faces = Array.isArray(sourceCard?.card_faces) && sourceCard.card_faces.length
+        ? sourceCard.card_faces
+        : [{
+            name: sourceCard?.name || '',
+            oracle_text: getCurrentSourceOracleText(sourceCard) || fallbackText || '',
+            mana_cost: sourceCard?.mana_cost,
+            type_line: sourceCard?.type_line,
+            colors: sourceCard?.colors
+        }];
+    const cardKeywords = Array.isArray(sourceCard?.keywords) ? sourceCard.keywords.join(' ') : '';
+    const colorIdentity = Array.isArray(sourceCard?.color_identity) ? sourceCard.color_identity.join(' ') : '';
+    const producedMana = Array.isArray(sourceCard?.produced_mana) ? sourceCard.produced_mana.join(' ') : '';
+    const documents = [];
+    const seen = new Set();
+
+    for (const face of faces) {
+        const faceText = String(face?.oracle_text || '');
+        const lines = faceText.split(/\n+/).map(line => line.trim()).filter(Boolean);
+        const context = [
+            face?.name && \`card face \${face.name}\`,
+            face?.type_line && \`type \${face.type_line}\`,
+            face?.mana_cost && \`mana cost \${face.mana_cost}\`,
+            Array.isArray(face?.colors) && face.colors.length ? \`colors \${face.colors.join(' ')}\` : '',
+            cardKeywords && \`keywords \${cardKeywords}\`,
+            colorIdentity && \`color identity \${colorIdentity}\`,
+            producedMana && \`produces \${producedMana} mana\`,
+            Number.isFinite(Number(sourceCard?.cmc)) ? \`mana value \${sourceCard.cmc}\` : ''
+        ].filter(Boolean).join('. ');
+
+        const addDocument = abilityText => {
+            const normalized = normalizeOracleForEmbedding(\`\${context}. ability \${abilityText}\`, face?.name || sourceCard?.name || '');
+            if (normalized && !seen.has(normalized)) {
+                seen.add(normalized);
+                documents.push(normalized);
+            }
+        };
+        for (const line of lines) {
+            const words = line.split(/\s+/);
+            if (words.length <= maxWords) {
+                addDocument(line);
+                continue;
+            }
+            const overlap = 24;
+            for (let offset = 0; offset < words.length; offset += maxWords - overlap) {
+                addDocument(words.slice(offset, Math.min(words.length, offset + maxWords)).join(' '));
+            }
+        }
+    }
+    return documents.length ? documents : (fallbackText ? [fallbackText] : []);
+}
 
 function getSearchIntent(sourceCard, highlights = []) {
     const sourceText = getCurrentSourceOracleText(sourceCard) || '';
@@ -27394,7 +27453,7 @@ async function findSimilarCards() {
 
     functionalRetrievalPlans = buildFunctionalRetrievalQueries(
         currentSourceCard, sourceParsedEffects, excludeSelf,
-        activeSearchMethodFlags.functional ? 3 : 2
+        activeSearchMethodFlags.functional ? 5 : 4
     );
     const methodQueries = {
         wording: activeSearchMethodFlags.wording ? buildWordingRetrievalQuery(currentSourceCard, excludeSelf, stopWords, mtgStopWords) : null,
@@ -28081,7 +28140,7 @@ async function findSimilarCards() {
                 const semanticRetrievalVector = await getCachedEmbedding(queryText, ex);
                 const normalizedOracleTarget = normalizeOracleForEmbedding(targetTextForScoring, currentSourceCard.name);
                 const normalizedFullSourceOracle = normalizeOracleForEmbedding(getCurrentSourceOracleText(currentSourceCard), currentSourceCard.name);
-                const canUseIndexedSourceVector = !hasHighlight && normalizedOracleTarget && normalizedOracleTarget === normalizedFullSourceOracle;
+                const canUseIndexedSourceVector = false; // multi-row semantic index: the first row is only one ability, not a whole-card vector
                 const indexedSourceVector = canUseIndexedSourceVector ? getStaticSemanticVectorAsFloat32(currentSourceCard, index) : null;
                 const oracleVector = indexedSourceVector || await getCachedEmbedding(normalizedOracleTarget, ex);
                 if (!semanticRetrievalVector && !oracleVector) return { index, queryVector: null, semanticRetrievalVector: null, matches: [], hydrated: [] };
@@ -28092,6 +28151,22 @@ async function findSimilarCards() {
                 const queryJobs = [];
                 if (semanticRetrievalVector) queryJobs.push({ vector: semanticRetrievalVector, view: 'intent', limit, threshold: 0.42 });
                 if (oracleVector && !hasHighlight) queryJobs.push({ vector: oracleVector, view: 'oracle', limit: Math.max(24, Math.floor(limit * 0.55)), threshold: 0.40 });
+
+                // Search every source face/ability independently. This complements the full-text
+                // intent query and protects later abilities from input-token truncation.
+                if (!hasHighlight) {
+                    const abilityTexts = buildSourceSemanticQueryTexts(currentSourceCard, semanticIntentTextForScoring);
+                    const abilityVectors = await Promise.all(abilityTexts.map(text => getCachedEmbedding(text, ex)));
+                    const abilityLimit = Math.max(12, Math.ceil(limit / Math.max(1, abilityVectors.length)));
+                    abilityVectors.forEach((vector, abilityIndex) => {
+                        if (vector) queryJobs.push({
+                            vector,
+                            view: \`ability-\${abilityIndex + 1}\`,
+                            limit: abilityLimit,
+                            threshold: 0.40
+                        });
+                    });
+                }
                 const querySets = await Promise.all(queryJobs.map(q => findFullSemanticMatches(index, q.vector, currentSourceCard.name, q.limit, q.threshold)));
                 const mergedMatches = new Map();
                 querySets.forEach((set, qi) => (set || []).forEach(item => {
