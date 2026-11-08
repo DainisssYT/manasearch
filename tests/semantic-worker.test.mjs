@@ -53,3 +53,30 @@ test('semantic worker ranks unique cards, not duplicate ability rows', async () 
     'Closest distinct card'
   ]);
 });
+
+test('semantic baseline calibration samples across the entire ability index', async () => {
+  const source = await readFile(new URL('../semantic-search-worker.js', import.meta.url), 'utf8');
+  const messages = [];
+  const self = { postMessage(message) { messages.push(message); } };
+  vm.runInNewContext(source + '\\nself.__calibrateSemanticBaseline = calibrateSemanticBaseline;', { self, console });
+
+  const count = 1200;
+  const dim = 2;
+  const vectors = new Int8Array(count * dim);
+  const norms = new Float32Array(count);
+  // The first 96 rows deliberately look identical (the failure mode in the old sampler).
+  for (let i = 0; i < 96; i++) {
+    vectors[i * dim] = 127;
+    norms[i] = 127 * 127;
+  }
+  // The rest of the index has varied vectors, so a corpus-wide background estimate is lower.
+  for (let i = 96; i < count; i++) {
+    const mode = i % 3;
+    vectors[i * dim] = mode === 0 ? 127 : 0;
+    vectors[i * dim + 1] = mode === 1 ? 127 : (mode === 2 ? 127 : 0);
+    norms[i] = vectors[i * dim] ** 2 + vectors[i * dim + 1] ** 2;
+  }
+
+  const calibrated = self.__calibrateSemanticBaseline(vectors, count, dim, norms);
+  assert.ok(calibrated < 0.52, 'baseline should not be pinned by the first 96 duplicate-like rows');
+});
