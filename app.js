@@ -16655,7 +16655,7 @@ function normalizeOracleForEmbedding(text, cardName = '') {
     if (!value.trim()) return '';
     if (cardName) {
         const escaped = String(cardName).replace(/[.*+?^\${}()|[\]\\]/g, '\\$&');
-        value = value.replace(new RegExp(\`\\b\${escaped}\\b\`, 'gi'), 'this card');
+        value = value.replace(new RegExp('\\b' + escaped + '\\b', 'gi'), 'this card');
     }
     // Parenthetical rules/reminder text can be the only description of an important mechanic.
     const manaNames = {
@@ -16665,22 +16665,22 @@ function normalizeOracleForEmbedding(text, cardName = '') {
     };
     value = value.replace(/\{([^}]+)\}/g, (_, raw) => {
         const symbol = String(raw).toUpperCase();
-        if (manaNames[symbol]) return \` \${manaNames[symbol]} \`;
-        if (/^\d+$/.test(symbol)) return \` \${symbol} generic mana \`;
+        if (manaNames[symbol]) return ' ' + manaNames[symbol] + ' ';
+        if (/^\d+$/.test(symbol)) return ' ' + symbol + ' generic mana ';
         if (/^\d+\/[WUBRGC]$/.test(symbol)) {
             const parts = symbol.split('/');
-            return \` \${parts[0]} generic or \${manaNames[parts[1]]} \`;
+            return ' ' + parts[0] + ' generic or ' + manaNames[parts[1]] + ' ';
         }
-        if (/^[WUBRGC]\/P$/.test(symbol)) return \` \${manaNames[symbol[0]]} or two life phyrexian mana \`;
+        if (/^[WUBRGC]\/P$/.test(symbol)) return ' ' + manaNames[symbol[0]] + ' or two life phyrexian mana ';
         if (/^[WUBRGC]\/[WUBRGC]$/.test(symbol)) {
             const parts = symbol.split('/');
-            return \` \${manaNames[parts[0]]} or \${manaNames[parts[1]]} hybrid mana \`;
+            return ' ' + manaNames[parts[0]] + ' or ' + manaNames[parts[1]] + ' hybrid mana ';
         }
         if (symbol === 'P') return ' phyrexian mana pay two life ';
-        return \` \${symbol.toLowerCase().replace(/[^a-z0-9/]+/g, ' ')} mana symbol \`;
+        return ' ' + symbol.toLowerCase().replace(/[^a-z0-9/]+/g, ' ') + ' mana symbol ';
     });
     for (const [keyword, expansion] of Object.entries(SEMANTIC_KEYWORD_EXPANSIONS)) {
-        value = value.replace(new RegExp(\`\\b\${keyword}\\b\`, 'gi'), \` \${keyword} \${expansion} \`);
+        value = value.replace(new RegExp('\\b' + keyword + '\\b', 'gi'), ' ' + keyword + ' ' + expansion + ' ');
     }
     return value.replace(/[^a-z0-9+\\-\\s]/gi, ' ').replace(/\\s+/g, ' ').trim();
 }
@@ -26491,19 +26491,24 @@ function buildSourceSemanticQueryTexts(sourceCard, fallbackText, maxWords = 140)
     for (const face of faces) {
         const faceText = String(face?.oracle_text || '');
         const lines = faceText.split(/\n+/).map(line => line.trim()).filter(Boolean);
-        const context = [
-            face?.name && \`card face \${face.name}\`,
-            face?.type_line && \`type \${face.type_line}\`,
-            face?.mana_cost && \`mana cost \${face.mana_cost}\`,
-            Array.isArray(face?.colors) && face.colors.length ? \`colors \${face.colors.join(' ')}\` : '',
-            cardKeywords && \`keywords \${cardKeywords}\`,
-            colorIdentity && \`color identity \${colorIdentity}\`,
-            producedMana && \`produces \${producedMana} mana\`,
-            Number.isFinite(Number(sourceCard?.cmc)) ? \`mana value \${sourceCard.cmc}\` : ''
-        ].filter(Boolean).join('. ');
+        const contextParts = [];
+        if (face?.name) contextParts.push('card face ' + face.name);
+        if (face?.type_line) contextParts.push('type ' + face.type_line);
+        if (face?.mana_cost) contextParts.push('mana cost ' + face.mana_cost);
+        if (Array.isArray(face?.colors) && face.colors.length) contextParts.push('colors ' + face.colors.join(' '));
+        if (face?.color_indicator) contextParts.push('color indicator ' + face.color_indicator);
+        if (cardKeywords) contextParts.push('keywords ' + cardKeywords);
+        if (colorIdentity) contextParts.push('color identity ' + colorIdentity);
+        if (producedMana) contextParts.push('produces ' + producedMana + ' mana');
+        if (Number.isFinite(Number(sourceCard?.cmc))) contextParts.push('mana value ' + sourceCard.cmc);
+        if (face?.power) contextParts.push('power ' + face.power);
+        if (face?.toughness) contextParts.push('toughness ' + face.toughness);
+        if (face?.loyalty) contextParts.push('loyalty ' + face.loyalty);
+        if (face?.defense) contextParts.push('defense ' + face.defense);
+        const context = contextParts.join('. ');
 
         const addDocument = abilityText => {
-            const normalized = normalizeOracleForEmbedding(\`\${context}. ability \${abilityText}\`, face?.name || sourceCard?.name || '');
+            const normalized = normalizeOracleForEmbedding(context + '. ability ' + abilityText, face?.name || sourceCard?.name || '');
             if (normalized && !seen.has(normalized)) {
                 seen.add(normalized);
                 documents.push(normalized);
@@ -28179,7 +28184,7 @@ async function findSimilarCards() {
                     abilityVectors.forEach((vector, abilityIndex) => {
                         if (vector) queryJobs.push({
                             vector,
-                            view: \`ability-\${abilityIndex + 1}\`,
+                            view: 'ability-' + (abilityIndex + 1),
                             limit: abilityLimit,
                             threshold: 0.40
                         });
