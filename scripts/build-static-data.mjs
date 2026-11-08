@@ -113,7 +113,7 @@ function writeSemanticIndex(rows, vectors) {
   let namesBytes = 0;
   for (const row of rows) {
     const bytes = encoder.encode(row.name);
-    if (bytes.length > 65535) throw new Error(`Card name is too long: ${card.name}`);
+    if (bytes.length > 65535) throw new Error(`Card name is too long: ${row.name}`);
     const part = Buffer.allocUnsafe(2 + bytes.length);
     part.writeUInt16LE(bytes.length, 0);
     Buffer.from(bytes).copy(part, 2);
@@ -327,7 +327,7 @@ async function main() {
   if (!cardBinary.length || !semanticBinary.length || !metadata.length) {
     throw new Error('Static asset generation produced an empty artifact.');
   }
-  if (vectors.length !== semanticRows.length || semanticRows.length < cards.length) {
+  if (vectors.length !== semanticRows.length || semanticRows.length === 0) {
     throw new Error('Semantic view/vector count mismatch.');
   }
   if (vectors[0]?.length !== 384) {

@@ -26,11 +26,11 @@ export function normalizeManaSearchOracleText(text, cardName = '') {
   }
   return value.replace(/[^a-z0-9+\-\s]/gi, ' ').replace(/\s+/g, ' ').trim();
 }
-export function splitSemanticTextIntoChunks(text, { maxWords = 140, overlapWords = 36 } = {}) {
+export function splitSemanticTextIntoChunks(text, { maxWords = 110, overlapWords = 28 } = {}) {
   const words = String(text || '').trim().split(/\s+/).filter(Boolean);
   if (!words.length) return [];
-  const max = Math.max(48, Number(maxWords) || 140);
-  const overlap = Math.max(8, Math.min(max - 16, Number(overlapWords) || 36));
+  const max = Math.max(48, Number(maxWords) || 110);
+  const overlap = Math.max(8, Math.min(max - 16, Number(overlapWords) || 28));
   if (words.length <= max) return [words.join(' ')];
   const step = max - overlap;
   const anchor = words.slice(0, Math.min(24, Math.floor(max / 4))).join(' ');
@@ -57,6 +57,21 @@ export function buildSemanticOracleViews(card, options = {}) {
       face && face.type_line || card.type_line ? 'Face type ' + (face && face.type_line || card.type_line) + '.' : ''
     ].filter(Boolean).join(' ');
     const abilities = oracle.split(/\n+/).map(line => line.trim()).filter(Boolean);
+    if (!abilities.length) {
+      const metadata = [
+        face && face.name || card.name,
+        face && face.type_line || card.type_line,
+        face && face.mana_cost || card.mana_cost,
+        face && Array.isArray(face.colors) ? face.colors.join(' ') : (Array.isArray(card.colors) ? card.colors.join(' ') : ''),
+        Array.isArray(card.keywords) ? card.keywords.join(' ') : '',
+        Array.isArray(card.produced_mana) ? card.produced_mana.join(' ') : '',
+        face && face.power || card.power,
+        face && face.toughness || card.toughness,
+        face && face.loyalty || card.loyalty,
+        face && face.defense || card.defense
+      ].filter(Boolean).join(' ');
+      if (metadata) abilities.push(metadata);
+    }
     for (let abilityIndex = 0; abilityIndex < abilities.length; abilityIndex++) {
       const chunks = splitSemanticTextIntoChunks(abilities[abilityIndex], options);
       for (let chunkIndex = 0; chunkIndex < chunks.length; chunkIndex++) {
