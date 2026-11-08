@@ -7057,6 +7057,26 @@ function parseTokenEffect(clause) {
         };
     };
 
+    // Replacement wording such as "If a token would be created, three times that many
+    // tokens are created instead" modifies another effect; it does not independently create
+    // tokens. Capture the multiplier here before the generic create/creates parser can consume it.
+    const multiplierPhrase = text.match(/\b(twice|double|(?:two|three|four|five|six|seven|eight|nine|ten|\d+)\s+times?)\s+that many\b/i);
+    const replacementTokenText = /\binstead\b/i.test(text) &&
+        (/\bif\b[\s\S]*?\btokens?\b[\s\S]*?\bwould\s+create\b/i.test(text) ||
+         /\b(?:those|that many of those)\s+tokens?\b/i.test(text) ||
+         /\bcreates?\s+(?:twice|double|(?:two|three|four|five|six|seven|eight|nine|ten|\d+)\s+times?)\s+that many\b/i.test(text));
+    if (multiplierPhrase && replacementTokenText) {
+        const multiplierWords = { twice: 2, double: 2, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10 };
+        const multiplier = multiplierWords[multiplierPhrase[1].toLowerCase()] ?? Number(multiplierPhrase[1].match(/\d+/)?.[0] || 2);
+        // A trailing atom containing only the replacement outcome is already represented by the
+        // parent "if ... would create" rule, so avoid adding a second token-creation node.
+        if (!/\bif\b/i.test(text)) return null;
+        return { action: "multiply", object: "token", multiplier, isReplacement: true };
+    }
+    if (/\bif\b[\s\S]*?\btokens?\b[\s\S]*?\bwould\s+create\b[\s\S]*?\binstead\b/i.test(text)) {
+        return { action: "multiply", object: "token", multiplier: 2, isReplacement: true };
+    }
+
     // Investigate creates one Clue for each occurrence. Whether those creation events recur
     // comes from the parent ability's trigger/timing profile, not from the Clue token itself.
     if (/\binvestigates?\b/i.test(text)) {
