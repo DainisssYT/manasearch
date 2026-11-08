@@ -1,6 +1,6 @@
 /* ManaSearch build 20261108-131 */
 // ManaSearch deployment build marker. Bump this whenever app.js changes so cached-module issues are easy to diagnose.
-const MANASEARCH_APP_BUILD = '20261108-133';
+const MANASEARCH_APP_BUILD = '20261108-134';
 console.info(`[ManaSearch] app.js build ${MANASEARCH_APP_BUILD}`);
 
 // The source-query and static-index builders share one representation so both sides
@@ -2070,6 +2070,7 @@ async function runBenchmarkPass(searchFn, test) {
     let rankedResults = [];
     let diagnostics = null;
     let scoreByName = new Map();
+    const semanticRetrievalEvidenceByName = new Map();
     let testStatus = 'ok';
     let errorMessage = null;
 
@@ -2106,7 +2107,20 @@ async function runBenchmarkPass(searchFn, test) {
         // information").
         resultList.forEach(card => {
             if (typeof card === 'string' || !card?.name) return;
-            scoreByName.set(card.name.toLowerCase(), {
+            const cardKey = normalizeCardNameForIdentity(card.name);
+            const semanticViews = Array.isArray(card._semanticRetrievalViews) ? card._semanticRetrievalViews : [];
+            semanticRetrievalEvidenceByName.set(cardKey, {
+                similarity: Number(card._semanticRetrievalSimilarity) || 0,
+                rrfRatio: Number(card._semanticRetrievalRrfScoreRatio) || 0,
+                abilityCoverage: Number(card._semanticAbilityCoverage) || 0,
+                abilityTotal: Number(card._semanticAbilityTotal) || 0,
+                abilityCoverageRatio: Number(card._semanticAbilityCoverageRatio) || 0,
+                views: semanticViews.slice()
+            });
+            scoreByName.set(cardKey, {
+                semanticRrfAgreement: Number(card._semanticRetrievalRrfScoreRatio) || 0,
+                semanticAbilityCoverage: Number(card._semanticAbilityCoverageRatio) || 0,
+                semanticRetrievalViews: semanticViews.slice(),
                 mechanicalScore: card.mechanicalScore ?? null,
                 contextScore: card.contextScore ?? null,
                 functionScore: card.functionScore ?? null,
@@ -2173,6 +2187,8 @@ async function runBenchmarkPass(searchFn, test) {
     const recall5 = calculateRecallAtK(rankedResults, test.expected, 5);
     const recall10 = calculateRecallAtK(rankedResults, test.expected, 10);
     const recall20 = calculateRecallAtK(rankedResults, test.expected, 20);
+    const recall50 = calculateRecallAtK(rankedResults, test.expected, 50);
+    const recall100 = calculateRecallAtK(rankedResults, test.expected, 100);
 
     const adjustedExpected = test.expected.filter(c => !conflictSet.has(c.toLowerCase()));
     const adjustedRecall5 = adjustedExpected.length > 0 ? calculateRecallAtK(rankedResults, adjustedExpected, 5) : recall5;
@@ -2183,6 +2199,14 @@ async function runBenchmarkPass(searchFn, test) {
     const ndcg10 = calculateNDCGAtK(rankedResults, test.expected, 10);
     const ndcg20 = calculateNDCGAtK(rankedResults, test.expected, 20);
     const precision10 = calculatePrecisionAtK(rankedResults, test.expected, 10);
+    const precision20 = calculatePrecisionAtK(rankedResults, test.expected, 20);
+    const top20SemanticEvidence = rankedResults.slice(0, 20)
+        .map(name => semanticRetrievalEvidenceByName.get(normalizeCardNameForIdentity(name)))
+        .filter(evidence => evidence && evidence.abilityTotal > 0 && evidence.views.some(view => /^ability-/i.test(view)));
+    const semanticAbilityCoverageAt20 = top20SemanticEvidence.length
+        ? top20SemanticEvidence.reduce((sum, evidence) => sum + evidence.abilityCoverageRatio, 0) / top20SemanticEvidence.length
+        : null;
+    const semanticRetrievalProvenanceAt20 = [...new Set(top20SemanticEvidence.flatMap(evidence => evidence.views))].sort();
     const stageRecalls = calculateStageRecalls(diagnostics, test.expected);
     const predicateExpected = Array.isArray(test.predicateExpected) ? test.predicateExpected : [];
     const hasPredicateEvaluation = Boolean(test.relevancePredicate);
@@ -2195,8 +2219,9 @@ async function runBenchmarkPass(searchFn, test) {
 
     return {
         rankedResults, diagnostics, scoreByName, testStatus, errorMessage, conflictSet,
-        recall5, recall10, recall20, adjustedRecall5, adjustedRecall10, adjustedRecall20,
-        mrr, ndcg10, ndcg20, precision10, stageRecalls, cardRanks, avgTestRank,
+        recall5, recall10, recall20, recall50, recall100, adjustedRecall5, adjustedRecall10, adjustedRecall20,
+        mrr, ndcg10, ndcg20, precision10, precision20, semanticAbilityCoverageAt20, semanticRetrievalProvenanceAt20,
+        semanticRetrievalEvidenceByName, stageRecalls, cardRanks, avgTestRank,
         predicateExpectedCount: hasPredicateEvaluation ? predicateExpected.length : null,
         predicatePrecision10,
         predicateNdcg10
@@ -2990,13 +3015,15 @@ async function runBenchmarkSuite(searchFn) {
 
     const suiteResults = [];
     const retrievalCostRows = [];
-    let totalRecall5 = 0, totalRecall10 = 0, totalRecall20 = 0;
+    let totalRecall5 = 0, totalRecall10 = 0, totalRecall20 = 0, totalRecall50 = 0, totalRecall100 = 0;
     // "Adjusted" recall excludes expected cards flagged as constraintConflicts (see
     // BENCHMARK_SUITE) from the denominator - a card the engine's own hard filters correctly
     // exclude (because the card itself doesn't satisfy the test's own supplied constraints) isn't
     // a retrieval/ranking failure, it's a data problem with the test case.
     let totalAdjustedRecall5 = 0, totalAdjustedRecall10 = 0, totalAdjustedRecall20 = 0;
-    let totalMRR = 0, totalNDCG10 = 0, totalNDCG20 = 0, totalPrecision10 = 0, totalRetrievalRecall = 0;
+    let totalMRR = 0, totalNDCG10 = 0, totalNDCG20 = 0, totalPrecision10 = 0, totalPrecision20 = 0, totalRetrievalRecall = 0;
+    let totalSemanticAbilityCoverageAt20 = 0, semanticAbilityCoverageTestCount = 0;
+    const semanticRetrievalProvenanceCounts = {};
     let allExpectedRanks = [];
     const categoryTotals = {};
     const structuredResults = [];
@@ -3219,6 +3246,8 @@ async function runBenchmarkSuite(searchFn) {
             totalRecall5 += strictPass.recall5;
             totalRecall10 += strictPass.recall10;
             totalRecall20 += strictPass.recall20;
+            totalRecall50 += strictPass.recall50;
+            totalRecall100 += strictPass.recall100;
             totalAdjustedRecall5 += strictPass.adjustedRecall5;
             totalAdjustedRecall10 += strictPass.adjustedRecall10;
             totalAdjustedRecall20 += strictPass.adjustedRecall20;
@@ -3226,13 +3255,24 @@ async function runBenchmarkSuite(searchFn) {
             totalNDCG10 += strictPass.ndcg10;
             totalNDCG20 += strictPass.ndcg20;
             totalPrecision10 += strictPass.precision10;
+            totalPrecision20 += strictPass.precision20;
             totalRetrievalRecall += strictPass.stageRecalls.retrieval;
+            if (Number.isFinite(strictPass.semanticAbilityCoverageAt20)) {
+                totalSemanticAbilityCoverageAt20 += strictPass.semanticAbilityCoverageAt20;
+                semanticAbilityCoverageTestCount++;
+            }
+            (strictPass.semanticRetrievalProvenanceAt20 || []).forEach(view => {
+                semanticRetrievalProvenanceCounts[view] = (semanticRetrievalProvenanceCounts[view] || 0) + 1;
+            });
             allExpectedRanks.push(...Object.values(strictPass.cardRanks));
 
             (test.categories || ['uncategorized']).forEach(cat => {
-                if (!categoryTotals[cat]) categoryTotals[cat] = { count: 0, recall20: 0, ndcg20: 0, mrr: 0, retrieval: 0 };
+                if (!categoryTotals[cat]) categoryTotals[cat] = { count: 0, recall20: 0, recall50: 0, recall100: 0, precision20: 0, ndcg20: 0, mrr: 0, retrieval: 0 };
                 categoryTotals[cat].count++;
                 categoryTotals[cat].recall20 += strictPass.recall20;
+                categoryTotals[cat].recall50 += strictPass.recall50;
+                categoryTotals[cat].recall100 += strictPass.recall100;
+                categoryTotals[cat].precision20 += strictPass.precision20;
                 categoryTotals[cat].ndcg20 += strictPass.ndcg20;
                 categoryTotals[cat].mrr += strictPass.mrr;
                 categoryTotals[cat].retrieval += strictPass.stageRecalls.retrieval;
@@ -3277,11 +3317,16 @@ async function runBenchmarkSuite(searchFn) {
             "Recall@5": `${(strictPass.recall5 * 100).toFixed(1)}%`,
             "Recall@10": `${(strictPass.recall10 * 100).toFixed(1)}%`,
             "Recall@20": `${(strictPass.recall20 * 100).toFixed(1)}%`,
+            "Recall@50": `${(strictPass.recall50 * 100).toFixed(1)}%`,
+            "Recall@100": `${(strictPass.recall100 * 100).toFixed(1)}%`,
             "Adj. Recall@20": test.constraintConflicts?.length ? `${(strictPass.adjustedRecall20 * 100).toFixed(1)}%` : '-',
             "Semantic Recall@20": semanticPass ? `${(semanticPass.recall20 * 100).toFixed(1)}%` : '-',
             "MRR": strictPass.mrr.toFixed(3),
             "NDCG@20": strictPass.ndcg20.toFixed(3),
             "P@10": strictPass.precision10.toFixed(3),
+            "P@20": strictPass.precision20.toFixed(3),
+            "Ability Coverage@20": strictPass.semanticAbilityCoverageAt20 == null ? 'n/a' : strictPass.semanticAbilityCoverageAt20.toFixed(3),
+            "Semantic Query Views@20": strictPass.semanticRetrievalProvenanceAt20.join(', '),
             "Predicate": test.relevancePredicate || '-',
             "Predicate N": strictPass.predicateExpectedCount ?? '-',
             "Predicate P@10": strictPass.predicatePrecision10 == null ? '-' : strictPass.predicatePrecision10.toFixed(3),
@@ -3374,6 +3419,9 @@ async function runBenchmarkSuite(searchFn) {
     const categoryBreakdown = Object.entries(categoryTotals).map(([cat, t]) => ({
         "Category": cat, "Tests": t.count,
         "Recall@20": `${((t.recall20 / t.count) * 100).toFixed(1)}%`,
+        "Recall@50": `${((t.recall50 / t.count) * 100).toFixed(1)}%`,
+        "Recall@100": `${((t.recall100 / t.count) * 100).toFixed(1)}%`,
+        "Precision@20": (t.precision20 / t.count).toFixed(3),
         "NDCG@20": (t.ndcg20 / t.count).toFixed(3),
         "MRR": (t.mrr / t.count).toFixed(3),
         "Retrieval Recall": `${((t.retrieval / t.count) * 100).toFixed(1)}%`
@@ -3391,6 +3439,8 @@ async function runBenchmarkSuite(searchFn) {
     console.log(`Mean Recall@5:            ${((totalRecall5 / testCount) * 100).toFixed(2)}%`);
     console.log(`Mean Recall@10:           ${((totalRecall10 / testCount) * 100).toFixed(2)}%`);
     console.log(`Mean Recall@20:           ${((totalRecall20 / testCount) * 100).toFixed(2)}%`);
+    console.log(`Mean Recall@50:           ${((totalRecall50 / testCount) * 100).toFixed(2)}%`);
+    console.log(`Mean Recall@100:          ${((totalRecall100 / testCount) * 100).toFixed(2)}%`);
     console.log(`Mean Adjusted Recall@20:  ${((totalAdjustedRecall20 / testCount) * 100).toFixed(2)}%  (excludes constraint-conflict expected cards)`);
     if (semanticTestCount > 0) {
         console.log(`Mean Semantic Recall@20:  ${((totalSemanticRecall20 / semanticTestCount) * 100).toFixed(2)}%  (${semanticTestCount} tests with preferred constraints, preferred fields omitted)`);
@@ -3400,6 +3450,11 @@ async function runBenchmarkSuite(searchFn) {
     console.log(`Mean NDCG@10:             ${(totalNDCG10 / testCount).toFixed(4)}`);
     console.log(`Mean NDCG@20:             ${(totalNDCG20 / testCount).toFixed(4)}`);
     console.log(`Mean Precision@10:        ${(totalPrecision10 / testCount).toFixed(4)}`);
+    console.log(`Mean Precision@20:        ${(totalPrecision20 / testCount).toFixed(4)}`);
+    console.log(semanticAbilityCoverageTestCount
+        ? `Mean semantic ability coverage@20: ${(totalSemanticAbilityCoverageAt20 / semanticAbilityCoverageTestCount).toFixed(4)} (${semanticAbilityCoverageTestCount} measured ability-view tests)`
+        : 'Mean semantic ability coverage@20: n/a (no ability-view evidence)');
+    console.log('Semantic retrieval provenance@20:', semanticRetrievalProvenanceCounts);
     console.log(`Overall Avg Card Rank: ${overallAvgRank === null ? 'n/a' : overallAvgRank.toFixed(2)} (Penalty for unranked: 100)`);
     console.log(`Embedding cache: ${embeddingCacheStats.hits.toLocaleString()} hits, ${embeddingCacheStats.computed.toLocaleString()} computations, ${embeddingCacheStats.evictions.toLocaleString()} evictions, ${embeddingCache.size.toLocaleString()}/${EMBEDDING_CACHE_MAX_ENTRIES.toLocaleString()} entries`);
     console.log(`Candidate raw-Oracle vectors reused from semantic-index.bin: ${embeddingCacheStats.precomputedOracleHits.toLocaleString()} hits, ${embeddingCacheStats.precomputedOracleMisses.toLocaleString()} misses`);
@@ -3421,6 +3476,12 @@ async function runBenchmarkSuite(searchFn) {
         meanRecall5: totalRecall5 / testCount,
         meanRecall10: totalRecall10 / testCount,
         meanRecall20: totalRecall20 / testCount,
+        meanRecall50: totalRecall50 / testCount,
+        meanRecall100: totalRecall100 / testCount,
+        meanPrecision20: totalPrecision20 / testCount,
+        meanSemanticAbilityCoverageAt20: semanticAbilityCoverageTestCount ? totalSemanticAbilityCoverageAt20 / semanticAbilityCoverageTestCount : null,
+        semanticAbilityCoverageTestCount,
+        semanticRetrievalProvenanceCounts,
         meanAdjustedRecall20: totalAdjustedRecall20 / testCount,
         meanSemanticRecall20: semanticTestCount > 0 ? totalSemanticRecall20 / semanticTestCount : null,
         semanticRecallTestCount: semanticTestCount,
