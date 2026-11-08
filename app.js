@@ -26530,6 +26530,7 @@ function buildSourceSemanticQueryTexts(sourceCard, fallbackText, maxWords = 96) 
         const lines = faceText.split(/\n+/).map(line => line.trim()).filter(Boolean);
         const contextParts = [];
         if (face?.name) contextParts.push('card face ' + face.name);
+        if (sourceCard?.layout) contextParts.push('layout ' + sourceCard.layout);
         if (face?.type_line) contextParts.push('type ' + face.type_line);
         if (face?.mana_cost) contextParts.push('mana cost ' + face.mana_cost);
         if (Array.isArray(face?.colors) && face.colors.length) contextParts.push('colors ' + face.colors.join(' '));
