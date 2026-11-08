@@ -12,6 +12,7 @@ const { chromium } = require('playwright');
 const root = path.resolve(__dirname, '..');
 const mime = {
   '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8',
+  '.mjs': 'text/javascript; charset=utf-8',
   '.css': 'text/css; charset=utf-8', '.json': 'application/json; charset=utf-8',
   '.bin': 'application/octet-stream', '.wasm': 'application/wasm'
 };
@@ -48,7 +49,8 @@ async function main() {
     await page.goto(`http://127.0.0.1:${address.port}/index.html?manasearch-test=1`, {
       waitUntil: 'domcontentloaded', timeout: 60000
     });
-    await page.waitForFunction(() =>
+    try {
+      await page.waitForFunction(() =>
       typeof window.runMechanicalRegressionSuite === 'function' &&
       typeof window.runManaSearchMechanicalRegressionSuite === 'function' &&
       typeof window.runManaSearchRepeatabilityRegressionSuite === 'function' &&
@@ -58,7 +60,11 @@ async function main() {
       typeof window.runManaSearchRealCardBenchmark === 'function' &&
       typeof window.runManaSearchIntentRegressionSuite === 'function',
       null, { timeout: 60000 }
-    );
+      );
+    } catch (error) {
+      if (pageErrors.length) console.error('Browser errors before ManaSearch test startup:', pageErrors.join('\\n'));
+      throw error;
+    }
     const report = await page.evaluate(async () => ({
       base: window.runMechanicalRegressionSuite(),
       mechanical: window.runManaSearchMechanicalRegressionSuite({ log: false }),
