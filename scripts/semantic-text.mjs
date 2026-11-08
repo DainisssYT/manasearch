@@ -173,12 +173,12 @@ export function buildSemanticDocuments(cards, options = {}) {
       ].filter(Boolean).join('. ');
       if (!abilities.length) {
         const profile = normalizeOracleForEmbedding(`card profile ${context}`, face.name || card.name);
-        if (profile) documents.push({ name: card.name, text: profile, face: face.name, abilityIndex: -1, kind: 'profile' });
+        if (profile) documents.push({ name: card.name, text: profile, contextText: profile, abilityText: '', face: face.name, abilityIndex: -1, kind: 'profile' });
         continue;
       }
       for (let i = 0; i < abilities.length; i++) {
         const normalized = normalizeOracleForEmbedding(`${context}. ability ${abilities[i]}`, face.name || card.name);
-        if (normalized) documents.push({ name: card.name, text: normalized, face: face.name, abilityIndex: i });
+        if (normalized) documents.push({ name: card.name, text: normalized, contextText: context, abilityText: abilities[i], face: face.name, abilityIndex: i });
       }
     }
   }
@@ -243,12 +243,14 @@ export function mergeSemanticRetrievalRanks(querySets, queryViews = [], options 
     .map(entry => {
       const covered = entry._semanticAbilityViews.size;
       const views = [...entry._semanticViews];
+      const maxRrf = querySets.length / (rrfK + 1);
       return {
         ...entry,
         _semanticViews: views,
         _semanticAbilityCoverage: covered,
         _semanticAbilityTotal: totalAbilities,
-        _semanticAbilityCoverageRatio: totalAbilities ? covered / totalAbilities : 0
+        _semanticAbilityCoverageRatio: totalAbilities ? covered / totalAbilities : 0,
+        _semanticRrfScoreRatio: maxRrf > 0 ? entry._semanticRrfScore / maxRrf : 0
       };
     })
     .sort((a, b) =>
@@ -256,4 +258,74 @@ export function mergeSemanticRetrievalRanks(querySets, queryViews = [], options 
       (b.similarity - a.similarity) ||
       String(a.name).localeCompare(String(b.name))
     );
+}
+
+
+/**
+ * Enforce the model's real tokenizer limit before any document reaches the embedding
+ * pipeline. Oversized ability documents are recursively split with overlapping word
+ * windows; the original face/card context is repeated so each fragment remains grounded.
+ * This is deliberately a build-time operation: end-user searches never download or
+ * tokenize the full corpus.
+ */
+export async function enforceSemanticTokenBudget(documents, tokenizer, options = {}) {
+  if (typeof tokenizer !== 'function') throw new TypeError('A Transformers.js tokenizer function is required.');
+  const maxTokens = Math.max(32, Number(options.maxTokens) || 240);
+  const minWords = Math.max(4, Number(options.minWords) || 8);
+  const output = [];
+  const pending = (documents || []).map(document => ({ ...document, chunkDepth: 0 }));
+
+  const getTokenCount = async text => {
+    const encoded = await tokenizer(text, { padding: false, truncation: false });
+    const ids = encoded?.input_ids;
+    const dims = Array.isArray(ids?.dims) ? ids.dims : null;
+    const count = dims?.length ? Number(dims[dims.length - 1]) :
+      (Number.isFinite(Number(ids?.size)) ? Number(ids.size) :
+      (ArrayBuffer.isView(ids?.data) ? ids.data.length :
+      (Array.isArray(ids) ? ids.length : NaN)));
+    if (!Number.isFinite(count) || count < 1) {
+      throw new Error('Tokenizer returned no measurable input_ids for a semantic document.');
+    }
+    return count;
+  };
+
+  while (pending.length) {
+    const document = pending.shift();
+    const tokenCount = await getTokenCount(document.text);
+    if (tokenCount <= maxTokens) {
+      output.push({ ...document, tokenCount });
+      continue;
+    }
+
+    const words = String(document.abilityText || '').trim().split(/\s+/).filter(Boolean);
+    if (words.length < minWords * 2 || document.chunkDepth >= 8) {
+      throw new Error(
+        `Semantic document for "${document.name}" (${document.face || 'card profile'}) needs ${tokenCount} tokens; cannot safely split below the ${maxTokens}-token budget.`
+      );
+    }
+
+    const ratio = Math.min(0.8, maxTokens / tokenCount * 0.78);
+    const chunkWords = Math.max(minWords, Math.floor(words.length * ratio));
+    const overlapWords = Math.min(Math.floor(chunkWords / 4), Math.max(4, Number(options.overlapWords) || 8));
+    const chunks = splitAbilityText(document.abilityText, chunkWords, overlapWords);
+    if (chunks.length < 2) {
+      throw new Error(`Unable to split oversized semantic ability for "${document.name}" safely.`);
+    }
+
+    for (const [index, abilityText] of chunks.entries()) {
+      const normalized = normalizeOracleForEmbedding(
+        `${document.contextText || ''}. ability ${abilityText}`,
+        document.face || document.name || ''
+      );
+      pending.push({
+        ...document,
+        text: normalized,
+        abilityText,
+        chunkDepth: document.chunkDepth + 1,
+        chunkIndex: (Number(document.chunkIndex) || 0) + index
+      });
+    }
+  }
+
+  return output;
 }
