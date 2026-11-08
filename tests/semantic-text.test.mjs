@@ -53,3 +53,22 @@ test('card-level Oracle text is retained when face records omit it', () => {
   assert.equal(docs.length, 1);
   assert.ok(docs.some(doc => /attacks/.test(doc.text) && /draw a card/.test(doc.text)));
 });
+
+test('cards without Oracle text retain searchable structured profiles', () => {
+  const docs = buildSemanticDocuments([{
+    name: 'Vanilla Profile',
+    mana_cost: '{2}{G}',
+    cmc: 3,
+    type_line: 'Creature — Bear',
+    colors: ['G'],
+    color_identity: ['G'],
+    power: '3',
+    toughness: '3'
+  }]);
+  assert.equal(docs.length, 1);
+  assert.equal(docs[0].kind, 'profile');
+  assert.match(docs[0].text, /creature bear/);
+  assert.match(docs[0].text, /power 3/);
+  assert.match(docs[0].text, /toughness 3/);
+  assert.match(docs[0].text, /green mana/);
+});
