@@ -121,6 +121,8 @@ function faceDescriptors(card) {
         keywords: Array.isArray(card.keywords) ? card.keywords.join(' ') : ''
       });
     }
+    // If only card-level Oracle text exists, do not also emit empty face-profile rows.
+    if (!faceOracle && wholeOracle) return faces.slice(-1);
     return faces;
   }
   return [{
