@@ -18442,12 +18442,13 @@ async function findFullSemanticMatches(index, sourceVector, excludeName, limit =
         queryVectors = (Array.isArray(sourceVector) ? sourceVector : [sourceVector]).filter(Boolean)
             .map(vector => vector instanceof Float32Array ? new Float32Array(vector) : Float32Array.from(vector));
         if (!queryVectors.length) return [];
-        const multiQuery = queryVectors.length > 1;
-        const queryPayload = multiQuery ? { queryBuffers: queryVectors.map(vector => vector.buffer) } : { queryBuffer: queryVectors[0].buffer };
+        const workerQueryVectors = queryVectors.map(vector => new Float32Array(vector));
+        const multiQuery = workerQueryVectors.length > 1;
+        const queryPayload = multiQuery ? { queryBuffers: workerQueryVectors.map(vector => vector.buffer) } : { queryBuffer: workerQueryVectors[0].buffer };
         const results = await semanticWorkerRequest(multiQuery ? 'query-many' : 'query', {
             ...queryPayload, excludeKey: getSemanticWorkerExcludeKey(excludeName), limit, minSimilarity,
             baseline: semanticCosineBaseline, generation: owningSearchRequestId
-        }, queryVectors.map(vector => vector.buffer));
+        }, workerQueryVectors.map(vector => vector.buffer));
         if (cancelled()) return [];
         staticSemanticQueryStats.workerQueries++;
         staticSemanticQueryStats.workerElapsedMs += Math.max(0, getManaResponsivenessNow() - semanticQueryStartedAt);
@@ -25232,7 +25233,10 @@ async function scoreCardBatch({
         const highlightBlend = blendHighlightIntentScore(baseChannelScore, card.highlightIntentScore || 0, highlightProfiles, {
             hasHighlight, hasEffectHighlight, hasTypeHighlight: typeLineHighlights.length > 0
         });
-        const channelScore = highlightBlend.score;
+        // Structured metadata is supporting evidence only; mechanics and function remain dominant.
+        const metadataWeight = hasHighlight ? 0.025 : 0.05;
+        const channelScore = (highlightBlend.score * (1 - metadataWeight))
+            + (Math.max(0, Math.min(1, Number(card.proximityScore) || 0)) * metadataWeight);
 
         // Agreement is only the convergence of the same three channels. It is capped hard so it
         // can never turn three weakly-related signals into a strong match by itself.
@@ -29189,39 +29193,45 @@ function getOverallInternalScore(card) {
 
 function calculateCardProximityScore(sourceCard, candidateCard) {
     if (!sourceCard || !candidateCard) return 0;
-    let score = 0, weight = 0;
+    let weightedScore = 0, totalWeight = 0;
+    const add = (score, weight) => {
+        if (!Number.isFinite(score) || weight <= 0) return;
+        weightedScore += Math.max(0, Math.min(1, score)) * weight;
+        totalWeight += weight;
+    };
+    const setSimilarity = (left, right) => {
+        const a = new Set((Array.isArray(left) ? left : []).map(value => String(value).toLowerCase()).filter(Boolean));
+        const b = new Set((Array.isArray(right) ? right : []).map(value => String(value).toLowerCase()).filter(Boolean));
+        if (!a.size && !b.size) return 1;
+        const union = new Set([...a, ...b]);
+        return [...a].filter(value => b.has(value)).length / Math.max(1, union.size);
+    };
     const sourceMvRaw = sourceCard.mana_value ?? sourceCard.cmc;
     const candidateMvRaw = candidateCard.mana_value ?? candidateCard.cmc;
-    const sourceMv = sourceMvRaw === null || sourceMvRaw === undefined || sourceMvRaw === '' ? null : Number(sourceMvRaw);
-    const candidateMv = candidateMvRaw === null || candidateMvRaw === undefined || candidateMvRaw === '' ? null : Number(candidateMvRaw);
-    if (Number.isFinite(sourceMv) && Number.isFinite(candidateMv)) {
-        score += 0.45 * Math.max(0, 1 - Math.abs(sourceMv - candidateMv) / 5);
-        weight += 0.45;
+    const sourceMv = sourceMvRaw == null || sourceMvRaw === '' ? null : Number(sourceMvRaw);
+    const candidateMv = candidateMvRaw == null || candidateMvRaw === '' ? null : Number(candidateMvRaw);
+    if (Number.isFinite(sourceMv) && Number.isFinite(candidateMv)) add(Math.exp(-Math.abs(sourceMv - candidateMv) / 3.5), 0.15);
+    if (Array.isArray(sourceCard.colors) && Array.isArray(candidateCard.colors)) add(setSimilarity(sourceCard.colors, candidateCard.colors), 0.09);
+    if (Array.isArray(sourceCard.color_identity) && Array.isArray(candidateCard.color_identity)) add(setSimilarity(sourceCard.color_identity, candidateCard.color_identity), 0.12);
+    const manaSymbols = value => String(value || '').match(/\{[^}]+\}/g) || [];
+    if (sourceCard.mana_cost != null && candidateCard.mana_cost != null) add(setSimilarity(manaSymbols(sourceCard.mana_cost), manaSymbols(candidateCard.mana_cost)), 0.08);
+    if (sourceCard.type_line && candidateCard.type_line) {
+        const tokens = value => String(value).toLowerCase().replace(/[—–-]/g, ' ').split(/[^a-z0-9]+/).filter(Boolean);
+        add(setSimilarity(tokens(sourceCard.type_line), tokens(candidateCard.type_line)), 0.17);
     }
-    const sourceColorsRaw = Array.isArray(sourceCard.color_identity) ? sourceCard.color_identity : sourceCard.colors;
-    const candidateColorsRaw = Array.isArray(candidateCard.color_identity) ? candidateCard.color_identity : candidateCard.colors;
-    if (Array.isArray(sourceColorsRaw) && Array.isArray(candidateColorsRaw)) {
-        const sourceColors = new Set(sourceColorsRaw.map(c => String(c).toLowerCase()));
-        const candidateColors = new Set(candidateColorsRaw.map(c => String(c).toLowerCase()));
-        const union = new Set([...sourceColors, ...candidateColors]);
-        const colorSimilarity = union.size ? [...sourceColors].filter(c => candidateColors.has(c)).length / union.size : 1;
-        score += 0.30 * colorSimilarity;
-        weight += 0.30;
-    }
-    const typeTokens = ['creature', 'instant', 'sorcery', 'artifact', 'enchantment', 'land', 'planeswalker', 'battle', 'kindred'];
-    const sourceLine = String(sourceCard.type_line || '').toLowerCase();
-    const candidateLine = String(candidateCard.type_line || '').toLowerCase();
-    const sourceTypeWords = sourceLine.split(/[^a-z]+/).filter(Boolean);
-    const sourceTypes = typeTokens.filter(t => sourceTypeWords.includes(t));
-    const candidateTypeWords = candidateLine.split(/[^a-z]+/).filter(Boolean);
-    const candidateTypes = typeTokens.filter(t => candidateTypeWords.includes(t));
-    if (sourceLine && candidateLine) {
-        const shared = sourceTypes.filter(t => candidateTypes.includes(t)).length;
-        const union = new Set([...sourceTypes, ...candidateTypes]).size;
-        score += 0.25 * (union ? shared / union : 0);
-        weight += 0.25;
-    }
-    return weight > 0 ? Math.max(0, Math.min(1, score / weight)) : 0;
+    if (Array.isArray(sourceCard.keywords) && Array.isArray(candidateCard.keywords)) add(setSimilarity(sourceCard.keywords, candidateCard.keywords), 0.16);
+    if (Array.isArray(sourceCard.produced_mana) && Array.isArray(candidateCard.produced_mana)) add(setSimilarity(sourceCard.produced_mana, candidateCard.produced_mana), 0.07);
+    const addNumeric = (left, right, weight, scale) => {
+        if (left == null || left === '' || right == null || right === '') return;
+        const a = Number(left), b = Number(right);
+        if (Number.isFinite(a) && Number.isFinite(b)) add(Math.max(0, 1 - Math.abs(a - b) / scale), weight);
+    };
+    addNumeric(sourceCard.power, candidateCard.power, 0.04, 8);
+    addNumeric(sourceCard.toughness, candidateCard.toughness, 0.04, 8);
+    addNumeric(sourceCard.loyalty, candidateCard.loyalty, 0.02, 8);
+    addNumeric(sourceCard.defense, candidateCard.defense, 0.02, 8);
+    if (sourceCard.layout && candidateCard.layout) add(sourceCard.layout === candidateCard.layout ? 1 : 0, 0.02);
+    return totalWeight > 0 ? Math.max(0, Math.min(1, weightedScore / totalWeight)) : 0;
 }
 
 function getRankingScoreForCriteria(card, criteria) {
