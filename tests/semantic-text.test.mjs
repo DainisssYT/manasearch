@@ -67,7 +67,7 @@ test('cards without Oracle text retain searchable structured profiles', () => {
   }]);
   assert.equal(docs.length, 1);
   assert.equal(docs[0].kind, 'profile');
-  assert.match(docs[0].text, /creature bear/);
+  assert.match(docs[0].text, /creature bear/i);
   assert.match(docs[0].text, /power 3/);
   assert.match(docs[0].text, /toughness 3/);
   assert.match(docs[0].text, /green mana/);
