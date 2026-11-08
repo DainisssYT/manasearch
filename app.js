@@ -1,11 +1,11 @@
 /* ManaSearch build 20261108-131 */
 // ManaSearch deployment build marker. Bump this whenever app.js changes so cached-module issues are easy to diagnose.
-const MANASEARCH_APP_BUILD = '20261108-132';
+const MANASEARCH_APP_BUILD = '20261108-133';
 console.info(`[ManaSearch] app.js build ${MANASEARCH_APP_BUILD}`);
 
 // The source-query and static-index builders share one representation so both sides
 // embed the same normalized face/ability/metadata documents.
-import { buildSemanticDocuments, mergeSemanticRetrievalRanks } from './scripts/semantic-text.mjs';
+import { buildSemanticDocuments, enforceSemanticTokenBudget, mergeSemanticRetrievalRanks } from './scripts/semantic-text.mjs';
 
 // State Management
 let currentSourceCard = null;
@@ -26507,7 +26507,7 @@ function buildNoHighlightSemanticIntentText(sourceCard, sourceText, parsedEffect
 }
 
 
-function buildSourceSemanticQueryTexts(sourceCard, fallbackText, maxWords = 32) {
+async function buildSourceSemanticQueryTexts(sourceCard, fallbackText, maxWords = 32, tokenizer = null) {
     const source = sourceCard && typeof sourceCard === 'object' ? { ...sourceCard } : {};
     const faceText = Array.isArray(source.card_faces)
         ? source.card_faces.map(face => String(face?.oracle_text || '')).join(' ').trim()
@@ -26518,10 +26518,18 @@ function buildSourceSemanticQueryTexts(sourceCard, fallbackText, maxWords = 32) 
     // This is deliberately the same helper and split configuration used by the static
     // index builder. A source face, ability, or metadata field therefore receives the same
     // semantic representation as the corresponding candidate-side document.
-    return buildSemanticDocuments([source], {
+    const documents = buildSemanticDocuments([source], {
         maxWords: Math.max(16, Number(maxWords) || 32),
         overlapWords: 8
-    }).map(document => document.text).filter(Boolean);
+    });
+    if (typeof tokenizer !== 'function') {
+        throw new Error('The semantic model tokenizer is unavailable; refusing to submit unverified source ability text.');
+    }
+    const tokenSafeDocuments = await enforceSemanticTokenBudget(documents, tokenizer, {
+        maxTokens: 240,
+        overlapWords: 8
+    });
+    return tokenSafeDocuments.map(document => document.text).filter(Boolean);
 }
 
 function getSearchIntent(sourceCard, highlights = []) {
@@ -28173,7 +28181,7 @@ async function findSimilarCards() {
                 // Search every source face/ability independently. This complements the full-text
                 // intent query and protects later abilities from input-token truncation.
                 if (!hasHighlight) {
-                    const abilityTexts = buildSourceSemanticQueryTexts(currentSourceCard, semanticIntentTextForScoring);
+                    const abilityTexts = await buildSourceSemanticQueryTexts(currentSourceCard, semanticIntentTextForScoring, 32, ex.tokenizer);
                     const distinctAbilityTexts = abilityTexts.length === 1 && abilityTexts[0] === queryText ? [] : abilityTexts;
                     const abilityVectors = await Promise.all(distinctAbilityTexts.map(text => getCachedEmbedding(text, ex)));
                     const abilityLimit = Math.max(12, Math.ceil(limit / Math.max(1, abilityVectors.length)));
