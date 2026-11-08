@@ -100,7 +100,7 @@ function faceDescriptors(card) {
     }));
     const faceOracle = faces.map(face => face.oracleText).filter(Boolean).join(' ');
     const wholeOracle = String(card.oracle_text || '').trim();
-    const normalizeSpacing = value => String(value || '').replace(/\\s+/g, ' ').trim();
+    const normalizeSpacing = value => String(value || '').replace(/\s+/g, ' ').trim();
     // Some layouts expose useful card-level Oracle text in addition to (or instead of) face text.
     if (wholeOracle && normalizeSpacing(wholeOracle) !== normalizeSpacing(faceOracle)) {
       faces.push({
@@ -117,7 +117,6 @@ function faceDescriptors(card) {
         keywords: Array.isArray(card.keywords) ? card.keywords.join(' ') : ''
       });
     }
-    if (!faceOracle && wholeOracle && faces.length) faces[0].oracleText = wholeOracle;
     return faces;
   }
   return [{
