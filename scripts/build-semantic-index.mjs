@@ -1,3 +1,6 @@
+// DEPRECATED: retained for historical compatibility; this creates the old one-vector-per-card index.
+// Do not use it to publish semantic-index.bin. Run `npm run build-static-data` instead so cards.bin,
+// semantic-index.bin, and static-data-meta.json are rebuilt atomically from the same Scryfall revision.
 import fs from 'node:fs/promises';
 import { gunzipSync } from 'node:zlib';
 import { pipeline } from '@xenova/transformers';
