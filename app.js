@@ -15202,8 +15202,17 @@ function runManaSearchMechanicalRegressionSuite({ log = true } = {}) {
         const tokenDetail = calculateMechanicalSimilarityDetailed(multiplier, creator);
         results.push({
             id: 'token-multiplier-is-not-token-creation',
-            pass: tokenDetail.explicitContrast?.kind === 'token-multiplier-vs-token-creation' && tokenDetail.score <= 0.58,
+            pass: tokenDetail.explicitContrast?.kind === 'token-multiplier-vs-token-creation' && Number.isFinite(tokenDetail.score) && tokenDetail.score <= 0.58,
             score: tokenDetail.score,
+            rawScore: tokenDetail.rawScore,
+            graphScore: tokenDetail.graphScore,
+            structuralScore: tokenDetail.structuralScore,
+            universalScore: tokenDetail.universalScore,
+            repeatabilityMismatch: tokenDetail.repeatabilityMismatch,
+            relationshipMismatch: tokenDetail.relationshipMismatch,
+            graphContradiction: tokenDetail.graphContradiction,
+            graphFeatureVector: tokenDetail.graphFeatureVector,
+            graphMatches: (tokenDetail.graphMatches || []).map(match => ({score:match.score,breakdown:match.breakdown})),
             contrast: tokenDetail.explicitContrast
         });
 
