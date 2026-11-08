@@ -278,6 +278,7 @@ async function main() {
   // Multiple rows may share a card name. The worker already keeps the strongest
   // matching row per normalized card name, so this remains binary-format compatible.
   const semanticCards = semanticDocuments.map(document => ({ name: document.name }));
+  if (semanticCards.length !== vectors.length) throw new Error('Semantic document and vector counts differ before index serialization.');
   const semanticBinary = writeSemanticIndex(semanticCards, vectors);
   console.log(`Prepared ${path.basename(SEMANTIC_OUT)} (${(semanticBinary.length / 1024 / 1024).toFixed(2)} MiB).`);
 
@@ -299,8 +300,8 @@ async function main() {
   if (!cardBinary.length || !semanticBinary.length || !metadata.length) {
     throw new Error('Static asset generation produced an empty artifact.');
   }
-  if (vectors.length !== cards.length) {
-    throw new Error(`Semantic vector/card count mismatch: ${vectors.length} vectors for ${cards.length} cards.`);
+  if (vectors.length !== semanticDocuments.length || semanticDocuments.length !== semanticCards.length) {
+    throw new Error(`Semantic document/vector count mismatch: ${semanticDocuments.length} documents, ${vectors.length} vectors, ${semanticCards.length} index rows.`);
   }
   if (vectors[0]?.length !== 384) {
     throw new Error(`Unexpected semantic dimension: ${vectors[0]?.length || 0}; expected 384.`);
