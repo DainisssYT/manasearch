@@ -17451,10 +17451,9 @@ function getLocalCorpusQueryTokens(text) {
 async function searchStaticCardCorpus(queryText, options = {}) {
     const corpus = staticCardCorpusMemory;
     if (!corpus?.cards?.length || !queryText) return [];
-    const tokens = getLocalCorpusQueryTokens(queryText);
+    const descriptor = localCorpusScoreDescriptor(queryText, corpus);
+    const tokens = descriptor.tokens;
     if (!tokens.length) return [];
-    const tokenSet = new Set(tokens);
-    const phrase = normalizeLocalCorpusText(queryText);
     const excludeKey = normalizeCardNameForIdentity(options.excludeName || '');
     const limit = Math.max(1, Math.min(1200, Number(options.limit) || 180));
     const scored = [];
@@ -17474,17 +17473,8 @@ async function searchStaticCardCorpus(queryText, options = {}) {
             !(useFilters && !matchesActiveFilters(card, options.filters, options.broadFallbackFilters))) {
             const haystack = card._localSearchText || '';
             if (haystack) {
-                let matched = 0;
-                for (const token of tokens) if (haystack.includes(token)) matched++;
-                if (matched) {
-                    const coverage = matched / tokens.length;
-                    const phraseBonus = phrase.length >= 8 && haystack.includes(phrase) ? 0.24 : 0;
-                    const keywordBonus = Array.isArray(card._localKeywordTokens)
-                        ? card._localKeywordTokens.some(k => tokenSet.has(k)) ? 0.08 : 0
-                        : (Array.isArray(card.keywords) && card.keywords.some(k => tokens.includes(normalizeLocalCorpusText(k))) ? 0.08 : 0);
-                    const score = Math.min(1, coverage * 0.68 + phraseBonus + keywordBonus);
-                    if (score >= 0.18) scored.push({ card, score });
-                }
+                const score = scoreLocalCorpusCardForDescriptor(card, descriptor);
+                if (score >= 0.18) scored.push({ card, score });
             }
         }
         if ((i & 7) === 7) {
@@ -17595,18 +17585,29 @@ function createLocalCorpusBatchContext(corpus = staticCardCorpusMemory, isCancel
     };
 }
 
-function localCorpusScoreDescriptor(query) {
+function localCorpusScoreDescriptor(query, corpus = staticCardCorpusMemory) {
     const text = String(query || '').trim();
     const tokens = getLocalCorpusQueryTokens(text);
     const phrase = normalizeLocalCorpusText(text);
+    const totalDocuments = Math.max(1, Number(corpus?.cards?.length) || 1);
+    const tokenIdf = tokens.map(token => {
+        const postingCount = corpus?.tokenIndex instanceof Map
+            ? Number(corpus.tokenIndex.get(token)?.length) || 0
+            : 0;
+        if (!postingCount) return 1;
+        const documentFrequency = Math.min(totalDocuments, Math.max(1, postingCount));
+        // Smoothed BM25 inverse-document-frequency: rare mechanic terms carry more evidence
+        // than ubiquitous words such as "creature", "control", or "battlefield".
+        return Math.log(1 + (totalDocuments - documentFrequency + 0.5) / (documentFrequency + 0.5));
+    });
     return {
         query: text,
         tokens,
         tokenSet: new Set(tokens),
         phrase,
-        // Query text is normalized before keying; semantically equivalent normalized phrases
-        // share the cache even when they originated in separate retrieval lanes.
-        cacheKey: `${phrase}\u001f${tokens.join('\u001e')}`
+        tokenIdf,
+        // Include corpus-derived weights to prevent stale scores after a corpus rebuild.
+        cacheKey: phrase + '\u001f' + tokens.join('\u001e') + '\u001f' + tokenIdf.map(x => x.toFixed(4)).join(',')
     };
 }
 
@@ -17625,12 +17626,20 @@ function scoreLocalCorpusCardForDescriptor(card, descriptor) {
         return cached;
     }
     let matched = 0;
-    // Keep String.includes semantics exactly, including prefix/substring matches. The cache
-    // changes how often we scan the string, not what qualifies as a hit.
-    for (const token of descriptor.tokens) if (haystack.includes(token)) matched++;
+    let matchedIdf = 0;
+    let totalIdf = 0;
+    // Rare mechanic terms carry more evidence than common type/zone words.
+    for (let i = 0; i < descriptor.tokens.length; i++) {
+        const weight = Number(descriptor.tokenIdf?.[i]) || 1;
+        totalIdf += weight;
+        if (haystack.includes(descriptor.tokens[i])) {
+            matched++;
+            matchedIdf += weight;
+        }
+    }
     let score = 0;
     if (matched) {
-        const coverage = matched / descriptor.tokens.length;
+        const coverage = totalIdf > 0 ? matchedIdf / totalIdf : matched / descriptor.tokens.length;
         const phraseBonus = descriptor.phrase.length >= 8 && haystack.includes(descriptor.phrase) ? 0.24 : 0;
         const keywordBonus = Array.isArray(card._localKeywordTokens) &&
             card._localKeywordTokens.some(k => descriptor.tokenSet?.has(k) || descriptor.tokens.includes(k)) ? 0.08 : 0;
@@ -17664,7 +17673,7 @@ async function runLocalCorpusBatch(context) {
     const requestStates = ctx.requests.map((request, stateIndex) => ({
         request,
         stateIndex,
-        descriptors: request.queries.slice(0, 16).map(localCorpusScoreDescriptor).filter(d => d.tokens.length),
+        descriptors: request.queries.slice(0, 16).map(query => localCorpusScoreDescriptor(query, corpus)).filter(d => d.tokens.length),
         hits: [],
         cap: getDepthScaledLocalLimit(request.limit, ctx.depthPercent),
         // A bit-mark array avoids millions of repeated Set.add/hash operations when common terms
