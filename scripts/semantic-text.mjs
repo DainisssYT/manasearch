@@ -153,6 +153,7 @@ export function buildSemanticDocuments(cards, options = {}) {
       const abilities = splitAbilityText(face.oracleText, maxWords, overlapWords);
       const context = [
         face.name && `card face ${face.name}`,
+        card.layout && `layout ${card.layout}`,
         face.typeLine && `type ${face.typeLine}`,
         face.manaCost && `mana cost ${face.manaCost}`,
         face.colors && `colors ${face.colors}`,
