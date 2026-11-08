@@ -58,7 +58,7 @@ test('semantic baseline calibration samples across the entire ability index', as
   const source = await readFile(new URL('../semantic-search-worker.js', import.meta.url), 'utf8');
   const messages = [];
   const self = { postMessage(message) { messages.push(message); } };
-  vm.runInNewContext(source + '\\nself.__calibrateSemanticBaseline = calibrateSemanticBaseline;', { self, console });
+  vm.runInNewContext(source + '\nself.__calibrateSemanticBaseline = calibrateSemanticBaseline;', { self, console });
 
   const count = 1200;
   const dim = 2;
