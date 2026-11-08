@@ -3837,7 +3837,8 @@ const CANONICAL_FUNCTION_TAG_NAMES = {
     lose_life: "Life Loss",
     // "tap" has no existing hand tag counterpart (falls through to the generic Title-Case
     // fallback, "Tap") - only untap already had one, reused here.
-    untap: "Untap"
+    untap: "Untap",
+    untap_restriction: "Stax"
     // place_counter deliberately has no flat entry here - see the compositional block in
     // generateTags, which maps it to "+1/+1 Counters" or "-1/-1 Counters" depending on
     // counterType. A flat mapping to the existing "+1/+1 Counters" tag would be wrong for a
@@ -6377,14 +6378,40 @@ function parseCounterPlacementEffect(clause) {
 }
 
 /**
- * Parses direct tap/untap effects on a permanent - "tap target creature", "untap all lands you
- * control" - distinct from a mana ability's own {T} activation cost (already stripped out before
- * this runs by splitActivationCost) and from keyword reminder text like "doesn't untap". Requires
- * an explicit target/each/all phrase after the verb specifically so a bare mention isn't misread
- * as an effect. Previously unparsed entirely.
+ * Parses static prohibitions that prevent a permanent from untapping during a specified untap
+ * step. This is distinct from an effect that actively taps or untaps a permanent.
  * @param {string} clause
  * @returns {Object|null}
  */
+function parseUntapRestrictionEffect(clause) {
+    const text = String(clause || '').trim().toLowerCase().replace(/[’]/g, "'");
+    const restrictionMatch = text.match(/\b(?:does\s+not|doesn't|do\s+not|don't|cannot|can't|never)\s+untap\b/i);
+    if (!restrictionMatch) return null;
+    const subjectText = text.slice(0, restrictionMatch.index).trim();
+    const typeMatch = subjectText.match(/\b(artifacts?|creatures?|permanents?|lands?|planeswalkers?|battles?|enchantments?)\b/i);
+    const object = typeMatch ? typeMatch[1].toLowerCase().replace(/s$/, '') : 'permanent';
+    const isSelf = /\b(?:this|that|~)\b/i.test(subjectText);
+    const allScope = /\b(?:each|all)\b/i.test(subjectText);
+    const controllerScope = /\byou control\b/i.test(subjectText) ? 'you_control'
+        : /\bopponents?\s+control\b/i.test(subjectText) ? 'opponent_control' : null;
+    const untapScope = isSelf ? 'self' : allScope ? 'all'
+        : controllerScope || 'unspecified';
+    const untapWindow = /\byour\s+untap\s+step\b/i.test(text) ? 'your_untap_step'
+        : /\b(?:its|their|that player's)\s+(?:controller's\s+)?untap\s+step\b/i.test(text)
+            ? 'controller_untap_step'
+            : /\buntap\s+step\b/i.test(text) ? 'untap_step' : null;
+    const restrictions = extractMTGRestrictions(text)
+        .filter(token => token === 'controlledbyyou' || token === 'controlledbyopponent');
+    restrictions.push('untap_step_restriction');
+    return {
+        action: 'restrict_untap', object,
+        target: isSelf ? 'self' : allScope ? 'all' : null,
+        controllerScope, untapWindow, untapScope,
+        isStatic: true, effectMode: 'prohibition',
+        restriction: restrictions, raw: String(clause || '').trim()
+    };
+}
+
 function parseTapEffect(clause) {
     const text = String(clause || '').trim().toLowerCase();
     // Anchor the action after optional imperative wrappers so trigger conditions such as
@@ -6996,83 +7023,102 @@ function parseSearchEffect(clause) {
  * @returns {Object|null}
  */
 function parseTokenEffect(clause) {
-    const text = clause.toLowerCase();
+    const text = String(clause || '').toLowerCase().replace(/[’]/g, "'");
+    const describeToken = descriptorValue => {
+        const descriptor = String(descriptorValue || '').replace(/\s+/g, ' ').trim();
+        const stats = (descriptor.match(/(?:\*|\d+)\s*\/\s*(?:\*|\d+)/) || [])[0]?.replace(/\s+/g, '') || null;
+        const colors = ['white', 'blue', 'black', 'red', 'green', 'colorless'].filter(color =>
+            new RegExp('\\b' + color + '\\b', 'i').test(descriptor)
+        );
+        const cardTypes = ['artifact', 'creature', 'enchantment', 'land', 'planeswalker', 'battle', 'kindred']
+            .filter(type => new RegExp('\\b' + type + '\\b', 'i').test(descriptor));
+        const tokenName = (descriptor.match(/\bnamed\s+["']?([^"',.;]+)/i) || [])[1]?.trim() || null;
+        let subtype = descriptor
+            .replace(/(?:\*|\d+)\s*\/\s*(?:\*|\d+)/g, ' ')
+            .replace(/\b(?:white|blue|black|red|green|colorless)\b/gi, ' ')
+            .replace(/\b(?:artifact|creature|enchantment|land|planeswalker|battle|kindred|token|tokens)\b/gi, ' ')
+            .replace(/\b(?:tapped|untapped|legendary|nonlegendary|and|with|named|has|have)\b/gi, ' ')
+            .replace(/\bnamed\b[\s\S]*$/i, ' ')
+            .replace(/[^a-z0-9' -]+/gi, ' ')
+            .replace(/\s+/g, ' ')
+            .trim();
+        if (!subtype) {
+            const known = descriptor.match(/\b(treasure|clue|food|blood|map|powerstone|incubator|shard|gold|emblem|junk|lumber|vibranium|heartwood)\b/i);
+            if (known) subtype = known[1].toLowerCase();
+        }
+        return {
+            descriptor,
+            tokenType: subtype || 'token',
+            tokenName,
+            tokenColors: colors,
+            tokenCardTypes: cardTypes,
+            tokenStats: stats,
+            tokenEntersTapped: /\btapped\b/i.test(descriptor)
+        };
+    };
 
-    // "Investigate" is rules text for creating a Clue token. Preserve the clue identity so
-    // retrieval/ranking can recognize repeatable Clue engines, not merely generic token makers.
+    // Investigate creates one Clue for each occurrence. Whether those creation events recur
+    // comes from the parent ability's trigger/timing profile, not from the Clue token itself.
     if (/\binvestigates?\b/i.test(text)) {
         return {
-            action: "create", object: "token", to: "battlefield", quantity: null,
-            tokenType: "clue", recipientScope: /\bunder\s+(?:an?\s+)?opponent(?:'s|’s)\s+control\b/i.test(text) ? 'opponent' : 'you',
+            action: "create", object: "token", to: "battlefield", quantity: 1,
+            tokenType: "clue", tokenDescriptor: "clue", tokenColors: [],
+            tokenCardTypes: ["artifact"], tokenStats: null, tokenEntersTapped: false,
+            tokenKeywords: [], recipientScope: /\bunder\s+(?:an?\s+)?opponent(?:'s|’s)\s+control\b/i.test(text) ? 'opponent' : 'you',
             clueDrawEngine: true, isReplacement: false
         };
     }
 
     if (/\bif\b.*?\btokens?\b.*?\bwould be created\b/i.test(text) || text.includes("twice that many")) {
-        return {
-            action: "multiply",
-            object: "token",
-            multiplier: 2,
-            isReplacement: true
-        };
+        return { action: "multiply", object: "token", multiplier: 2, isReplacement: true };
     }
-
     if (/\bcopy\b/i.test(text) && text.includes("token")) {
-        return {
-            action: "copy_token",
-            object: "token",
-            target: /\btarget\b/i.test(text) ? "target" : "chosen",
-            isReplacement: false
-        };
+        return { action: "copy_token", object: "token", target: /\btarget\b/i.test(text) ? "target" : "chosen", isReplacement: false };
     }
-
-    // Oracle grammar uses both imperative "create" and third-person "creates" (e.g.
-    // "an opponent creates two Treasure tokens"). Recognize both so opponent-gift clauses don't
-    // silently fall through to a generic effect.
     if (!/\b(?:create|creates|creating)\b/i.test(text)) return null;
 
     const opponentCreates = /\b(?:(?:an?|each|target)\s+)?opponents?\s+creates?\b/i.test(text);
     const underOpponentControl = /\bunder\s+(?:an?\s+)?opponent(?:'s|’s)\s+control\b/i.test(text);
     const underYourControl = /\bunder\s+your\s+control\b/i.test(text);
-    const recipientScope = opponentCreates || underOpponentControl ? 'opponent' : (underYourControl ? 'you' : null);
     const effect = {
-        action: "create",
-        object: "token",
-        to: "battlefield",
-        quantity: 1,
-        stats: null,
-        keywords: [],
-        tokenType: "token",
-        recipientScope,
-        controller: opponentCreates ? 'opponent' : null,
-        isReplacement: false
+        action: "create", object: "token", to: "battlefield", quantity: 1,
+        stats: null, keywords: [], tokenType: "token", tokenDescriptor: null,
+        tokenColors: [], tokenCardTypes: [], tokenStats: null,
+        tokenEntersTapped: false, tokenKeywords: [],
+        recipientScope: opponentCreates || underOpponentControl ? 'opponent' : (underYourControl ? 'you' : null),
+        controller: opponentCreates ? 'opponent' : null, isReplacement: false
     };
-
-    const qtyMap = { 'a': 1, 'an': 1, 'one': 1, 'two': 2, 'three': 3, 'four': 4, 'five': 5, 'six': 6, 'x': 'X' };
-    const qtyMatch = text.match(/\bcreates?\s+(a|an|one|two|three|four|five|six|x|\d+)\b/i);
-    if (qtyMatch) {
-        const rawQty = qtyMatch[1].toLowerCase();
-        effect.quantity = qtyMap[rawQty] !== undefined ? qtyMap[rawQty] : (isNaN(rawQty) ? rawQty : parseInt(rawQty, 10));
+    const qtyMap = {
+        a: 1, an: 1, one: 1, two: 2, three: 3, four: 4, five: 5,
+        six: 6, seven: 7, eight: 8, nine: 9, ten: 10, x: 'X',
+        'one or more': 'ANY', 'any number of': 'ANY'
+    };
+    const quantityMatch = text.match(/\bcreates?\s+(one or more|any number of|a|an|one|two|three|four|five|six|seven|eight|nine|ten|x|\d+)\b/i);
+    if (quantityMatch) {
+        const rawQuantity = quantityMatch[1].toLowerCase();
+        effect.quantity = qtyMap[rawQuantity] !== undefined ? qtyMap[rawQuantity] : Number(rawQuantity);
     }
-
-    // Extract P/T stats (e.g., 2/2, 1/1)
-    const ptMatch = text.match(/(\d+\/\d+|\*[\/*]\*)/);
-    if (ptMatch) {
-        effect.stats = ptMatch[1];
+    const descriptorMatch = text.match(/\bcreates?\s+(?:one or more|any number of|a|an|one|two|three|four|five|six|seven|eight|nine|ten|x|\d+)\s+(.+?)\s+tokens?\b/i);
+    if (descriptorMatch) {
+        const token = describeToken(descriptorMatch[1]);
+        effect.tokenType = token.tokenType;
+        effect.tokenDescriptor = token.descriptor;
+        effect.tokenColors = token.tokenColors;
+        effect.tokenCardTypes = token.tokenCardTypes;
+        effect.tokenStats = token.tokenStats;
+        effect.tokenEntersTapped = token.tokenEntersTapped;
+        effect.tokenName = token.tokenName;
+        effect.stats = token.tokenStats;
     }
-
-    // Extract keywords granted to the token
     const keywordCheck = ['flying', 'haste', 'trample', 'lifelink', 'deathtouch', 'vigilance', 'menace'];
-    effect.keywords = keywordCheck.filter(kw => text.includes(kw));
-
-    const typeMatch = text.match(/\bcreates?\s+(?:a|an|one|two|three|four|five|six|x|\d+)\s+([a-z0-9\/\s\-]+?)\s*token/i);
-    if (typeMatch) {
-        effect.tokenType = typeMatch[1].trim().replace(/\s+/g, ' ');
+    effect.keywords = keywordCheck.filter(keyword => text.includes(keyword));
+    effect.tokenKeywords = [...effect.keywords];
+    if (/\bfor each\b/i.test(text)) {
+        effect.quantity = null;
+        effect.quantityProfile = { kind: 'variable', relation: 'for_each', source: 'matching_permanent_count' };
+    } else if (effect.quantity === 'ANY') {
+        effect.quantityProfile = { kind: 'variable', relation: 'one_or_more', source: 'oracle_quantity' };
     }
-    // "for each" describes a variable count, not a one-token effect. Keep the relation without
-    // pretending the token quantity is fixed at one.
-    if (/\bfor each\b/i.test(text)) effect.quantity = null;
-
     return effect;
 }
 
@@ -8109,6 +8155,7 @@ function parseMTGEffect(oracleText, cardContext = null) {
             parseAnthemEffect(effectText) ||
             parseCounterPlacementEffect(effectText) ||
             parseControlChangeEffect(effectText) ||
+            parseUntapRestrictionEffect(effectText) ||
             parseTapEffect(effectText) ||
             parseLibraryActionEffect(effectText) ||
             parseDamageEffect(effectText) ||
@@ -8291,6 +8338,8 @@ const ACTION_TAXONOMY = {
     // serve opposite strategic purposes despite the shared verb family.
     tap:         { family: "tap_control",            outcome: "permanent_tapped" },
     untap:       { family: "tap_control",            outcome: "permanent_untapped" },
+    restrict_untap: { family: "tap_control",         outcome: "permanent_cannot_untap" },
+    untap_restriction: { family: "tap_control",      outcome: "permanent_cannot_untap" },
     scry:        { family: "library_manipulation",   outcome: "library_top_reordered" },
     surveil:     { family: "library_manipulation",   outcome: "library_top_or_graveyard" },
     proliferate: { family: "counter_manipulation",   outcome: "existing_counters_increased" }
@@ -8350,6 +8399,7 @@ const FUNCTION_OUTCOMES = {
     place_counter:    "stats_changed_one_shot",
     tap:              "permanent_tapped",
     untap: "permanent_untapped",
+    untap_restriction: "permanent_cannot_untap",
     scry: "library_top_reordered",
     surveil: "library_top_or_graveyard",
     proliferate: "existing_counters_increased",
@@ -8520,6 +8570,8 @@ function deriveCanonicalFunction(effect) {
         fn = a;
     } else if (a === "place_counter") {
         fn = "place_counter";
+    } else if (a === "restrict_untap") {
+        fn = "untap_restriction";
     } else if (a === "tap" || a === "untap") {
         // Same reasoning as gain_life/lose_life: opposite effects, kept as separate functions
         // rather than one "tap_state_change" that would score a Falter effect and an Untap-all
@@ -8596,6 +8648,13 @@ function deriveCanonicalFunction(effect) {
             recipientScope,
             isOpponentBenefit: Boolean(effect.isOpponentBenefit || recipientScope === 'opponent'),
             tokenType: effect.tokenType && effect.tokenType !== 'token' ? String(effect.tokenType).toLowerCase().trim() : null,
+            tokenDescriptor: effect.tokenDescriptor || null,
+            tokenColors: Array.isArray(effect.tokenColors) ? effect.tokenColors : [],
+            tokenCardTypes: Array.isArray(effect.tokenCardTypes) ? effect.tokenCardTypes : [],
+            tokenStats: effect.tokenStats || effect.stats || null,
+            tokenEntersTapped: Boolean(effect.tokenEntersTapped),
+            untapWindow: effect.untapWindow || null,
+            untapScope: effect.untapScope || null,
             libraryOwnerScope: libraryTopExile ? libraryOwnerScope : null,
             accessType: libraryTopExile ? (effect.playFromExile || /\b(?:you may|you can)\s+(?:play|cast)\b/i.test(ruleContext) ? 'impulse_draw' : 'exile_access') : null,
             playFromExile: Boolean(effect.playFromExile || (libraryTopExile && /\b(?:you may|you can)\s+(?:play|cast)\b/i.test(ruleContext))),
@@ -8656,7 +8715,9 @@ function canonicalFunctionToText(canonicalFunctions) {
             return `${access}; library-card access`;
         }
         if (cf.function === 'token_creation' && p.tokenType === 'clue') {
-            return `repeatable Clue token engine from investigate; each Clue can be activated for {2}, sacrifice that Clue token: draw a card (repeatable card advantage when mana and Clues are available)`;
+            const cadence = p.repeatabilityProfile?.group === 'repeatable_engine' ? 'repeatable Clue token engine'
+                : p.repeatabilityProfile?.group === 'single_use' ? 'one-time Clue token creation' : 'Clue token creation';
+            return `${cadence} from investigate; each created Clue can be activated for {2}, sacrifice that Clue token: draw a card`;
         }
         if (cf.function === 'card_draw' && p.derivedFromTokenAbility) {
             return 'repeatable activated card draw from a Clue token: pay {2}, sacrifice that Clue token, draw a card';
@@ -8665,8 +8726,8 @@ function canonicalFunctionToText(canonicalFunctions) {
         if (cf.function === 'opponent_gift') return "put a permanent onto the battlefield under an opponent's control; this grants the opponent a resource";
         if (cf.function === 'self_sacrifice') return 'sacrifice this source permanent itself; a one-time self-sacrifice is not sacrificing another permanent as a repeatable cost';
         if (cf.function === 'sacrifice_other') return 'sacrifice another or unspecified permanent; this is not the source permanent sacrificing itself';
-        if (cf.function === 'token_creation' && p.tokenType) {
-            const tokenName = `${p.tokenType} token`;
+        if (cf.function === 'token_creation') {
+            const tokenName = `${p.tokenType || 'token'} token`;
             const quantityText = typeof p.quantity === 'number'
                 ? `${p.quantity} ${tokenName}${p.quantity === 1 ? '' : 's'}`
                 : p.quantityProfile?.relation === 'for_each'
@@ -8674,9 +8735,21 @@ function canonicalFunctionToText(canonicalFunctions) {
                     : `${tokenName}s`;
             const actorText = p.recipientScope === 'opponent' ? 'an opponent creates' : p.recipientScope === 'you' ? 'you create' : 'create';
             const recipientContext = p.recipientScope === 'opponent'
-                ? ' (opponent benefit/resources; potentially a downside for your side or a deliberate political effect)'
-                : '';
-            return `${actorText} ${quantityText}${recipientContext}`;
+                ? ' (opponent benefit/resources; potentially a downside for your side or a deliberate political effect)' : '';
+            const cadence = p.repeatabilityProfile?.group === 'repeatable_engine' ? 'repeatable token production'
+                : p.repeatabilityProfile?.group === 'single_use' ? 'one-time token creation' : 'token creation';
+            const descriptor = p.tokenDescriptor && p.tokenDescriptor !== p.tokenType ? ` (token characteristics: ${p.tokenDescriptor})` : '';
+            return `${cadence}: ${actorText} ${quantityText}${descriptor}${recipientContext}`;
+        }
+        if (cf.function === 'untap_restriction') {
+            const subject = p.untapScope === 'self' ? 'this ' + (p.object || 'permanent')
+                : p.untapScope === 'you_control' ? (p.object || 'permanents') + ' you control'
+                : p.untapScope === 'opponent_control' ? (p.object || 'permanents') + ' opponents control'
+                : p.untapScope === 'all' ? 'all ' + (p.object || 'permanents') : (p.object || 'permanent');
+            const window = p.untapWindow === 'your_untap_step' ? 'your untap step'
+                : p.untapWindow === 'controller_untap_step' ? "its controller's untap step"
+                : p.untapWindow === 'untap_step' ? 'the untap step' : 'an untap step';
+            return 'static untap prohibition: ' + subject + ' does not untap during ' + window;
         }
         const bits = [cf.function.replace(/_/g, ' ')];
         if (p.tokenType) bits.push(`${p.tokenType} token`);
@@ -8724,7 +8797,7 @@ const FUNCTION_IMPORTANCE = {
     // card built around it (an "outlast"/counters deck payoff), on par with recursion or a
     // one-shot anthem. Tap/untap are usually a supporting piece of a bigger card (a Falter effect,
     // an untap-lands ramp trick) rather than the point of the card on their own, so they sit lower.
-    place_counter: 0.7, tap: 0.5, untap: 0.5, proliferate: 0.55, surveil: 0.35, scry: 0.3,
+    place_counter: 0.7, tap: 0.5, untap: 0.5, untap_restriction: 0.72, proliferate: 0.55, surveil: 0.35, scry: 0.3,
     cast_timing_permission: 0.98,
     mechanic_recruit: 0.90,
     mechanic_storied: 0.88,
@@ -9632,7 +9705,7 @@ const FUNCTION_LABELS = [
     'reanimate', 'recursion', 'cheat_into_play', 'token_creation', 'token_multiplier',
     'card_draw', 'tutor', 'ramp_tutor', 'counter', 'cost_reduction', 'stat_buff', 'tribal_anthem',
     'direct_damage', 'lose_life', 'gain_life', 'discard', 'mill', 'mana_ability',
-    'tap', 'untap', 'anthem', 'cast_timing_permission',
+    'tap', 'untap', 'untap_restriction', 'anthem', 'cast_timing_permission',
     'mechanic_recruit', 'mechanic_storied', 'mechanic_hone_counter', 'mechanic_empower_jace',
     'mechanic_heartwood_token', 'mechanic_plan_progression', 'mechanic_worthy_equip',
     'mechanic_vibranium_token', 'mechanic_prepared_spell', 'mechanic_casting_mode_profile',
@@ -11746,6 +11819,7 @@ const MECHANIC_FAMILY_MAP = {
     reanimate: 'recursion', recursion: 'recursion', cheat_into_play: 'recursion',
     tutor: 'selection', ramp_tutor: 'acceleration', opponent_ramp: 'opponent_advantage', opponent_gift: 'opponent_advantage', library_exile_access: 'card_advantage', card_draw: 'card_advantage', discard: 'disruption',
     mill: 'disruption', counter: 'interaction', direct_damage: 'interaction', gain_control: 'control',
+    untap_restriction: 'board_state',
     cost_reduction: 'cost_modification', token_creation: 'tokens', token_multiplier: 'tokens',
     tribal_anthem: 'combat', anthem: 'combat', place_counter: 'stats', mana_ability: 'resources',
     cast_timing_permission: 'casting_permission',
@@ -13214,7 +13288,12 @@ function buildMechanicalEffectNode(effect, index = 0, graphAnchors = new Set()) 
         keywordAnchors: universalAnchors,
         raw
     };
-    if (effect?.stats) node.stats = normalizeMechanicToken(effect.stats);
+    if (effect?.stats || p.tokenStats) node.stats = normalizeMechanicToken(effect?.stats || p.tokenStats);
+    if (effect?.tokenColors?.length || p.tokenColors?.length) node.tokenColors = normalizeMechanicalSet(effect?.tokenColors || p.tokenColors);
+    if (effect?.tokenCardTypes?.length || p.tokenCardTypes?.length) node.tokenCardTypes = normalizeMechanicalSet(effect?.tokenCardTypes || p.tokenCardTypes);
+    if (effect?.untapWindow || p.untapWindow) node.untapWindow = normalizeMechanicToken(effect?.untapWindow || p.untapWindow);
+    if (effect?.untapScope || p.untapScope) node.untapScope = normalizeMechanicToken(effect?.untapScope || p.untapScope);
+    if (effect?.tokenEntersTapped || p.tokenEntersTapped) node.tokenEntersTapped = true;
     const grantedKeywords = effect?.grantedKeywords || effect?.keywords || p.grantedKeywords || [];
     if (grantedKeywords.length) node.grantedKeywords = normalizeMechanicalSet(grantedKeywords);
     const scalingProfile = effect?.scalingProfile || p.scalingProfile || null;
@@ -13456,6 +13535,8 @@ function mechanicalRoleSimilarity(a, b) {
 
 const OPPOSITE_MECHANICS = new Set([
     'gain_life|lose_life','lose_life|gain_life','tap|untap','untap|tap',
+    'untap_restriction|untap','untap|untap_restriction','restrict_untap|untap','untap|restrict_untap',
+    'permanent_cannot_untap|permanent_untapped','permanent_untapped|permanent_cannot_untap',
     'draw|discard','discard|draw','gain_control|self_sacrifice','self_sacrifice|gain_control',
     'reanimate|mill','mill|reanimate'
 ]);
@@ -13480,7 +13561,11 @@ function mechanicalNodeContradiction(a, b) {
     let penalty = 0;
     const tokenTypeA = normalizeMechanicToken(a?.tokenType || '');
     const tokenTypeB = normalizeMechanicToken(b?.tokenType || '');
-    if (a?.function === 'token_creation' && b?.function === 'token_creation' && tokenTypeA && tokenTypeB && tokenTypeA !== tokenTypeB) penalty += 0.25;
+    if (a?.function === 'token_creation' && b?.function === 'token_creation' && tokenTypeA && tokenTypeB && tokenTypeA !== tokenTypeB) {
+        const left = new Set(tokenTypeA.split(/[^a-z0-9]+/).filter(Boolean));
+        const right = new Set(tokenTypeB.split(/[^a-z0-9]+/).filter(Boolean));
+        penalty += [...left].some(word => right.has(word)) ? 0.06 : 0.25;
+    }
 
     // A difference in numeric magnitude is only a soft ranking penalty, but an incompatible
     // target class is a genuine mechanical conflict (e.g. destroy a creature vs destroy an artifact).
@@ -13633,6 +13718,11 @@ function computeMechanicalEffectNodeComparison(a, b) {
         [sacrificeScopeA, sacrificeScopeB].some(scope => scope === 'another_or_unspecified_permanent')) {
         return { score: 0.015, contradiction: 0.95, breakdown: { core: 0, incompatibleSelfSacrificeAndSacrificeCost: 1 } };
     }
+    const untapRestrictionVsUntap =
+        (a.function === 'untap_restriction' && b.function === 'untap') ||
+        (b.function === 'untap_restriction' && a.function === 'untap');
+    if (untapRestrictionVsUntap) return { score: 0.015, contradiction: 0.97, breakdown: { core: 0, incompatibleUntapRestrictionAndUntap: 1 } };
+
     const libraryAccessVsRemoval = (a.function === 'library_exile_access' && b.function === 'exile_removal') || (a.function === 'exile_removal' && b.function === 'library_exile_access');
     if (libraryAccessVsRemoval) return { score: 0.015, contradiction: 0.95, breakdown: { core: 0, incompatibleLibraryAccessAndRemoval: 1 } };
     const handExileVsRemoval =
@@ -13676,7 +13766,23 @@ function computeMechanicalEffectNodeComparison(a, b) {
         role: mechanicalRoleSimilarity(a, b),
         condition: a.condition || b.condition ? (a.condition === b.condition ? 1 : 0.45) : 1,
         stats: a.stats || b.stats ? (a.stats === b.stats ? 1 : 0.45) : 1,
-        tokenType: a.tokenType || b.tokenType ? (a.tokenType && b.tokenType ? (a.tokenType === b.tokenType ? 1 : 0.05) : 0.58) : 1,
+        tokenType: a.tokenType || b.tokenType ? (a.tokenType && b.tokenType
+            ? (a.tokenType === b.tokenType ? 1 : (() => {
+                const left = new Set(a.tokenType.split(/[^a-z0-9]+/).filter(Boolean));
+                const right = new Set(b.tokenType.split(/[^a-z0-9]+/).filter(Boolean));
+                return [...left].some(word => right.has(word)) ? 0.76 : 0.05;
+            })())
+            : 0.58) : 1,
+        tokenColors: a.tokenColors?.size || b.tokenColors?.size
+            ? (a.tokenColors?.size && b.tokenColors?.size ? compareMechanicalSets(a.tokenColors, b.tokenColors, 0.60) : 0.65) : 1,
+        tokenCardTypes: a.tokenCardTypes?.size || b.tokenCardTypes?.size
+            ? (a.tokenCardTypes?.size && b.tokenCardTypes?.size ? compareMechanicalSets(a.tokenCardTypes, b.tokenCardTypes, 0.55) : 0.65) : 1,
+        tokenEntersTapped: a.tokenEntersTapped || b.tokenEntersTapped
+            ? (a.tokenEntersTapped === b.tokenEntersTapped ? 1 : 0.18) : 1,
+        untapWindow: a.untapWindow || b.untapWindow
+            ? (a.untapWindow && b.untapWindow ? (a.untapWindow === b.untapWindow ? 1 : 0.22) : 0.62) : 1,
+        untapScope: a.untapScope || b.untapScope
+            ? (a.untapScope && b.untapScope ? (a.untapScope === b.untapScope ? 1 : 0.30) : 0.62) : 1,
         recipientScope: a.recipientScope || b.recipientScope ? (a.recipientScope && b.recipientScope ? (a.recipientScope === b.recipientScope ? 1 : 0.12) : 0.62) : 1,
         sacrificeScope: a.sacrificeScope || b.sacrificeScope ? (a.sacrificeScope && b.sacrificeScope ? (a.sacrificeScope === b.sacrificeScope ? 1 : 0.08) : 0.52) : 1,
         keywords: compareMechanicalSets(a.keywordAnchors, b.keywordAnchors, 1),
@@ -13706,7 +13812,7 @@ function computeMechanicalEffectNodeComparison(a, b) {
         [15, breakdown.object], [14, breakdown.target], [13, breakdown.zone], [10, breakdown.restriction],
         [9, breakdown.quantity], [10, breakdown.trigger], [8, breakdown.event], [7, breakdown.duration],
         [7, breakdown.mode], [16, breakdown.repeatability], [5, breakdown.cost], [5, breakdown.role], [5, breakdown.condition], [4, breakdown.stats],
-        [10, breakdown.tokenType], [8, breakdown.recipientScope], [12, breakdown.sacrificeScope], [25, breakdown.grantedKeywords], [26, breakdown.scaling], [32, breakdown.combatFinisher],
+        [10, breakdown.tokenType], [3, breakdown.tokenColors], [2, breakdown.tokenCardTypes], [2, breakdown.tokenEntersTapped], [8, breakdown.untapWindow], [4, breakdown.untapScope], [8, breakdown.recipientScope], [12, breakdown.sacrificeScope], [25, breakdown.grantedKeywords], [26, breakdown.scaling], [32, breakdown.combatFinisher],
         [20, breakdown.namedMechanic], [16, breakdown.gameStateCondition], [6, breakdown.manaAbilityRulesClass]
     ];
     const fieldScore = fieldParts.reduce((sum, [w, v]) => sum + w * v, 0) / fieldParts.reduce((sum, [w]) => sum + w, 0);
@@ -14271,7 +14377,11 @@ function calculateEffectRelationshipMismatch(parsedA = [], parsedB = []) {
             mismatch = Math.max(mismatch, 0.82);
         }
         if (left.recipientScope && right.recipientScope && left.recipientScope !== right.recipientScope) mismatch = Math.max(mismatch, 0.62);
-        if (left.tokenType && right.tokenType && normalizeMechanicToken(left.tokenType) !== normalizeMechanicToken(right.tokenType)) mismatch = Math.max(mismatch, 0.40);
+        if (left.tokenType && right.tokenType && normalizeMechanicToken(left.tokenType) !== normalizeMechanicToken(right.tokenType)) {
+            const leftTypes = new Set(normalizeMechanicToken(left.tokenType).split(/[^a-z0-9]+/).filter(Boolean));
+            const rightTypes = new Set(normalizeMechanicToken(right.tokenType).split(/[^a-z0-9]+/).filter(Boolean));
+            mismatch = Math.max(mismatch, [...leftTypes].some(token => rightTypes.has(token)) ? 0.12 : 0.40);
+        }
         if (left.condition && right.condition && left.condition !== right.condition) mismatch = Math.max(mismatch, 0.22);
         bestMismatch = Math.min(bestMismatch, mismatch);
     }
@@ -14788,6 +14898,24 @@ function runManaSearchRepeatabilityRegressionSuite({ log = true } = {}) {
             fn: 'token_creation', expected: 'one_shot', engine: false
         },
         {
+            id: 'one-time-etb-token-maker-keeps-soldier-identity',
+            card: { name: 'ETB Soldier Maker', type_line: 'Creature — Human Soldier', oracle_text: 'When ETB Soldier Maker enters the battlefield, create a 1/1 white Soldier creature token.' },
+            fn: 'token_creation', expected: 'entry_trigger', engine: false, repeatable: false,
+            tokenType: 'soldier', tokenStats: '1/1', tokenColors: ['white']
+        },
+        {
+            id: 'repeatable-activated-token-maker-keeps-treasure-identity',
+            card: { name: 'Activated Treasure Maker', type_line: 'Artifact', oracle_text: '{2}, {T}: Create a Treasure token.' },
+            fn: 'token_creation', expected: 'repeatable_activation', engine: true, repeatable: true,
+            tokenType: 'treasure'
+        },
+        {
+            id: 'one-shot-investigate-is-not-repeatable-clue-production',
+            card: { name: 'One-shot Investigation', type_line: 'Sorcery', oracle_text: 'Investigate.' },
+            fn: 'token_creation', expected: 'one_shot', engine: false, repeatable: false,
+            tokenType: 'clue'
+        },
+        {
             id: 'etb-draw-is-not-automatic-engine',
             card: { name: 'ETB Draw Creature', type_line: 'Creature — Human', oracle_text: 'When ETB Draw Creature enters the battlefield, draw a card.' },
             fn: 'card_draw', expected: 'entry_trigger', engine: false
@@ -14860,7 +14988,20 @@ function runManaSearchRepeatabilityRegressionSuite({ log = true } = {}) {
             const hasRole = roleProfile.some(r => r.role === role);
             const hasRepeatableEffect = matching.some(e => getEffectRepeatabilityProfile(e)?.group === 'repeatable_engine');
             const repeatabilityPass = item.repeatable == null || hasRepeatableEffect === item.repeatable;
-            results.push({ id: item.id, pass: profileKind === item.expected && hasRole === item.engine && repeatabilityPass, profileKind, expected: item.expected, hasRole, expectedRole: item.engine, hasRepeatableEffect, expectedRepeatable: item.repeatable });
+            const tokenEffect = matching.find(e => e?.canonical?.function === 'token_creation');
+            const tokenParams = tokenEffect?.canonical?.params || {};
+            const tokenTypePass = item.tokenType == null || tokenParams.tokenType === item.tokenType;
+            const tokenStatsPass = item.tokenStats == null || tokenParams.tokenStats === item.tokenStats;
+            const tokenColorsPass = item.tokenColors == null || JSON.stringify(tokenParams.tokenColors || []) === JSON.stringify(item.tokenColors);
+            const tokenIdentityPass = tokenTypePass && tokenStatsPass && tokenColorsPass;
+            results.push({
+                id: item.id,
+                pass: profileKind === item.expected && hasRole === item.engine && repeatabilityPass && tokenIdentityPass,
+                profileKind, expected: item.expected, hasRole, expectedRole: item.engine,
+                hasRepeatableEffect, expectedRepeatable: item.repeatable, tokenType: tokenParams.tokenType || null,
+                tokenStats: tokenParams.tokenStats || null, tokenColors: tokenParams.tokenColors || [],
+                tokenIdentityPass
+            });
             parsedCases.push({ item, effects });
         } catch (error) {
             results.push({ id: item.id, pass: false, error: error?.message || String(error) });
@@ -14928,6 +15069,15 @@ function runManaSearchRepeatabilityRegressionSuite({ log = true } = {}) {
                 const secondTokenEngine = annotateEffectRepeatability(secondTokenEngineCard, parseMTGEffect(secondTokenEngineCard.oracle_text), secondTokenEngineCard.oracle_text);
                 const repeatTokenScore = calculateMechanicalSimilarityDetailed(tokenEngineItem.effects, secondTokenEngine).score;
                 results.push({ id: 'repeatable-token-vs-one-shot-token-score', pass: repeatTokenScore > oneShotTokenScore, repeatableScore: repeatTokenScore, oneShotScore: oneShotTokenScore });
+            }
+            const oneShotClueItem = parsedCases.find(x => x.item.id === 'one-shot-investigate-is-not-repeatable-clue-production');
+            if (oneShotClueItem) {
+                const clueText = canonicalFunctionToText(oneShotClueItem.effects.map(effect => effect?.canonical).filter(Boolean));
+                results.push({
+                    id: 'one-shot-investigate-description-does-not-call-it-repeatable',
+                    pass: /one-time Clue token creation/i.test(clueText) && !/repeatable Clue token engine/i.test(clueText),
+                    canonicalText: clueText
+                });
             }
             const periodicTokenItem = parsedCases.find(x => x.item.id === 'end-step-token-production-is-periodic');
             const delayedTokenItem = parsedCases.find(x => x.item.id === 'next-upkeep-is-one-time-delayed-trigger');
@@ -15175,6 +15325,44 @@ function runManaSearchMasteryEdgeCaseRegressionSuite() {
     const selfSacNode = { function:'self_sacrifice', action:'sacrifice', outcome:'own_permanent_to_graveyard', sacrificeScope:'source_permanent', keywordAnchors:new Set() };
     const otherSacNode = { function:'sacrifice_other', action:'sacrifice', outcome:'another_permanent_to_graveyard', sacrificeScope:'another_or_unspecified_permanent', keywordAnchors:new Set() };
     check('Scoring strongly rejects self-sacrifice versus sacrificing another permanent', computeMechanicalEffectNodeComparison(selfSacNode, otherSacNode).score <= 0.02, JSON.stringify(computeMechanicalEffectNodeComparison(selfSacNode, otherSacNode)));
+
+    const lockedArtifact = {
+        name: 'Locked Artifact',
+        type_line: 'Artifact',
+        oracle_text: "This artifact doesn't untap during your untap step."
+    };
+    const lockedEffects = annotateEffectRepeatability(lockedArtifact, parseMTGEffect(lockedArtifact.oracle_text), lockedArtifact.oracle_text);
+    const lockedUntap = lockedEffects.find(effect => effect?.canonical?.function === 'untap_restriction');
+    const lockedParams = lockedUntap?.canonical?.params || {};
+    const lockedProfile = getEffectRepeatabilityProfile(lockedUntap);
+    check(
+        'Artifact does not untap during your untap step is parsed as a structured static prohibition',
+        Boolean(lockedUntap) && lockedParams.object === 'artifact' && lockedParams.target === 'self' &&
+            lockedParams.untapWindow === 'your_untap_step' && lockedParams.untapScope === 'self' &&
+            lockedUntap.isStatic === true && lockedProfile?.kind === 'ongoing_static' &&
+            lockedProfile?.group === 'repeatable_engine',
+        JSON.stringify({ canonical: lockedUntap?.canonical || null, profile: lockedProfile })
+    );
+    const lockedDescription = canonicalFunctionToText(lockedEffects.map(effect => effect?.canonical).filter(Boolean));
+    check(
+        'Untap lock canonical description retains the untap-step timing',
+        /static untap prohibition/i.test(lockedDescription) && /your untap step/i.test(lockedDescription),
+        lockedDescription
+    );
+    const positiveUntap = parse('Untap target artifact.').find(effect => effect?.canonical?.function === 'untap');
+    const lockedTwin = annotateEffectRepeatability(
+        { name: 'Locked Artifact Twin', type_line: 'Artifact', oracle_text: lockedArtifact.oracle_text },
+        parseMTGEffect(lockedArtifact.oracle_text),
+        lockedArtifact.oracle_text
+    );
+    const lockedTwinScore = calculateMechanicalSimilarityDetailed(lockedEffects, lockedTwin).score;
+    const lockedVsPositiveScore = calculateMechanicalSimilarityDetailed(lockedEffects, positiveUntap ? [positiveUntap] : []).score;
+    check(
+        'Untap prohibition is not confused with actively untapping a permanent',
+        Boolean(positiveUntap) && lockedTwinScore > lockedVsPositiveScore && lockedVsPositiveScore <= 0.05 &&
+            !lockedEffects.some(effect => effect?.canonical?.function === 'untap'),
+        JSON.stringify({ lockedTwinScore, lockedVsPositiveScore, positiveUntap: positiveUntap?.canonical || null })
+    );
     const impulse = parse('Exile the top two cards of your library. You may play those cards until the end of your next turn.');
     const impulseEffect = impulse.find(effect => effect.canonical.function === 'library_exile_access');
     const impulseText = canonicalText(impulse);
@@ -30808,7 +30996,7 @@ function compareFunctionLabel(fn) {
 function compareFunctionKey(cf) {
     if (!cf) return '';
     const p = cf.params || {};
-    return [cf.function, cf.outcome, p.object, p.subtype, p.tokenType, p.recipientScope, p.libraryOwnerScope, p.from, p.to, p.scope, p.duration].filter(Boolean).join('|').toLowerCase();
+    return [cf.function, cf.outcome, p.object, p.subtype, p.tokenType, p.tokenDescriptor, p.tokenColors?.join(','), p.untapWindow, p.untapScope, p.recipientScope, p.libraryOwnerScope, p.from, p.to, p.scope, p.duration].filter(Boolean).join('|').toLowerCase();
 }
 
 function compareFunctionFamily(cf) {
@@ -31003,6 +31191,7 @@ function compareEffectDescription(cf) {
         case 'tribal_anthem': return `${duration ? duration + ' ' : ''}change ${scope ? scope + ' ' : ''}creature stats${magnitude ? ` by ${magnitude}` : ''}${subtype ? ` for ${subtype}` : ''}`;
         case 'tap': return `tap${object ? ` ${object}` : ''}`;
         case 'untap': return `untap${object ? ` ${object}` : ''}`;
+        case 'untap_restriction': return `prevent ${object || 'a permanent'} from untapping during ${p.untapWindow || 'its untap step'}`;
         case 'scry': return `scry ${q ?? ''}`.trim();
         case 'surveil': return `surveil ${q ?? ''}`.trim();
         case 'proliferate': return 'proliferate existing counters';
@@ -31053,6 +31242,7 @@ function compareNaturalEffectAction(cf) {
         case 'mill': return `mill ${compareNaturalQuantity(q, 'card')}`;
         case 'discard': return `discard ${compareNaturalQuantity(q, 'card')}`;
         case 'mana_ability': return q !== null ? `add ${q} mana` : 'add mana';
+        case 'untap_restriction': return `prevent ${core.object || 'a permanent'} from untapping`;
         case 'removal': return `destroy ${core.target || core.object || 'the relevant permanent'}`;
         case 'exile_removal': return `exile ${core.target || core.object || 'the relevant permanent'}`;
         case 'counter': return `counter ${core.target || core.object || 'the relevant spell or ability'}`;
