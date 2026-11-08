@@ -1566,6 +1566,8 @@ async function downloadBenchmarkWorkbook(report) {
         { Metric: 'Mean Recall@5', Value: pct(report.meanRecall5) },
         { Metric: 'Mean Recall@10', Value: pct(report.meanRecall10) },
         { Metric: 'Mean Recall@20', Value: pct(report.meanRecall20) },
+        { Metric: 'Mean Recall@50', Value: pct(report.meanRecall50) },
+        { Metric: 'Mean Recall@100', Value: pct(report.meanRecall100) },
         { Metric: 'Mean Adjusted Recall@20', Value: pct(report.meanAdjustedRecall20) },
         { Metric: 'Mean Semantic Recall@20', Value: report.meanSemanticRecall20 !== null ? pct(report.meanSemanticRecall20) : 'n/a (no preferred-constraint tests)' },
         { Metric: 'Semantic Recall tests measured (denominator)', Value: report.semanticRecallTestCount ?? 0 },
@@ -1574,6 +1576,10 @@ async function downloadBenchmarkWorkbook(report) {
         { Metric: 'Mean NDCG@10', Value: num(report.meanNDCG10) },
         { Metric: 'Mean NDCG@20', Value: num(report.meanNDCG20) },
         { Metric: 'Mean Precision@10', Value: num(report.meanPrecision10) },
+        { Metric: 'Mean Precision@20', Value: num(report.meanPrecision20) },
+        { Metric: 'Mean Semantic Ability Coverage@20', Value: pct(report.meanSemanticAbilityCoverageAt20) },
+        { Metric: 'Semantic ability coverage tests', Value: report.semanticAbilityCoverageTestCount ?? 0 },
+        { Metric: 'Semantic retrieval query-view hits', Value: JSON.stringify(report.semanticRetrievalProvenanceCounts || {}) },
         { Metric: 'Overall Avg Card Rank', Value: num(report.overallAvgRank, 2) },
         { Metric: 'Embedding cache hits', Value: report.embeddingCacheDiagnostics?.hits ?? 0 },
         { Metric: 'Embedding computations', Value: report.embeddingCacheDiagnostics?.computed ?? 0 },
@@ -2117,7 +2123,7 @@ async function runBenchmarkPass(searchFn, test) {
                 abilityCoverageRatio: Number(card._semanticAbilityCoverageRatio) || 0,
                 views: semanticViews.slice()
             });
-            scoreByName.set(cardKey, {
+            scoreByName.set(card.name.toLowerCase(), {
                 semanticRrfAgreement: Number(card._semanticRetrievalRrfScoreRatio) || 0,
                 semanticAbilityCoverage: Number(card._semanticAbilityCoverageRatio) || 0,
                 semanticRetrievalViews: semanticViews.slice(),
@@ -3519,7 +3525,7 @@ async function runBenchmarkSuite(searchFn) {
     if (previousRun) {
         console.log("--- VS PREVIOUS RUN ---");
         console.log(`Previous run: ${previousRun.runId || '(unknown)'} at ${previousRun.generatedAt || '(unknown)'}`);
-        [['Recall@20', 'meanRecall20', true], ['Retrieval Recall', 'meanRetrievalRecall', true], ['MRR', 'meanMRR', false], ['Avg runtime', 'durationMs', false]]
+        [['Recall@20', 'meanRecall20', true], ['Recall@50', 'meanRecall50', true], ['Recall@100', 'meanRecall100', true], ['Retrieval Recall', 'meanRetrievalRecall', true], ['Precision@20', 'meanPrecision20', true], ['MRR', 'meanMRR', false], ['Avg runtime', 'durationMs', false]]
             .forEach(([label, key, isPct]) => {
                 const prev = previousRun[key];
                 const curr = summaryMetrics[key];
