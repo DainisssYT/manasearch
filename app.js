@@ -26473,7 +26473,7 @@ function buildNoHighlightSemanticIntentText(sourceCard, sourceText, parsedEffect
 
 
 function buildSourceSemanticQueryTexts(sourceCard, fallbackText, maxWords = 140) {
-    const faces = Array.isArray(sourceCard?.card_faces) && sourceCard.card_faces.length
+    let faces = Array.isArray(sourceCard?.card_faces) && sourceCard.card_faces.length
         ? sourceCard.card_faces
         : [{
             name: sourceCard?.name || '',
@@ -26482,6 +26482,21 @@ function buildSourceSemanticQueryTexts(sourceCard, fallbackText, maxWords = 140)
             type_line: sourceCard?.type_line,
             colors: sourceCard?.colors
         }];
+    if (Array.isArray(sourceCard?.card_faces) && sourceCard.card_faces.length && String(sourceCard.oracle_text || '').trim()) {
+        const faceOracle = faces.map(face => String(face?.oracle_text || '')).filter(Boolean).join(' ');
+        const normalizedWhole = String(sourceCard.oracle_text).replace(/\s+/g, ' ').trim();
+        const normalizedFaces = faceOracle.replace(/\s+/g, ' ').trim();
+        if (normalizedWhole && normalizedWhole !== normalizedFaces) {
+            faces = [...faces, {
+                name: sourceCard.name || '',
+                oracle_text: sourceCard.oracle_text,
+                mana_cost: sourceCard.mana_cost,
+                type_line: sourceCard.type_line,
+                colors: sourceCard.colors,
+                color_indicator: ''
+            }];
+        }
+    }
     const cardKeywords = Array.isArray(sourceCard?.keywords) ? sourceCard.keywords.join(' ') : '';
     const colorIdentity = Array.isArray(sourceCard?.color_identity) ? sourceCard.color_identity.join(' ') : '';
     const producedMana = Array.isArray(sourceCard?.produced_mana) ? sourceCard.produced_mana.join(' ') : '';
