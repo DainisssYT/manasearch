@@ -11,6 +11,7 @@ node --check --input-type=module < app.js
 node tests/run-static-regression.cjs
 node tests/run-core-unit-regression.cjs
 node tests/run-card-benchmark-data.cjs
+node tests/run-semantic-retrieval-regression.cjs
 ```
 
 ## 2. Full browser regression + performance benchmark
@@ -99,3 +100,8 @@ The deploy workflow uses `cancel-in-progress: false` to avoid canceling a live P
 ### Optional Search intent UI regression
 
 In the live browser console, call `runManaSearchIntentRegressionSuite()` to exercise the production search-intent model against Rhystic Study and Chronicler of Heroes, including Exact vs Flexible highlights. To see the panel itself, enable **Show Search intent panel** in Preferences. The regression suite does not start a search or change ranking weights.
+
+
+## Multi-view semantic retrieval
+
+`tests/run-semantic-retrieval-regression.cjs` verifies bounded overlapping ability windows, retention of later Oracle-text words, opening context in subsequent windows, distinct face/ability views, and metadata-only coverage for cards without Oracle text.

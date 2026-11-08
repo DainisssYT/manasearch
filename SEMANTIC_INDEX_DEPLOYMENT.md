@@ -24,5 +24,14 @@ The result page size remains 50 by default. Preferences now also provide a maxim
 defaulting to 3 pages (up to 150 visible results). This affects the presentation list only; the
 underlying ranked candidates and CSV export remain unchanged.
 
-The deployment workflow publishes both worker scripts beside the existing static assets. No hosting
+The deployment workflow publishes both worker scripts and the shared semantic view module beside the existing static assets. No hosting
 upgrade or paid infrastructure is required.
+
+
+## Multi-view semantic index (builder version 5)
+
+The canonical static-data builder writes multiple MSIDX1 rows per Oracle card: each face and newline-separated ability receives its own embedding, and unusually long abilities are split into bounded overlapping windows that repeat opening context. Cards with no Oracle text receive a metadata view. The binary layout remains compatible; repeated card names identify multiple rows, while `semantic_vector_count` separates embedding rows from unique `card_count`.
+
+The worker can score multiple source-ability vectors in one full-corpus pass and aggregates rows by normalized card name before top-k selection. The browser maps every card to all of its index rows and compares all source views with all candidate views. Local lexical retrieval now includes face, mana, color, produced-mana, stat, rarity, set and flavor-text fields, with a small metadata ranking contribution alongside the existing functional/mechanical score.
+
+Run representation checks with `node tests/run-semantic-retrieval-regression.cjs`. `npm run build-static-data` is the canonical builder; the obsolete one-view-per-card standalone builder is removed.

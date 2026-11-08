@@ -26,9 +26,11 @@ jobs:
       - name: Run dependency-free checks
         run: |
           node --check --input-type=module < app.js
+          node --check semantic-card-views.js
           node tests/run-static-regression.cjs
           node tests/run-core-unit-regression.cjs
           node tests/run-card-benchmark-data.cjs
+          node tests/run-semantic-retrieval-regression.cjs
 
       - name: Install Playwright
         run: npm install --no-save playwright@1.55.0

@@ -149,7 +149,8 @@ check('binary loading and semantic nearest-neighbour search use the dedicated wo
   assert.match(app, /semanticWorkerRequest\('load-semantic-index'/);
   assert.match(searchWorker, /data\.type === 'load-cards'/);
   assert.match(searchWorker, /data\.type === 'load-semantic-index'/);
-  assert.match(searchWorker, /data\.type !== 'query'/);
+  assert.match(searchWorker, /query-many/);
+  assert.match(searchWorker, /bestByName\.get\(normalizedName\)/);
   assert.match(searchWorker, /vectorInverseNorms/);
   assert.match(searchWorker, /heapPushTop/);
 });
@@ -296,6 +297,26 @@ check('Exact highlights bind literal text to the same parsed candidate effect us
   assert.match(app, /if \(!sourceIsReliable \|\| !candidateIsReliable\) return true/);
 });
 
+check('multi-view semantic retrieval indexes ability rows and maps them back to unique cards', () => {
+  const views = fs.readFileSync(path.join(root, 'semantic-card-views.js'), 'utf8');
+  const builder = fs.readFileSync(path.join(root, 'scripts', 'build-static-data.mjs'), 'utf8');
+  assert.match(views, /export function buildSemanticOracleViews/);
+  assert.match(views, /export function splitSemanticTextIntoChunks/);
+  assert.match(builder, /buildSemanticOracleViews\(card\)/);
+  assert.match(builder, /semanticRows\.push\(\{ name: card\.name, text/);
+  assert.match(builder, /semantic_vector_count: vectors\.length/);
+  assert.match(app, /function getStaticSemanticVectorViews\(/);
+  assert.match(app, /nameToIndices\.get\(key\)\.push\(row\)/);
+  assert.match(app, /query-many/);
+  assert.match(app, /semanticRetrievalVectors/);
+});
+check('local lexical corpus and ranking include structured card metadata', () => {
+  assert.match(app, /faceMetadata/);
+  for (const field of ['mana_cost', 'cmc', 'produced_mana', 'power', 'toughness', 'loyalty', 'defense', 'hand_modifier', 'life_modifier', 'flavor_text']) {
+    assert.match(app, new RegExp(field));
+  }
+  assert.match(app, /const metadataWeight = hasHighlight \? 0\.025 : 0\.05/);
+});
 check('semantic worker response envelopes are normalized before array-based result merging', () => {
   assert.match(app, /function normalizeSemanticWorkerQueryResults\(response\)/);
   assert.match(app, /Array\.isArray\(response\.results\)/);
