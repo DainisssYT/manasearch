@@ -74,16 +74,17 @@ function splitAbilityText(text, maxWords = 48, overlapWords = 12) {
     const safeAnchor = anchorWords.length
       ? anchorWords.slice(0, Math.min(anchorWords.length, Math.max(4, Math.floor(maxWords * 0.45))))
       : words.slice(0, Math.min(14, Math.max(4, Math.floor(maxWords * 0.45))));
-    const bodyBudget = Math.max(8, maxWords - safeAnchor.length);
+    const hasExternalAnchor = anchorWords.length > 0;
+    const prefix = hasExternalAnchor ? safeAnchor : [];
+    const bodyBudget = Math.max(8, maxWords - prefix.length);
     const overlap = Math.min(bodyBudget - 1, Math.max(4, overlapWords));
     const output = [];
     let start = 0;
     while (start < words.length) {
-      const end = Math.min(words.length, start + (output.length === 0 ? maxWords : bodyBudget));
+      const firstWindow = output.length === 0 && !hasExternalAnchor;
+      const end = Math.min(words.length, start + (firstWindow ? maxWords : bodyBudget));
       const body = words.slice(start, end);
-      const merged = output.length === 0
-        ? body
-        : [...safeAnchor, ...body];
+      const merged = firstWindow ? body : [...prefix, ...body];
       output.push(merged.join(' '));
       if (end === words.length) break;
       start = Math.max(start + 1, end - overlap);
