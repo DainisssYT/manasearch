@@ -85,7 +85,7 @@ function splitAbilityText(text, maxWords = 160, overlapWords = 24) {
 
 function faceDescriptors(card) {
   if (Array.isArray(card?.card_faces) && card.card_faces.length) {
-    return card.card_faces.map((face, index) => ({
+    const faces = card.card_faces.map((face, index) => ({
       name: face?.name || `${card.name} face ${index + 1}`,
       manaCost: face?.mana_cost || '',
       typeLine: face?.type_line || card.type_line || '',
@@ -98,6 +98,26 @@ function faceDescriptors(card) {
       oracleText: face?.oracle_text || '',
       keywords: Array.isArray(card.keywords) ? card.keywords.join(' ') : ''
     }));
+    const faceOracle = faces.map(face => face.oracleText).filter(Boolean).join(' ');
+    const wholeOracle = String(card.oracle_text || '').trim();
+    // Some layouts expose useful card-level Oracle text in addition to (or instead of) face text.
+    if (wholeOracle && wholeOracle !== faceOracle) {
+      faces.push({
+        name: card.name,
+        manaCost: card.mana_cost || '',
+        typeLine: card.type_line || '',
+        colors: Array.isArray(card.colors) ? card.colors.join(' ') : '',
+        colorIndicator: '',
+        power: card.power || '',
+        toughness: card.toughness || '',
+        loyalty: card.loyalty || '',
+        defense: card.defense || '',
+        oracleText: wholeOracle,
+        keywords: Array.isArray(card.keywords) ? card.keywords.join(' ') : ''
+      });
+    }
+    if (!faceOracle && wholeOracle && faces.length) faces[0].oracleText = wholeOracle;
+    return faces;
   }
   return [{
     name: card?.name || '',
@@ -115,7 +135,7 @@ function faceDescriptors(card) {
 }
 
 export function buildSemanticDocuments(cards, options = {}) {
-  const maxWords = Math.max(48, Number(options.maxWords) || 160);
+  const maxWords = Math.max(48, Number(options.maxWords) || 140);
   const overlapWords = Math.min(maxWords - 1, Math.max(0, Number(options.overlapWords) || 24));
   const documents = [];
   for (const card of cards || []) {
