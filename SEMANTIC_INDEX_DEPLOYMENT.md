@@ -36,7 +36,7 @@ upgrade or paid infrastructure is required.
 
 The v5 semantic index stores multiple rows per Oracle card: each non-empty card face and each
 separate Oracle-text ability gets its own embedding document. Unusually long ability lines are
-split into overlapping chunks (140 words by default), so a later clause is not lost when the
+split into overlapping chunks (96 words by default), so a later clause is not lost when the
 embedding model reaches its input limit. Each document carries face type, mana cost, colors,
 keywords, color identity, produced mana, mana value, and available face stats as context.
 Parenthetical text is retained, and mana symbols are normalized without collapsing all colors
