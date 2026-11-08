@@ -16682,7 +16682,7 @@ function normalizeOracleForEmbedding(text, cardName = '') {
     for (const [keyword, expansion] of Object.entries(SEMANTIC_KEYWORD_EXPANSIONS)) {
         value = value.replace(new RegExp('\\b' + keyword + '\\b', 'gi'), ' ' + keyword + ' ' + expansion + ' ');
     }
-    return value.replace(/[^a-z0-9+\\-\\s]/gi, ' ').replace(/\\s+/g, ' ').trim();
+    return value.replace(/[^a-z0-9+\-\s]/gi, ' ').replace(/\s+/g, ' ').trim();
 }
 
 // Oracle normalization is called once while warming the embedding cache and again while scoring
