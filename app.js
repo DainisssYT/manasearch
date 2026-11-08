@@ -1,6 +1,8 @@
-/* ManaSearch build 20261101-129 */
+import { buildSemanticOracleViews, normalizeManaSearchOracleText } from './semantic-card-views.js?v=20261108-131';
+
+/* ManaSearch build 20261108-131 */
 // ManaSearch deployment build marker. Bump this whenever app.js changes so cached-module issues are easy to diagnose.
-const MANASEARCH_APP_BUILD = '20261101-130';
+const MANASEARCH_APP_BUILD = '20261108-131';
 console.info(`[ManaSearch] app.js build ${MANASEARCH_APP_BUILD}`);
 
 // State Management
@@ -16651,32 +16653,9 @@ const SEMANTIC_KEYWORD_EXPANSIONS = {
 };
 
 function normalizeOracleForEmbedding(text, cardName = '') {
-    let value = String(text || '');
-    if (!value) return '';
-    if (cardName) {
-        const escaped = String(cardName).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-        value = value.replace(new RegExp(`\\b${escaped}\\b`, 'gi'), 'this permanent');
-    }
-    // Reminder text is useful to humans but often duplicates/loosens the actual rules wording.
-    value = value.replace(/\([^()]*\)/g, ' ');
-    value = value.replace(/\{T\}/gi, ' tap ')
-        .replace(/\{Q\}/gi, ' untap ')
-        .replace(/\{[WUBRGC]\}/gi, ' colored mana ')
-        .replace(/\{\d+\}/g, ' generic mana ')
-        .replace(/\{X\}/gi, ' X mana ')
-        .replace(/\{[^}]+\}/g, ' mana symbol ');
-    const lower = value.toLowerCase();
-    for (const [keyword, expansion] of Object.entries(SEMANTIC_KEYWORD_EXPANSIONS)) {
-        value = value.replace(new RegExp(`\\b${keyword}\\b`, 'gi'), ` ${keyword} ${expansion} `);
-    }
-    // Numbers are preserved because quantity matters, but normalize comma/formatting noise.
-    return value.replace(/[^a-z0-9+\-\s]/gi, ' ')
-        .replace(/\s+/g, ' ')
-        .trim();
+    return normalizeManaSearchOracleText(text, cardName);
 }
 
-// Oracle normalization is called once while warming the embedding cache and again while scoring
-// the same candidate. Cache per-card normalized text so each card's regex/token cleanup happens once.
 const normalizedOracleEmbeddingTextByCard = new WeakMap();
 function getCachedOracleEmbeddingText(card, text) {
     const rawText = String(text || '');
@@ -17050,17 +17029,24 @@ function prepareStaticCardRecord(card) {
     const oracle = getLocalCorpusCardOracleText(card);
     const faces = Array.isArray(card.card_faces) ? card.card_faces : [];
     const faceText = faces.map(face => face?.oracle_text || '').filter(Boolean).join(' ');
+    const faceMetadata = faces.map(face => [
+        face?.name, face?.mana_cost, face?.type_line, face?.colors?.join(' '),
+        face?.power, face?.toughness, face?.loyalty, face?.defense
+    ].filter(Boolean).join(' ')).join(' ');
     const searchText = normalizeLocalCorpusText([
-        card.name,
-        oracle,
-        faceText,
+        card.name, oracle, faceText, card.mana_cost, card.cmc, card.layout,
+        Array.isArray(card.colors) ? card.colors.join(' ') : '',
+        Array.isArray(card.color_identity) ? card.color_identity.join(' ') : '',
         Array.isArray(card.keywords) ? card.keywords.join(' ') : '',
-        card.type_line || '',
-        Array.isArray(card.color_identity) ? card.color_identity.join(' ') : ''
-    ].join(' '));
-    const localKeywordTokens = Array.isArray(card.keywords)
-        ? [...new Set(card.keywords.map(normalizeLocalCorpusText).filter(Boolean))]
-        : [];
+        Array.isArray(card.produced_mana) ? card.produced_mana.join(' ') : '',
+        card.type_line || '', card.power, card.toughness, card.loyalty, card.defense,
+        card.hand_modifier, card.life_modifier, card.rarity, card.set, card.set_name,
+        card.flavor_text, card.artist, faceMetadata
+    ].filter(value => value !== null && value !== undefined && value !== '').join(' '));
+    const localKeywordTokens = [...new Set([
+        ...(Array.isArray(card.keywords) ? card.keywords : []),
+        ...(Array.isArray(card.produced_mana) ? card.produced_mana : [])
+    ].map(normalizeLocalCorpusText).filter(Boolean))];
     return {
         ...card,
         _localSearchText: searchText,
@@ -17427,7 +17413,7 @@ function getLocalCorpusIndexTokens(text) {
 }
 
 function getLocalCorpusQueryTokens(text) {
-    return getLocalCorpusIndexTokens(text).slice(0, 14);
+    return getLocalCorpusIndexTokens(text).slice(0, 32);
 }
 
 async function searchStaticCardCorpus(queryText, options = {}) {
@@ -18021,12 +18007,17 @@ async function parseStaticSemanticIndexBinary(buffer) {
     // once and reuse them in the worker and yielding fallback scanner.
     const normalizedNames = new Array(count);
     const nameToIndex = new Map();
+    const nameToIndices = new Map();
     const vectorNormSquares = new Float32Array(count);
     let vectorPrepStartedAt = getManaResponsivenessNow();
     for (let row = 0; row < count; row++) {
         const key = normalizeCardNameForIdentity(names[row]);
         normalizedNames[row] = key;
-        if (key && !nameToIndex.has(key)) nameToIndex.set(key, row);
+        if (key) {
+            if (!nameToIndex.has(key)) nameToIndex.set(key, row);
+            if (!nameToIndices.has(key)) nameToIndices.set(key, []);
+            nameToIndices.get(key).push(row);
+        }
         let normSquared = 0;
         const offset = row * dim;
         for (let j = 0; j < dim; j++) {
@@ -18047,6 +18038,7 @@ async function parseStaticSemanticIndexBinary(buffer) {
         total: count,
         source: 'static',
         nameToIndex,
+        nameToIndices,
         chunks: [{
             names,
             normalizedNames,
@@ -18102,15 +18094,20 @@ async function loadStaticSemanticIndex({ retryAttempt = 1 } = {}) {
                 throw new Error('The search worker returned a truncated semantic vector table.');
             }
             const nameToIndex = new Map();
+            const nameToIndices = new Map();
             for (let row = 0; row < count; row++) {
                 const key = normalizedNames[row] || normalizeCardNameForIdentity(names[row]);
-                if (key && !nameToIndex.has(key)) nameToIndex.set(key, row);
+                if (!key) continue;
+                if (!nameToIndex.has(key)) nameToIndex.set(key, row);
+                if (!nameToIndices.has(key)) nameToIndices.set(key, []);
+                nameToIndices.get(key).push(row);
             }
             index = {
                 dim,
                 total: count,
                 source: 'static',
                 nameToIndex,
+                nameToIndices,
                 chunks: [{
                     names,
                     normalizedNames,
@@ -18159,32 +18156,29 @@ async function loadStaticSemanticIndex({ retryAttempt = 1 } = {}) {
 // for scoring candidates too, not only retrieval: generating an embedding for the same Oracle text
 // again is redundant when the bundled quantized vector already exists. Custom highlights and
 // canonical-function summaries still use the model because they are not indexed text views.
-function getStaticSemanticVectorView(cardOrName, index = fullSemanticIndexMemory) {
-    if (index?.source !== 'static' || !index.nameToIndex || !Array.isArray(index.chunks) || !index.chunks.length) return null;
+function getStaticSemanticVectorViews(cardOrName, index = fullSemanticIndexMemory) {
+    if (index?.source !== 'static' || !index.nameToIndex || !Array.isArray(index.chunks) || !index.chunks.length) return [];
     const name = typeof cardOrName === 'string' ? cardOrName : String(cardOrName?.name || '');
-    let row = index.nameToIndex.get(normalizeCardNameForIdentity(name));
-    if (!Number.isInteger(row) && name.includes(' // ')) {
-        row = index.nameToIndex.get(normalizeCardNameForIdentity(name.split(' // ')[0]));
-    }
-    if (!Number.isInteger(row) || row < 0) return null;
-    let offset = row;
-    for (const chunk of index.chunks) {
-        const chunkCount = Number(chunk?.count) || chunk?.names?.length || 0;
-        if (offset < chunkCount && chunk?.vectors) {
-            const start = offset * index.dim;
-            return {
-                index,
-                chunk,
-                row: offset,
-                globalRow: row,
-                vector: chunk.vectors.subarray(start, start + index.dim),
-                normSquared: chunk.vectorNormSquares?.[offset] ?? null,
-                name: chunk.names?.[offset] || name
-            };
+    let key = normalizeCardNameForIdentity(name);
+    if (!index.nameToIndices?.has(key) && !index.nameToIndex.has(key) && name.includes(' // ')) key = normalizeCardNameForIdentity(name.split(' // ')[0]);
+    const rows = index.nameToIndices?.get(key) || (Number.isInteger(index.nameToIndex.get(key)) ? [index.nameToIndex.get(key)] : []);
+    const output = [];
+    for (const globalRow of rows) {
+        let offset = globalRow;
+        for (const chunk of index.chunks) {
+            const count = Number(chunk?.count) || chunk?.names?.length || 0;
+            if (offset < count && chunk?.vectors) {
+                const start = offset * index.dim;
+                output.push({ index, chunk, row: offset, globalRow, vector: chunk.vectors.subarray(start, start + index.dim), normSquared: chunk.vectorNormSquares?.[offset] ?? null, name: chunk.names?.[offset] || name });
+                break;
+            }
+            offset -= count;
         }
-        offset -= chunkCount;
     }
-    return null;
+    return output;
+}
+function getStaticSemanticVectorView(cardOrName, index = fullSemanticIndexMemory) {
+    return getStaticSemanticVectorViews(cardOrName, index)[0] || null;
 }
 function getStaticSemanticVectorAsFloat32(cardOrName, index = fullSemanticIndexMemory) {
     const view = getStaticSemanticVectorView(cardOrName, index);
@@ -26341,7 +26335,7 @@ function buildSynergyRetrievalQuery(sourceCard, parsedEffects, excludeSelf) {
     return parts.length ? `(${[...new Set(parts)].join(' or ')}) ${excludeSelf}`.trim() : null;
 }
 
-function buildFunctionalRetrievalQueries(sourceCard, parsedEffects, excludeSelf, maxFunctions = 2) {
+function buildFunctionalRetrievalQueries(sourceCard, parsedEffects, excludeSelf, maxFunctions = 6) {
     const sourceText = (sourceCard.oracle_text || (sourceCard.card_faces ? sourceCard.card_faces.map(f => f.oracle_text).join(' ') : '')).toLowerCase();
 
     // Take the top functions by importance, not merely the first parsed effect - a card whose
@@ -26433,7 +26427,7 @@ function buildFunctionalRetrievalQueries(sourceCard, parsedEffects, excludeSelf,
         }
     }
 
-    return descriptors.slice(0, 5);
+    return descriptors.slice(0, 12);
 }
 
 function buildNoHighlightSemanticIntentText(sourceCard, sourceText, parsedEffects) {
@@ -27394,7 +27388,7 @@ async function findSimilarCards() {
 
     functionalRetrievalPlans = buildFunctionalRetrievalQueries(
         currentSourceCard, sourceParsedEffects, excludeSelf,
-        activeSearchMethodFlags.functional ? 3 : 2
+        activeSearchMethodFlags.functional ? 6 : 4
     );
     const methodQueries = {
         wording: activeSearchMethodFlags.wording ? buildWordingRetrievalQuery(currentSourceCard, excludeSelf, stopWords, mtgStopWords) : null,
