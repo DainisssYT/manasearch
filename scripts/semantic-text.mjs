@@ -63,22 +63,88 @@ export function normalizeOracleForEmbedding(text, cardName = '') {
 }
 
 function splitAbilityText(text, maxWords = 48, overlapWords = 12) {
-  const paragraphs = String(text || '').split(/\n+/).map(part => part.trim()).filter(Boolean);
+  const paragraphs = String(text || '').split(/\\n+/).map(part => part.trim()).filter(Boolean);
   const chunks = [];
+  const countWords = value => String(value || '').trim().split(/\\s+/).filter(Boolean).length;
+
+  const splitOversizedClause = (clause, anchorText = '') => {
+    const words = String(clause || '').trim().split(/\\s+/).filter(Boolean);
+    if (words.length <= maxWords) return [words.join(' ')];
+    const anchorWords = anchorText ? anchorText.split(/\\s+/).filter(Boolean) : [];
+    const safeAnchor = anchorWords.length
+      ? anchorWords.slice(0, Math.min(anchorWords.length, Math.max(4, Math.floor(maxWords * 0.45))))
+      : words.slice(0, Math.min(14, Math.max(4, Math.floor(maxWords * 0.45))));
+    const bodyBudget = Math.max(8, maxWords - safeAnchor.length);
+    const overlap = Math.min(bodyBudget - 1, Math.max(4, overlapWords));
+    const output = [];
+    let start = 0;
+    while (start < words.length) {
+      const end = Math.min(words.length, start + (output.length === 0 ? maxWords : bodyBudget));
+      const body = words.slice(start, end);
+      const merged = output.length === 0
+        ? body
+        : [...safeAnchor, ...body];
+      output.push(merged.join(' '));
+      if (end === words.length) break;
+      start = Math.max(start + 1, end - overlap);
+    }
+    return output;
+  };
+
   for (const paragraph of paragraphs) {
-    // Keep short, complete ability lines intact. Split only unusually long lines.
-    const words = paragraph.split(/\s+/);
-    if (words.length <= maxWords) {
+    // A short complete Oracle ability is always retained as one semantic document.
+    if (countWords(paragraph) <= maxWords) {
       chunks.push(paragraph);
       continue;
     }
-    let start = 0;
-    while (start < words.length) {
-      const end = Math.min(words.length, start + maxWords);
-      chunks.push(words.slice(start, end).join(' '));
-      if (end === words.length) break;
-      start = Math.max(start + 1, end - overlapWords);
+
+    // Prefer complete sentence and semicolon-clause boundaries. When an ability needs
+    // several documents, carry its opening trigger/cost clause into later documents so
+    // the effect tail is not represented as an unrelated instruction.
+    const clauses = paragraph.split(/(?<=[.;])\\s+/).map(part => part.trim()).filter(Boolean);
+    if (clauses.length > 1) {
+      const firstWords = countWords(clauses[0]);
+      const anchorText = firstWords <= Math.floor(maxWords * 0.60)
+        ? clauses[0]
+        : clauses[0].split(/\\s+/).slice(0, Math.max(8, Math.floor(maxWords * 0.45))).join(' ');
+      let current = [clauses[0]];
+      let currentWords = firstWords;
+
+      for (const clause of clauses.slice(1)) {
+        const clauseWords = countWords(clause);
+        if (clauseWords > maxWords) {
+          if (current.length) chunks.push(current.join(' '));
+          chunks.push(...splitOversizedClause(clause, anchorText));
+          current = [anchorText];
+          currentWords = countWords(anchorText);
+          continue;
+        }
+        if (currentWords + clauseWords <= maxWords) {
+          current.push(clause);
+          currentWords += clauseWords;
+          continue;
+        }
+        chunks.push(current.join(' '));
+        current = [anchorText, clause];
+        currentWords = countWords(anchorText) + clauseWords;
+        if (currentWords > maxWords) {
+          chunks.push(...splitOversizedClause(clause, anchorText));
+          current = [anchorText];
+          currentWords = countWords(anchorText);
+        }
+      }
+      if (current.length && current.some((part, index) => index > 0 || part !== anchorText)) {
+        chunks.push(current.join(' '));
+      } else if (current.length && chunks.length === 0) {
+        chunks.push(current.join(' '));
+      }
+      continue;
     }
+
+    // A single uninterrupted sentence is the fallback. Retain a short opening anchor
+    // (usually its trigger and initial cost) in every continuation while overlapping
+    // adjacent body windows to preserve local clause context.
+    chunks.push(...splitOversizedClause(paragraph));
   }
   return chunks;
 }
