@@ -213,7 +213,7 @@ export function mergeSemanticRetrievalRanks(querySets, queryViews = [], options 
       const name = String(item?.name || '').trim();
       if (!name) continue;
       const key = name.normalize('NFKD')
-        .replace(/[\\u0300-\\u036f]/g, '')
+        .replace(/[\u0300-\u036f]/g, '')
         .toLowerCase()
         .replace(/[^a-z0-9]+/g, ' ')
         .trim();
