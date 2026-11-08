@@ -63,14 +63,14 @@ export function normalizeOracleForEmbedding(text, cardName = '') {
 }
 
 function splitAbilityText(text, maxWords = 48, overlapWords = 12) {
-  const paragraphs = String(text || '').split(/\\n+/).map(part => part.trim()).filter(Boolean);
+  const paragraphs = String(text || '').split(/\n+/).map(part => part.trim()).filter(Boolean);
   const chunks = [];
-  const countWords = value => String(value || '').trim().split(/\\s+/).filter(Boolean).length;
+  const countWords = value => String(value || '').trim().split(/\s+/).filter(Boolean).length;
 
   const splitOversizedClause = (clause, anchorText = '') => {
-    const words = String(clause || '').trim().split(/\\s+/).filter(Boolean);
+    const words = String(clause || '').trim().split(/\s+/).filter(Boolean);
     if (words.length <= maxWords) return [words.join(' ')];
-    const anchorWords = anchorText ? anchorText.split(/\\s+/).filter(Boolean) : [];
+    const anchorWords = anchorText ? anchorText.split(/\s+/).filter(Boolean) : [];
     const safeAnchor = anchorWords.length
       ? anchorWords.slice(0, Math.min(anchorWords.length, Math.max(4, Math.floor(maxWords * 0.45))))
       : words.slice(0, Math.min(14, Math.max(4, Math.floor(maxWords * 0.45))));
@@ -102,12 +102,12 @@ function splitAbilityText(text, maxWords = 48, overlapWords = 12) {
     // Prefer complete sentence and semicolon-clause boundaries. When an ability needs
     // several documents, carry its opening trigger/cost clause into later documents so
     // the effect tail is not represented as an unrelated instruction.
-    const clauses = paragraph.split(/(?<=[.;])\\s+/).map(part => part.trim()).filter(Boolean);
+    const clauses = paragraph.split(/(?<=[.;])\s+/).map(part => part.trim()).filter(Boolean);
     if (clauses.length > 1) {
       const firstWords = countWords(clauses[0]);
       const anchorText = firstWords <= Math.floor(maxWords * 0.60)
         ? clauses[0]
-        : clauses[0].split(/\\s+/).slice(0, Math.max(8, Math.floor(maxWords * 0.45))).join(' ');
+        : clauses[0].split(/\s+/).slice(0, Math.max(8, Math.floor(maxWords * 0.45))).join(' ');
       let current = [clauses[0]];
       let currentWords = firstWords;
 
