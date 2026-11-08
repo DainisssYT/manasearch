@@ -45,7 +45,15 @@ async function main() {
     browser = await chromium.launch(launchOptions);
     const page = await browser.newPage();
     const pageErrors = [];
+    const consoleErrors = [];
+    const failedRequests = [];
     page.on('pageerror', error => pageErrors.push(error.message));
+    page.on('console', message => {
+      if (message.type() === 'error') consoleErrors.push(message.text());
+    });
+    page.on('requestfailed', request => {
+      failedRequests.push(`${request.url()}: ${request.failure()?.errorText || 'request failed'}`);
+    });
     await page.goto(`http://127.0.0.1:${address.port}/index.html?manasearch-test=1`, {
       waitUntil: 'domcontentloaded', timeout: 60000
     });
@@ -62,7 +70,9 @@ async function main() {
       null, { timeout: 60000 }
       );
     } catch (error) {
-      if (pageErrors.length) console.error('Browser errors before ManaSearch test startup:', pageErrors.join('\\n'));
+      if (pageErrors.length) console.error('Browser page errors before ManaSearch test startup:', pageErrors.join('\\n'));
+      if (consoleErrors.length) console.error('Browser console errors before ManaSearch test startup:', consoleErrors.join('\\n'));
+      if (failedRequests.length) console.error('Browser requests that failed before ManaSearch test startup:', failedRequests.join('\\n'));
       throw error;
     }
     const report = await page.evaluate(async () => ({
