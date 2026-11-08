@@ -62,7 +62,7 @@ export function normalizeOracleForEmbedding(text, cardName = '') {
   return value.replace(/\s+/g, ' ').trim();
 }
 
-function splitAbilityText(text, maxWords = 160, overlapWords = 24) {
+function splitAbilityText(text, maxWords = 48, overlapWords = 12) {
   const paragraphs = String(text || '').split(/\n+/).map(part => part.trim()).filter(Boolean);
   const chunks = [];
   for (const paragraph of paragraphs) {
@@ -143,8 +143,10 @@ function faceDescriptors(card) {
 }
 
 export function buildSemanticDocuments(cards, options = {}) {
-  const maxWords = Math.max(48, Number(options.maxWords) || 96);
-  const overlapWords = Math.min(maxWords - 1, Math.max(0, Number(options.overlapWords) || 24));
+  // Keep a conservative browser/build-time word cap. The static builder additionally
+  // validates every finished document with the model's actual tokenizer before embedding.
+  const maxWords = Math.max(16, Number(options.maxWords) || 48);
+  const overlapWords = Math.min(maxWords - 1, Math.max(0, Number(options.overlapWords) || 12));
   const documents = [];
   for (const card of cards || []) {
     if (!card?.name) continue;
@@ -181,4 +183,77 @@ export function buildSemanticDocuments(cards, options = {}) {
     }
   }
   return documents;
+}
+
+
+/**
+ * Merge ranked semantic retrieval lists from the full-card intent, full Oracle text,
+ * and each independently queried face/ability. Reciprocal Rank Fusion rewards cards
+ * that are consistently relevant across independent views without assuming that their
+ * raw cosine scores are perfectly calibrated against one another.
+ *
+ * The maximum calibrated cosine remains available as "similarity" for existing scoring.
+ * Ability coverage is reported separately so callers can use it as a small, explicit
+ * coverage signal instead of averaging vectors and diluting a strong single-ability match.
+ */
+export function mergeSemanticRetrievalRanks(querySets, queryViews = [], options = {}) {
+  const rrfK = Math.max(1, Number(options.rrfK) || 60);
+  const abilityViews = [...new Set((queryViews || [])
+    .map(view => String(view || ''))
+    .filter(view => /^ability-/i.test(view)))];
+  const totalAbilities = abilityViews.length;
+  const byCard = new Map();
+
+  for (let queryIndex = 0; queryIndex < (querySets || []).length; queryIndex++) {
+    const set = Array.isArray(querySets[queryIndex]) ? querySets[queryIndex] : [];
+    const view = String(queryViews[queryIndex] || `query-${queryIndex + 1}`);
+    const isAbilityView = /^ability-/i.test(view);
+    for (let rankIndex = 0; rankIndex < set.length; rankIndex++) {
+      const item = set[rankIndex];
+      const name = String(item?.name || '').trim();
+      if (!name) continue;
+      const key = name.normalize('NFKD')
+        .replace(/[\\u0300-\\u036f]/g, '')
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, ' ')
+        .trim();
+      if (!key) continue;
+
+      let entry = byCard.get(key);
+      if (!entry) {
+        entry = {
+          ...item,
+          name,
+          similarity: Number(item.similarity) || 0,
+          _semanticViews: new Set(),
+          _semanticAbilityViews: new Set(),
+          _semanticRrfScore: 0
+        };
+        byCard.set(key, entry);
+      }
+      entry.similarity = Math.max(entry.similarity, Number(item.similarity) || 0);
+      entry._semanticViews.add(view);
+      if (isAbilityView) entry._semanticAbilityViews.add(view);
+      // The result arrays are already sorted by similarity, so their position is the rank.
+      entry._semanticRrfScore += 1 / (rrfK + rankIndex + 1);
+    }
+  }
+
+  return [...byCard.values()]
+    .map(entry => {
+      const covered = entry._semanticAbilityViews.size;
+      const views = [...entry._semanticViews];
+      return {
+        ...entry,
+        _semanticViews: views,
+        _semanticAbilityCoverage: covered,
+        _semanticAbilityTotal: totalAbilities,
+        _semanticAbilityCoverageRatio: totalAbilities ? covered / totalAbilities : 0
+      };
+    })
+    .sort((a, b) =>
+      (b._semanticRrfScore - a._semanticRrfScore) ||
+      (b.similarity - a.similarity) ||
+      String(a.name).localeCompare(String(b.name))
+    );
 }
