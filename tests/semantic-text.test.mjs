@@ -50,6 +50,6 @@ test('card-level Oracle text is retained when face records omit it', () => {
       { name: 'Back', type_line: 'Enchantment', oracle_text: '' }
     ]
   }]);
-  assert.ok(docs.length > 0);
+  assert.equal(docs.length, 1);
   assert.ok(docs.some(doc => /attacks/.test(doc.text) && /draw a card/.test(doc.text)));
 });
