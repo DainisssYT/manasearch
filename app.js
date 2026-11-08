@@ -18434,19 +18434,20 @@ async function findFullSemanticMatches(index, sourceVector, excludeName, limit =
     const benchmarkLocal = index === benchmarkLocalOracleCorpus;
     const semanticQueryStartedAt = getManaResponsivenessNow();
     let enteredFallback = false;
+    let queryVectors = null;
     try {
         if (benchmarkLocal) throw new Error('Benchmark-local corpus uses payload-preserving scan.');
         await runWhenIdle(() => ensureSemanticWorkerIndex(index), { timeout: 2500 });
         if (cancelled()) return [];
-        const queryVector = sourceVector instanceof Float32Array ? new Float32Array(sourceVector) : Float32Array.from(sourceVector);
-        const results = await semanticWorkerRequest('query', {
-            queryBuffer: queryVector.buffer,
-            excludeKey: getSemanticWorkerExcludeKey(excludeName),
-            limit,
-            minSimilarity,
-            baseline: semanticCosineBaseline,
-            generation: owningSearchRequestId
-        }, [queryVector.buffer]);
+        queryVectors = (Array.isArray(sourceVector) ? sourceVector : [sourceVector]).filter(Boolean)
+            .map(vector => vector instanceof Float32Array ? new Float32Array(vector) : Float32Array.from(vector));
+        if (!queryVectors.length) return [];
+        const multiQuery = queryVectors.length > 1;
+        const queryPayload = multiQuery ? { queryBuffers: queryVectors.map(vector => vector.buffer) } : { queryBuffer: queryVectors[0].buffer };
+        const results = await semanticWorkerRequest(multiQuery ? 'query-many' : 'query', {
+            ...queryPayload, excludeKey: getSemanticWorkerExcludeKey(excludeName), limit, minSimilarity,
+            baseline: semanticCosineBaseline, generation: owningSearchRequestId
+        }, queryVectors.map(vector => vector.buffer));
         if (cancelled()) return [];
         staticSemanticQueryStats.workerQueries++;
         staticSemanticQueryStats.workerElapsedMs += Math.max(0, getManaResponsivenessNow() - semanticQueryStartedAt);
@@ -18457,19 +18458,25 @@ async function findFullSemanticMatches(index, sourceVector, excludeName, limit =
         enteredFallback = true;
         if (!benchmarkLocal) console.info('Semantic worker unavailable; using yielding main-thread semantic scan where possible:', workerError?.message || workerError);
         const excludeKey = normalizeCardNameForIdentity(excludeName || '');
-        const best = [];
+        queryVectors = queryVectors || (Array.isArray(sourceVector) ? sourceVector : [sourceVector]).filter(Boolean);
+        const bestByName = new Map();
         const keepCap = Math.max(limit * 2, 32);
         const pushBest = item => {
-            best.push(item);
-            // Periodic pruning bounds memory without sorting on every matching card. The previous
-            // per-hit sort could itself monopolize the main thread when the worker path failed.
-            if (best.length > keepCap * 2) {
-                best.sort((a, b) => b.similarity - a.similarity);
-                best.length = keepCap;
+            const key = normalizeCardNameForIdentity(item.name);
+            if (!key) return;
+            const previous = bestByName.get(key);
+            if (!previous || item.similarity > previous.similarity) bestByName.set(key, item);
+            if (bestByName.size > keepCap * 2) {
+                const strongest = Array.from(bestByName.values()).sort((x, y) => y.similarity - x.similarity).slice(0, keepCap);
+                bestByName.clear();
+                strongest.forEach(entry => bestByName.set(normalizeCardNameForIdentity(entry.name), entry));
             }
         };
-        let sourceQueryNormSquared = 0;
-        for (let qi = 0; qi < sourceVector.length; qi++) sourceQueryNormSquared += (Number(sourceVector[qi]) || 0) ** 2;
+        const sourceQueryNormSquares = queryVectors.map(query => {
+            let squared = 0;
+            for (let i = 0; i < query.length; i++) squared += (Number(query[i]) || 0) ** 2;
+            return squared;
+        });
         let rowOffset = 0;
         let semanticScanSliceStartedAt = getManaResponsivenessNow();
         for (const chunk of index.chunks || []) {
@@ -18489,23 +18496,16 @@ async function findFullSemanticMatches(index, sourceVector, excludeName, limit =
                 const normalizedName = chunk.normalizedNames?.[i] || normalizeCardNameForIdentity(name);
                 if (!name || normalizedName === excludeKey) continue;
                 const vector = chunk.vectors.subarray(i * index.dim, (i + 1) * index.dim);
-                const rawCos = approximateQuantizedCosine(sourceVector, vector, index.dim, chunk.vectorNormSquares?.[i], sourceQueryNormSquared);
+                let rawCos = -1;
+                for (let q = 0; q < queryVectors.length; q++) rawCos = Math.max(rawCos, approximateQuantizedCosine(queryVectors[q], vector, index.dim, chunk.vectorNormSquares?.[i], sourceQueryNormSquares[q]));
                 const calibrated = Math.max(0, Math.min(1, (rawCos - semanticCosineBaseline) / Math.max(0.05, 1 - semanticCosineBaseline)));
                 if (calibrated >= minSimilarity) pushBest({ name, id: chunk.ids?.[i] || null, card: chunk.cards?.[i] || null, similarity: calibrated });
             }
             await yieldForManaSearchResponsiveness();
             if (cancelled()) throw createSearchCancellationError();
         }
-        const sortedBest = await sortManaArrayResponsively(best, (a, b) => b.similarity - a.similarity);
-        const seen = new Set();
-        const output = sortedBest
-            .filter(x => {
-                const k = normalizeCardNameForIdentity(x.name);
-                if (seen.has(k)) return false;
-                seen.add(k);
-                return true;
-            })
-            .slice(0, limit);
+        const sortedBest = await sortManaArrayResponsively(Array.from(bestByName.values()), (a, b) => b.similarity - a.similarity);
+        const output = sortedBest.slice(0, limit);
         if (enteredFallback) {
             staticSemanticQueryStats.fallbackQueries++;
             staticSemanticQueryStats.fallbackElapsedMs += Math.max(0, getManaResponsivenessNow() - semanticQueryStartedAt);
@@ -24872,7 +24872,9 @@ async function scoreCardBatch({
     const __triageSelectionStartedAt = __scoreNow();
     const oracleTargetVector = targetVector || targetVectors?.oracle || null;
     const semanticRetrievalTargetVector = targetVectors?.semanticRetrieval || oracleTargetVector;
-    const hasSemanticEngine = Boolean(extractor && extractor.type !== 'fallback' && oracleTargetVector);
+    const oracleTargetVectors = Array.isArray(targetVectors?.oracleViews) && targetVectors.oracleViews.length ? targetVectors.oracleViews : (oracleTargetVector ? [oracleTargetVector] : []);
+    const semanticRetrievalTargetVectors = Array.isArray(targetVectors?.semanticRetrievalViews) && targetVectors.semanticRetrievalViews.length ? targetVectors.semanticRetrievalViews : (semanticRetrievalTargetVector ? [semanticRetrievalTargetVector] : []);
+    const hasSemanticEngine = Boolean(extractor && extractor.type !== 'fallback' && (oracleTargetVectors.length || semanticRetrievalTargetVectors.length));
 
     // The loop above gives every candidate a mechanical/exactness/category/synergy score using
     // pure JS - cheap regardless of how many candidates there are. The embedding step below is
@@ -25038,8 +25040,8 @@ async function scoreCardBatch({
         for (const card of semanticEligible) {
             if (card.contextScore !== undefined) continue;
             const cardText = card.oracle_text || (card.card_faces ? card.card_faces.map(f => f.oracle_text).join(' ') : '');
-            if (hasSemanticEngine && cardText && !getStaticSemanticVectorView(card)) {
-                textsToEmbed.push(getCachedOracleEmbeddingText(card, cardText));
+            if (hasSemanticEngine && cardText && !getStaticSemanticVectorViews(card).length) {
+                for (const view of buildSemanticOracleViews(card)) textsToEmbed.push(normalizeOracleForEmbedding(view.text, card.name));
             }
             if (sourceFunctionVector && card._parsedEffects) {
                 const candidateFunctionText = getCachedCanonicalFunctionText(card._parsedEffects);
@@ -25069,29 +25071,29 @@ async function scoreCardBatch({
             // The cache was already warmed above, so this is a cache read, not a fresh model call.
             let semanticScore = null;
             if (hasSemanticEngine && cardText && semanticEligibleSet.has(card)) {
-                const semanticQueryVector = Number.isFinite(card._semanticRetrievalSimilarity)
-                    ? semanticRetrievalTargetVector
-                    : oracleTargetVector;
-                const staticVectorView = semanticQueryVector ? getStaticSemanticVectorView(card) : null;
-                if (staticVectorView) {
-                    // semantic-index.bin is the same precomputed Oracle-vector corpus used by Search G.
-                    // Read the row directly instead of invoking MiniLM again for candidate raw text.
-                    const rawCos = approximateQuantizedCosine(
-                        semanticQueryVector, staticVectorView.vector, staticVectorView.index.dim,
-                        staticVectorView.normSquared
-                    );
-                    semanticScore = calibratedCosineFromRaw(rawCos);
-                    card._rawOracleSemanticSimilarity = rawCos;
+                const queryVectors = Number.isFinite(card._semanticRetrievalSimilarity) ? semanticRetrievalTargetVectors : oracleTargetVectors;
+                const indexedViews = getStaticSemanticVectorViews(card);
+                let bestRawCos = -1;
+                if (indexedViews.length) {
+                    for (const query of queryVectors) for (const candidateView of indexedViews) {
+                        bestRawCos = Math.max(bestRawCos, approximateQuantizedCosine(query, candidateView.vector, candidateView.index.dim, candidateView.normSquared));
+                    }
                     embeddingDiagnostics.precomputedOracleVectorHits = (embeddingDiagnostics.precomputedOracleVectorHits || 0) + 1;
                     embeddingCacheStats.precomputedOracleHits++;
                 } else {
-                    const cardVector = await getCachedEmbedding(getCachedOracleEmbeddingText(card, cardText), extractor, embeddingDiagnostics);
-                    if (cardVector) {
-                        semanticScore = semanticQueryVector ? calibratedCosineSimilarity(semanticQueryVector, cardVector) : null;
-                        if (semanticQueryVector && cardVector) card._rawOracleSemanticSimilarity = cosineSimilarity(semanticQueryVector, cardVector);
+                    const candidateTexts = buildSemanticOracleViews(card).map(view => normalizeOracleForEmbedding(view.text, card.name));
+                    const candidateVectors = [];
+                    for (const text of candidateTexts) {
+                        const vector = await getCachedEmbedding(text, extractor, embeddingDiagnostics);
+                        if (vector) candidateVectors.push(vector);
                     }
+                    for (const query of queryVectors) for (const vector of candidateVectors) bestRawCos = Math.max(bestRawCos, cosineSimilarity(query, vector));
                     embeddingDiagnostics.precomputedOracleVectorMisses = (embeddingDiagnostics.precomputedOracleVectorMisses || 0) + 1;
                     embeddingCacheStats.precomputedOracleMisses++;
+                }
+                if (bestRawCos >= -1) {
+                    semanticScore = calibratedCosineFromRaw(bestRawCos);
+                    card._rawOracleSemanticSimilarity = bestRawCos;
                 }
             }
 
@@ -28064,29 +28066,25 @@ async function findSimilarCards() {
         const semanticRetrievalPromise = trackStream((async () => {
             try {
                 const ex = await extractorPromise;
-                if (!ex || ex.type === 'fallback') return { index: null, queryVector: null, semanticRetrievalVector: null, matches: [], hydrated: [] };
+                if (!ex || ex.type === 'fallback') return { index: null, queryVector: null, semanticRetrievalVector: null, oracleVectors: [], semanticRetrievalVectors: [], matches: [], hydrated: [] };
                 const index = benchmarkUseLocalOracleCorpus
                     ? benchmarkLocalOracleCorpus
                     : await semanticIndexPromise;
-                if (!index) return { index: null, queryVector: null, semanticRetrievalVector: null, matches: [], hydrated: [] };
+                if (!index) return { index: null, queryVector: null, semanticRetrievalVector: null, oracleVectors: [], semanticRetrievalVectors: [], matches: [], hydrated: [] };
 
                 const queryText = semanticIntentTextForScoring;
-                if (!queryText) return { index, queryVector: null, matches: [], hydrated: [] };
+                if (!queryText) return { index, queryVector: null, semanticRetrievalVector: null, oracleVectors: [], semanticRetrievalVectors: [], matches: [], hydrated: [] };
                 const semanticRetrievalVector = await getCachedEmbedding(queryText, ex);
-                const normalizedOracleTarget = normalizeOracleForEmbedding(targetTextForScoring, currentSourceCard.name);
-                const normalizedFullSourceOracle = normalizeOracleForEmbedding(getCurrentSourceOracleText(currentSourceCard), currentSourceCard.name);
-                const canUseIndexedSourceVector = !hasHighlight && normalizedOracleTarget && normalizedOracleTarget === normalizedFullSourceOracle;
-                const indexedSourceVector = canUseIndexedSourceVector ? getStaticSemanticVectorAsFloat32(currentSourceCard, index) : null;
-                const oracleVector = indexedSourceVector || await getCachedEmbedding(normalizedOracleTarget, ex);
-                if (!semanticRetrievalVector && !oracleVector) return { index, queryVector: null, semanticRetrievalVector: null, matches: [], hydrated: [] };
-
-                const limit = benchmarkUseLocalOracleCorpus
-                    ? (isBroadSearch ? 512 : 384)
-                    : (isBroadSearch ? 96 : 72);
-                const queryJobs = [];
-                if (semanticRetrievalVector) queryJobs.push({ vector: semanticRetrievalVector, view: 'intent', limit, threshold: 0.42 });
-                if (oracleVector && !hasHighlight) queryJobs.push({ vector: oracleVector, view: 'oracle', limit: Math.max(24, Math.floor(limit * 0.55)), threshold: 0.40 });
-                const querySets = await Promise.all(queryJobs.map(q => findFullSemanticMatches(index, q.vector, currentSourceCard.name, q.limit, q.threshold)));
+                const sourceViews = hasHighlight
+                    ? buildSemanticOracleViews({ name: currentSourceCard.name, oracle_text: targetTextForScoring })
+                    : buildSemanticOracleViews(currentSourceCard);
+                const sourceViewTexts = [...new Set(sourceViews.map(view => normalizeOracleForEmbedding(view.text, currentSourceCard.name)).filter(Boolean))];
+                await warmEmbeddingCache(sourceViewTexts, ex, null, getManaSearchEmbeddingBatchSize());
+                const oracleVectors = sourceViewTexts.map(text => getCachedEmbeddingValue(text)).filter(Boolean);
+                const semanticRetrievalVectors = [...(semanticRetrievalVector ? [semanticRetrievalVector] : []), ...oracleVectors];
+                if (!semanticRetrievalVectors.length) return { index, queryVector: null, semanticRetrievalVector: null, oracleVectors: [], semanticRetrievalVectors: [], matches: [], hydrated: [] };
+                const limit = benchmarkUseLocalOracleCorpus ? (isBroadSearch ? 512 : 384) : (isBroadSearch ? 96 : 72);
+                const matches = await findFullSemanticMatches(index, semanticRetrievalVectors, currentSourceCard.name, limit, 0.39);
                 const mergedMatches = new Map();
                 querySets.forEach((set, qi) => (set || []).forEach(item => {
                     const key = normalizeCardNameForIdentity(item.name);
@@ -28145,10 +28143,10 @@ async function findSimilarCards() {
                         hydrated = localCards;
                     }
                 }
-                return { index, queryVector: oracleVector || semanticRetrievalVector, semanticRetrievalVector, matches, hydrated };
+                return { index, queryVector: oracleVectors[0] || semanticRetrievalVector, semanticRetrievalVector, oracleVectors, semanticRetrievalVectors, matches, hydrated };
             } catch (error) {
                 console.info('Search G semantic retrieval unavailable; continuing with non-semantic retrieval:', error?.message || error);
-                return { index: null, queryVector: null, semanticRetrievalVector: null, matches: [], hydrated: [] };
+                return { index: null, queryVector: null, semanticRetrievalVector: null, oracleVectors: [], semanticRetrievalVectors: [], matches: [], hydrated: [] };
             }
         })(), 'Semantic Index');
 
@@ -28275,7 +28273,12 @@ async function findSimilarCards() {
             if (sourceFunctionText) sourceFunctionVector = await getCachedEmbedding(sourceFunctionText, extractor);
         }
         let resultsG = semanticRetrieval?.hydrated || [];
-        const targetVectors = { oracle: sourceOracleVector, semanticRetrieval: sourceSemanticRetrievalVector };
+        const targetVectors = {
+            oracle: sourceOracleVector,
+            semanticRetrieval: sourceSemanticRetrievalVector,
+            oracleViews: semanticRetrieval?.oracleVectors || (sourceOracleVector ? [sourceOracleVector] : []),
+            semanticRetrievalViews: semanticRetrieval?.semanticRetrievalVectors || (sourceSemanticRetrievalVector ? [sourceSemanticRetrievalVector] : [])
+        };
         const targetVector = targetVectors.oracle;
 
         // Keep the old session corpus as a secondary recovery lane. It is still useful for cards
