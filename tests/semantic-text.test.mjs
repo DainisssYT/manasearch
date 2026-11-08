@@ -102,3 +102,18 @@ test('semantic retrieval uses reciprocal rank fusion and records ability coverag
   assert.ok(results[0]._semanticRrfScoreRatio > 0);
   assert.ok(results.some(item => item.name === 'B' && item._semanticAbilityCoverage === 1));
 });
+
+
+test('long Oracle clauses keep their trigger and initial cost context in later chunks', () => {
+  const tail = Array.from({ length: 96 }, (_, i) => `detailword${i}`).join(' ');
+  const oracle = `Whenever this creature attacks, you may pay {2}. If you do, ${tail}; then create a Treasure token.`;
+  const docs = buildSemanticDocuments([{ name: 'Clause Anchor', oracle_text: oracle }], {
+    maxWords: 20,
+    overlapWords: 5
+  });
+  assert.ok(docs.length >= 4);
+  assert.ok(docs.slice(1).every(doc => /Whenever this creature attacks, you may pay/.test(doc.abilityText)),
+    'continuation chunks must retain the trigger and cost anchor');
+  assert.ok(docs.some(doc => /detailword95/.test(doc.abilityText)), 'the end of the long effect must remain indexed');
+  assert.ok(docs.some(doc => /create a Treasure token/.test(doc.abilityText)), 'a trailing clause must not be dropped');
+});
