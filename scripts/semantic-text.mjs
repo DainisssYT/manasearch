@@ -90,6 +90,11 @@ function faceDescriptors(card) {
       manaCost: face?.mana_cost || '',
       typeLine: face?.type_line || card.type_line || '',
       colors: Array.isArray(face?.colors) ? face.colors.join(' ') : '',
+      colorIndicator: Array.isArray(face?.color_indicator) ? face.color_indicator.join(' ') : (face?.color_indicator || ''),
+      power: face?.power || '',
+      toughness: face?.toughness || '',
+      loyalty: face?.loyalty || '',
+      defense: face?.defense || '',
       oracleText: face?.oracle_text || '',
       keywords: Array.isArray(card.keywords) ? card.keywords.join(' ') : ''
     }));
@@ -99,6 +104,11 @@ function faceDescriptors(card) {
     manaCost: card?.mana_cost || '',
     typeLine: card?.type_line || '',
     colors: Array.isArray(card?.colors) ? card.colors.join(' ') : '',
+    colorIndicator: '',
+    power: card?.power || '',
+    toughness: card?.toughness || '',
+    loyalty: card?.loyalty || '',
+    defense: card?.defense || '',
     oracleText: card?.oracle_text || '',
     keywords: Array.isArray(card?.keywords) ? card.keywords.join(' ') : ''
   }];
@@ -119,7 +129,15 @@ export function buildSemanticDocuments(cards, options = {}) {
         face.typeLine && `type ${face.typeLine}`,
         face.manaCost && `mana cost ${face.manaCost}`,
         face.colors && `colors ${face.colors}`,
-        face.keywords && `keywords ${face.keywords}`
+        face.colorIndicator && `color indicator ${face.colorIndicator}`,
+        face.keywords && `keywords ${face.keywords}`,
+        Array.isArray(card.color_identity) && card.color_identity.length ? `color identity ${card.color_identity.join(' ')}` : '',
+        Array.isArray(card.produced_mana) && card.produced_mana.length ? `produces ${card.produced_mana.join(' ')} mana` : '',
+        Number.isFinite(Number(card.cmc)) ? `mana value ${card.cmc}` : '',
+        face.power && `power ${face.power}`,
+        face.toughness && `toughness ${face.toughness}`,
+        face.loyalty && `loyalty ${face.loyalty}`,
+        face.defense && `defense ${face.defense}`
       ].filter(Boolean).join('. ');
       for (let i = 0; i < abilities.length; i++) {
         const normalized = normalizeOracleForEmbedding(`${context}. ability ${abilities[i]}`, face.name || card.name);
