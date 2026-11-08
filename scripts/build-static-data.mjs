@@ -19,9 +19,9 @@ const CARD_MAGIC = 'MSCARD1G';
 const CARD_VERSION = 1;
 const MODEL_ID = 'Xenova/all-MiniLM-L6-v2';
 const EMBEDDING_BATCH_SIZE = 32;
-const BUILDER_VERSION = 5;
+const BUILDER_VERSION = 6;
 
-const { buildSemanticDocuments } = await import('./semantic-text.mjs');
+const { buildSemanticDocuments, enforceSemanticTokenBudget } = await import('./semantic-text.mjs');
 
 function compactFace(face) {
   if (!face) return null;
@@ -259,12 +259,25 @@ async function main() {
   console.log(`Loading ${MODEL_ID}…`);
   const extractor = await createPipeline('feature-extraction', MODEL_ID, { quantized: true });
   const vectors = [];
-  const semanticDocuments = buildSemanticDocuments(cards);
+  // Use the exact tokenizer attached to the loaded MiniLM pipeline. A conservative 32-word
+  // initial split is followed by an actual token-count guard (240 tokens, below the 256 limit),
+  // so truncation cannot silently discard a card ability during index generation.
+  if (typeof extractor.tokenizer !== 'function') {
+    throw new Error('The MiniLM pipeline did not expose its tokenizer; refusing to build a potentially truncated semantic index.');
+  }
+  const initialSemanticDocuments = buildSemanticDocuments(cards, { maxWords: 32, overlapWords: 8 });
+  const semanticDocuments = await enforceSemanticTokenBudget(initialSemanticDocuments, extractor.tokenizer, {
+    maxTokens: 240,
+    overlapWords: 8
+  });
   const texts = semanticDocuments.map(document => document.text);
   if (!texts.length) throw new Error('No searchable Oracle-text documents were generated.');
+  if (semanticDocuments.some(document => !Number.isFinite(document.tokenCount) || document.tokenCount > 240)) {
+    throw new Error('A semantic document exceeded the verified 240-token safety budget.');
+  }
   for (let i = 0; i < texts.length; i += EMBEDDING_BATCH_SIZE) {
     const chunk = texts.slice(i, i + EMBEDDING_BATCH_SIZE);
-    const output = await extractor(chunk, { pooling: 'mean', normalize: true, truncation: true, max_length: 256 });
+    const output = await extractor(chunk, { pooling: 'mean', normalize: true, truncation: false });
     const dims = output?.dims;
     if (!Array.isArray(dims) || dims.length < 2 || dims[0] !== chunk.length) {
       throw new Error(`Unexpected embedding shape at batch ${i}: ${JSON.stringify(dims)}`);
