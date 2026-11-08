@@ -16660,7 +16660,7 @@ function normalizeOracleForEmbedding(text, cardName = '') {
     // Parenthetical rules/reminder text can be the only description of an important mechanic.
     const manaNames = {
         W: 'white mana', U: 'blue mana', B: 'black mana', R: 'red mana',
-        G: 'green mana', C: 'colorless mana', S: 'snow mana',
+        G: 'green mana', C: 'colorless mana', S: 'snow mana', X: 'X mana',
         T: 'tap symbol', Q: 'untap symbol', E: 'energy symbol'
     };
     value = value.replace(/\{([^}]+)\}/g, (_, raw) => {
