@@ -26,6 +26,10 @@ jobs:
       - name: Run dependency-free checks
         run: |
           node --check --input-type=module < app.js
+          node --check scripts/build-static-data.mjs
+          node --check scripts/semantic-text.mjs
+          node --check semantic-search-worker.js
+          npm test
           node tests/run-static-regression.cjs
           node tests/run-core-unit-regression.cjs
           node tests/run-card-benchmark-data.cjs
