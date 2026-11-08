@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildSemanticDocuments, normalizeOracleForEmbedding } from '../scripts/semantic-text.mjs';
+import { buildSemanticDocuments, enforceSemanticTokenBudget, mergeSemanticRetrievalRanks, normalizeOracleForEmbedding } from '../scripts/semantic-text.mjs';
 
 test('normalization preserves parenthetical rules and reminder text', () => {
   const text = normalizeOracleForEmbedding('Flying (This creature can\'t be blocked except by creatures with flying or reach.)');
@@ -71,4 +71,34 @@ test('cards without Oracle text retain searchable structured profiles', () => {
   assert.match(docs[0].text, /power 3/);
   assert.match(docs[0].text, /toughness 3/);
   assert.match(docs[0].text, /green mana/);
+});
+
+
+test('semantic documents are split to the actual tokenizer budget without losing the ability tail', async () => {
+  const ability = Array.from({ length: 180 }, (_, i) => `ruleword${i}`).join(' ');
+  const initial = buildSemanticDocuments([{ name: 'Token Budget Card', oracle_text: ability }], {
+    maxWords: 120,
+    overlapWords: 12
+  });
+  const tokenizer = async text => ({
+    input_ids: { dims: [1, String(text).trim().split(/\\s+/).filter(Boolean).length] }
+  });
+  const fitted = await enforceSemanticTokenBudget(initial, tokenizer, { maxTokens: 40, overlapWords: 6 });
+  assert.ok(fitted.length > initial.length, 'oversized ability chunks should be split further');
+  assert.ok(fitted.every(document => document.tokenCount <= 40));
+  assert.ok(fitted.some(document => /ruleword179/.test(document.text)), 'the final Oracle words must remain searchable');
+});
+
+test('semantic retrieval uses reciprocal rank fusion and records ability coverage', () => {
+  const results = mergeSemanticRetrievalRanks([
+    [{ name: 'A', similarity: 0.72 }, { name: 'B', similarity: 0.70 }],
+    [{ name: 'B', similarity: 0.79 }, { name: 'A', similarity: 0.74 }],
+    [{ name: 'A', similarity: 0.68 }, { name: 'C', similarity: 0.76 }]
+  ], ['intent', 'ability-1', 'ability-2']);
+  assert.equal(results[0].name, 'A');
+  assert.equal(results[0]._semanticAbilityCoverage, 2);
+  assert.equal(results[0]._semanticAbilityTotal, 2);
+  assert.equal(results[0]._semanticAbilityCoverageRatio, 1);
+  assert.ok(results[0]._semanticRrfScoreRatio > 0);
+  assert.ok(results.some(item => item.name === 'B' && item._semanticAbilityCoverage === 1));
 });
