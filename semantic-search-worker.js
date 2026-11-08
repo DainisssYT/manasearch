@@ -422,8 +422,10 @@ self.onmessage = async function(event) {
         const limit = Math.max(1, Number(data.limit) || 72);
         const minSimilarity = Number.isFinite(data.minSimilarity) ? data.minSimilarity : 0.42;
         const baseline = Number.isFinite(data.baseline) ? data.baseline : 0.30;
-        const keepCap = Math.max(limit * 2, 32);
-        const heap = [];
+        // Several ability/face documents intentionally share one card name.
+        // Aggregate their strongest hit before limiting cards; otherwise a card with
+        // many matching abilities can occupy most of the old row-level heap.
+        const bestByCard = new Map();
 
         for (const chunk of indexChunks) {
             if (Number.isFinite(data.generation) && data.generation < latestGeneration) {
@@ -438,7 +440,7 @@ self.onmessage = async function(event) {
                 const name = chunk.names[i] || '';
                 if (!name) continue;
                 const normalizedName = chunk.normalizedNames?.[i] || normalizeCardName(name);
-                if (normalizedName === excludeKey) continue;
+                if (!normalizedName || normalizedName === excludeKey) continue;
                 const vector = chunk.vectors.subarray(i * dim, (i + 1) * dim);
                 let inverseNorm = chunk.vectorInverseNorms?.[i] || 0;
                 if (!(inverseNorm > 0)) {
@@ -447,27 +449,22 @@ self.onmessage = async function(event) {
                 }
                 const rawCos = cosineSimilarityQuantized(query, vector, dim, queryInverseNorm, inverseNorm);
                 const calibrated = Math.max(0, Math.min(1, (rawCos - baseline) / Math.max(0.05, 1 - baseline)));
-                if (calibrated >= minSimilarity) {
-                    heapPushTop(heap, {
+                if (calibrated < minSimilarity) continue;
+
+                const previous = bestByCard.get(normalizedName);
+                if (!previous || calibrated > previous.similarity) {
+                    bestByCard.set(normalizedName, {
                         name,
-                        id: chunk.ids?.[i] || null,
-                        similarity: calibrated,
-                        _normalizedName: normalizedName
-                    }, keepCap);
+                        id: chunk.ids?.[i] || previous?.id || null,
+                        similarity: calibrated
+                    });
                 }
             }
         }
 
-        heap.sort((a, b) => b.similarity - a.similarity);
-        const seen = new Set();
-        const results = [];
-        for (const item of heap) {
-            const key = item._normalizedName || normalizeCardName(item.name);
-            if (!key || seen.has(key)) continue;
-            seen.add(key);
-            results.push({ name: item.name, id: item.id || null, similarity: item.similarity });
-            if (results.length >= limit) break;
-        }
+        const results = Array.from(bestByCard.values())
+            .sort((a, b) => b.similarity - a.similarity)
+            .slice(0, limit);
         self.postMessage({ type: 'result', requestId: data.requestId, results });
     } catch (error) {
         const message = error?.message || String(error);
