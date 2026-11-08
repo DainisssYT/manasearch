@@ -15213,6 +15213,20 @@ function runManaSearchMechanicalRegressionSuite({ log = true } = {}) {
             graphContradiction: tokenDetail.graphContradiction,
             graphFeatureVector: tokenDetail.graphFeatureVector,
             graphMatches: (tokenDetail.graphMatches || []).map(match => ({score:match.score,breakdown:match.breakdown})),
+            multiplierEffects: multiplier.map(effect => ({
+                action: effect.action, canonical: effect.canonical, importance: effect.importance,
+                isPrimary: effect.isPrimary, isStatic: effect.isStatic, effectMode: effect.effectMode,
+                quantity: effect.quantity, stats: effect.stats, tokenType: effect.tokenType,
+                repeatability: getEffectRepeatabilityProfile(effect)
+            })),
+            creatorEffects: creator.map(effect => ({
+                action: effect.action, canonical: effect.canonical, importance: effect.importance,
+                isPrimary: effect.isPrimary, isStatic: effect.isStatic, effectMode: effect.effectMode,
+                quantity: effect.quantity, stats: effect.stats, tokenType: effect.tokenType,
+                repeatability: getEffectRepeatabilityProfile(effect)
+            })),
+            directionalPairScore: multiplier[0] && creator[0] ? getDirectionalMechanicalEffectPairSimilarity(multiplier[0],creator[0]) : null,
+            directionalRawPairScore: multiplier[0] && creator[0] ? computeDirectionalMechanicalEffectPairSimilarity(multiplier[0],creator[0]) : null,
             contrast: tokenDetail.explicitContrast
         });
 
