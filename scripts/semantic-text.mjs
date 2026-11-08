@@ -100,8 +100,9 @@ function faceDescriptors(card) {
     }));
     const faceOracle = faces.map(face => face.oracleText).filter(Boolean).join(' ');
     const wholeOracle = String(card.oracle_text || '').trim();
+    const normalizeSpacing = value => String(value || '').replace(/\\s+/g, ' ').trim();
     // Some layouts expose useful card-level Oracle text in addition to (or instead of) face text.
-    if (wholeOracle && wholeOracle !== faceOracle) {
+    if (wholeOracle && normalizeSpacing(wholeOracle) !== normalizeSpacing(faceOracle)) {
       faces.push({
         name: card.name,
         manaCost: card.mana_cost || '',
