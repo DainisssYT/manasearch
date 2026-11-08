@@ -81,7 +81,7 @@ test('semantic documents are split to the actual tokenizer budget without losing
     overlapWords: 12
   });
   const tokenizer = async text => ({
-    input_ids: { dims: [1, String(text).trim().split(/\\s+/).filter(Boolean).length] }
+    input_ids: { dims: [1, String(text).trim().split(/\s+/).filter(Boolean).length] }
   });
   const fitted = await enforceSemanticTokenBudget(initial, tokenizer, { maxTokens: 40, overlapWords: 6 });
   assert.ok(fitted.length > initial.length, 'oversized ability chunks should be split further');
