@@ -19,49 +19,9 @@ const CARD_MAGIC = 'MSCARD1G';
 const CARD_VERSION = 1;
 const MODEL_ID = 'Xenova/all-MiniLM-L6-v2';
 const EMBEDDING_BATCH_SIZE = 32;
-const BUILDER_VERSION = 4;
+const BUILDER_VERSION = 5;
 
-const SEMANTIC_KEYWORD_EXPANSIONS = {
-  cascade: ' cascade reveals cards until a spell is found and casts it ',
-  flashback: ' flashback cast from graveyard ',
-  prowess: ' prowess gets plus one plus one when you cast a noncreature spell ',
-  deathtouch: ' deathtouch lethal damage destroys creature ',
-  lifelink: ' lifelink damage causes you to gain life ',
-  trample: ' trample excess combat damage to defending player ',
-  vigilance: ' vigilance does not tap to attack ',
-  menace: ' menace requires two or more blockers ',
-  flying: ' flying can be blocked only by flying or reach ',
-  haste: ' haste can attack and tap immediately ',
-  hexproof: ' hexproof cannot be targeted by opponents ',
-  indestructible: ' indestructible cannot be destroyed by damage or destroy effects '
-};
-
-function normalizeOracleForEmbedding(text, cardName = '') {
-  let value = String(text || '');
-  if (!value) return '';
-  if (cardName) {
-    const escaped = String(cardName).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    value = value.replace(new RegExp(`\\b${escaped}\\b`, 'gi'), 'this permanent');
-  }
-  value = value.replace(/\([^()]*\)/g, ' ');
-  value = value.replace(/\{T\}/gi, ' tap ')
-    .replace(/\{Q\}/gi, ' untap ')
-    .replace(/\{[WUBRGC]\}/gi, ' colored mana ')
-    .replace(/\{\d+\}/g, ' generic mana ')
-    .replace(/\{X\}/gi, ' X mana ')
-    .replace(/\{[^}]+\}/g, ' mana symbol ');
-  for (const [keyword, expansion] of Object.entries(SEMANTIC_KEYWORD_EXPANSIONS)) {
-    value = value.replace(new RegExp(`\\b${keyword}\\b`, 'gi'), ` ${keyword} ${expansion} `);
-  }
-  return value.replace(/[^a-z0-9+\-\s]/gi, ' ').replace(/\s+/g, ' ').trim();
-}
-
-function getOracleText(card) {
-  if (typeof card?.oracle_text === 'string' && card.oracle_text.trim()) return card.oracle_text;
-  return Array.isArray(card?.card_faces)
-    ? card.card_faces.map(face => face?.oracle_text || '').filter(Boolean).join(' ')
-    : '';
-}
+const { buildSemanticDocuments } = await import('./semantic-text.mjs');
 
 function compactFace(face) {
   if (!face) return null;
@@ -299,20 +259,26 @@ async function main() {
   console.log(`Loading ${MODEL_ID}…`);
   const extractor = await createPipeline('feature-extraction', MODEL_ID, { quantized: true });
   const vectors = [];
-  const texts = cards.map(card => normalizeOracleForEmbedding(getOracleText(card), card.name));
+  const semanticDocuments = buildSemanticDocuments(cards);
+  const texts = semanticDocuments.map(document => document.text);
+  if (!texts.length) throw new Error('No searchable Oracle-text documents were generated.');
   for (let i = 0; i < texts.length; i += EMBEDDING_BATCH_SIZE) {
     const chunk = texts.slice(i, i + EMBEDDING_BATCH_SIZE);
-    const output = await extractor(chunk, { pooling: 'mean', normalize: true });
+    const output = await extractor(chunk, { pooling: 'mean', normalize: true, truncation: true, max_length: 256 });
     const dims = output?.dims;
     if (!Array.isArray(dims) || dims.length < 2 || dims[0] !== chunk.length) {
       throw new Error(`Unexpected embedding shape at batch ${i}: ${JSON.stringify(dims)}`);
     }
     const hidden = dims[dims.length - 1];
+    if (hidden !== 384) throw new Error(`Unexpected embedding dimension: ${hidden}; expected 384.`);
     for (let j = 0; j < chunk.length; j++) vectors.push(output.data.slice(j * hidden, (j + 1) * hidden));
-    console.log(`Embedded ${Math.min(i + chunk.length, texts.length).toLocaleString()}/${texts.length.toLocaleString()}`);
+    console.log(`Embedded ${Math.min(i + chunk.length, texts.length).toLocaleString()}/${texts.length.toLocaleString()} ability documents`);
   }
 
-  const semanticBinary = writeSemanticIndex(cards, vectors);
+  // Multiple rows may share a card name. The worker already keeps the strongest
+  // matching row per normalized card name, so this remains binary-format compatible.
+  const semanticCards = semanticDocuments.map(document => ({ name: document.name }));
+  const semanticBinary = writeSemanticIndex(semanticCards, vectors);
   console.log(`Prepared ${path.basename(SEMANTIC_OUT)} (${(semanticBinary.length / 1024 / 1024).toFixed(2)} MiB).`);
 
   const metadata = JSON.stringify({
@@ -322,6 +288,8 @@ async function main() {
     oracle_cards_updated_at: oracleEntry.updated_at,
     oracle_cards_uri: downloadUri,
     card_count: cards.length,
+    semantic_document_count: semanticDocuments.length,
+    semantic_document_strategy: 'per-face-per-ability-with-overlap-v1',
     embedding_dimension: vectors[0]?.length || 0,
     model: MODEL_ID
   }, null, 2) + '\n';
