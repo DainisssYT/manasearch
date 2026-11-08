@@ -14527,6 +14527,17 @@ function runManaSearchPerformanceOptimizationRegressionSuite({ log = true } = {}
         const descriptorCacheAfterFirst = { ...localCorpusDescriptorScoreCacheStats };
         const descriptorCacheSecondScore = scoreLocalCorpusCardForDescriptor(descriptorCacheFixture, descriptorCacheFixtureQuery);
         check('local-descriptor-score-cache-preserves-exact-score', descriptorCacheFirstScore === descriptorCacheSecondScore && descriptorCacheAfterFirst.computed === descriptorCacheStatsBefore.computed + 1 && localCorpusDescriptorScoreCacheStats.hits === descriptorCacheAfterFirst.hits + 1, `first=${descriptorCacheFirstScore}; second=${descriptorCacheSecondScore}`);
+        const idfFixtureCorpus = {
+            cards: new Array(100),
+            tokenIndex: new Map([
+                ['creature', { offset: 0, length: 90 }],
+                ['cascade', { offset: 90, length: 2 }]
+            ])
+        };
+        const idfFixtureQuery = localCorpusScoreDescriptor('creature cascade', idfFixtureCorpus);
+        const commonOnlyScore = scoreLocalCorpusCardForDescriptor({ _localSearchText: 'creature' }, idfFixtureQuery);
+        const rareOnlyScore = scoreLocalCorpusCardForDescriptor({ _localSearchText: 'cascade' }, idfFixtureQuery);
+        check('local-lexical-ranking-weights-rare-mechanics', rareOnlyScore > commonOnlyScore && rareOnlyScore > 0, `common=${commonOnlyScore}; rare=${rareOnlyScore}`);
         check('large-structural-prescore-batches', /STRUCTURAL_PRESCORE_BATCH_SIZE = 256/.test(findSimilarCards.toString()), 'larger batches amortize repeated source profile setup while the scorer still yields cooperatively');
         check('main-search-structural-cache-key-is-explicitly-mapped', (findSimilarCards.toString().match(/structuralScoreCacheKey:\s*structuralScoringCacheKey/g) || []).length === 2 && !/\bstructuralScoreCacheKey\s*[,}]/.test(findSimilarCards.toString()), 'both scoring passes must map the locally declared key to the scoreCardBatch option; never use an undeclared shorthand');
         check('corpus-output-feeds-scoring-queue', /ctx\.onRetrievedCandidate\(card, state\.request\)/.test(runLocalCorpusBatch.toString()), 'only capped local retrieval outputs are enqueued for one-time structural scoring');
