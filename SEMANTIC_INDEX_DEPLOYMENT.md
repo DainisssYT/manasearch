@@ -26,3 +26,43 @@ underlying ranked candidates and CSV export remain unchanged.
 
 The deployment workflow publishes both worker scripts beside the existing static assets. No hosting
 upgrade or paid infrastructure is required.
+
+
+## Semantic document coverage (builder v5)
+
+`npm run build-static-data` is the canonical static-data build. It reads one Scryfall
+`oracle_cards` revision and atomically generates `cards.bin`, `semantic-index.bin`, and
+`static-data-meta.json` from that same revision.
+
+The v5 semantic index stores multiple rows per Oracle card: each non-empty card face and each
+separate Oracle-text ability gets its own embedding document. Unusually long ability lines are
+split into overlapping chunks (140 words by default), so a later clause is not lost when the
+embedding model reaches its input limit. Each document carries face type, mana cost, colors,
+keywords, color identity, produced mana, mana value, and available face stats as context.
+Parenthetical text is retained, and mana symbols are normalized without collapsing all colors
+into one generic "colored mana" token.
+
+The binary header remains `MSIDX1` v1 (384-dimensional Int8 vectors), so no new browser decoder is
+required. Because the index contains repeated card names, `semantic-search-worker.js` aggregates
+the strongest ability/face match per normalized card name before applying the requested result
+limit. The main-thread fallback does the same. Candidate output therefore remains a list of unique
+cards, not a list of individual abilities.
+
+Source-card semantic retrieval mirrors this representation: unhighlighted searches build distinct
+query vectors for each source face/ability in addition to the whole-card intent query. Explicit
+highlights remain scoped to the selected text. Functional lexical retrieval also distributes its
+limited Scryfall query slots across several parsed source mechanics instead of spending every slot
+on one ability. The local lexical corpus contains face-level metadata and uses a larger query-token
+budget.
+
+### Refresh and legacy builder
+
+`scripts/build-static-data.mjs` is the supported builder. The scheduled
+`.github/workflows/refresh-static-data.yml` rebuilds from Scryfall on Sundays and can be started
+manually. It validates the v5 manifest before committing generated assets. A changed asset set
+then explicitly dispatches the Pages deployment workflow.
+
+`scripts/build-semantic-index.mjs` is retained for compatibility and historical reference, but is
+not used by package scripts or the deployment workflow. It predates the multi-document format;
+do not run it to publish `semantic-index.bin`. Keeping it in the repository avoids a potentially
+surprising deletion while making the supported path explicit.
