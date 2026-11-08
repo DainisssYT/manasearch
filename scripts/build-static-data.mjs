@@ -303,7 +303,10 @@ async function main() {
     oracle_cards_uri: downloadUri,
     card_count: cards.length,
     semantic_document_count: semanticDocuments.length,
-    semantic_document_strategy: 'per-face-per-ability-with-overlap-v1',
+    semantic_document_strategy: 'shared-per-face-per-ability-token-verified-v2',
+    semantic_max_tokens: 240,
+    semantic_chunk_word_target: 32,
+    semantic_chunk_overlap_words: 8,
     embedding_dimension: vectors[0]?.length || 0,
     model: MODEL_ID
   }, null, 2) + '\n';
