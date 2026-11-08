@@ -135,7 +135,7 @@ function faceDescriptors(card) {
 }
 
 export function buildSemanticDocuments(cards, options = {}) {
-  const maxWords = Math.max(48, Number(options.maxWords) || 140);
+  const maxWords = Math.max(48, Number(options.maxWords) || 96);
   const overlapWords = Math.min(maxWords - 1, Math.max(0, Number(options.overlapWords) || 24));
   const documents = [];
   for (const card of cards || []) {
