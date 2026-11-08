@@ -1,4 +1,4 @@
-/* ManaSearch build 20261101-129 */
+/* ManaSearch build 20261108-131 */
 // ManaSearch deployment build marker. Bump this whenever app.js changes so cached-module issues are easy to diagnose.
 const MANASEARCH_APP_BUILD = '20261108-131';
 console.info(`[ManaSearch] app.js build ${MANASEARCH_APP_BUILD}`);
@@ -16652,27 +16652,37 @@ const SEMANTIC_KEYWORD_EXPANSIONS = {
 
 function normalizeOracleForEmbedding(text, cardName = '') {
     let value = String(text || '');
-    if (!value) return '';
+    if (!value.trim()) return '';
     if (cardName) {
-        const escaped = String(cardName).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-        value = value.replace(new RegExp(`\\b${escaped}\\b`, 'gi'), 'this permanent');
+        const escaped = String(cardName).replace(/[.*+?^\${}()|[\]\\]/g, '\\$&');
+        value = value.replace(new RegExp(\`\\b\${escaped}\\b\`, 'gi'), 'this card');
     }
-    // Reminder text is useful to humans but often duplicates/loosens the actual rules wording.
-    value = value.replace(/\([^()]*\)/g, ' ');
-    value = value.replace(/\{T\}/gi, ' tap ')
-        .replace(/\{Q\}/gi, ' untap ')
-        .replace(/\{[WUBRGC]\}/gi, ' colored mana ')
-        .replace(/\{\d+\}/g, ' generic mana ')
-        .replace(/\{X\}/gi, ' X mana ')
-        .replace(/\{[^}]+\}/g, ' mana symbol ');
-    const lower = value.toLowerCase();
+    // Parenthetical rules/reminder text can be the only description of an important mechanic.
+    const manaNames = {
+        W: 'white mana', U: 'blue mana', B: 'black mana', R: 'red mana',
+        G: 'green mana', C: 'colorless mana', S: 'snow mana',
+        T: 'tap symbol', Q: 'untap symbol', E: 'energy symbol'
+    };
+    value = value.replace(/\{([^}]+)\}/g, (_, raw) => {
+        const symbol = String(raw).toUpperCase();
+        if (manaNames[symbol]) return \` \${manaNames[symbol]} \`;
+        if (/^\d+$/.test(symbol)) return \` \${symbol} generic mana \`;
+        if (/^\d+\/[WUBRGC]$/.test(symbol)) {
+            const parts = symbol.split('/');
+            return \` \${parts[0]} generic or \${manaNames[parts[1]]} \`;
+        }
+        if (/^[WUBRGC]\/P$/.test(symbol)) return \` \${manaNames[symbol[0]]} or two life phyrexian mana \`;
+        if (/^[WUBRGC]\/[WUBRGC]$/.test(symbol)) {
+            const parts = symbol.split('/');
+            return \` \${manaNames[parts[0]]} or \${manaNames[parts[1]]} hybrid mana \`;
+        }
+        if (symbol === 'P') return ' phyrexian mana pay two life ';
+        return \` \${symbol.toLowerCase().replace(/[^a-z0-9/]+/g, ' ')} mana symbol \`;
+    });
     for (const [keyword, expansion] of Object.entries(SEMANTIC_KEYWORD_EXPANSIONS)) {
-        value = value.replace(new RegExp(`\\b${keyword}\\b`, 'gi'), ` ${keyword} ${expansion} `);
+        value = value.replace(new RegExp(\`\\b\${keyword}\\b\`, 'gi'), \` \${keyword} \${expansion} \`);
     }
-    // Numbers are preserved because quantity matters, but normalize comma/formatting noise.
-    return value.replace(/[^a-z0-9+\-\s]/gi, ' ')
-        .replace(/\s+/g, ' ')
-        .trim();
+    return value.replace(/[^a-z0-9+\\-\\s]/gi, ' ').replace(/\\s+/g, ' ').trim();
 }
 
 // Oracle normalization is called once while warming the embedding cache and again while scoring
@@ -17050,14 +17060,22 @@ function prepareStaticCardRecord(card) {
     const oracle = getLocalCorpusCardOracleText(card);
     const faces = Array.isArray(card.card_faces) ? card.card_faces : [];
     const faceText = faces.map(face => face?.oracle_text || '').filter(Boolean).join(' ');
+    const faceMetadata = faces.flatMap(face => [
+        face?.name, face?.mana_cost, face?.type_line,
+        Array.isArray(face?.colors) ? face.colors.join(' ') : '',
+        face?.color_indicator, face?.power, face?.toughness, face?.loyalty,
+        face?.defense, face?.hand_modifier, face?.life_modifier
+    ]);
     const searchText = normalizeLocalCorpusText([
-        card.name,
-        oracle,
-        faceText,
+        card.name, card.layout, oracle, faceText, ...faceMetadata,
         Array.isArray(card.keywords) ? card.keywords.join(' ') : '',
-        card.type_line || '',
-        Array.isArray(card.color_identity) ? card.color_identity.join(' ') : ''
-    ].join(' '));
+        card.type_line || '', card.mana_cost || '', card.cmc,
+        card.power, card.toughness, card.loyalty, card.defense,
+        card.hand_modifier, card.life_modifier,
+        Array.isArray(card.colors) ? card.colors.join(' ') : '',
+        Array.isArray(card.color_identity) ? card.color_identity.join(' ') : '',
+        Array.isArray(card.produced_mana) ? card.produced_mana.join(' ') : ''
+    ].filter(value => value !== null && value !== undefined && value !== '').join(' '));
     const localKeywordTokens = Array.isArray(card.keywords)
         ? [...new Set(card.keywords.map(normalizeLocalCorpusText).filter(Boolean))]
         : [];
@@ -17427,7 +17445,7 @@ function getLocalCorpusIndexTokens(text) {
 }
 
 function getLocalCorpusQueryTokens(text) {
-    return getLocalCorpusIndexTokens(text).slice(0, 14);
+    return getLocalCorpusIndexTokens(text).slice(0, 48);
 }
 
 async function searchStaticCardCorpus(queryText, options = {}) {
