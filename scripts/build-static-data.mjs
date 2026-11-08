@@ -5,6 +5,7 @@ import { promisify } from 'node:util';
 import { Readable } from 'node:stream';
 import readline from 'node:readline';
 import { pipeline as createPipeline } from '@xenova/transformers';
+import { buildSemanticOracleViews, normalizeManaSearchOracleText } from '../semantic-card-views.js';
 
 const gzip = promisify(zlib.gzip);
 const ROOT = process.cwd();
@@ -19,7 +20,7 @@ const CARD_MAGIC = 'MSCARD1G';
 const CARD_VERSION = 1;
 const MODEL_ID = 'Xenova/all-MiniLM-L6-v2';
 const EMBEDDING_BATCH_SIZE = 32;
-const BUILDER_VERSION = 4;
+const BUILDER_VERSION = 5;
 
 const SEMANTIC_KEYWORD_EXPANSIONS = {
   cascade: ' cascade reveals cards until a spell is found and casts it ',
@@ -37,23 +38,7 @@ const SEMANTIC_KEYWORD_EXPANSIONS = {
 };
 
 function normalizeOracleForEmbedding(text, cardName = '') {
-  let value = String(text || '');
-  if (!value) return '';
-  if (cardName) {
-    const escaped = String(cardName).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    value = value.replace(new RegExp(`\\b${escaped}\\b`, 'gi'), 'this permanent');
-  }
-  value = value.replace(/\([^()]*\)/g, ' ');
-  value = value.replace(/\{T\}/gi, ' tap ')
-    .replace(/\{Q\}/gi, ' untap ')
-    .replace(/\{[WUBRGC]\}/gi, ' colored mana ')
-    .replace(/\{\d+\}/g, ' generic mana ')
-    .replace(/\{X\}/gi, ' X mana ')
-    .replace(/\{[^}]+\}/g, ' mana symbol ');
-  for (const [keyword, expansion] of Object.entries(SEMANTIC_KEYWORD_EXPANSIONS)) {
-    value = value.replace(new RegExp(`\\b${keyword}\\b`, 'gi'), ` ${keyword} ${expansion} `);
-  }
-  return value.replace(/[^a-z0-9+\-\s]/gi, ' ').replace(/\s+/g, ' ').trim();
+  return normalizeManaSearchOracleText(text, cardName);
 }
 
 function getOracleText(card) {
@@ -121,12 +106,13 @@ function compactCard(card) {
   };
 }
 
-function writeSemanticIndex(cards, vectors) {
+function writeSemanticIndex(rows, vectors) {
+  if (rows.length !== vectors.length) throw new Error('Semantic row/vector mismatch.');
   const encoder = new TextEncoder();
   const nameParts = [];
   let namesBytes = 0;
-  for (const card of cards) {
-    const bytes = encoder.encode(card.name);
+  for (const row of rows) {
+    const bytes = encoder.encode(row.name);
     if (bytes.length > 65535) throw new Error(`Card name is too long: ${card.name}`);
     const part = Buffer.allocUnsafe(2 + bytes.length);
     part.writeUInt16LE(bytes.length, 0);
@@ -136,7 +122,7 @@ function writeSemanticIndex(cards, vectors) {
   }
   const dim = vectors[0]?.length || 0;
   if (!dim) throw new Error('No embedding vectors were generated.');
-  const vectorBytes = Buffer.allocUnsafe(cards.length * dim);
+  const vectorBytes = Buffer.allocUnsafe(rows.length * dim);
   let offset = 0;
   for (const vector of vectors) {
     for (let i = 0; i < dim; i++) {
@@ -148,7 +134,7 @@ function writeSemanticIndex(cards, vectors) {
   header.write(SEMANTIC_MAGIC, 0, 'ascii');
   header.writeUInt32LE(SEMANTIC_VERSION, 8);
   header.writeUInt32LE(dim, 12);
-  header.writeUInt32LE(cards.length, 16);
+  header.writeUInt32LE(rows.length, 16);
   header.writeUInt32LE(namesBytes, 20);
   header.writeUInt32LE(vectorBytes.length, 24);
   return Buffer.concat([header, ...nameParts, vectorBytes]);
@@ -298,21 +284,29 @@ async function main() {
 
   console.log(`Loading ${MODEL_ID}…`);
   const extractor = await createPipeline('feature-extraction', MODEL_ID, { quantized: true });
+  const semanticRows = [];
+  for (const card of cards) {
+    for (const view of buildSemanticOracleViews(card)) {
+      const text = normalizeOracleForEmbedding(view.text, card.name);
+      if (text) semanticRows.push({ name: card.name, text, faceIndex: view.faceIndex, abilityIndex: view.abilityIndex });
+    }
+  }
+  if (!semanticRows.length) throw new Error('No usable semantic views.');
+  console.log('Prepared ' + semanticRows.length.toLocaleString() + ' semantic views for ' + cards.length.toLocaleString() + ' cards.');
   const vectors = [];
-  const texts = cards.map(card => normalizeOracleForEmbedding(getOracleText(card), card.name));
+  const texts = semanticRows.map(row => row.text);
   for (let i = 0; i < texts.length; i += EMBEDDING_BATCH_SIZE) {
     const chunk = texts.slice(i, i + EMBEDDING_BATCH_SIZE);
     const output = await extractor(chunk, { pooling: 'mean', normalize: true });
     const dims = output?.dims;
     if (!Array.isArray(dims) || dims.length < 2 || dims[0] !== chunk.length) {
-      throw new Error(`Unexpected embedding shape at batch ${i}: ${JSON.stringify(dims)}`);
+      throw new Error('Unexpected embedding shape at batch ' + i + ': ' + JSON.stringify(dims));
     }
     const hidden = dims[dims.length - 1];
     for (let j = 0; j < chunk.length; j++) vectors.push(output.data.slice(j * hidden, (j + 1) * hidden));
-    console.log(`Embedded ${Math.min(i + chunk.length, texts.length).toLocaleString()}/${texts.length.toLocaleString()}`);
+    console.log('Embedded ' + Math.min(i + chunk.length, texts.length).toLocaleString() + '/' + texts.length.toLocaleString() + ' semantic views');
   }
-
-  const semanticBinary = writeSemanticIndex(cards, vectors);
+  const semanticBinary = writeSemanticIndex(semanticRows, vectors);
   console.log(`Prepared ${path.basename(SEMANTIC_OUT)} (${(semanticBinary.length / 1024 / 1024).toFixed(2)} MiB).`);
 
   const metadata = JSON.stringify({
@@ -322,6 +316,8 @@ async function main() {
     oracle_cards_updated_at: oracleEntry.updated_at,
     oracle_cards_uri: downloadUri,
     card_count: cards.length,
+    semantic_vector_count: vectors.length,
+    semantic_views_version: 2,
     embedding_dimension: vectors[0]?.length || 0,
     model: MODEL_ID
   }, null, 2) + '\n';
@@ -331,8 +327,8 @@ async function main() {
   if (!cardBinary.length || !semanticBinary.length || !metadata.length) {
     throw new Error('Static asset generation produced an empty artifact.');
   }
-  if (vectors.length !== cards.length) {
-    throw new Error(`Semantic vector/card count mismatch: ${vectors.length} vectors for ${cards.length} cards.`);
+  if (vectors.length !== semanticRows.length || semanticRows.length < cards.length) {
+    throw new Error('Semantic view/vector count mismatch.');
   }
   if (vectors[0]?.length !== 384) {
     throw new Error(`Unexpected semantic dimension: ${vectors[0]?.length || 0}; expected 384.`);

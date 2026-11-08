@@ -408,22 +408,21 @@ self.onmessage = async function(event) {
             self.postMessage({ type: 'ready', requestId: data.requestId });
             return;
         }
-        if (data.type !== 'query' || !ready) return;
+        if (!['query', 'query-many'].includes(data.type) || !ready) return;
 
-        const query = new Float32Array(data.queryBuffer);
+        const queries = data.type === 'query-many' ? (data.queryBuffers || []).map(buffer => new Float32Array(buffer)) : [new Float32Array(data.queryBuffer)];
+        if (!queries.length) throw new Error('Semantic query contains no vectors.');
         const dim = indexDim;
-        let queryNormSquared = 0;
-        for (let i = 0; i < dim; i++) {
-            const q = Number(query[i]) || 0;
-            queryNormSquared += q * q;
-        }
-        const queryInverseNorm = queryNormSquared > 0 ? 1 / Math.sqrt(queryNormSquared) : 0;
+        const queryInverseNorms = queries.map(query => {
+            let normSquared = 0;
+            for (let i = 0; i < dim; i++) normSquared += (Number(query[i]) || 0) ** 2;
+            return normSquared > 0 ? 1 / Math.sqrt(normSquared) : 0;
+        });
         const excludeKey = String(data.excludeKey || '');
         const limit = Math.max(1, Number(data.limit) || 72);
         const minSimilarity = Number.isFinite(data.minSimilarity) ? data.minSimilarity : 0.42;
         const baseline = Number.isFinite(data.baseline) ? data.baseline : 0.30;
-        const keepCap = Math.max(limit * 2, 32);
-        const heap = [];
+        const bestByName = new Map();
 
         for (const chunk of indexChunks) {
             if (Number.isFinite(data.generation) && data.generation < latestGeneration) {
@@ -445,34 +444,23 @@ self.onmessage = async function(event) {
                     const normSquared = chunk.vectorNormSquares?.[i] || 0;
                     inverseNorm = normSquared > 0 ? 1 / Math.sqrt(normSquared) : 0;
                 }
-                const rawCos = cosineSimilarityQuantized(query, vector, dim, queryInverseNorm, inverseNorm);
+                let rawCos = -1;
+                for (let q = 0; q < queries.length; q++) rawCos = Math.max(rawCos, cosineSimilarityQuantized(queries[q], vector, dim, queryInverseNorms[q], inverseNorm));
                 const calibrated = Math.max(0, Math.min(1, (rawCos - baseline) / Math.max(0.05, 1 - baseline)));
                 if (calibrated >= minSimilarity) {
-                    heapPushTop(heap, {
-                        name,
-                        id: chunk.ids?.[i] || null,
-                        similarity: calibrated,
-                        _normalizedName: normalizedName
-                    }, keepCap);
+                    const previous = bestByName.get(normalizedName);
+                    if (!previous || calibrated > previous.similarity) bestByName.set(normalizedName, { name, id: chunk.ids?.[i] || null, similarity: calibrated, _normalizedName: normalizedName });
                 }
             }
         }
 
-        heap.sort((a, b) => b.similarity - a.similarity);
-        const seen = new Set();
-        const results = [];
-        for (const item of heap) {
-            const key = item._normalizedName || normalizeCardName(item.name);
-            if (!key || seen.has(key)) continue;
-            seen.add(key);
-            results.push({ name: item.name, id: item.id || null, similarity: item.similarity });
-            if (results.length >= limit) break;
-        }
+        const results = Array.from(bestByName.values()).sort((a, b) => b.similarity - a.similarity)
+            .slice(0, limit).map(item => ({ name: item.name, id: item.id || null, similarity: item.similarity }));
         self.postMessage({ type: 'result', requestId: data.requestId, results });
     } catch (error) {
         const message = error?.message || String(error);
         const type = data.type === 'init' ? 'init-error'
-            : data.type === 'query' ? 'query-error'
+            : ['query', 'query-many'].includes(data.type) ? 'query-error'
             : 'load-error';
         self.postMessage({ type, requestId: data.requestId, error: message });
     }
