@@ -26,11 +26,11 @@ export function normalizeManaSearchOracleText(text, cardName = '') {
   }
   return value.replace(/[^a-z0-9+\-\s]/gi, ' ').replace(/\s+/g, ' ').trim();
 }
-export function splitSemanticTextIntoChunks(text, { maxWords = 110, overlapWords = 28 } = {}) {
+export function splitSemanticTextIntoChunks(text, { maxWords = 84, overlapWords = 24 } = {}) {
   const words = String(text || '').trim().split(/\s+/).filter(Boolean);
   if (!words.length) return [];
-  const max = Math.max(48, Number(maxWords) || 110);
-  const overlap = Math.max(8, Math.min(max - 16, Number(overlapWords) || 28));
+  const max = Math.max(48, Number(maxWords) || 84);
+  const overlap = Math.max(8, Math.min(max - 16, Number(overlapWords) || 24));
   if (words.length <= max) return [words.join(' ')];
   const step = max - overlap;
   const anchor = words.slice(0, Math.min(24, Math.floor(max / 4))).join(' ');

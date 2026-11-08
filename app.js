@@ -28088,15 +28088,8 @@ async function findSimilarCards() {
                 const semanticRetrievalVectors = [...(semanticRetrievalVector ? [semanticRetrievalVector] : []), ...oracleVectors];
                 if (!semanticRetrievalVectors.length) return { index, queryVector: null, semanticRetrievalVector: null, oracleVectors: [], semanticRetrievalVectors: [], matches: [], hydrated: [] };
                 const limit = benchmarkUseLocalOracleCorpus ? (isBroadSearch ? 512 : 384) : (isBroadSearch ? 96 : 72);
-                const matches = await findFullSemanticMatches(index, semanticRetrievalVectors, currentSourceCard.name, limit, 0.39);
-                const mergedMatches = new Map();
-                querySets.forEach((set, qi) => (set || []).forEach(item => {
-                    const key = normalizeCardNameForIdentity(item.name);
-                    const prev = mergedMatches.get(key);
-                    const view = queryJobs[qi].view;
-                    mergedMatches.set(key, prev ? { ...prev, similarity: Math.max(prev.similarity || 0, item.similarity || 0), _semanticViews: [...new Set([...(prev._semanticViews || []), view])] } : { ...item, _semanticViews: [view] });
-                }));
-                const matches = Array.from(mergedMatches.values()).sort((a,b)=>(b.similarity||0)-(a.similarity||0)).slice(0, limit);
+                const semanticMatches = await findFullSemanticMatches(index, semanticRetrievalVectors, currentSourceCard.name, limit, 0.39);
+                const matches = semanticMatches;
                 const exactMatches = benchmarkUseLocalOracleCorpus && hasHighlight
                     ? await findFullSemanticExactMatches(index, searchHighlightsSnapshot, currentSourceCard.name, 1024)
                     : [];
