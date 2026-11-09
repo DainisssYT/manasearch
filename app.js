@@ -1,7 +1,11 @@
-/* ManaSearch build 20261101-129 */
+/* ManaSearch build 20261108-131 */
 // ManaSearch deployment build marker. Bump this whenever app.js changes so cached-module issues are easy to diagnose.
-const MANASEARCH_APP_BUILD = '20261101-130';
+const MANASEARCH_APP_BUILD = '20261108-134';
 console.info(`[ManaSearch] app.js build ${MANASEARCH_APP_BUILD}`);
+
+// The source-query and static-index builders share one representation so both sides
+// embed the same normalized face/ability/metadata documents.
+import { buildSemanticDocuments, enforceSemanticTokenBudget, mergeSemanticRetrievalRanks } from './scripts/semantic-text.mjs';
 
 // State Management
 let currentSourceCard = null;
@@ -1562,6 +1566,8 @@ async function downloadBenchmarkWorkbook(report) {
         { Metric: 'Mean Recall@5', Value: pct(report.meanRecall5) },
         { Metric: 'Mean Recall@10', Value: pct(report.meanRecall10) },
         { Metric: 'Mean Recall@20', Value: pct(report.meanRecall20) },
+        { Metric: 'Mean Recall@50', Value: pct(report.meanRecall50) },
+        { Metric: 'Mean Recall@100', Value: pct(report.meanRecall100) },
         { Metric: 'Mean Adjusted Recall@20', Value: pct(report.meanAdjustedRecall20) },
         { Metric: 'Mean Semantic Recall@20', Value: report.meanSemanticRecall20 !== null ? pct(report.meanSemanticRecall20) : 'n/a (no preferred-constraint tests)' },
         { Metric: 'Semantic Recall tests measured (denominator)', Value: report.semanticRecallTestCount ?? 0 },
@@ -1570,6 +1576,10 @@ async function downloadBenchmarkWorkbook(report) {
         { Metric: 'Mean NDCG@10', Value: num(report.meanNDCG10) },
         { Metric: 'Mean NDCG@20', Value: num(report.meanNDCG20) },
         { Metric: 'Mean Precision@10', Value: num(report.meanPrecision10) },
+        { Metric: 'Mean Precision@20', Value: num(report.meanPrecision20) },
+        { Metric: 'Mean Semantic Ability Coverage@20', Value: pct(report.meanSemanticAbilityCoverageAt20) },
+        { Metric: 'Semantic ability coverage tests', Value: report.semanticAbilityCoverageTestCount ?? 0 },
+        { Metric: 'Semantic retrieval query-view hits', Value: JSON.stringify(report.semanticRetrievalProvenanceCounts || {}) },
         { Metric: 'Overall Avg Card Rank', Value: num(report.overallAvgRank, 2) },
         { Metric: 'Embedding cache hits', Value: report.embeddingCacheDiagnostics?.hits ?? 0 },
         { Metric: 'Embedding computations', Value: report.embeddingCacheDiagnostics?.computed ?? 0 },
@@ -2066,6 +2076,7 @@ async function runBenchmarkPass(searchFn, test) {
     let rankedResults = [];
     let diagnostics = null;
     let scoreByName = new Map();
+    const semanticRetrievalEvidenceByName = new Map();
     let testStatus = 'ok';
     let errorMessage = null;
 
@@ -2102,7 +2113,20 @@ async function runBenchmarkPass(searchFn, test) {
         // information").
         resultList.forEach(card => {
             if (typeof card === 'string' || !card?.name) return;
+            const cardKey = normalizeCardNameForIdentity(card.name);
+            const semanticViews = Array.isArray(card._semanticRetrievalViews) ? card._semanticRetrievalViews : [];
+            semanticRetrievalEvidenceByName.set(cardKey, {
+                similarity: Number(card._semanticRetrievalSimilarity) || 0,
+                rrfRatio: Number(card._semanticRetrievalRrfScoreRatio) || 0,
+                abilityCoverage: Number(card._semanticAbilityCoverage) || 0,
+                abilityTotal: Number(card._semanticAbilityTotal) || 0,
+                abilityCoverageRatio: Number(card._semanticAbilityCoverageRatio) || 0,
+                views: semanticViews.slice()
+            });
             scoreByName.set(card.name.toLowerCase(), {
+                semanticRrfAgreement: Number(card._semanticRetrievalRrfScoreRatio) || 0,
+                semanticAbilityCoverage: Number(card._semanticAbilityCoverageRatio) || 0,
+                semanticRetrievalViews: semanticViews.slice(),
                 mechanicalScore: card.mechanicalScore ?? null,
                 contextScore: card.contextScore ?? null,
                 functionScore: card.functionScore ?? null,
@@ -2169,6 +2193,8 @@ async function runBenchmarkPass(searchFn, test) {
     const recall5 = calculateRecallAtK(rankedResults, test.expected, 5);
     const recall10 = calculateRecallAtK(rankedResults, test.expected, 10);
     const recall20 = calculateRecallAtK(rankedResults, test.expected, 20);
+    const recall50 = calculateRecallAtK(rankedResults, test.expected, 50);
+    const recall100 = calculateRecallAtK(rankedResults, test.expected, 100);
 
     const adjustedExpected = test.expected.filter(c => !conflictSet.has(c.toLowerCase()));
     const adjustedRecall5 = adjustedExpected.length > 0 ? calculateRecallAtK(rankedResults, adjustedExpected, 5) : recall5;
@@ -2179,6 +2205,14 @@ async function runBenchmarkPass(searchFn, test) {
     const ndcg10 = calculateNDCGAtK(rankedResults, test.expected, 10);
     const ndcg20 = calculateNDCGAtK(rankedResults, test.expected, 20);
     const precision10 = calculatePrecisionAtK(rankedResults, test.expected, 10);
+    const precision20 = calculatePrecisionAtK(rankedResults, test.expected, 20);
+    const top20SemanticEvidence = rankedResults.slice(0, 20)
+        .map(name => semanticRetrievalEvidenceByName.get(normalizeCardNameForIdentity(name)))
+        .filter(evidence => evidence && evidence.abilityTotal > 0 && evidence.views.some(view => /^ability-/i.test(view)));
+    const semanticAbilityCoverageAt20 = top20SemanticEvidence.length
+        ? top20SemanticEvidence.reduce((sum, evidence) => sum + evidence.abilityCoverageRatio, 0) / top20SemanticEvidence.length
+        : null;
+    const semanticRetrievalProvenanceAt20 = [...new Set(top20SemanticEvidence.flatMap(evidence => evidence.views))].sort();
     const stageRecalls = calculateStageRecalls(diagnostics, test.expected);
     const predicateExpected = Array.isArray(test.predicateExpected) ? test.predicateExpected : [];
     const hasPredicateEvaluation = Boolean(test.relevancePredicate);
@@ -2191,8 +2225,9 @@ async function runBenchmarkPass(searchFn, test) {
 
     return {
         rankedResults, diagnostics, scoreByName, testStatus, errorMessage, conflictSet,
-        recall5, recall10, recall20, adjustedRecall5, adjustedRecall10, adjustedRecall20,
-        mrr, ndcg10, ndcg20, precision10, stageRecalls, cardRanks, avgTestRank,
+        recall5, recall10, recall20, recall50, recall100, adjustedRecall5, adjustedRecall10, adjustedRecall20,
+        mrr, ndcg10, ndcg20, precision10, precision20, semanticAbilityCoverageAt20, semanticRetrievalProvenanceAt20,
+        semanticRetrievalEvidenceByName, stageRecalls, cardRanks, avgTestRank,
         predicateExpectedCount: hasPredicateEvaluation ? predicateExpected.length : null,
         predicatePrecision10,
         predicateNdcg10
@@ -2986,13 +3021,15 @@ async function runBenchmarkSuite(searchFn) {
 
     const suiteResults = [];
     const retrievalCostRows = [];
-    let totalRecall5 = 0, totalRecall10 = 0, totalRecall20 = 0;
+    let totalRecall5 = 0, totalRecall10 = 0, totalRecall20 = 0, totalRecall50 = 0, totalRecall100 = 0;
     // "Adjusted" recall excludes expected cards flagged as constraintConflicts (see
     // BENCHMARK_SUITE) from the denominator - a card the engine's own hard filters correctly
     // exclude (because the card itself doesn't satisfy the test's own supplied constraints) isn't
     // a retrieval/ranking failure, it's a data problem with the test case.
     let totalAdjustedRecall5 = 0, totalAdjustedRecall10 = 0, totalAdjustedRecall20 = 0;
-    let totalMRR = 0, totalNDCG10 = 0, totalNDCG20 = 0, totalPrecision10 = 0, totalRetrievalRecall = 0;
+    let totalMRR = 0, totalNDCG10 = 0, totalNDCG20 = 0, totalPrecision10 = 0, totalPrecision20 = 0, totalRetrievalRecall = 0;
+    let totalSemanticAbilityCoverageAt20 = 0, semanticAbilityCoverageTestCount = 0;
+    const semanticRetrievalProvenanceCounts = {};
     let allExpectedRanks = [];
     const categoryTotals = {};
     const structuredResults = [];
@@ -3215,6 +3252,8 @@ async function runBenchmarkSuite(searchFn) {
             totalRecall5 += strictPass.recall5;
             totalRecall10 += strictPass.recall10;
             totalRecall20 += strictPass.recall20;
+            totalRecall50 += strictPass.recall50;
+            totalRecall100 += strictPass.recall100;
             totalAdjustedRecall5 += strictPass.adjustedRecall5;
             totalAdjustedRecall10 += strictPass.adjustedRecall10;
             totalAdjustedRecall20 += strictPass.adjustedRecall20;
@@ -3222,13 +3261,24 @@ async function runBenchmarkSuite(searchFn) {
             totalNDCG10 += strictPass.ndcg10;
             totalNDCG20 += strictPass.ndcg20;
             totalPrecision10 += strictPass.precision10;
+            totalPrecision20 += strictPass.precision20;
             totalRetrievalRecall += strictPass.stageRecalls.retrieval;
+            if (Number.isFinite(strictPass.semanticAbilityCoverageAt20)) {
+                totalSemanticAbilityCoverageAt20 += strictPass.semanticAbilityCoverageAt20;
+                semanticAbilityCoverageTestCount++;
+            }
+            (strictPass.semanticRetrievalProvenanceAt20 || []).forEach(view => {
+                semanticRetrievalProvenanceCounts[view] = (semanticRetrievalProvenanceCounts[view] || 0) + 1;
+            });
             allExpectedRanks.push(...Object.values(strictPass.cardRanks));
 
             (test.categories || ['uncategorized']).forEach(cat => {
-                if (!categoryTotals[cat]) categoryTotals[cat] = { count: 0, recall20: 0, ndcg20: 0, mrr: 0, retrieval: 0 };
+                if (!categoryTotals[cat]) categoryTotals[cat] = { count: 0, recall20: 0, recall50: 0, recall100: 0, precision20: 0, ndcg20: 0, mrr: 0, retrieval: 0 };
                 categoryTotals[cat].count++;
                 categoryTotals[cat].recall20 += strictPass.recall20;
+                categoryTotals[cat].recall50 += strictPass.recall50;
+                categoryTotals[cat].recall100 += strictPass.recall100;
+                categoryTotals[cat].precision20 += strictPass.precision20;
                 categoryTotals[cat].ndcg20 += strictPass.ndcg20;
                 categoryTotals[cat].mrr += strictPass.mrr;
                 categoryTotals[cat].retrieval += strictPass.stageRecalls.retrieval;
@@ -3273,11 +3323,16 @@ async function runBenchmarkSuite(searchFn) {
             "Recall@5": `${(strictPass.recall5 * 100).toFixed(1)}%`,
             "Recall@10": `${(strictPass.recall10 * 100).toFixed(1)}%`,
             "Recall@20": `${(strictPass.recall20 * 100).toFixed(1)}%`,
+            "Recall@50": `${(strictPass.recall50 * 100).toFixed(1)}%`,
+            "Recall@100": `${(strictPass.recall100 * 100).toFixed(1)}%`,
             "Adj. Recall@20": test.constraintConflicts?.length ? `${(strictPass.adjustedRecall20 * 100).toFixed(1)}%` : '-',
             "Semantic Recall@20": semanticPass ? `${(semanticPass.recall20 * 100).toFixed(1)}%` : '-',
             "MRR": strictPass.mrr.toFixed(3),
             "NDCG@20": strictPass.ndcg20.toFixed(3),
             "P@10": strictPass.precision10.toFixed(3),
+            "P@20": strictPass.precision20.toFixed(3),
+            "Ability Coverage@20": strictPass.semanticAbilityCoverageAt20 == null ? 'n/a' : strictPass.semanticAbilityCoverageAt20.toFixed(3),
+            "Semantic Query Views@20": strictPass.semanticRetrievalProvenanceAt20.join(', '),
             "Predicate": test.relevancePredicate || '-',
             "Predicate N": strictPass.predicateExpectedCount ?? '-',
             "Predicate P@10": strictPass.predicatePrecision10 == null ? '-' : strictPass.predicatePrecision10.toFixed(3),
@@ -3370,6 +3425,9 @@ async function runBenchmarkSuite(searchFn) {
     const categoryBreakdown = Object.entries(categoryTotals).map(([cat, t]) => ({
         "Category": cat, "Tests": t.count,
         "Recall@20": `${((t.recall20 / t.count) * 100).toFixed(1)}%`,
+        "Recall@50": `${((t.recall50 / t.count) * 100).toFixed(1)}%`,
+        "Recall@100": `${((t.recall100 / t.count) * 100).toFixed(1)}%`,
+        "Precision@20": (t.precision20 / t.count).toFixed(3),
         "NDCG@20": (t.ndcg20 / t.count).toFixed(3),
         "MRR": (t.mrr / t.count).toFixed(3),
         "Retrieval Recall": `${((t.retrieval / t.count) * 100).toFixed(1)}%`
@@ -3387,6 +3445,8 @@ async function runBenchmarkSuite(searchFn) {
     console.log(`Mean Recall@5:            ${((totalRecall5 / testCount) * 100).toFixed(2)}%`);
     console.log(`Mean Recall@10:           ${((totalRecall10 / testCount) * 100).toFixed(2)}%`);
     console.log(`Mean Recall@20:           ${((totalRecall20 / testCount) * 100).toFixed(2)}%`);
+    console.log(`Mean Recall@50:           ${((totalRecall50 / testCount) * 100).toFixed(2)}%`);
+    console.log(`Mean Recall@100:          ${((totalRecall100 / testCount) * 100).toFixed(2)}%`);
     console.log(`Mean Adjusted Recall@20:  ${((totalAdjustedRecall20 / testCount) * 100).toFixed(2)}%  (excludes constraint-conflict expected cards)`);
     if (semanticTestCount > 0) {
         console.log(`Mean Semantic Recall@20:  ${((totalSemanticRecall20 / semanticTestCount) * 100).toFixed(2)}%  (${semanticTestCount} tests with preferred constraints, preferred fields omitted)`);
@@ -3396,6 +3456,11 @@ async function runBenchmarkSuite(searchFn) {
     console.log(`Mean NDCG@10:             ${(totalNDCG10 / testCount).toFixed(4)}`);
     console.log(`Mean NDCG@20:             ${(totalNDCG20 / testCount).toFixed(4)}`);
     console.log(`Mean Precision@10:        ${(totalPrecision10 / testCount).toFixed(4)}`);
+    console.log(`Mean Precision@20:        ${(totalPrecision20 / testCount).toFixed(4)}`);
+    console.log(semanticAbilityCoverageTestCount
+        ? `Mean semantic ability coverage@20: ${(totalSemanticAbilityCoverageAt20 / semanticAbilityCoverageTestCount).toFixed(4)} (${semanticAbilityCoverageTestCount} measured ability-view tests)`
+        : 'Mean semantic ability coverage@20: n/a (no ability-view evidence)');
+    console.log('Semantic retrieval provenance@20:', semanticRetrievalProvenanceCounts);
     console.log(`Overall Avg Card Rank: ${overallAvgRank === null ? 'n/a' : overallAvgRank.toFixed(2)} (Penalty for unranked: 100)`);
     console.log(`Embedding cache: ${embeddingCacheStats.hits.toLocaleString()} hits, ${embeddingCacheStats.computed.toLocaleString()} computations, ${embeddingCacheStats.evictions.toLocaleString()} evictions, ${embeddingCache.size.toLocaleString()}/${EMBEDDING_CACHE_MAX_ENTRIES.toLocaleString()} entries`);
     console.log(`Candidate raw-Oracle vectors reused from semantic-index.bin: ${embeddingCacheStats.precomputedOracleHits.toLocaleString()} hits, ${embeddingCacheStats.precomputedOracleMisses.toLocaleString()} misses`);
@@ -3417,6 +3482,12 @@ async function runBenchmarkSuite(searchFn) {
         meanRecall5: totalRecall5 / testCount,
         meanRecall10: totalRecall10 / testCount,
         meanRecall20: totalRecall20 / testCount,
+        meanRecall50: totalRecall50 / testCount,
+        meanRecall100: totalRecall100 / testCount,
+        meanPrecision20: totalPrecision20 / testCount,
+        meanSemanticAbilityCoverageAt20: semanticAbilityCoverageTestCount ? totalSemanticAbilityCoverageAt20 / semanticAbilityCoverageTestCount : null,
+        semanticAbilityCoverageTestCount,
+        semanticRetrievalProvenanceCounts,
         meanAdjustedRecall20: totalAdjustedRecall20 / testCount,
         meanSemanticRecall20: semanticTestCount > 0 ? totalSemanticRecall20 / semanticTestCount : null,
         semanticRecallTestCount: semanticTestCount,
@@ -3454,7 +3525,7 @@ async function runBenchmarkSuite(searchFn) {
     if (previousRun) {
         console.log("--- VS PREVIOUS RUN ---");
         console.log(`Previous run: ${previousRun.runId || '(unknown)'} at ${previousRun.generatedAt || '(unknown)'}`);
-        [['Recall@20', 'meanRecall20', true], ['Retrieval Recall', 'meanRetrievalRecall', true], ['MRR', 'meanMRR', false], ['Avg runtime', 'durationMs', false]]
+        [['Recall@20', 'meanRecall20', true], ['Recall@50', 'meanRecall50', true], ['Recall@100', 'meanRecall100', true], ['Retrieval Recall', 'meanRetrievalRecall', true], ['Precision@20', 'meanPrecision20', true], ['MRR', 'meanMRR', false], ['Avg runtime', 'durationMs', false]]
             .forEach(([label, key, isPct]) => {
                 const prev = previousRun[key];
                 const curr = summaryMetrics[key];
@@ -3766,7 +3837,8 @@ const CANONICAL_FUNCTION_TAG_NAMES = {
     lose_life: "Life Loss",
     // "tap" has no existing hand tag counterpart (falls through to the generic Title-Case
     // fallback, "Tap") - only untap already had one, reused here.
-    untap: "Untap"
+    untap: "Untap",
+    untap_restriction: "Stax"
     // place_counter deliberately has no flat entry here - see the compositional block in
     // generateTags, which maps it to "+1/+1 Counters" or "-1/-1 Counters" depending on
     // counterType. A flat mapping to the existing "+1/+1 Counters" tag would be wrong for a
@@ -6306,14 +6378,40 @@ function parseCounterPlacementEffect(clause) {
 }
 
 /**
- * Parses direct tap/untap effects on a permanent - "tap target creature", "untap all lands you
- * control" - distinct from a mana ability's own {T} activation cost (already stripped out before
- * this runs by splitActivationCost) and from keyword reminder text like "doesn't untap". Requires
- * an explicit target/each/all phrase after the verb specifically so a bare mention isn't misread
- * as an effect. Previously unparsed entirely.
+ * Parses static prohibitions that prevent a permanent from untapping during a specified untap
+ * step. This is distinct from an effect that actively taps or untaps a permanent.
  * @param {string} clause
  * @returns {Object|null}
  */
+function parseUntapRestrictionEffect(clause) {
+    const text = String(clause || '').trim().toLowerCase().replace(/[’]/g, "'");
+    const restrictionMatch = text.match(/\b(?:does\s+not|doesn't|do\s+not|don't|cannot|can't|never)\s+untap\b/i);
+    if (!restrictionMatch) return null;
+    const subjectText = text.slice(0, restrictionMatch.index).trim();
+    const typeMatch = subjectText.match(/\b(artifacts?|creatures?|permanents?|lands?|planeswalkers?|battles?|enchantments?)\b/i);
+    const object = typeMatch ? typeMatch[1].toLowerCase().replace(/s$/, '') : 'permanent';
+    const isSelf = /\b(?:this|that|~)\b/i.test(subjectText);
+    const allScope = /\b(?:each|all)\b/i.test(subjectText);
+    const controllerScope = /\byou control\b/i.test(subjectText) ? 'you_control'
+        : /\bopponents?\s+control\b/i.test(subjectText) ? 'opponent_control' : null;
+    const untapScope = isSelf ? 'self' : allScope ? 'all'
+        : controllerScope || 'unspecified';
+    const untapWindow = /\byour\s+untap\s+step\b/i.test(text) ? 'your_untap_step'
+        : /\b(?:its|their|that player's)\s+(?:controller's\s+)?untap\s+step\b/i.test(text)
+            ? 'controller_untap_step'
+            : /\buntap\s+step\b/i.test(text) ? 'untap_step' : null;
+    const restrictions = extractMTGRestrictions(text)
+        .filter(token => token === 'controlledbyyou' || token === 'controlledbyopponent');
+    restrictions.push('untap_step_restriction');
+    return {
+        action: 'restrict_untap', object,
+        target: isSelf ? 'self' : allScope ? 'all' : null,
+        controllerScope, untapWindow, untapScope,
+        isStatic: true, effectMode: 'prohibition',
+        restriction: restrictions, raw: String(clause || '').trim()
+    };
+}
+
 function parseTapEffect(clause) {
     const text = String(clause || '').trim().toLowerCase();
     // Anchor the action after optional imperative wrappers so trigger conditions such as
@@ -6925,83 +7023,122 @@ function parseSearchEffect(clause) {
  * @returns {Object|null}
  */
 function parseTokenEffect(clause) {
-    const text = clause.toLowerCase();
+    const text = String(clause || '').toLowerCase().replace(/[’]/g, "'");
+    const describeToken = descriptorValue => {
+        const descriptor = String(descriptorValue || '').replace(/\s+/g, ' ').trim();
+        const stats = (descriptor.match(/(?:\*|\d+)\s*\/\s*(?:\*|\d+)/) || [])[0]?.replace(/\s+/g, '') || null;
+        const colors = ['white', 'blue', 'black', 'red', 'green', 'colorless'].filter(color =>
+            new RegExp('\\b' + color + '\\b', 'i').test(descriptor)
+        );
+        const cardTypes = ['artifact', 'creature', 'enchantment', 'land', 'planeswalker', 'battle', 'kindred']
+            .filter(type => new RegExp('\\b' + type + '\\b', 'i').test(descriptor));
+        const tokenName = (descriptor.match(/\bnamed\s+["']?([^"',.;]+)/i) || [])[1]?.trim() || null;
+        let subtype = descriptor
+            .replace(/(?:\*|\d+)\s*\/\s*(?:\*|\d+)/g, ' ')
+            .replace(/\b(?:white|blue|black|red|green|colorless)\b/gi, ' ')
+            .replace(/\b(?:artifact|creature|enchantment|land|planeswalker|battle|kindred|token|tokens)\b/gi, ' ')
+            .replace(/\b(?:tapped|untapped|legendary|nonlegendary|and|with|named|has|have)\b/gi, ' ')
+            .replace(/\bnamed\b[\s\S]*$/i, ' ')
+            .replace(/[^a-z0-9' -]+/gi, ' ')
+            .replace(/\s+/g, ' ')
+            .trim();
+        if (!subtype) {
+            const known = descriptor.match(/\b(treasure|clue|food|blood|map|powerstone|incubator|shard|gold|emblem|junk|lumber|vibranium|heartwood)\b/i);
+            if (known) subtype = known[1].toLowerCase();
+        }
+        return {
+            descriptor,
+            tokenType: subtype || 'token',
+            tokenName,
+            tokenColors: colors,
+            tokenCardTypes: cardTypes,
+            tokenStats: stats,
+            tokenEntersTapped: /\btapped\b/i.test(descriptor)
+        };
+    };
 
-    // "Investigate" is rules text for creating a Clue token. Preserve the clue identity so
-    // retrieval/ranking can recognize repeatable Clue engines, not merely generic token makers.
+    // Replacement wording such as "If a token would be created, three times that many
+    // tokens are created instead" modifies another effect; it does not independently create
+    // tokens. Capture the multiplier here before the generic create/creates parser can consume it.
+    const multiplierPhrase = text.match(/\b(twice|double|(?:two|three|four|five|six|seven|eight|nine|ten|\d+)\s+times?)\s+that many\b/i);
+    const replacementTokenText = /\binstead\b/i.test(text) &&
+        (/\bif\b[\s\S]*?\btokens?\b[\s\S]*?\bwould\s+create\b/i.test(text) ||
+         /\b(?:those|that many of those)\s+tokens?\b/i.test(text) ||
+         /\bcreates?\s+(?:twice|double|(?:two|three|four|five|six|seven|eight|nine|ten|\d+)\s+times?)\s+that many\b/i.test(text));
+    if (multiplierPhrase && replacementTokenText) {
+        const multiplierWords = { twice: 2, double: 2, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10 };
+        const multiplier = multiplierWords[multiplierPhrase[1].toLowerCase()] ?? Number(multiplierPhrase[1].match(/\d+/)?.[0] || 2);
+        // A trailing atom containing only the replacement outcome is already represented by the
+        // parent "if ... would create" rule, so avoid adding a second token-creation node.
+        if (!/\bif\b/i.test(text)) return null;
+        return { action: "multiply", object: "token", multiplier, isReplacement: true };
+    }
+    if (/\bif\b[\s\S]*?\btokens?\b[\s\S]*?\bwould\s+create\b[\s\S]*?\binstead\b/i.test(text)) {
+        return { action: "multiply", object: "token", multiplier: 2, isReplacement: true };
+    }
+
+    // Investigate creates one Clue for each occurrence. Whether those creation events recur
+    // comes from the parent ability's trigger/timing profile, not from the Clue token itself.
     if (/\binvestigates?\b/i.test(text)) {
         return {
-            action: "create", object: "token", to: "battlefield", quantity: null,
-            tokenType: "clue", recipientScope: /\bunder\s+(?:an?\s+)?opponent(?:'s|’s)\s+control\b/i.test(text) ? 'opponent' : 'you',
+            action: "create", object: "token", to: "battlefield", quantity: 1,
+            tokenType: "clue", tokenDescriptor: "clue", tokenColors: [],
+            tokenCardTypes: ["artifact"], tokenStats: null, tokenEntersTapped: false,
+            tokenKeywords: [], recipientScope: /\bunder\s+(?:an?\s+)?opponent(?:'s|’s)\s+control\b/i.test(text) ? 'opponent' : 'you',
             clueDrawEngine: true, isReplacement: false
         };
     }
 
     if (/\bif\b.*?\btokens?\b.*?\bwould be created\b/i.test(text) || text.includes("twice that many")) {
-        return {
-            action: "multiply",
-            object: "token",
-            multiplier: 2,
-            isReplacement: true
-        };
+        return { action: "multiply", object: "token", multiplier: 2, isReplacement: true };
     }
-
     if (/\bcopy\b/i.test(text) && text.includes("token")) {
-        return {
-            action: "copy_token",
-            object: "token",
-            target: /\btarget\b/i.test(text) ? "target" : "chosen",
-            isReplacement: false
-        };
+        return { action: "copy_token", object: "token", target: /\btarget\b/i.test(text) ? "target" : "chosen", isReplacement: false };
     }
-
-    // Oracle grammar uses both imperative "create" and third-person "creates" (e.g.
-    // "an opponent creates two Treasure tokens"). Recognize both so opponent-gift clauses don't
-    // silently fall through to a generic effect.
     if (!/\b(?:create|creates|creating)\b/i.test(text)) return null;
 
     const opponentCreates = /\b(?:(?:an?|each|target)\s+)?opponents?\s+creates?\b/i.test(text);
     const underOpponentControl = /\bunder\s+(?:an?\s+)?opponent(?:'s|’s)\s+control\b/i.test(text);
     const underYourControl = /\bunder\s+your\s+control\b/i.test(text);
-    const recipientScope = opponentCreates || underOpponentControl ? 'opponent' : (underYourControl ? 'you' : null);
     const effect = {
-        action: "create",
-        object: "token",
-        to: "battlefield",
-        quantity: 1,
-        stats: null,
-        keywords: [],
-        tokenType: "token",
-        recipientScope,
-        controller: opponentCreates ? 'opponent' : null,
-        isReplacement: false
+        action: "create", object: "token", to: "battlefield", quantity: 1,
+        stats: null, keywords: [], tokenType: "token", tokenDescriptor: null,
+        tokenColors: [], tokenCardTypes: [], tokenStats: null,
+        tokenEntersTapped: false, tokenKeywords: [],
+        recipientScope: opponentCreates || underOpponentControl ? 'opponent' : (underYourControl ? 'you' : null),
+        controller: opponentCreates ? 'opponent' : null, isReplacement: false
     };
-
-    const qtyMap = { 'a': 1, 'an': 1, 'one': 1, 'two': 2, 'three': 3, 'four': 4, 'five': 5, 'six': 6, 'x': 'X' };
-    const qtyMatch = text.match(/\bcreates?\s+(a|an|one|two|three|four|five|six|x|\d+)\b/i);
-    if (qtyMatch) {
-        const rawQty = qtyMatch[1].toLowerCase();
-        effect.quantity = qtyMap[rawQty] !== undefined ? qtyMap[rawQty] : (isNaN(rawQty) ? rawQty : parseInt(rawQty, 10));
+    const qtyMap = {
+        a: 1, an: 1, one: 1, two: 2, three: 3, four: 4, five: 5,
+        six: 6, seven: 7, eight: 8, nine: 9, ten: 10, x: 'X',
+        'one or more': 'ANY', 'any number of': 'ANY'
+    };
+    const quantityMatch = text.match(/\bcreates?\s+(one or more|any number of|a|an|one|two|three|four|five|six|seven|eight|nine|ten|x|\d+)\b/i);
+    if (quantityMatch) {
+        const rawQuantity = quantityMatch[1].toLowerCase();
+        effect.quantity = qtyMap[rawQuantity] !== undefined ? qtyMap[rawQuantity] : Number(rawQuantity);
     }
-
-    // Extract P/T stats (e.g., 2/2, 1/1)
-    const ptMatch = text.match(/(\d+\/\d+|\*[\/*]\*)/);
-    if (ptMatch) {
-        effect.stats = ptMatch[1];
+    const descriptorMatch = text.match(/\bcreates?\s+(?:one or more|any number of|a|an|one|two|three|four|five|six|seven|eight|nine|ten|x|\d+)\s+(.+?)\s+tokens?\b/i);
+    if (descriptorMatch) {
+        const token = describeToken(descriptorMatch[1]);
+        effect.tokenType = token.tokenType;
+        effect.tokenDescriptor = token.descriptor;
+        effect.tokenColors = token.tokenColors;
+        effect.tokenCardTypes = token.tokenCardTypes;
+        effect.tokenStats = token.tokenStats;
+        effect.tokenEntersTapped = token.tokenEntersTapped;
+        effect.tokenName = token.tokenName;
+        effect.stats = token.tokenStats;
     }
-
-    // Extract keywords granted to the token
     const keywordCheck = ['flying', 'haste', 'trample', 'lifelink', 'deathtouch', 'vigilance', 'menace'];
-    effect.keywords = keywordCheck.filter(kw => text.includes(kw));
-
-    const typeMatch = text.match(/\bcreates?\s+(?:a|an|one|two|three|four|five|six|x|\d+)\s+([a-z0-9\/\s\-]+?)\s*token/i);
-    if (typeMatch) {
-        effect.tokenType = typeMatch[1].trim().replace(/\s+/g, ' ');
+    effect.keywords = keywordCheck.filter(keyword => text.includes(keyword));
+    effect.tokenKeywords = [...effect.keywords];
+    if (/\bfor each\b/i.test(text)) {
+        effect.quantity = null;
+        effect.quantityProfile = { kind: 'variable', relation: 'for_each', source: 'matching_permanent_count' };
+    } else if (effect.quantity === 'ANY') {
+        effect.quantityProfile = { kind: 'variable', relation: 'one_or_more', source: 'oracle_quantity' };
     }
-    // "for each" describes a variable count, not a one-token effect. Keep the relation without
-    // pretending the token quantity is fixed at one.
-    if (/\bfor each\b/i.test(text)) effect.quantity = null;
-
     return effect;
 }
 
@@ -8038,6 +8175,7 @@ function parseMTGEffect(oracleText, cardContext = null) {
             parseAnthemEffect(effectText) ||
             parseCounterPlacementEffect(effectText) ||
             parseControlChangeEffect(effectText) ||
+            parseUntapRestrictionEffect(effectText) ||
             parseTapEffect(effectText) ||
             parseLibraryActionEffect(effectText) ||
             parseDamageEffect(effectText) ||
@@ -8220,6 +8358,8 @@ const ACTION_TAXONOMY = {
     // serve opposite strategic purposes despite the shared verb family.
     tap:         { family: "tap_control",            outcome: "permanent_tapped" },
     untap:       { family: "tap_control",            outcome: "permanent_untapped" },
+    restrict_untap: { family: "tap_control",         outcome: "permanent_cannot_untap" },
+    untap_restriction: { family: "tap_control",      outcome: "permanent_cannot_untap" },
     scry:        { family: "library_manipulation",   outcome: "library_top_reordered" },
     surveil:     { family: "library_manipulation",   outcome: "library_top_or_graveyard" },
     proliferate: { family: "counter_manipulation",   outcome: "existing_counters_increased" }
@@ -8279,6 +8419,7 @@ const FUNCTION_OUTCOMES = {
     place_counter:    "stats_changed_one_shot",
     tap:              "permanent_tapped",
     untap: "permanent_untapped",
+    untap_restriction: "permanent_cannot_untap",
     scry: "library_top_reordered",
     surveil: "library_top_or_graveyard",
     proliferate: "existing_counters_increased",
@@ -8449,6 +8590,8 @@ function deriveCanonicalFunction(effect) {
         fn = a;
     } else if (a === "place_counter") {
         fn = "place_counter";
+    } else if (a === "restrict_untap") {
+        fn = "untap_restriction";
     } else if (a === "tap" || a === "untap") {
         // Same reasoning as gain_life/lose_life: opposite effects, kept as separate functions
         // rather than one "tap_state_change" that would score a Falter effect and an Untap-all
@@ -8525,6 +8668,13 @@ function deriveCanonicalFunction(effect) {
             recipientScope,
             isOpponentBenefit: Boolean(effect.isOpponentBenefit || recipientScope === 'opponent'),
             tokenType: effect.tokenType && effect.tokenType !== 'token' ? String(effect.tokenType).toLowerCase().trim() : null,
+            tokenDescriptor: effect.tokenDescriptor || null,
+            tokenColors: Array.isArray(effect.tokenColors) ? effect.tokenColors : [],
+            tokenCardTypes: Array.isArray(effect.tokenCardTypes) ? effect.tokenCardTypes : [],
+            tokenStats: effect.tokenStats || effect.stats || null,
+            tokenEntersTapped: Boolean(effect.tokenEntersTapped),
+            untapWindow: effect.untapWindow || null,
+            untapScope: effect.untapScope || null,
             libraryOwnerScope: libraryTopExile ? libraryOwnerScope : null,
             accessType: libraryTopExile ? (effect.playFromExile || /\b(?:you may|you can)\s+(?:play|cast)\b/i.test(ruleContext) ? 'impulse_draw' : 'exile_access') : null,
             playFromExile: Boolean(effect.playFromExile || (libraryTopExile && /\b(?:you may|you can)\s+(?:play|cast)\b/i.test(ruleContext))),
@@ -8585,7 +8735,9 @@ function canonicalFunctionToText(canonicalFunctions) {
             return `${access}; library-card access`;
         }
         if (cf.function === 'token_creation' && p.tokenType === 'clue') {
-            return `repeatable Clue token engine from investigate; each Clue can be activated for {2}, sacrifice that Clue token: draw a card (repeatable card advantage when mana and Clues are available)`;
+            const cadence = p.repeatabilityProfile?.group === 'repeatable_engine' ? 'repeatable Clue token engine'
+                : p.repeatabilityProfile?.group === 'single_use' ? 'one-time Clue token creation' : 'Clue token creation';
+            return `${cadence} from investigate; each created Clue can be activated for {2}, sacrifice that Clue token: draw a card`;
         }
         if (cf.function === 'card_draw' && p.derivedFromTokenAbility) {
             return 'repeatable activated card draw from a Clue token: pay {2}, sacrifice that Clue token, draw a card';
@@ -8594,8 +8746,8 @@ function canonicalFunctionToText(canonicalFunctions) {
         if (cf.function === 'opponent_gift') return "put a permanent onto the battlefield under an opponent's control; this grants the opponent a resource";
         if (cf.function === 'self_sacrifice') return 'sacrifice this source permanent itself; a one-time self-sacrifice is not sacrificing another permanent as a repeatable cost';
         if (cf.function === 'sacrifice_other') return 'sacrifice another or unspecified permanent; this is not the source permanent sacrificing itself';
-        if (cf.function === 'token_creation' && p.tokenType) {
-            const tokenName = `${p.tokenType} token`;
+        if (cf.function === 'token_creation') {
+            const tokenName = `${p.tokenType || 'token'} token`;
             const quantityText = typeof p.quantity === 'number'
                 ? `${p.quantity} ${tokenName}${p.quantity === 1 ? '' : 's'}`
                 : p.quantityProfile?.relation === 'for_each'
@@ -8603,9 +8755,21 @@ function canonicalFunctionToText(canonicalFunctions) {
                     : `${tokenName}s`;
             const actorText = p.recipientScope === 'opponent' ? 'an opponent creates' : p.recipientScope === 'you' ? 'you create' : 'create';
             const recipientContext = p.recipientScope === 'opponent'
-                ? ' (opponent benefit/resources; potentially a downside for your side or a deliberate political effect)'
-                : '';
-            return `${actorText} ${quantityText}${recipientContext}`;
+                ? ' (opponent benefit/resources; potentially a downside for your side or a deliberate political effect)' : '';
+            const cadence = p.repeatabilityProfile?.group === 'repeatable_engine' ? 'repeatable token production'
+                : p.repeatabilityProfile?.group === 'single_use' ? 'one-time token creation' : 'token creation';
+            const descriptor = p.tokenDescriptor && p.tokenDescriptor !== p.tokenType ? ` (token characteristics: ${p.tokenDescriptor})` : '';
+            return `${cadence}: ${actorText} ${quantityText}${descriptor}${recipientContext}`;
+        }
+        if (cf.function === 'untap_restriction') {
+            const subject = p.untapScope === 'self' ? 'this ' + (p.object || 'permanent')
+                : p.untapScope === 'you_control' ? (p.object || 'permanents') + ' you control'
+                : p.untapScope === 'opponent_control' ? (p.object || 'permanents') + ' opponents control'
+                : p.untapScope === 'all' ? 'all ' + (p.object || 'permanents') : (p.object || 'permanent');
+            const window = p.untapWindow === 'your_untap_step' ? 'your untap step'
+                : p.untapWindow === 'controller_untap_step' ? "its controller's untap step"
+                : p.untapWindow === 'untap_step' ? 'the untap step' : 'an untap step';
+            return 'static untap prohibition: ' + subject + ' does not untap during ' + window;
         }
         const bits = [cf.function.replace(/_/g, ' ')];
         if (p.tokenType) bits.push(`${p.tokenType} token`);
@@ -8653,7 +8817,7 @@ const FUNCTION_IMPORTANCE = {
     // card built around it (an "outlast"/counters deck payoff), on par with recursion or a
     // one-shot anthem. Tap/untap are usually a supporting piece of a bigger card (a Falter effect,
     // an untap-lands ramp trick) rather than the point of the card on their own, so they sit lower.
-    place_counter: 0.7, tap: 0.5, untap: 0.5, proliferate: 0.55, surveil: 0.35, scry: 0.3,
+    place_counter: 0.7, tap: 0.5, untap: 0.5, untap_restriction: 0.72, proliferate: 0.55, surveil: 0.35, scry: 0.3,
     cast_timing_permission: 0.98,
     mechanic_recruit: 0.90,
     mechanic_storied: 0.88,
@@ -9561,7 +9725,7 @@ const FUNCTION_LABELS = [
     'reanimate', 'recursion', 'cheat_into_play', 'token_creation', 'token_multiplier',
     'card_draw', 'tutor', 'ramp_tutor', 'counter', 'cost_reduction', 'stat_buff', 'tribal_anthem',
     'direct_damage', 'lose_life', 'gain_life', 'discard', 'mill', 'mana_ability',
-    'tap', 'untap', 'anthem', 'cast_timing_permission',
+    'tap', 'untap', 'untap_restriction', 'anthem', 'cast_timing_permission',
     'mechanic_recruit', 'mechanic_storied', 'mechanic_hone_counter', 'mechanic_empower_jace',
     'mechanic_heartwood_token', 'mechanic_plan_progression', 'mechanic_worthy_equip',
     'mechanic_vibranium_token', 'mechanic_prepared_spell', 'mechanic_casting_mode_profile',
@@ -11675,6 +11839,7 @@ const MECHANIC_FAMILY_MAP = {
     reanimate: 'recursion', recursion: 'recursion', cheat_into_play: 'recursion',
     tutor: 'selection', ramp_tutor: 'acceleration', opponent_ramp: 'opponent_advantage', opponent_gift: 'opponent_advantage', library_exile_access: 'card_advantage', card_draw: 'card_advantage', discard: 'disruption',
     mill: 'disruption', counter: 'interaction', direct_damage: 'interaction', gain_control: 'control',
+    untap_restriction: 'board_state',
     cost_reduction: 'cost_modification', token_creation: 'tokens', token_multiplier: 'tokens',
     tribal_anthem: 'combat', anthem: 'combat', place_counter: 'stats', mana_ability: 'resources',
     cast_timing_permission: 'casting_permission',
@@ -13143,7 +13308,12 @@ function buildMechanicalEffectNode(effect, index = 0, graphAnchors = new Set()) 
         keywordAnchors: universalAnchors,
         raw
     };
-    if (effect?.stats) node.stats = normalizeMechanicToken(effect.stats);
+    if (effect?.stats || p.tokenStats) node.stats = normalizeMechanicToken(effect?.stats || p.tokenStats);
+    if (effect?.tokenColors?.length || p.tokenColors?.length) node.tokenColors = normalizeMechanicalSet(effect?.tokenColors || p.tokenColors);
+    if (effect?.tokenCardTypes?.length || p.tokenCardTypes?.length) node.tokenCardTypes = normalizeMechanicalSet(effect?.tokenCardTypes || p.tokenCardTypes);
+    if (effect?.untapWindow || p.untapWindow) node.untapWindow = normalizeMechanicToken(effect?.untapWindow || p.untapWindow);
+    if (effect?.untapScope || p.untapScope) node.untapScope = normalizeMechanicToken(effect?.untapScope || p.untapScope);
+    if (effect?.tokenEntersTapped || p.tokenEntersTapped) node.tokenEntersTapped = true;
     const grantedKeywords = effect?.grantedKeywords || effect?.keywords || p.grantedKeywords || [];
     if (grantedKeywords.length) node.grantedKeywords = normalizeMechanicalSet(grantedKeywords);
     const scalingProfile = effect?.scalingProfile || p.scalingProfile || null;
@@ -13385,6 +13555,8 @@ function mechanicalRoleSimilarity(a, b) {
 
 const OPPOSITE_MECHANICS = new Set([
     'gain_life|lose_life','lose_life|gain_life','tap|untap','untap|tap',
+    'untap_restriction|untap','untap|untap_restriction','restrict_untap|untap','untap|restrict_untap',
+    'permanent_cannot_untap|permanent_untapped','permanent_untapped|permanent_cannot_untap',
     'draw|discard','discard|draw','gain_control|self_sacrifice','self_sacrifice|gain_control',
     'reanimate|mill','mill|reanimate'
 ]);
@@ -13409,7 +13581,11 @@ function mechanicalNodeContradiction(a, b) {
     let penalty = 0;
     const tokenTypeA = normalizeMechanicToken(a?.tokenType || '');
     const tokenTypeB = normalizeMechanicToken(b?.tokenType || '');
-    if (a?.function === 'token_creation' && b?.function === 'token_creation' && tokenTypeA && tokenTypeB && tokenTypeA !== tokenTypeB) penalty += 0.25;
+    if (a?.function === 'token_creation' && b?.function === 'token_creation' && tokenTypeA && tokenTypeB && tokenTypeA !== tokenTypeB) {
+        const left = new Set(tokenTypeA.split(/[^a-z0-9]+/).filter(Boolean));
+        const right = new Set(tokenTypeB.split(/[^a-z0-9]+/).filter(Boolean));
+        penalty += [...left].some(word => right.has(word)) ? 0.06 : 0.25;
+    }
 
     // A difference in numeric magnitude is only a soft ranking penalty, but an incompatible
     // target class is a genuine mechanical conflict (e.g. destroy a creature vs destroy an artifact).
@@ -13562,6 +13738,11 @@ function computeMechanicalEffectNodeComparison(a, b) {
         [sacrificeScopeA, sacrificeScopeB].some(scope => scope === 'another_or_unspecified_permanent')) {
         return { score: 0.015, contradiction: 0.95, breakdown: { core: 0, incompatibleSelfSacrificeAndSacrificeCost: 1 } };
     }
+    const untapRestrictionVsUntap =
+        (a.function === 'untap_restriction' && b.function === 'untap') ||
+        (b.function === 'untap_restriction' && a.function === 'untap');
+    if (untapRestrictionVsUntap) return { score: 0.015, contradiction: 0.97, breakdown: { core: 0, incompatibleUntapRestrictionAndUntap: 1 } };
+
     const libraryAccessVsRemoval = (a.function === 'library_exile_access' && b.function === 'exile_removal') || (a.function === 'exile_removal' && b.function === 'library_exile_access');
     if (libraryAccessVsRemoval) return { score: 0.015, contradiction: 0.95, breakdown: { core: 0, incompatibleLibraryAccessAndRemoval: 1 } };
     const handExileVsRemoval =
@@ -13605,7 +13786,23 @@ function computeMechanicalEffectNodeComparison(a, b) {
         role: mechanicalRoleSimilarity(a, b),
         condition: a.condition || b.condition ? (a.condition === b.condition ? 1 : 0.45) : 1,
         stats: a.stats || b.stats ? (a.stats === b.stats ? 1 : 0.45) : 1,
-        tokenType: a.tokenType || b.tokenType ? (a.tokenType && b.tokenType ? (a.tokenType === b.tokenType ? 1 : 0.05) : 0.58) : 1,
+        tokenType: a.tokenType || b.tokenType ? (a.tokenType && b.tokenType
+            ? (a.tokenType === b.tokenType ? 1 : (() => {
+                const left = new Set(a.tokenType.split(/[^a-z0-9]+/).filter(Boolean));
+                const right = new Set(b.tokenType.split(/[^a-z0-9]+/).filter(Boolean));
+                return [...left].some(word => right.has(word)) ? 0.76 : 0.05;
+            })())
+            : 0.58) : 1,
+        tokenColors: a.tokenColors?.size || b.tokenColors?.size
+            ? (a.tokenColors?.size && b.tokenColors?.size ? compareMechanicalSets(a.tokenColors, b.tokenColors, 0.60) : 0.65) : 1,
+        tokenCardTypes: a.tokenCardTypes?.size || b.tokenCardTypes?.size
+            ? (a.tokenCardTypes?.size && b.tokenCardTypes?.size ? compareMechanicalSets(a.tokenCardTypes, b.tokenCardTypes, 0.55) : 0.65) : 1,
+        tokenEntersTapped: a.tokenEntersTapped || b.tokenEntersTapped
+            ? (a.tokenEntersTapped === b.tokenEntersTapped ? 1 : 0.18) : 1,
+        untapWindow: a.untapWindow || b.untapWindow
+            ? (a.untapWindow && b.untapWindow ? (a.untapWindow === b.untapWindow ? 1 : 0.22) : 0.62) : 1,
+        untapScope: a.untapScope || b.untapScope
+            ? (a.untapScope && b.untapScope ? (a.untapScope === b.untapScope ? 1 : 0.30) : 0.62) : 1,
         recipientScope: a.recipientScope || b.recipientScope ? (a.recipientScope && b.recipientScope ? (a.recipientScope === b.recipientScope ? 1 : 0.12) : 0.62) : 1,
         sacrificeScope: a.sacrificeScope || b.sacrificeScope ? (a.sacrificeScope && b.sacrificeScope ? (a.sacrificeScope === b.sacrificeScope ? 1 : 0.08) : 0.52) : 1,
         keywords: compareMechanicalSets(a.keywordAnchors, b.keywordAnchors, 1),
@@ -13635,7 +13832,7 @@ function computeMechanicalEffectNodeComparison(a, b) {
         [15, breakdown.object], [14, breakdown.target], [13, breakdown.zone], [10, breakdown.restriction],
         [9, breakdown.quantity], [10, breakdown.trigger], [8, breakdown.event], [7, breakdown.duration],
         [7, breakdown.mode], [16, breakdown.repeatability], [5, breakdown.cost], [5, breakdown.role], [5, breakdown.condition], [4, breakdown.stats],
-        [10, breakdown.tokenType], [8, breakdown.recipientScope], [12, breakdown.sacrificeScope], [25, breakdown.grantedKeywords], [26, breakdown.scaling], [32, breakdown.combatFinisher],
+        [10, breakdown.tokenType], [3, breakdown.tokenColors], [2, breakdown.tokenCardTypes], [2, breakdown.tokenEntersTapped], [8, breakdown.untapWindow], [4, breakdown.untapScope], [8, breakdown.recipientScope], [12, breakdown.sacrificeScope], [25, breakdown.grantedKeywords], [26, breakdown.scaling], [32, breakdown.combatFinisher],
         [20, breakdown.namedMechanic], [16, breakdown.gameStateCondition], [6, breakdown.manaAbilityRulesClass]
     ];
     const fieldScore = fieldParts.reduce((sum, [w, v]) => sum + w * v, 0) / fieldParts.reduce((sum, [w]) => sum + w, 0);
@@ -14200,7 +14397,11 @@ function calculateEffectRelationshipMismatch(parsedA = [], parsedB = []) {
             mismatch = Math.max(mismatch, 0.82);
         }
         if (left.recipientScope && right.recipientScope && left.recipientScope !== right.recipientScope) mismatch = Math.max(mismatch, 0.62);
-        if (left.tokenType && right.tokenType && normalizeMechanicToken(left.tokenType) !== normalizeMechanicToken(right.tokenType)) mismatch = Math.max(mismatch, 0.40);
+        if (left.tokenType && right.tokenType && normalizeMechanicToken(left.tokenType) !== normalizeMechanicToken(right.tokenType)) {
+            const leftTypes = new Set(normalizeMechanicToken(left.tokenType).split(/[^a-z0-9]+/).filter(Boolean));
+            const rightTypes = new Set(normalizeMechanicToken(right.tokenType).split(/[^a-z0-9]+/).filter(Boolean));
+            mismatch = Math.max(mismatch, [...leftTypes].some(token => rightTypes.has(token)) ? 0.12 : 0.40);
+        }
         if (left.condition && right.condition && left.condition !== right.condition) mismatch = Math.max(mismatch, 0.22);
         bestMismatch = Math.min(bestMismatch, mismatch);
     }
@@ -14527,6 +14728,17 @@ function runManaSearchPerformanceOptimizationRegressionSuite({ log = true } = {}
         const descriptorCacheAfterFirst = { ...localCorpusDescriptorScoreCacheStats };
         const descriptorCacheSecondScore = scoreLocalCorpusCardForDescriptor(descriptorCacheFixture, descriptorCacheFixtureQuery);
         check('local-descriptor-score-cache-preserves-exact-score', descriptorCacheFirstScore === descriptorCacheSecondScore && descriptorCacheAfterFirst.computed === descriptorCacheStatsBefore.computed + 1 && localCorpusDescriptorScoreCacheStats.hits === descriptorCacheAfterFirst.hits + 1, `first=${descriptorCacheFirstScore}; second=${descriptorCacheSecondScore}`);
+        const idfFixtureCorpus = {
+            cards: new Array(100),
+            tokenIndex: new Map([
+                ['creature', { offset: 0, length: 90 }],
+                ['cascade', { offset: 90, length: 2 }]
+            ])
+        };
+        const idfFixtureQuery = localCorpusScoreDescriptor('creature cascade', idfFixtureCorpus);
+        const commonOnlyScore = scoreLocalCorpusCardForDescriptor({ _localSearchText: 'creature' }, idfFixtureQuery);
+        const rareOnlyScore = scoreLocalCorpusCardForDescriptor({ _localSearchText: 'cascade' }, idfFixtureQuery);
+        check('local-lexical-ranking-weights-rare-mechanics', rareOnlyScore > commonOnlyScore && rareOnlyScore > 0, `common=${commonOnlyScore}; rare=${rareOnlyScore}`);
         check('large-structural-prescore-batches', /STRUCTURAL_PRESCORE_BATCH_SIZE = 256/.test(findSimilarCards.toString()), 'larger batches amortize repeated source profile setup while the scorer still yields cooperatively');
         check('main-search-structural-cache-key-is-explicitly-mapped', (findSimilarCards.toString().match(/structuralScoreCacheKey:\s*structuralScoringCacheKey/g) || []).length === 2 && !/\bstructuralScoreCacheKey\s*[,}]/.test(findSimilarCards.toString()), 'both scoring passes must map the locally declared key to the scoreCardBatch option; never use an undeclared shorthand');
         check('corpus-output-feeds-scoring-queue', /ctx\.onRetrievedCandidate\(card, state\.request\)/.test(runLocalCorpusBatch.toString()), 'only capped local retrieval outputs are enqueued for one-time structural scoring');
@@ -14706,6 +14918,24 @@ function runManaSearchRepeatabilityRegressionSuite({ log = true } = {}) {
             fn: 'token_creation', expected: 'one_shot', engine: false
         },
         {
+            id: 'one-time-etb-token-maker-keeps-soldier-identity',
+            card: { name: 'ETB Soldier Maker', type_line: 'Creature — Human Soldier', oracle_text: 'When ETB Soldier Maker enters the battlefield, create a 1/1 white Soldier creature token.' },
+            fn: 'token_creation', expected: 'entry_trigger', engine: false, repeatable: false,
+            tokenType: 'soldier', tokenStats: '1/1', tokenColors: ['white']
+        },
+        {
+            id: 'repeatable-activated-token-maker-keeps-treasure-identity',
+            card: { name: 'Activated Treasure Maker', type_line: 'Artifact', oracle_text: '{2}, {T}: Create a Treasure token.' },
+            fn: 'token_creation', expected: 'repeatable_activation', engine: true, repeatable: true,
+            tokenType: 'treasure'
+        },
+        {
+            id: 'one-shot-investigate-is-not-repeatable-clue-production',
+            card: { name: 'One-shot Investigation', type_line: 'Sorcery', oracle_text: 'Investigate.' },
+            fn: 'token_creation', expected: 'one_shot', engine: false, repeatable: false,
+            tokenType: 'clue'
+        },
+        {
             id: 'etb-draw-is-not-automatic-engine',
             card: { name: 'ETB Draw Creature', type_line: 'Creature — Human', oracle_text: 'When ETB Draw Creature enters the battlefield, draw a card.' },
             fn: 'card_draw', expected: 'entry_trigger', engine: false
@@ -14778,7 +15008,20 @@ function runManaSearchRepeatabilityRegressionSuite({ log = true } = {}) {
             const hasRole = roleProfile.some(r => r.role === role);
             const hasRepeatableEffect = matching.some(e => getEffectRepeatabilityProfile(e)?.group === 'repeatable_engine');
             const repeatabilityPass = item.repeatable == null || hasRepeatableEffect === item.repeatable;
-            results.push({ id: item.id, pass: profileKind === item.expected && hasRole === item.engine && repeatabilityPass, profileKind, expected: item.expected, hasRole, expectedRole: item.engine, hasRepeatableEffect, expectedRepeatable: item.repeatable });
+            const tokenEffect = matching.find(e => e?.canonical?.function === 'token_creation');
+            const tokenParams = tokenEffect?.canonical?.params || {};
+            const tokenTypePass = item.tokenType == null || tokenParams.tokenType === item.tokenType;
+            const tokenStatsPass = item.tokenStats == null || tokenParams.tokenStats === item.tokenStats;
+            const tokenColorsPass = item.tokenColors == null || JSON.stringify(tokenParams.tokenColors || []) === JSON.stringify(item.tokenColors);
+            const tokenIdentityPass = tokenTypePass && tokenStatsPass && tokenColorsPass;
+            results.push({
+                id: item.id,
+                pass: profileKind === item.expected && hasRole === item.engine && repeatabilityPass && tokenIdentityPass,
+                profileKind, expected: item.expected, hasRole, expectedRole: item.engine,
+                hasRepeatableEffect, expectedRepeatable: item.repeatable, tokenType: tokenParams.tokenType || null,
+                tokenStats: tokenParams.tokenStats || null, tokenColors: tokenParams.tokenColors || [],
+                tokenIdentityPass
+            });
             parsedCases.push({ item, effects });
         } catch (error) {
             results.push({ id: item.id, pass: false, error: error?.message || String(error) });
@@ -14846,6 +15089,15 @@ function runManaSearchRepeatabilityRegressionSuite({ log = true } = {}) {
                 const secondTokenEngine = annotateEffectRepeatability(secondTokenEngineCard, parseMTGEffect(secondTokenEngineCard.oracle_text), secondTokenEngineCard.oracle_text);
                 const repeatTokenScore = calculateMechanicalSimilarityDetailed(tokenEngineItem.effects, secondTokenEngine).score;
                 results.push({ id: 'repeatable-token-vs-one-shot-token-score', pass: repeatTokenScore > oneShotTokenScore, repeatableScore: repeatTokenScore, oneShotScore: oneShotTokenScore });
+            }
+            const oneShotClueItem = parsedCases.find(x => x.item.id === 'one-shot-investigate-is-not-repeatable-clue-production');
+            if (oneShotClueItem) {
+                const clueText = canonicalFunctionToText(oneShotClueItem.effects.map(effect => effect?.canonical).filter(Boolean));
+                results.push({
+                    id: 'one-shot-investigate-description-does-not-call-it-repeatable',
+                    pass: /one-time Clue token creation/i.test(clueText) && !/repeatable Clue token engine/i.test(clueText),
+                    canonicalText: clueText
+                });
             }
             const periodicTokenItem = parsedCases.find(x => x.item.id === 'end-step-token-production-is-periodic');
             const delayedTokenItem = parsedCases.find(x => x.item.id === 'next-upkeep-is-one-time-delayed-trigger');
@@ -14970,7 +15222,8 @@ function runManaSearchMechanicalRegressionSuite({ log = true } = {}) {
         const tokenDetail = calculateMechanicalSimilarityDetailed(multiplier, creator);
         results.push({
             id: 'token-multiplier-is-not-token-creation',
-            pass: tokenDetail.explicitContrast?.kind === 'token-multiplier-vs-token-creation' && tokenDetail.score <= 0.58,
+            pass: tokenDetail.explicitContrast?.kind === 'token-multiplier-vs-token-creation' &&
+                Number.isFinite(tokenDetail.score) && tokenDetail.score <= 0.58,
             score: tokenDetail.score,
             contrast: tokenDetail.explicitContrast
         });
@@ -15093,6 +15346,44 @@ function runManaSearchMasteryEdgeCaseRegressionSuite() {
     const selfSacNode = { function:'self_sacrifice', action:'sacrifice', outcome:'own_permanent_to_graveyard', sacrificeScope:'source_permanent', keywordAnchors:new Set() };
     const otherSacNode = { function:'sacrifice_other', action:'sacrifice', outcome:'another_permanent_to_graveyard', sacrificeScope:'another_or_unspecified_permanent', keywordAnchors:new Set() };
     check('Scoring strongly rejects self-sacrifice versus sacrificing another permanent', computeMechanicalEffectNodeComparison(selfSacNode, otherSacNode).score <= 0.02, JSON.stringify(computeMechanicalEffectNodeComparison(selfSacNode, otherSacNode)));
+
+    const lockedArtifact = {
+        name: 'Locked Artifact',
+        type_line: 'Artifact',
+        oracle_text: "This artifact doesn't untap during your untap step."
+    };
+    const lockedEffects = annotateEffectRepeatability(lockedArtifact, parseMTGEffect(lockedArtifact.oracle_text), lockedArtifact.oracle_text);
+    const lockedUntap = lockedEffects.find(effect => effect?.canonical?.function === 'untap_restriction');
+    const lockedParams = lockedUntap?.canonical?.params || {};
+    const lockedProfile = getEffectRepeatabilityProfile(lockedUntap);
+    check(
+        'Artifact does not untap during your untap step is parsed as a structured static prohibition',
+        Boolean(lockedUntap) && lockedParams.object === 'artifact' && lockedParams.target === 'self' &&
+            lockedParams.untapWindow === 'your_untap_step' && lockedParams.untapScope === 'self' &&
+            lockedUntap.isStatic === true && lockedProfile?.kind === 'ongoing_static' &&
+            lockedProfile?.group === 'repeatable_engine',
+        JSON.stringify({ canonical: lockedUntap?.canonical || null, profile: lockedProfile })
+    );
+    const lockedDescription = canonicalFunctionToText(lockedEffects.map(effect => effect?.canonical).filter(Boolean));
+    check(
+        'Untap lock canonical description retains the untap-step timing',
+        /static untap prohibition/i.test(lockedDescription) && /your untap step/i.test(lockedDescription),
+        lockedDescription
+    );
+    const positiveUntap = parse('Untap target artifact.').find(effect => effect?.canonical?.function === 'untap');
+    const lockedTwin = annotateEffectRepeatability(
+        { name: 'Locked Artifact Twin', type_line: 'Artifact', oracle_text: lockedArtifact.oracle_text },
+        parseMTGEffect(lockedArtifact.oracle_text),
+        lockedArtifact.oracle_text
+    );
+    const lockedTwinScore = calculateMechanicalSimilarityDetailed(lockedEffects, lockedTwin).score;
+    const lockedVsPositiveScore = calculateMechanicalSimilarityDetailed(lockedEffects, positiveUntap ? [positiveUntap] : []).score;
+    check(
+        'Untap prohibition is not confused with actively untapping a permanent',
+        Boolean(positiveUntap) && lockedTwinScore > lockedVsPositiveScore && lockedVsPositiveScore <= 0.05 &&
+            !lockedEffects.some(effect => effect?.canonical?.function === 'untap'),
+        JSON.stringify({ lockedTwinScore, lockedVsPositiveScore, positiveUntap: positiveUntap?.canonical || null })
+    );
     const impulse = parse('Exile the top two cards of your library. You may play those cards until the end of your next turn.');
     const impulseEffect = impulse.find(effect => effect.canonical.function === 'library_exile_access');
     const impulseText = canonicalText(impulse);
@@ -16652,27 +16943,37 @@ const SEMANTIC_KEYWORD_EXPANSIONS = {
 
 function normalizeOracleForEmbedding(text, cardName = '') {
     let value = String(text || '');
-    if (!value) return '';
+    if (!value.trim()) return '';
     if (cardName) {
-        const escaped = String(cardName).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-        value = value.replace(new RegExp(`\\b${escaped}\\b`, 'gi'), 'this permanent');
+        const escaped = String(cardName).replace(/[.*+?^\${}()|[\]\\]/g, '\\$&');
+        value = value.replace(new RegExp('\\b' + escaped + '\\b', 'gi'), 'this card');
     }
-    // Reminder text is useful to humans but often duplicates/loosens the actual rules wording.
-    value = value.replace(/\([^()]*\)/g, ' ');
-    value = value.replace(/\{T\}/gi, ' tap ')
-        .replace(/\{Q\}/gi, ' untap ')
-        .replace(/\{[WUBRGC]\}/gi, ' colored mana ')
-        .replace(/\{\d+\}/g, ' generic mana ')
-        .replace(/\{X\}/gi, ' X mana ')
-        .replace(/\{[^}]+\}/g, ' mana symbol ');
-    const lower = value.toLowerCase();
+    // Parenthetical rules/reminder text can be the only description of an important mechanic.
+    const manaNames = {
+        W: 'white mana', U: 'blue mana', B: 'black mana', R: 'red mana',
+        G: 'green mana', C: 'colorless mana', S: 'snow mana', X: 'X mana',
+        T: 'tap symbol', Q: 'untap symbol', E: 'energy symbol'
+    };
+    value = value.replace(/\{([^}]+)\}/g, (_, raw) => {
+        const symbol = String(raw).toUpperCase();
+        if (manaNames[symbol]) return ' ' + manaNames[symbol] + ' ';
+        if (/^\d+$/.test(symbol)) return ' ' + symbol + ' generic mana ';
+        if (/^\d+\/[WUBRGC]$/.test(symbol)) {
+            const parts = symbol.split('/');
+            return ' ' + parts[0] + ' generic or ' + manaNames[parts[1]] + ' ';
+        }
+        if (/^[WUBRGC]\/P$/.test(symbol)) return ' ' + manaNames[symbol[0]] + ' or two life phyrexian mana ';
+        if (/^[WUBRGC]\/[WUBRGC]$/.test(symbol)) {
+            const parts = symbol.split('/');
+            return ' ' + manaNames[parts[0]] + ' or ' + manaNames[parts[1]] + ' hybrid mana ';
+        }
+        if (symbol === 'P') return ' phyrexian mana pay two life ';
+        return ' ' + symbol.toLowerCase().replace(/[^a-z0-9/]+/g, ' ') + ' mana symbol ';
+    });
     for (const [keyword, expansion] of Object.entries(SEMANTIC_KEYWORD_EXPANSIONS)) {
-        value = value.replace(new RegExp(`\\b${keyword}\\b`, 'gi'), ` ${keyword} ${expansion} `);
+        value = value.replace(new RegExp('\\b' + keyword + '\\b', 'gi'), ' ' + keyword + ' ' + expansion + ' ');
     }
-    // Numbers are preserved because quantity matters, but normalize comma/formatting noise.
-    return value.replace(/[^a-z0-9+\-\s]/gi, ' ')
-        .replace(/\s+/g, ' ')
-        .trim();
+    return value.replace(/[^a-z0-9+\-\s]/gi, ' ').replace(/\s+/g, ' ').trim();
 }
 
 // Oracle normalization is called once while warming the embedding cache and again while scoring
@@ -16700,7 +17001,7 @@ let semanticCosineBaselineReady = false;
 const STATIC_CARD_CORPUS_FILENAME = 'cards.bin';
 const STATIC_CARD_CORPUS_VERSION = 1;
 const STATIC_CARD_CORPUS_MAGIC = 'MSCARD1G';
-const STATIC_CARD_CORPUS_CACHE_VERSION = '20261015-79';
+const STATIC_CARD_CORPUS_CACHE_VERSION = '20261108-81';
 const STATIC_DATA_META_FILENAME = 'static-data-meta.json';
 
 // A failed/stalled static asset request must not leave the initial search status spinning forever.
@@ -17050,14 +17351,22 @@ function prepareStaticCardRecord(card) {
     const oracle = getLocalCorpusCardOracleText(card);
     const faces = Array.isArray(card.card_faces) ? card.card_faces : [];
     const faceText = faces.map(face => face?.oracle_text || '').filter(Boolean).join(' ');
+    const faceMetadata = faces.flatMap(face => [
+        face?.name, face?.mana_cost, face?.type_line,
+        Array.isArray(face?.colors) ? face.colors.join(' ') : '',
+        face?.color_indicator, face?.power, face?.toughness, face?.loyalty,
+        face?.defense, face?.hand_modifier, face?.life_modifier
+    ]);
     const searchText = normalizeLocalCorpusText([
-        card.name,
-        oracle,
-        faceText,
+        card.name, card.layout, oracle, faceText, ...faceMetadata,
         Array.isArray(card.keywords) ? card.keywords.join(' ') : '',
-        card.type_line || '',
-        Array.isArray(card.color_identity) ? card.color_identity.join(' ') : ''
-    ].join(' '));
+        card.type_line || '', card.mana_cost || '', card.cmc,
+        card.power, card.toughness, card.loyalty, card.defense,
+        card.hand_modifier, card.life_modifier,
+        Array.isArray(card.colors) ? card.colors.join(' ') : '',
+        Array.isArray(card.color_identity) ? card.color_identity.join(' ') : '',
+        Array.isArray(card.produced_mana) ? card.produced_mana.join(' ') : ''
+    ].filter(value => value !== null && value !== undefined && value !== '').join(' '));
     const localKeywordTokens = Array.isArray(card.keywords)
         ? [...new Set(card.keywords.map(normalizeLocalCorpusText).filter(Boolean))]
         : [];
@@ -17427,16 +17736,15 @@ function getLocalCorpusIndexTokens(text) {
 }
 
 function getLocalCorpusQueryTokens(text) {
-    return getLocalCorpusIndexTokens(text).slice(0, 14);
+    return getLocalCorpusIndexTokens(text).slice(0, 48);
 }
 
 async function searchStaticCardCorpus(queryText, options = {}) {
     const corpus = staticCardCorpusMemory;
     if (!corpus?.cards?.length || !queryText) return [];
-    const tokens = getLocalCorpusQueryTokens(queryText);
+    const descriptor = localCorpusScoreDescriptor(queryText, corpus);
+    const tokens = descriptor.tokens;
     if (!tokens.length) return [];
-    const tokenSet = new Set(tokens);
-    const phrase = normalizeLocalCorpusText(queryText);
     const excludeKey = normalizeCardNameForIdentity(options.excludeName || '');
     const limit = Math.max(1, Math.min(1200, Number(options.limit) || 180));
     const scored = [];
@@ -17456,17 +17764,8 @@ async function searchStaticCardCorpus(queryText, options = {}) {
             !(useFilters && !matchesActiveFilters(card, options.filters, options.broadFallbackFilters))) {
             const haystack = card._localSearchText || '';
             if (haystack) {
-                let matched = 0;
-                for (const token of tokens) if (haystack.includes(token)) matched++;
-                if (matched) {
-                    const coverage = matched / tokens.length;
-                    const phraseBonus = phrase.length >= 8 && haystack.includes(phrase) ? 0.24 : 0;
-                    const keywordBonus = Array.isArray(card._localKeywordTokens)
-                        ? card._localKeywordTokens.some(k => tokenSet.has(k)) ? 0.08 : 0
-                        : (Array.isArray(card.keywords) && card.keywords.some(k => tokens.includes(normalizeLocalCorpusText(k))) ? 0.08 : 0);
-                    const score = Math.min(1, coverage * 0.68 + phraseBonus + keywordBonus);
-                    if (score >= 0.18) scored.push({ card, score });
-                }
+                const score = scoreLocalCorpusCardForDescriptor(card, descriptor);
+                if (score >= 0.18) scored.push({ card, score });
             }
         }
         if ((i & 7) === 7) {
@@ -17577,18 +17876,29 @@ function createLocalCorpusBatchContext(corpus = staticCardCorpusMemory, isCancel
     };
 }
 
-function localCorpusScoreDescriptor(query) {
+function localCorpusScoreDescriptor(query, corpus = staticCardCorpusMemory) {
     const text = String(query || '').trim();
     const tokens = getLocalCorpusQueryTokens(text);
     const phrase = normalizeLocalCorpusText(text);
+    const totalDocuments = Math.max(1, Number(corpus?.cards?.length) || 1);
+    const tokenIdf = tokens.map(token => {
+        const postingCount = corpus?.tokenIndex instanceof Map
+            ? Number(corpus.tokenIndex.get(token)?.length) || 0
+            : 0;
+        if (!postingCount) return 1;
+        const documentFrequency = Math.min(totalDocuments, Math.max(1, postingCount));
+        // Smoothed BM25 inverse-document-frequency: rare mechanic terms carry more evidence
+        // than ubiquitous words such as "creature", "control", or "battlefield".
+        return Math.log(1 + (totalDocuments - documentFrequency + 0.5) / (documentFrequency + 0.5));
+    });
     return {
         query: text,
         tokens,
         tokenSet: new Set(tokens),
         phrase,
-        // Query text is normalized before keying; semantically equivalent normalized phrases
-        // share the cache even when they originated in separate retrieval lanes.
-        cacheKey: `${phrase}\u001f${tokens.join('\u001e')}`
+        tokenIdf,
+        // Include corpus-derived weights to prevent stale scores after a corpus rebuild.
+        cacheKey: phrase + '\u001f' + tokens.join('\u001e') + '\u001f' + tokenIdf.map(x => x.toFixed(4)).join(',')
     };
 }
 
@@ -17607,12 +17917,20 @@ function scoreLocalCorpusCardForDescriptor(card, descriptor) {
         return cached;
     }
     let matched = 0;
-    // Keep String.includes semantics exactly, including prefix/substring matches. The cache
-    // changes how often we scan the string, not what qualifies as a hit.
-    for (const token of descriptor.tokens) if (haystack.includes(token)) matched++;
+    let matchedIdf = 0;
+    let totalIdf = 0;
+    // Rare mechanic terms carry more evidence than common type/zone words.
+    for (let i = 0; i < descriptor.tokens.length; i++) {
+        const weight = Number(descriptor.tokenIdf?.[i]) || 1;
+        totalIdf += weight;
+        if (haystack.includes(descriptor.tokens[i])) {
+            matched++;
+            matchedIdf += weight;
+        }
+    }
     let score = 0;
     if (matched) {
-        const coverage = matched / descriptor.tokens.length;
+        const coverage = totalIdf > 0 ? matchedIdf / totalIdf : matched / descriptor.tokens.length;
         const phraseBonus = descriptor.phrase.length >= 8 && haystack.includes(descriptor.phrase) ? 0.24 : 0;
         const keywordBonus = Array.isArray(card._localKeywordTokens) &&
             card._localKeywordTokens.some(k => descriptor.tokenSet?.has(k) || descriptor.tokens.includes(k)) ? 0.08 : 0;
@@ -17646,7 +17964,7 @@ async function runLocalCorpusBatch(context) {
     const requestStates = ctx.requests.map((request, stateIndex) => ({
         request,
         stateIndex,
-        descriptors: request.queries.slice(0, 16).map(localCorpusScoreDescriptor).filter(d => d.tokens.length),
+        descriptors: request.queries.slice(0, 16).map(query => localCorpusScoreDescriptor(query, corpus)).filter(d => d.tokens.length),
         hits: [],
         cap: getDepthScaledLocalLimit(request.limit, ctx.depthPercent),
         // A bit-mark array avoids millions of repeated Set.add/hash operations when common terms
@@ -17949,7 +18267,7 @@ const FULL_SEMANTIC_INDEX_SEARCH_LIMIT = 96;
 const STATIC_SEMANTIC_INDEX_FILENAME = 'semantic-index.bin';
 const STATIC_SEMANTIC_INDEX_VERSION = 1;
 const STATIC_SEMANTIC_INDEX_MAGIC = 'MSIDX1';
-const STATIC_SEMANTIC_INDEX_CACHE_VERSION = '20261015-79';
+const STATIC_SEMANTIC_INDEX_CACHE_VERSION = '20261108-80';
 let staticSemanticIndexPromise = null;
 let staticSemanticIndexAttempted = false;
 let staticSemanticIndexLoadError = null;
@@ -18463,16 +18781,11 @@ async function findFullSemanticMatches(index, sourceVector, excludeName, limit =
         enteredFallback = true;
         if (!benchmarkLocal) console.info('Semantic worker unavailable; using yielding main-thread semantic scan where possible:', workerError?.message || workerError);
         const excludeKey = normalizeCardNameForIdentity(excludeName || '');
-        const best = [];
-        const keepCap = Math.max(limit * 2, 32);
+        const bestByCard = new Map();
         const pushBest = item => {
-            best.push(item);
-            // Periodic pruning bounds memory without sorting on every matching card. The previous
-            // per-hit sort could itself monopolize the main thread when the worker path failed.
-            if (best.length > keepCap * 2) {
-                best.sort((a, b) => b.similarity - a.similarity);
-                best.length = keepCap;
-            }
+            const key = normalizeCardNameForIdentity(item.name);
+            const previous = bestByCard.get(key);
+            if (!previous || item.similarity > previous.similarity) bestByCard.set(key, item);
         };
         let sourceQueryNormSquared = 0;
         for (let qi = 0; qi < sourceVector.length; qi++) sourceQueryNormSquared += (Number(sourceVector[qi]) || 0) ** 2;
@@ -18502,16 +18815,8 @@ async function findFullSemanticMatches(index, sourceVector, excludeName, limit =
             await yieldForManaSearchResponsiveness();
             if (cancelled()) throw createSearchCancellationError();
         }
-        const sortedBest = await sortManaArrayResponsively(best, (a, b) => b.similarity - a.similarity);
-        const seen = new Set();
-        const output = sortedBest
-            .filter(x => {
-                const k = normalizeCardNameForIdentity(x.name);
-                if (seen.has(k)) return false;
-                seen.add(k);
-                return true;
-            })
-            .slice(0, limit);
+        const sortedBest = await sortManaArrayResponsively(Array.from(bestByCard.values()), (a, b) => b.similarity - a.similarity);
+        const output = sortedBest.slice(0, limit);
         if (enteredFallback) {
             staticSemanticQueryStats.fallbackQueries++;
             staticSemanticQueryStats.fallbackElapsedMs += Math.max(0, getManaResponsivenessNow() - semanticQueryStartedAt);
@@ -25340,6 +25645,17 @@ async function scoreCardBatch({
             signalParts.forEach(part => { part[1] *= 0.92; });
             signalParts.push([methodSignal, 0.08]);
         }
+        // A small, bounded retrieval-consensus channel rewards cards found by several
+        // independent semantic views and cards matching multiple source abilities. It is
+        // supporting evidence only: mechanical/function matching remains the main ranking basis.
+        const semanticRrfSignal = Math.max(0, Math.min(1, Number(card._semanticRetrievalRrfScoreRatio) || 0));
+        const semanticAbilityCoverageSignal = Math.max(0, Math.min(1, Number(card._semanticAbilityCoverageRatio) || 0));
+        const semanticRetrievalConsensus = semanticRrfSignal * 0.60 + semanticAbilityCoverageSignal * 0.40;
+        if (semanticRrfSignal > 0 || semanticAbilityCoverageSignal > 0) {
+            const retrievalWeight = 0.035;
+            signalParts.forEach(part => { part[1] *= (1 - retrievalWeight); });
+            signalParts.push([semanticRetrievalConsensus, retrievalWeight]);
+        }
         const refinementWeightTotal = signalParts.reduce((sum, part) => sum + part[1], 0) || 1;
         const refinementSignal = Math.max(0, Math.min(1,
             signalParts.reduce((sum, part) => sum + Math.max(0, Math.min(1, Number(part[0]) || 0)) * part[1], 0) / refinementWeightTotal
@@ -25352,7 +25668,7 @@ async function scoreCardBatch({
             ? (1 - (0.50 * (1 - relatedConsensus.score) * Math.max(0, Math.min(1, relatedIntentProfile.confidence))))
             : 1;
         card.relatedConsensusGate = relatedConsensusGate;
-        card.rankingEvidence = { mechanical: structural, mechanicalTrusted: structuralTrusted, mechanicalConfidence, rawSemantic, functionSemantic: functionSemanticAugmented, roleSemantic, highlightIntent: Number(card.highlightIntentScore) || 0, highlightIntentWeight: highlightBlend.weight, explicitUserIntent: highlightBlend.explicitUserIntent, baseChannelScore, effectCoverage, balancedCoverage, primaryEffectMatch, rankingRefinementSignal: refinementSignal, modalModeSimilarity: modalSignal, evidenceAgreement: agreement, retrievalSimilarity: Number(card._semanticRetrievalSimilarity) || 0, rankingIntent: rankingIntent.kind, rankingIntentRole: rankingIntent.role || null, rankingIntentConfidence: rankingIntent.confidence, relatedConsensus: relatedConsensus ? { score: relatedConsensus.score, functionMatch: relatedConsensus.functionMatch, quantityFit: relatedConsensus.quantityFit, roleFit: relatedConsensus.roleFit, artifactFit: relatedConsensus.artifactFit, dominantFunction: relatedIntentProfile?.dominantFunction || null, targetQuantity: relatedIntentProfile?.numericTarget ?? null, confidence: relatedIntentProfile?.confidence || 0 } : null };
+        card.rankingEvidence = { mechanical: structural, mechanicalTrusted: structuralTrusted, mechanicalConfidence, rawSemantic, functionSemantic: functionSemanticAugmented, roleSemantic, highlightIntent: Number(card.highlightIntentScore) || 0, highlightIntentWeight: highlightBlend.weight, explicitUserIntent: highlightBlend.explicitUserIntent, baseChannelScore, effectCoverage, balancedCoverage, primaryEffectMatch, rankingRefinementSignal: refinementSignal, modalModeSimilarity: modalSignal, evidenceAgreement: agreement, retrievalSimilarity: Number(card._semanticRetrievalSimilarity) || 0, semanticRrfAgreement: semanticRrfSignal, semanticAbilityCoverage: semanticAbilityCoverageSignal, semanticRetrievalConsensus, rankingIntent: rankingIntent.kind, rankingIntentRole: rankingIntent.role || null, rankingIntentConfidence: rankingIntent.confidence, relatedConsensus: relatedConsensus ? { score: relatedConsensus.score, functionMatch: relatedConsensus.functionMatch, quantityFit: relatedConsensus.quantityFit, roleFit: relatedConsensus.roleFit, artifactFit: relatedConsensus.artifactFit, dominantFunction: relatedIntentProfile?.dominantFunction || null, targetQuantity: relatedIntentProfile?.numericTarget ?? null, confidence: relatedIntentProfile?.confidence || 0 } : null };
         const consensusAdjustment = relatedConsensus ? relatedConsensusDelta * 0.22 : 0;
         const relationshipMismatch = Math.max(0, Math.min(1, Number(card.mechanicalBreakdown?.relationshipMismatch) || 0));
         const strategicRoleAnchored = roleAnchoredHighlight || shouldUseStrategicRoleAnchor(
@@ -26341,7 +26657,7 @@ function buildSynergyRetrievalQuery(sourceCard, parsedEffects, excludeSelf) {
     return parts.length ? `(${[...new Set(parts)].join(' or ')}) ${excludeSelf}`.trim() : null;
 }
 
-function buildFunctionalRetrievalQueries(sourceCard, parsedEffects, excludeSelf, maxFunctions = 2) {
+function buildFunctionalRetrievalQueries(sourceCard, parsedEffects, excludeSelf, maxFunctions = 4) {
     const sourceText = (sourceCard.oracle_text || (sourceCard.card_faces ? sourceCard.card_faces.map(f => f.oracle_text).join(' ') : '')).toLowerCase();
 
     // Take the top functions by importance, not merely the first parsed effect - a card whose
@@ -26351,7 +26667,7 @@ function buildFunctionalRetrievalQueries(sourceCard, parsedEffects, excludeSelf,
 
     const descriptors = [];
     const seenQueries = new Set();
-    const addQuery = (parts, narrow) => {
+    const addQuery = (parts, narrow, functionIndex = -1) => {
         const body = parts.filter(Boolean).join(' ').trim();
         if (!body) return;
         const query = `${body} ${excludeSelf}`.trim();
@@ -26363,39 +26679,39 @@ function buildFunctionalRetrievalQueries(sourceCard, parsedEffects, excludeSelf,
         const dedupeKey = body.toLowerCase().split(/\s+/).sort().join(' ');
         if (seenQueries.has(dedupeKey)) return;
         seenQueries.add(dedupeKey);
-        descriptors.push({ query, narrow });
+        descriptors.push({ query, narrow, functionIndex });
     };
 
-    for (const cf of canonicals) {
+    for (const [functionIndex, cf] of canonicals.entries()) {
         const vocab = FUNCTION_RETRIEVAL_VOCAB[cf.function];
         const p = cf.params || {};
 
         // Formulation 0 - targeted phrase lanes. They run before broad parameter/tag fallbacks so
         // result caps don't starve a less common but genuinely equivalent wording variant.
         if (Array.isArray(vocab?.targetedQueries)) {
-            for (const targetedQuery of vocab.targetedQueries) addQuery([targetedQuery], true);
+            for (const targetedQuery of vocab.targetedQueries) addQuery([targetedQuery], true, functionIndex);
         }
 
         // Formulation 1 - canonical Oracle wording for this function (requires vocab).
         if (vocab?.phrases?.length) {
-            addQuery([`(${vocab.phrases.map(ph => `o:"${ph}"`).join(' or ')})`], true);
+            addQuery([`(${vocab.phrases.map(ph => `o:"${ph}"`).join(' or ')})`], true, functionIndex);
         }
 
         // Formulation 2 - zone-based: describe the movement rather than the verb, so a card using
         // completely different wording for the same zone transition is still reachable.
         if (p.from && p.to) {
-            addQuery([`o:"${p.from}"`, `o:"${p.to}"`, p.object ? `o:"${p.object}"` : null], true);
+            addQuery([`o:"${p.from}"`, `o:"${p.to}"`, p.object ? `o:"${p.object}"` : null], true, functionIndex);
         }
 
         // Formulation 3 - parameterized: subtype/magnitude/object specifics (requires vocab).
         if (vocab?.paramTemplate) {
             const templated = vocab.paramTemplate(p);
-            if (templated) addQuery([templated], true);
+            if (templated) addQuery([templated], true, functionIndex);
         }
 
         // Formulation 4 - tag-based, using Scryfall's own oracle-tag index where one exists.
         if (vocab?.otag) {
-            addQuery([`otag:${vocab.otag}`], true);
+            addQuery([`otag:${vocab.otag}`], true, functionIndex);
         }
 
         // Formulation 5 - generic feature combination, requiring NO vocabulary entry at all. This
@@ -26404,7 +26720,7 @@ function buildFunctionalRetrievalQueries(sourceCard, parsedEffects, excludeSelf,
         // real multi-feature AND query straight from its structural params (review Priority 3;
         // review Priority 14, "feature combinations").
         const combo = buildGenericFeatureCombinationQuery(cf);
-        if (combo) addQuery([combo], true);
+        if (combo) addQuery([combo], true, functionIndex);
     }
 
     // Generic structural fallback for any function with no vocabulary entry yet: build a query
@@ -26433,12 +26749,32 @@ function buildFunctionalRetrievalQueries(sourceCard, parsedEffects, excludeSelf,
         }
     }
 
-    return descriptors.slice(0, 5);
+    const selected = [];
+    const offsets = new Map();
+    const functionOrder = [...new Set(descriptors.map(item => item.functionIndex).filter(index => index >= 0))];
+    while (selected.length < 5) {
+        let added = false;
+        for (const functionIndex of functionOrder) {
+            const offset = offsets.get(functionIndex) || 0;
+            const candidate = descriptors.filter(item => item.functionIndex === functionIndex)[offset];
+            if (!candidate) continue;
+            selected.push(candidate);
+            offsets.set(functionIndex, offset + 1);
+            added = true;
+            if (selected.length >= 5) break;
+        }
+        if (!added) break;
+    }
+    for (const candidate of descriptors) {
+        if (selected.length >= 5) break;
+        if (candidate.functionIndex < 0 && !selected.includes(candidate)) selected.push(candidate);
+    }
+    return selected;
 }
 
 function buildNoHighlightSemanticIntentText(sourceCard, sourceText, parsedEffects) {
     const full = normalizeOracleForEmbedding(sourceText, sourceCard?.name || '');
-    if (!full) return '';
+    if (!full) return buildSourceSemanticQueryTexts(sourceCard, '').join('. ');
     const effects = (parsedEffects || []).filter(e => e?.canonical).slice().sort((a,b)=>(Number(b.importance)||0)-(Number(a.importance)||0));
     const canonical = getCanonicalFunctions(effects).slice(0, 4);
     const primary = canonical[0] ? canonicalFunctionToText([canonical[0]]) : '';
@@ -26446,6 +26782,31 @@ function buildNoHighlightSemanticIntentText(sourceCard, sourceText, parsedEffect
     return [full, primary ? `primary gameplay focus ${primary}` : '', secondary ? `secondary gameplay effects ${secondary}` : ''].filter(Boolean).join('. ');
 }
 
+
+async function buildSourceSemanticQueryTexts(sourceCard, fallbackText, maxWords = 32, tokenizer = null) {
+    const source = sourceCard && typeof sourceCard === 'object' ? { ...sourceCard } : {};
+    const faceText = Array.isArray(source.card_faces)
+        ? source.card_faces.map(face => String(face?.oracle_text || '')).join(' ').trim()
+        : '';
+    if (!String(source.oracle_text || '').trim() && !faceText && String(fallbackText || '').trim()) {
+        source.oracle_text = String(fallbackText);
+    }
+    // This is deliberately the same helper and split configuration used by the static
+    // index builder. A source face, ability, or metadata field therefore receives the same
+    // semantic representation as the corresponding candidate-side document.
+    const documents = buildSemanticDocuments([source], {
+        maxWords: Math.max(16, Number(maxWords) || 32),
+        overlapWords: 8
+    });
+    if (typeof tokenizer !== 'function') {
+        throw new Error('The semantic model tokenizer is unavailable; refusing to submit unverified source ability text.');
+    }
+    const tokenSafeDocuments = await enforceSemanticTokenBudget(documents, tokenizer, {
+        maxTokens: 240,
+        overlapWords: 8
+    });
+    return tokenSafeDocuments.map(document => document.text).filter(Boolean);
+}
 
 function getSearchIntent(sourceCard, highlights = []) {
     const sourceText = getCurrentSourceOracleText(sourceCard) || '';
@@ -27394,7 +27755,7 @@ async function findSimilarCards() {
 
     functionalRetrievalPlans = buildFunctionalRetrievalQueries(
         currentSourceCard, sourceParsedEffects, excludeSelf,
-        activeSearchMethodFlags.functional ? 3 : 2
+        activeSearchMethodFlags.functional ? 5 : 4
     );
     const methodQueries = {
         wording: activeSearchMethodFlags.wording ? buildWordingRetrievalQuery(currentSourceCard, excludeSelf, stopWords, mtgStopWords) : null,
@@ -28081,9 +28442,9 @@ async function findSimilarCards() {
                 const semanticRetrievalVector = await getCachedEmbedding(queryText, ex);
                 const normalizedOracleTarget = normalizeOracleForEmbedding(targetTextForScoring, currentSourceCard.name);
                 const normalizedFullSourceOracle = normalizeOracleForEmbedding(getCurrentSourceOracleText(currentSourceCard), currentSourceCard.name);
-                const canUseIndexedSourceVector = !hasHighlight && normalizedOracleTarget && normalizedOracleTarget === normalizedFullSourceOracle;
+                const canUseIndexedSourceVector = false; // multi-row semantic index: the first row is only one ability, not a whole-card vector
                 const indexedSourceVector = canUseIndexedSourceVector ? getStaticSemanticVectorAsFloat32(currentSourceCard, index) : null;
-                const oracleVector = indexedSourceVector || await getCachedEmbedding(normalizedOracleTarget, ex);
+                const oracleVector = indexedSourceVector || (normalizedOracleTarget ? await getCachedEmbedding(normalizedOracleTarget, ex) : null);
                 if (!semanticRetrievalVector && !oracleVector) return { index, queryVector: null, semanticRetrievalVector: null, matches: [], hydrated: [] };
 
                 const limit = benchmarkUseLocalOracleCorpus
@@ -28092,15 +28453,29 @@ async function findSimilarCards() {
                 const queryJobs = [];
                 if (semanticRetrievalVector) queryJobs.push({ vector: semanticRetrievalVector, view: 'intent', limit, threshold: 0.42 });
                 if (oracleVector && !hasHighlight) queryJobs.push({ vector: oracleVector, view: 'oracle', limit: Math.max(24, Math.floor(limit * 0.55)), threshold: 0.40 });
+
+                // Search every source face/ability independently. This complements the full-text
+                // intent query and protects later abilities from input-token truncation.
+                if (!hasHighlight) {
+                    const abilityTexts = await buildSourceSemanticQueryTexts(currentSourceCard, semanticIntentTextForScoring, 32, ex.tokenizer);
+                    const distinctAbilityTexts = abilityTexts.length === 1 && abilityTexts[0] === queryText ? [] : abilityTexts;
+                    const abilityVectors = await Promise.all(distinctAbilityTexts.map(text => getCachedEmbedding(text, ex)));
+                    const abilityLimit = Math.max(12, Math.ceil(limit / Math.max(1, abilityVectors.length)));
+                    abilityVectors.forEach((vector, abilityIndex) => {
+                        if (vector) queryJobs.push({
+                            vector,
+                            view: 'ability-' + (abilityIndex + 1),
+                            limit: abilityLimit,
+                            threshold: 0.40
+                        });
+                    });
+                }
                 const querySets = await Promise.all(queryJobs.map(q => findFullSemanticMatches(index, q.vector, currentSourceCard.name, q.limit, q.threshold)));
-                const mergedMatches = new Map();
-                querySets.forEach((set, qi) => (set || []).forEach(item => {
-                    const key = normalizeCardNameForIdentity(item.name);
-                    const prev = mergedMatches.get(key);
-                    const view = queryJobs[qi].view;
-                    mergedMatches.set(key, prev ? { ...prev, similarity: Math.max(prev.similarity || 0, item.similarity || 0), _semanticViews: [...new Set([...(prev._semanticViews || []), view])] } : { ...item, _semanticViews: [view] });
-                }));
-                const matches = Array.from(mergedMatches.values()).sort((a,b)=>(b.similarity||0)-(a.similarity||0)).slice(0, limit);
+                const matches = mergeSemanticRetrievalRanks(
+                    querySets,
+                    queryJobs.map(query => query.view),
+                    { rrfK: 60 }
+                ).slice(0, limit);
                 const exactMatches = benchmarkUseLocalOracleCorpus && hasHighlight
                     ? await findFullSemanticExactMatches(index, searchHighlightsSnapshot, currentSourceCard.name, 1024)
                     : [];
@@ -28124,17 +28499,27 @@ async function findSimilarCards() {
                             .map(x => ({
                                 ...x.card,
                                 _semanticRetrievalSimilarity: x.similarity || 0,
+                                _semanticRetrievalRrfScoreRatio: x._semanticRrfScoreRatio || 0,
+                                _semanticAbilityCoverage: x._semanticAbilityCoverage || 0,
+                                _semanticAbilityTotal: x._semanticAbilityTotal || 0,
+                                _semanticAbilityCoverageRatio: x._semanticAbilityCoverageRatio || 0,
+                                _semanticRetrievalViews: x._semanticViews || [],
                                 _semanticRetrievalSource: exactKeys.has(normalizeCardNameForIdentity(x.name))
                                     ? 'benchmark-full-index-exact'
                                     : 'benchmark-full-index'
                             }));
                     } else {
-                        const scoreByName = new Map(Array.from(byName.values()).map(x => [normalizeCardNameForIdentity(x.name), x.similarity]));
+                        const evidenceByName = new Map(Array.from(byName.values()).map(item => [normalizeCardNameForIdentity(item.name), item]));
                         const localCards = Array.from(byName.values()).map(item => {
                             const card = getStaticCardByName(item.name);
                             return card ? {
                                 ...card,
                                 _semanticRetrievalSimilarity: item.similarity || 0,
+                                _semanticRetrievalRrfScoreRatio: item._semanticRrfScoreRatio || 0,
+                                _semanticAbilityCoverage: item._semanticAbilityCoverage || 0,
+                                _semanticAbilityTotal: item._semanticAbilityTotal || 0,
+                                _semanticAbilityCoverageRatio: item._semanticAbilityCoverageRatio || 0,
+                                _semanticRetrievalViews: item._semanticViews || [],
                                 _semanticRetrievalSource: 'full-index-local-corpus'
                             } : null;
                         }).filter(Boolean);
@@ -28142,11 +28527,19 @@ async function findSimilarCards() {
                         const missingNames = Array.from(byName.values()).filter(item => !localNames.has(normalizeCardNameForIdentity(item.name)));
                         if (missingNames.length) {
                             const fetched = await hydrateCardsFromLocalCorpus(missingNames.map(x => ({ name: x.name })));
-                            localCards.push(...(fetched || []).map(card => ({
-                                ...card,
-                                _semanticRetrievalSimilarity: scoreByName.get(normalizeCardNameForIdentity(card.name)) || 0,
-                                _semanticRetrievalSource: 'full-index-local-corpus-fallback'
-                            })));
+                            localCards.push(...(fetched || []).map(card => {
+                                const evidence = evidenceByName.get(normalizeCardNameForIdentity(card.name));
+                                return {
+                                    ...card,
+                                    _semanticRetrievalSimilarity: evidence?.similarity || 0,
+                                    _semanticRetrievalRrfScoreRatio: evidence?._semanticRrfScoreRatio || 0,
+                                    _semanticAbilityCoverage: evidence?._semanticAbilityCoverage || 0,
+                                    _semanticAbilityTotal: evidence?._semanticAbilityTotal || 0,
+                                    _semanticAbilityCoverageRatio: evidence?._semanticAbilityCoverageRatio || 0,
+                                    _semanticRetrievalViews: evidence?._semanticViews || [],
+                                    _semanticRetrievalSource: 'full-index-local-corpus-fallback'
+                                };
+                            }));
                         }
                         hydrated = localCards;
                     }
@@ -30624,7 +31017,7 @@ function compareFunctionLabel(fn) {
 function compareFunctionKey(cf) {
     if (!cf) return '';
     const p = cf.params || {};
-    return [cf.function, cf.outcome, p.object, p.subtype, p.tokenType, p.recipientScope, p.libraryOwnerScope, p.from, p.to, p.scope, p.duration].filter(Boolean).join('|').toLowerCase();
+    return [cf.function, cf.outcome, p.object, p.subtype, p.tokenType, p.tokenDescriptor, p.tokenColors?.join(','), p.untapWindow, p.untapScope, p.recipientScope, p.libraryOwnerScope, p.from, p.to, p.scope, p.duration].filter(Boolean).join('|').toLowerCase();
 }
 
 function compareFunctionFamily(cf) {
@@ -30819,6 +31212,7 @@ function compareEffectDescription(cf) {
         case 'tribal_anthem': return `${duration ? duration + ' ' : ''}change ${scope ? scope + ' ' : ''}creature stats${magnitude ? ` by ${magnitude}` : ''}${subtype ? ` for ${subtype}` : ''}`;
         case 'tap': return `tap${object ? ` ${object}` : ''}`;
         case 'untap': return `untap${object ? ` ${object}` : ''}`;
+        case 'untap_restriction': return `prevent ${object || 'a permanent'} from untapping during ${p.untapWindow || 'its untap step'}`;
         case 'scry': return `scry ${q ?? ''}`.trim();
         case 'surveil': return `surveil ${q ?? ''}`.trim();
         case 'proliferate': return 'proliferate existing counters';
@@ -30869,6 +31263,7 @@ function compareNaturalEffectAction(cf) {
         case 'mill': return `mill ${compareNaturalQuantity(q, 'card')}`;
         case 'discard': return `discard ${compareNaturalQuantity(q, 'card')}`;
         case 'mana_ability': return q !== null ? `add ${q} mana` : 'add mana';
+        case 'untap_restriction': return `prevent ${core.object || 'a permanent'} from untapping`;
         case 'removal': return `destroy ${core.target || core.object || 'the relevant permanent'}`;
         case 'exile_removal': return `exile ${core.target || core.object || 'the relevant permanent'}`;
         case 'counter': return `counter ${core.target || core.object || 'the relevant spell or ability'}`;

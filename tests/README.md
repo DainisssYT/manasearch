@@ -99,3 +99,17 @@ The deploy workflow uses `cancel-in-progress: false` to avoid canceling a live P
 ### Optional Search intent UI regression
 
 In the live browser console, call `runManaSearchIntentRegressionSuite()` to exercise the production search-intent model against Rhystic Study and Chronicler of Heroes, including Exact vs Flexible highlights. To see the panel itself, enable **Show Search intent panel** in Preferences. The regression suite does not start a search or change ranking weights.
+
+
+## 5. End-to-end retrieval quality metrics
+
+The `runLocalBenchmarkInApp()` benchmark exercises the full local retrieval and ranking path.
+Its report includes Recall@20/@50/@100, Precision@10/@20, MRR, nDCG@10/@20, retrieval-stage
+candidate-pool recall, and semantic ability coverage/query-view provenance. Use the stage metrics
+to tell whether an expected card was missed by retrieval or found and then ranked too low. This
+benchmark is separate from the offline 31-card/22-pair mechanical scorer benchmark above.
+
+The semantic unit tests use a deterministic fake tokenizer to verify that the builder's guard
+splits oversized documents without truncating the final ability text. GitHub Actions also runs the
+browser regression, where the local test server must serve `.mjs` files with a JavaScript MIME type
+so the shared semantic module loads as a browser ES module.
