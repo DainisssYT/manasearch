@@ -305,7 +305,7 @@ check('Exact highlights bind literal text to the same parsed candidate effect us
 });
 
 check('source and candidate semantic documents share one tokenizer-verified representation', () => {
-  assert.match(app, /from ['"]\.\/scripts\/semantic-text\.mjs['"]/);
+  assert.match(app, /from ['"]\.\/scripts\/semantic-text\.mjs(?:\?v=[^'"]+)?['"]/);
   assert.match(app, /buildSemanticDocuments\(\[source\]/);
   assert.match(app, /await enforceSemanticTokenBudget\(documents, tokenizer/);
   assert.match(app, /mergeSemanticRetrievalRanks\(\s*querySets/);
