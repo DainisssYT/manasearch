@@ -62,6 +62,28 @@ export function normalizeOracleForEmbedding(text, cardName = '') {
   return value.replace(/\s+/g, ' ').trim();
 }
 
+
+function normalizeSemanticContextForEmbedding(text, cardName = '') {
+  let value = String(text || '');
+  if (!value.trim()) return '';
+  if (cardName) {
+    const escaped = Array.from(String(cardName), char =>
+      /[A-Za-z0-9_]/.test(char) ? char : '\\' + char
+    ).join('');
+    value = value.replace(new RegExp('\\b' + escaped + '\\b', 'gi'), 'this card');
+  }
+  return replaceManaSymbols(value)
+    .replace(/[^a-z0-9+\-\s]/gi, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function buildSemanticDocumentText(contextText, abilityText, cardName = '') {
+  const context = normalizeSemanticContextForEmbedding(contextText, cardName);
+  const ability = normalizeOracleForEmbedding(abilityText, cardName);
+  return [context, ability ? 'ability ' + ability : ''].filter(Boolean).join('. ');
+}
+
 function splitAbilityText(text, maxWords = 48, overlapWords = 12) {
   const paragraphs = String(text || '').split(/\n+/).map(part => part.trim()).filter(Boolean);
   const chunks = [];
@@ -221,31 +243,66 @@ export function buildSemanticDocuments(cards, options = {}) {
     for (const face of faces) {
       const abilities = splitAbilityText(face.oracleText, maxWords, overlapWords);
       const context = [
-        face.name && `card face ${face.name}`,
-        card.layout && `layout ${card.layout}`,
-        face.typeLine && `type ${face.typeLine}`,
-        face.manaCost && `mana cost ${face.manaCost}`,
-        face.colors && `colors ${face.colors}`,
-        face.colorIndicator && `color indicator ${face.colorIndicator}`,
-        face.keywords && `keywords ${face.keywords}`,
-        Array.isArray(card.color_identity) && card.color_identity.length ? `color identity ${card.color_identity.join(' ')}` : '',
-        Array.isArray(card.produced_mana) && card.produced_mana.length ? `produces ${card.produced_mana.join(' ')} mana` : '',
-        Number.isFinite(Number(card.cmc)) ? `mana value ${card.cmc}` : '',
-        face.power && `power ${face.power}`,
-        face.toughness && `toughness ${face.toughness}`,
-        face.loyalty && `loyalty ${face.loyalty}`,
-        face.defense && `defense ${face.defense}`,
-        face.handModifier && `hand modifier ${face.handModifier}`,
-        face.lifeModifier && `life modifier ${face.lifeModifier}`
+        face.name && 'card face ' + face.name,
+        card.layout && 'layout ' + card.layout,
+        face.typeLine && 'type ' + face.typeLine,
+        face.manaCost && 'mana cost ' + face.manaCost,
+        face.colors && 'colors ' + face.colors,
+        face.colorIndicator && 'color indicator ' + face.colorIndicator,
+        face.keywords && 'keywords ' + face.keywords,
+        Array.isArray(card.color_identity) && card.color_identity.length ? 'color identity ' + card.color_identity.join(' ') : '',
+        Array.isArray(card.produced_mana) && card.produced_mana.length ? 'produces ' + card.produced_mana.join(' ') + ' mana' : '',
+        Number.isFinite(Number(card.cmc)) ? 'mana value ' + card.cmc : '',
+        face.power && 'power ' + face.power,
+        face.toughness && 'toughness ' + face.toughness,
+        face.loyalty && 'loyalty ' + face.loyalty,
+        face.defense && 'defense ' + face.defense,
+        face.handModifier && 'hand modifier ' + face.handModifier,
+        face.lifeModifier && 'life modifier ' + face.lifeModifier
       ].filter(Boolean).join('. ');
+
+      // Full context retains all metadata. Compact/minimal alternatives are only used if
+      // the model tokenizer proves that a full face + ability row cannot fit its budget.
+      const compactContext = [
+        face.name && 'card face ' + face.name,
+        face.typeLine && 'type ' + face.typeLine,
+        face.manaCost && 'mana cost ' + face.manaCost,
+        face.colors && 'colors ' + face.colors,
+        face.colorIndicator && 'color indicator ' + face.colorIndicator,
+        face.keywords && 'keywords ' + face.keywords
+      ].filter(Boolean).join('. ');
+      const minimalContext = [
+        face.name && 'card face ' + face.name,
+        face.typeLine && 'type ' + face.typeLine
+      ].filter(Boolean).join('. ');
+
       if (!abilities.length) {
-        const profile = normalizeOracleForEmbedding(`card profile ${context}`, face.name || card.name);
-        if (profile) documents.push({ name: card.name, text: profile, contextText: profile, abilityText: '', face: face.name, abilityIndex: -1, kind: 'profile' });
+        const profile = normalizeOracleForEmbedding('card profile ' + context, face.name || card.name);
+        if (profile) documents.push({
+          name: card.name,
+          text: profile,
+          contextText: context,
+          compactContextText: compactContext,
+          minimalContextText: minimalContext,
+          abilityText: '',
+          face: face.name,
+          abilityIndex: -1,
+          kind: 'profile'
+        });
         continue;
       }
       for (let i = 0; i < abilities.length; i++) {
-        const normalized = normalizeOracleForEmbedding(`${context}. ability ${abilities[i]}`, face.name || card.name);
-        if (normalized) documents.push({ name: card.name, text: normalized, contextText: context, abilityText: abilities[i], face: face.name, abilityIndex: i });
+        const normalized = buildSemanticDocumentText(context, abilities[i], face.name || card.name);
+        if (normalized) documents.push({
+          name: card.name,
+          text: normalized,
+          contextText: context,
+          compactContextText: compactContext,
+          minimalContextText: minimalContext,
+          abilityText: abilities[i],
+          face: face.name,
+          abilityIndex: i
+        });
       }
     }
   }
@@ -356,34 +413,63 @@ export async function enforceSemanticTokenBudget(documents, tokenizer, options =
     return count;
   };
 
+  const textForContext = (document, contextText) => {
+    if (document.kind === 'profile' || !String(document.abilityText || '').trim()) {
+      return normalizeOracleForEmbedding('card profile ' + (contextText || ''), document.face || document.name || '');
+    }
+    return buildSemanticDocumentText(contextText || '', document.abilityText, document.face || document.name || '');
+  };
+
   while (pending.length) {
-    const document = pending.shift();
-    const tokenCount = await getTokenCount(document.text);
+    let document = pending.shift();
+    let tokenCount = await getTokenCount(document.text);
+    if (tokenCount <= maxTokens) {
+      output.push({ ...document, tokenCount });
+      continue;
+    }
+
+    // Reduce secondary metadata context first. This handles short Oracle text whose face
+    // metadata, rather than the ability itself, pushes the combined row over budget.
+    let bestDocument = document;
+    let bestTokenCount = tokenCount;
+    const contextVariants = [document.compactContextText, document.minimalContextText]
+      .filter((value, index, all) => typeof value === 'string' && value.trim() &&
+        value !== document.contextText && all.indexOf(value) === index);
+    for (const contextText of contextVariants) {
+      const candidate = { ...document, contextText, text: textForContext(document, contextText) };
+      const candidateTokenCount = await getTokenCount(candidate.text);
+      if (candidateTokenCount < bestTokenCount) {
+        bestDocument = candidate;
+        bestTokenCount = candidateTokenCount;
+      }
+      if (candidateTokenCount <= maxTokens) break;
+    }
+    document = bestDocument;
+    tokenCount = bestTokenCount;
     if (tokenCount <= maxTokens) {
       output.push({ ...document, tokenCount });
       continue;
     }
 
     const words = String(document.abilityText || '').trim().split(/\s+/).filter(Boolean);
-    if (words.length < minWords * 2 || document.chunkDepth >= 8) {
+    if (words.length <= minWords || document.chunkDepth >= 8) {
       throw new Error(
-        `Semantic document for "${document.name}" (${document.face || 'card profile'}) needs ${tokenCount} tokens; cannot safely split below the ${maxTokens}-token budget.`
+        'Semantic document for "' + document.name + '" (' + (document.face || 'card profile') +
+        ') still needs ' + tokenCount + ' tokens after compacting metadata context; cannot safely split its ' +
+        words.length + ' Oracle words below the ' + maxTokens + '-token budget.'
       );
     }
 
     const ratio = Math.min(0.8, maxTokens / tokenCount * 0.78);
-    const chunkWords = Math.max(minWords, Math.floor(words.length * ratio));
+    const chunkWords = Math.min(words.length - 1, Math.max(minWords, Math.floor(words.length * ratio)));
     const overlapWords = Math.min(Math.floor(chunkWords / 4), Math.max(4, Number(options.overlapWords) || 8));
     const chunks = splitAbilityText(document.abilityText, chunkWords, overlapWords);
     if (chunks.length < 2) {
-      throw new Error(`Unable to split oversized semantic ability for "${document.name}" safely.`);
+      throw new Error('Unable to split oversized semantic ability for "' + document.name + '" safely after reducing its metadata context.');
     }
 
     for (const [index, abilityText] of chunks.entries()) {
-      const normalized = normalizeOracleForEmbedding(
-        `${document.contextText || ''}. ability ${abilityText}`,
-        document.face || document.name || ''
-      );
+      const normalized = textForContext({ ...document, abilityText }, document.contextText || '');
       pending.push({
         ...document,
         text: normalized,

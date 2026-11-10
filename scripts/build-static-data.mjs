@@ -18,6 +18,7 @@ const SEMANTIC_VERSION = 1;
 const CARD_MAGIC = 'MSCARD1G';
 const CARD_VERSION = 1;
 const MODEL_ID = 'Xenova/all-MiniLM-L6-v2';
+const SEMANTIC_DOCUMENT_STRATEGY = 'shared-per-face-per-ability-token-verified-v3-context-deduplicated';
 const EMBEDDING_BATCH_SIZE = 32;
 const BUILDER_VERSION = 6;
 
@@ -213,6 +214,7 @@ async function main() {
   if (previousMeta?.oracle_cards_updated_at === oracleEntry.updated_at &&
       previousMeta?.model === MODEL_ID &&
       previousMeta?.builder_version === BUILDER_VERSION &&
+      previousMeta?.semantic_document_strategy === SEMANTIC_DOCUMENT_STRATEGY &&
       (await exists(CARDS_OUT)) && (await exists(SEMANTIC_OUT))) {
     console.log(`Oracle card dataset is unchanged (${oracleEntry.updated_at}); static assets are already current.`);
     return;
@@ -238,7 +240,7 @@ async function main() {
   // Everything below is built in memory first. Existing published assets are not touched
   // until cards.bin, semantic-index.bin, and metadata have all been generated successfully.
   const generatedAt = new Date().toISOString();
-  const buildId = `${oracleEntry.updated_at}|${MODEL_ID}|${BUILDER_VERSION}`;
+  const buildId = `${oracleEntry.updated_at}|${MODEL_ID}|${BUILDER_VERSION}|${SEMANTIC_DOCUMENT_STRATEGY}`;
 
   const cardPayload = Buffer.from(JSON.stringify({
     version: CARD_VERSION,
@@ -303,7 +305,7 @@ async function main() {
     oracle_cards_uri: downloadUri,
     card_count: cards.length,
     semantic_document_count: semanticDocuments.length,
-    semantic_document_strategy: 'shared-per-face-per-ability-token-verified-v2',
+    semantic_document_strategy: SEMANTIC_DOCUMENT_STRATEGY,
     semantic_max_tokens: 240,
     semantic_chunk_word_target: 32,
     semantic_chunk_overlap_words: 8,

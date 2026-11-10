@@ -117,3 +117,54 @@ test('long Oracle clauses keep their trigger and initial cost context in later c
   assert.ok(docs.some(doc => /detailword95/.test(doc.abilityText)), 'the end of the long effect must remain indexed');
   assert.ok(docs.some(doc => /create a Treasure token/.test(doc.abilityText)), 'a trailing clause must not be dropped');
 });
+
+
+test('keyword-heavy Odric ability keeps keyword names without duplicating their definitions in metadata', async () => {
+  const card = {
+    name: 'Odric, Blood-Cursed',
+    mana_cost: '{1}{R}{W}',
+    type_line: 'Legendary Creature — Vampire Soldier',
+    colors: ['R', 'W'],
+    color_identity: ['R', 'W'],
+    keywords: ['deathtouch', 'double strike', 'first strike', 'haste', 'hexproof', 'indestructible', 'lifelink', 'menace', 'reach', 'trample'],
+    oracle_text: 'When Odric, Blood-Cursed enters, create X Blood tokens, where X is the number of abilities from among flying, first strike, double strike, deathtouch, haste, hexproof, indestructible, lifelink, menace, reach, trample, and vigilance found among creatures you control. (Count each ability only once.)'
+  };
+  const documents = buildSemanticDocuments([card], { maxWords: 32, overlapWords: 8 });
+  assert.ok(documents.length > 0);
+  const first = documents[0].text;
+  const deathtouchExpansion = 'deathtouch makes any amount of damage lethal to a creature';
+  assert.equal(first.split(deathtouchExpansion).length - 1, 1,
+    'the deathtouch definition should be expanded once, not duplicated by the keywords metadata');
+  assert.match(first, /keywords deathtouch double strike first strike haste/);
+  const tokenizer = async text => ({
+    input_ids: { dims: [1, String(text).trim().split(/\s+/).filter(Boolean).length] }
+  });
+  const fitted = await enforceSemanticTokenBudget(documents, tokenizer, { maxTokens: 240, overlapWords: 8 });
+  assert.ok(fitted.length > 0);
+  assert.ok(fitted.every(document => document.tokenCount <= 240));
+  assert.ok(fitted.some(document => /count each ability only once/.test(document.text)),
+    'the parenthetical count-once rule must remain indexed');
+});
+
+test('oversized metadata context is compacted before rejecting a short Oracle ability', async () => {
+  const fullContext = 'card face Short Ability. type Legendary Creature. ' +
+    Array.from({ length: 180 }, (_, i) => 'secondaryfield' + i).join(' ');
+  const compactContext = 'card face Short Ability. type Legendary Creature. mana cost one green mana';
+  const documents = [{
+    name: 'Short Ability',
+    face: 'Short Ability',
+    contextText: fullContext,
+    compactContextText: compactContext,
+    minimalContextText: 'card face Short Ability. type Legendary Creature',
+    abilityText: 'Create a Blood token.',
+    text: fullContext + ' ability create a blood token'
+  }];
+  const tokenizer = async text => ({
+    input_ids: { dims: [1, String(text).trim().split(/\s+/).filter(Boolean).length] }
+  });
+  const fitted = await enforceSemanticTokenBudget(documents, tokenizer, { maxTokens: 40 });
+  assert.equal(fitted.length, 1);
+  assert.ok(fitted[0].tokenCount <= 40);
+  assert.equal(fitted[0].contextText, compactContext);
+  assert.match(fitted[0].text, /create a blood token/);
+});
