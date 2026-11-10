@@ -1,6 +1,6 @@
-/* ManaSearch build 20261108-131 */
+/* ManaSearch build 20261110-135 */
 // ManaSearch deployment build marker. Bump this whenever app.js changes so cached-module issues are easy to diagnose.
-const MANASEARCH_APP_BUILD = '20261108-134';
+const MANASEARCH_APP_BUILD = '20261110-135';
 console.info(`[ManaSearch] app.js build ${MANASEARCH_APP_BUILD}`);
 
 // The source-query and static-index builders share one representation so both sides
@@ -18339,12 +18339,17 @@ async function parseStaticSemanticIndexBinary(buffer) {
     // once and reuse them in the worker and yielding fallback scanner.
     const normalizedNames = new Array(count);
     const nameToIndex = new Map();
+    const nameToIndices = new Map();
     const vectorNormSquares = new Float32Array(count);
     let vectorPrepStartedAt = getManaResponsivenessNow();
     for (let row = 0; row < count; row++) {
         const key = normalizeCardNameForIdentity(names[row]);
         normalizedNames[row] = key;
-        if (key && !nameToIndex.has(key)) nameToIndex.set(key, row);
+        if (key) {
+            if (!nameToIndex.has(key)) nameToIndex.set(key, row);
+            if (!nameToIndices.has(key)) nameToIndices.set(key, []);
+            nameToIndices.get(key).push(row);
+        }
         let normSquared = 0;
         const offset = row * dim;
         for (let j = 0; j < dim; j++) {
@@ -18365,6 +18370,7 @@ async function parseStaticSemanticIndexBinary(buffer) {
         total: count,
         source: 'static',
         nameToIndex,
+        nameToIndices,
         chunks: [{
             names,
             normalizedNames,
@@ -18420,15 +18426,20 @@ async function loadStaticSemanticIndex({ retryAttempt = 1 } = {}) {
                 throw new Error('The search worker returned a truncated semantic vector table.');
             }
             const nameToIndex = new Map();
+            const nameToIndices = new Map();
             for (let row = 0; row < count; row++) {
                 const key = normalizedNames[row] || normalizeCardNameForIdentity(names[row]);
-                if (key && !nameToIndex.has(key)) nameToIndex.set(key, row);
+                if (!key) continue;
+                if (!nameToIndex.has(key)) nameToIndex.set(key, row);
+                if (!nameToIndices.has(key)) nameToIndices.set(key, []);
+                nameToIndices.get(key).push(row);
             }
             index = {
                 dim,
                 total: count,
                 source: 'static',
                 nameToIndex,
+                nameToIndices,
                 chunks: [{
                     names,
                     normalizedNames,
@@ -18477,32 +18488,40 @@ async function loadStaticSemanticIndex({ retryAttempt = 1 } = {}) {
 // for scoring candidates too, not only retrieval: generating an embedding for the same Oracle text
 // again is redundant when the bundled quantized vector already exists. Custom highlights and
 // canonical-function summaries still use the model because they are not indexed text views.
-function getStaticSemanticVectorView(cardOrName, index = fullSemanticIndexMemory) {
-    if (index?.source !== 'static' || !index.nameToIndex || !Array.isArray(index.chunks) || !index.chunks.length) return null;
+function getStaticSemanticVectorViews(cardOrName, index = fullSemanticIndexMemory) {
+    if (index?.source !== 'static' || !index.nameToIndex || !Array.isArray(index.chunks) || !index.chunks.length) return [];
     const name = typeof cardOrName === 'string' ? cardOrName : String(cardOrName?.name || '');
-    let row = index.nameToIndex.get(normalizeCardNameForIdentity(name));
-    if (!Number.isInteger(row) && name.includes(' // ')) {
-        row = index.nameToIndex.get(normalizeCardNameForIdentity(name.split(' // ')[0]));
+    let key = normalizeCardNameForIdentity(name);
+    if (!index.nameToIndices?.has(key) && !index.nameToIndex.has(key) && name.includes(' // ')) {
+        key = normalizeCardNameForIdentity(name.split(' // ')[0]);
     }
-    if (!Number.isInteger(row) || row < 0) return null;
-    let offset = row;
-    for (const chunk of index.chunks) {
-        const chunkCount = Number(chunk?.count) || chunk?.names?.length || 0;
-        if (offset < chunkCount && chunk?.vectors) {
-            const start = offset * index.dim;
-            return {
-                index,
-                chunk,
-                row: offset,
-                globalRow: row,
-                vector: chunk.vectors.subarray(start, start + index.dim),
-                normSquared: chunk.vectorNormSquares?.[offset] ?? null,
-                name: chunk.names?.[offset] || name
-            };
+    const firstRow = index.nameToIndex.get(key);
+    const rows = index.nameToIndices?.get(key) || (Number.isInteger(firstRow) ? [firstRow] : []);
+    const output = [];
+    for (const globalRow of rows) {
+        let offset = globalRow;
+        for (const chunk of index.chunks) {
+            const chunkCount = Number(chunk?.count) || chunk?.names?.length || 0;
+            if (offset < chunkCount && chunk?.vectors) {
+                const start = offset * index.dim;
+                output.push({
+                    index,
+                    chunk,
+                    row: offset,
+                    globalRow,
+                    vector: chunk.vectors.subarray(start, start + index.dim),
+                    normSquared: chunk.vectorNormSquares?.[offset] ?? null,
+                    name: chunk.names?.[offset] || name
+                });
+                break;
+            }
+            offset -= chunkCount;
         }
-        offset -= chunkCount;
     }
-    return null;
+    return output;
+}
+function getStaticSemanticVectorView(cardOrName, index = fullSemanticIndexMemory) {
+    return getStaticSemanticVectorViews(cardOrName, index)[0] || null;
 }
 function getStaticSemanticVectorAsFloat32(cardOrName, index = fullSemanticIndexMemory) {
     const view = getStaticSemanticVectorView(cardOrName, index);
@@ -25183,7 +25202,14 @@ async function scoreCardBatch({
     const __triageSelectionStartedAt = __scoreNow();
     const oracleTargetVector = targetVector || targetVectors?.oracle || null;
     const semanticRetrievalTargetVector = targetVectors?.semanticRetrieval || oracleTargetVector;
-    const hasSemanticEngine = Boolean(extractor && extractor.type !== 'fallback' && oracleTargetVector);
+    const oracleTargetVectors = Array.isArray(targetVectors?.oracleViews) && targetVectors.oracleViews.length
+        ? targetVectors.oracleViews
+        : (oracleTargetVector ? [oracleTargetVector] : []);
+    const semanticRetrievalTargetVectors = Array.isArray(targetVectors?.semanticRetrievalViews) && targetVectors.semanticRetrievalViews.length
+        ? targetVectors.semanticRetrievalViews
+        : (semanticRetrievalTargetVector ? [semanticRetrievalTargetVector] : []);
+    const hasSemanticEngine = Boolean(extractor && extractor.type !== 'fallback' &&
+        (oracleTargetVectors.length || semanticRetrievalTargetVectors.length));
 
     // The loop above gives every candidate a mechanical/exactness/category/synergy score using
     // pure JS - cheap regardless of how many candidates there are. The embedding step below is
@@ -25349,7 +25375,7 @@ async function scoreCardBatch({
         for (const card of semanticEligible) {
             if (card.contextScore !== undefined) continue;
             const cardText = card.oracle_text || (card.card_faces ? card.card_faces.map(f => f.oracle_text).join(' ') : '');
-            if (hasSemanticEngine && cardText && !getStaticSemanticVectorView(card)) {
+            if (hasSemanticEngine && cardText && !getStaticSemanticVectorViews(card).length) {
                 textsToEmbed.push(getCachedOracleEmbeddingText(card, cardText));
             }
             if (sourceFunctionVector && card._parsedEffects) {
@@ -25380,29 +25406,38 @@ async function scoreCardBatch({
             // The cache was already warmed above, so this is a cache read, not a fresh model call.
             let semanticScore = null;
             if (hasSemanticEngine && cardText && semanticEligibleSet.has(card)) {
-                const semanticQueryVector = Number.isFinite(card._semanticRetrievalSimilarity)
-                    ? semanticRetrievalTargetVector
-                    : oracleTargetVector;
-                const staticVectorView = semanticQueryVector ? getStaticSemanticVectorView(card) : null;
-                if (staticVectorView) {
-                    // semantic-index.bin is the same precomputed Oracle-vector corpus used by Search G.
-                    // Read the row directly instead of invoking MiniLM again for candidate raw text.
-                    const rawCos = approximateQuantizedCosine(
-                        semanticQueryVector, staticVectorView.vector, staticVectorView.index.dim,
-                        staticVectorView.normSquared
-                    );
-                    semanticScore = calibratedCosineFromRaw(rawCos);
-                    card._rawOracleSemanticSimilarity = rawCos;
+                // Retrieval may match any source ability, while each candidate may have several
+                // face/ability rows. Score the best source-view/candidate-view pair instead of
+                // silently comparing only the first indexed row for that card.
+                const semanticQueryVectors = Number.isFinite(card._semanticRetrievalSimilarity)
+                    ? semanticRetrievalTargetVectors
+                    : oracleTargetVectors;
+                const indexedViews = getStaticSemanticVectorViews(card);
+                let bestRawCos = -1;
+                if (semanticQueryVectors.length && indexedViews.length) {
+                    for (const query of semanticQueryVectors) {
+                        for (const candidateView of indexedViews) {
+                            bestRawCos = Math.max(bestRawCos, approximateQuantizedCosine(
+                                query, candidateView.vector, candidateView.index.dim, candidateView.normSquared
+                            ));
+                        }
+                    }
                     embeddingDiagnostics.precomputedOracleVectorHits = (embeddingDiagnostics.precomputedOracleVectorHits || 0) + 1;
                     embeddingCacheStats.precomputedOracleHits++;
-                } else {
+                } else if (semanticQueryVectors.length) {
+                    // Cards absent from the shipped corpus retain the prior model-backed fallback.
                     const cardVector = await getCachedEmbedding(getCachedOracleEmbeddingText(card, cardText), extractor, embeddingDiagnostics);
                     if (cardVector) {
-                        semanticScore = semanticQueryVector ? calibratedCosineSimilarity(semanticQueryVector, cardVector) : null;
-                        if (semanticQueryVector && cardVector) card._rawOracleSemanticSimilarity = cosineSimilarity(semanticQueryVector, cardVector);
+                        for (const query of semanticQueryVectors) {
+                            bestRawCos = Math.max(bestRawCos, cosineSimilarity(query, cardVector));
+                        }
                     }
                     embeddingDiagnostics.precomputedOracleVectorMisses = (embeddingDiagnostics.precomputedOracleVectorMisses || 0) + 1;
                     embeddingCacheStats.precomputedOracleMisses++;
+                }
+                if (bestRawCos >= -1) {
+                    semanticScore = calibratedCosineFromRaw(bestRawCos);
+                    card._rawOracleSemanticSimilarity = bestRawCos;
                 }
             }
 
@@ -28431,14 +28466,14 @@ async function findSimilarCards() {
         const semanticRetrievalPromise = trackStream((async () => {
             try {
                 const ex = await extractorPromise;
-                if (!ex || ex.type === 'fallback') return { index: null, queryVector: null, semanticRetrievalVector: null, matches: [], hydrated: [] };
+                if (!ex || ex.type === 'fallback') return { index: null, queryVector: null, semanticRetrievalVector: null, oracleVectors: [], semanticRetrievalVectors: [], matches: [], hydrated: [] };
                 const index = benchmarkUseLocalOracleCorpus
                     ? benchmarkLocalOracleCorpus
                     : await semanticIndexPromise;
-                if (!index) return { index: null, queryVector: null, semanticRetrievalVector: null, matches: [], hydrated: [] };
+                if (!index) return { index: null, queryVector: null, semanticRetrievalVector: null, oracleVectors: [], semanticRetrievalVectors: [], matches: [], hydrated: [] };
 
                 const queryText = semanticIntentTextForScoring;
-                if (!queryText) return { index, queryVector: null, matches: [], hydrated: [] };
+                if (!queryText) return { index, queryVector: null, semanticRetrievalVector: null, oracleVectors: [], semanticRetrievalVectors: [], matches: [], hydrated: [] };
                 const semanticRetrievalVector = await getCachedEmbedding(queryText, ex);
                 const normalizedOracleTarget = normalizeOracleForEmbedding(targetTextForScoring, currentSourceCard.name);
                 const normalizedFullSourceOracle = normalizeOracleForEmbedding(getCurrentSourceOracleText(currentSourceCard), currentSourceCard.name);
@@ -28470,6 +28505,14 @@ async function findSimilarCards() {
                         });
                     });
                 }
+                const oracleVectorsForScoring = [
+                    ...(oracleVector ? [oracleVector] : []),
+                    ...queryJobs.filter(query => /^ability-/i.test(query.view)).map(query => query.vector)
+                ].filter(Boolean);
+                const semanticRetrievalVectorsForScoring = [
+                    ...(semanticRetrievalVector ? [semanticRetrievalVector] : []),
+                    ...oracleVectorsForScoring
+                ];
                 const querySets = await Promise.all(queryJobs.map(q => findFullSemanticMatches(index, q.vector, currentSourceCard.name, q.limit, q.threshold)));
                 const matches = mergeSemanticRetrievalRanks(
                     querySets,
@@ -28544,10 +28587,18 @@ async function findSimilarCards() {
                         hydrated = localCards;
                     }
                 }
-                return { index, queryVector: oracleVector || semanticRetrievalVector, semanticRetrievalVector, matches, hydrated };
+                return {
+                    index,
+                    queryVector: oracleVector || semanticRetrievalVector,
+                    semanticRetrievalVector,
+                    oracleVectors: oracleVectorsForScoring,
+                    semanticRetrievalVectors: semanticRetrievalVectorsForScoring,
+                    matches,
+                    hydrated
+                };
             } catch (error) {
                 console.info('Search G semantic retrieval unavailable; continuing with non-semantic retrieval:', error?.message || error);
-                return { index: null, queryVector: null, semanticRetrievalVector: null, matches: [], hydrated: [] };
+                return { index: null, queryVector: null, semanticRetrievalVector: null, oracleVectors: [], semanticRetrievalVectors: [], matches: [], hydrated: [] };
             }
         })(), 'Semantic Index');
 
@@ -28669,12 +28720,23 @@ async function findSimilarCards() {
         let sourceFunctionVector = null;
         const sourceOracleVector = semanticRetrieval?.queryVector || null;
         const sourceSemanticRetrievalVector = semanticRetrieval?.semanticRetrievalVector || sourceOracleVector;
+        const sourceOracleVectors = semanticRetrieval?.oracleVectors?.length
+            ? semanticRetrieval.oracleVectors
+            : (sourceOracleVector ? [sourceOracleVector] : []);
+        const sourceSemanticRetrievalVectors = semanticRetrieval?.semanticRetrievalVectors?.length
+            ? semanticRetrieval.semanticRetrievalVectors
+            : (sourceSemanticRetrievalVector ? [sourceSemanticRetrievalVector] : []);
         if (extractor && extractor.type !== 'fallback') {
             const sourceFunctionText = getCachedCanonicalFunctionText(sourceParsedEffects);
             if (sourceFunctionText) sourceFunctionVector = await getCachedEmbedding(sourceFunctionText, extractor);
         }
         let resultsG = semanticRetrieval?.hydrated || [];
-        const targetVectors = { oracle: sourceOracleVector, semanticRetrieval: sourceSemanticRetrievalVector };
+        const targetVectors = {
+            oracle: sourceOracleVector,
+            semanticRetrieval: sourceSemanticRetrievalVector,
+            oracleViews: sourceOracleVectors,
+            semanticRetrievalViews: sourceSemanticRetrievalVectors
+        };
         const targetVector = targetVectors.oracle;
 
         // Keep the old session corpus as a secondary recovery lane. It is still useful for cards

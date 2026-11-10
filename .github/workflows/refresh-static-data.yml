@@ -35,7 +35,7 @@ jobs:
         with:
           node-version: 24
 
-      - name: Install semantic-index builder dependency
+      - name: Install Node 24-compatible semantic-index builder dependencies
         run: npm install --no-audit --no-fund
 
       - name: Build fresh card and semantic indexes
