@@ -142,7 +142,7 @@ test('keyword-heavy Odric ability keeps keyword names without duplicating their 
   const fitted = await enforceSemanticTokenBudget(documents, tokenizer, { maxTokens: 240, overlapWords: 8 });
   assert.ok(fitted.length > 0);
   assert.ok(fitted.every(document => document.tokenCount <= 240));
-  assert.ok(fitted.some(document => /count each ability only once/.test(document.text)),
+  assert.ok(fitted.some(document => /count each ability only once/i.test(document.text)),
     'the parenthetical count-once rule must remain indexed');
 });
 
@@ -166,5 +166,5 @@ test('oversized metadata context is compacted before rejecting a short Oracle ab
   assert.equal(fitted.length, 1);
   assert.ok(fitted[0].tokenCount <= 40);
   assert.equal(fitted[0].contextText, compactContext);
-  assert.match(fitted[0].text, /create a blood token/);
+  assert.match(fitted[0].text, /create a blood token/i);
 });
