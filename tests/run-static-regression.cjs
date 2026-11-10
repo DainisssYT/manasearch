@@ -315,6 +315,17 @@ check('source and candidate semantic documents share one tokenizer-verified repr
   assert.match(semanticText, /export function mergeSemanticRetrievalRanks/);
 });
 
+check('semantic candidate scoring compares every source view with every indexed card ability', () => {
+  assert.match(app, /const nameToIndices = new Map\(\)/);
+  assert.match(app, /nameToIndices\.get\(key\)\.push\(row\)/);
+  assert.match(app, /function getStaticSemanticVectorViews\(/);
+  assert.match(app, /oracleViews: sourceOracleVectors/);
+  assert.match(app, /semanticRetrievalViews: sourceSemanticRetrievalVectors/);
+  assert.match(app, /for \(const query of semanticQueryVectors\)/);
+  assert.match(app, /for \(const candidateView of indexedViews\)/);
+  assert.match(app, /getStaticSemanticVectorViews\(card\)\.length/);
+});
+
 check('static index builder verifies real model tokens and disables truncation', () => {
   assert.match(semanticBuilder, /extractor\.tokenizer/);
   assert.match(semanticBuilder, /maxTokens:\s*240/);

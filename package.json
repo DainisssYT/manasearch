@@ -8,5 +8,10 @@
   },
   "dependencies": {
     "@xenova/transformers": "2.16.0"
+  },
+  "overrides": {
+    "@xenova/transformers": {
+      "sharp": "0.35.5"
+    }
   }
 }
