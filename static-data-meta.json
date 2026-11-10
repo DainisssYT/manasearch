@@ -1,10 +1,15 @@
 {
-  "builder_version": 4,
-  "generated_at": "2026-10-15T09:58:58.294Z",
-  "build_id": "2026-10-15T09:02:01.217+00:00|Xenova/all-MiniLM-L6-v2|4",
-  "oracle_cards_updated_at": "2026-10-15T09:02:01.217+00:00",
-  "oracle_cards_uri": "https://data.scryfall.io/oracle-cards/oracle-cards-20261015090201.jsonl.gz",
-  "card_count": 38751,
+  "builder_version": 6,
+  "generated_at": "2026-11-10T14:23:27.769Z",
+  "build_id": "2026-11-10T10:02:24.346+00:00|Xenova/all-MiniLM-L6-v2|6|shared-per-face-per-ability-token-verified-v3-context-deduplicated",
+  "oracle_cards_updated_at": "2026-11-10T10:02:24.346+00:00",
+  "oracle_cards_uri": "https://data.scryfall.io/oracle-cards/oracle-cards-20261110100224.jsonl.gz",
+  "card_count": 39288,
+  "semantic_document_count": 82179,
+  "semantic_document_strategy": "shared-per-face-per-ability-token-verified-v3-context-deduplicated",
+  "semantic_max_tokens": 240,
+  "semantic_chunk_word_target": 32,
+  "semantic_chunk_overlap_words": 8,
   "embedding_dimension": 384,
   "model": "Xenova/all-MiniLM-L6-v2"
 }
