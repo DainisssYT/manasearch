@@ -70,7 +70,12 @@ jobs:
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add cards.bin semantic-index.bin static-data-meta.json
           git commit -m 'Refresh ManaSearch static card and semantic indexes'
-          git push origin main
+          # Regression/test commits can land on main while the full model build is running.
+          # Rebase the generated-artifact commit onto the latest branch tip before pushing,
+          # so the data refresh cannot fail with a non-fast-forward rejection.
+          git fetch origin main
+          git rebase origin/main
+          git push origin HEAD:main
 
       # GITHUB_TOKEN pushes do not automatically trigger other push workflows. Dispatch Pages
       # explicitly after the generated binaries have landed on main.
