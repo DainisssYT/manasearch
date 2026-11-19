@@ -292,7 +292,7 @@
         : 'Rank movement can result from changed inputs, candidate-pool membership, score changes, relevance pruning, or the selected ordering mode. Compare the request, stream overlap, score deltas, and rank changes together.'
     };
   };
-  const normalizeCandidateName = value => String(value || '').normalize('NFKD').replace(/[\\u0300-\\u036f]/g, '').trim().toLocaleLowerCase().replace(/\\s+/g, ' ');
+  const normalizeCandidateName = value => String(value || '').normalize('NFKD').replace(/[\u0300-\u036f]/g, '').trim().toLocaleLowerCase().replace(/\s+/g, ' ');
   const traceCandidate = (pipeline, candidateName) => {
     if (!pipeline || !candidateName) return { found: false, candidateName: candidateName || '', message: 'Select a candidate and a completed search.' };
     const key = normalizeCandidateName(candidateName);
