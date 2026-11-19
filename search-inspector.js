@@ -376,6 +376,22 @@
     return value;
   };
   const stableJson = value => JSON.stringify(canonicalize(value ?? null));
+  const flattenNumericFields = (value, prefix = '', result = {}) => {
+    if (Array.isArray(value)) return result;
+    if (value && typeof value === 'object') {
+      for (const key of Object.keys(value)) flattenNumericFields(value[key], prefix ? prefix + '.' + key : key, result);
+    } else if (typeof value === 'number' && Number.isFinite(value)) {
+      result[prefix] = value;
+    }
+    return result;
+  };
+  const compareNumericFields = (before, after) => {
+    const left = flattenNumericFields(before);
+    const right = flattenNumericFields(after);
+    return Object.keys(left).filter(key => Object.prototype.hasOwnProperty.call(right, key))
+      .map(key => ({ field: key, baseline: left[key], current: right[key], delta: Number((right[key] - left[key]).toFixed(6)) }))
+      .filter(item => Math.abs(item.delta) > 0.000001);
+  };
   const compareRegressionCase = (regressionCase, run) => {
     const fixture = validateRegressionCase(regressionCase);
     if (!run?.pipeline) return { comparable: false, pass: false, message: 'Select a completed search run to compare.' };
@@ -386,6 +402,34 @@
     const inputsMatch = inputDifferences.length === 0;
     const actualRanking = regressionFinalRanking(run.pipeline);
     const actualRanks = new Map(actualRanking.map(item => [normalizeCandidateName(item.name), item.rank]));
+    const baselinePipeline = fixture.diagnostics || {};
+    const baselineCandidates = new Map((baselinePipeline.candidates || []).map(item => [normalizeCandidateName(item.name), item]));
+    const currentCandidates = new Map((run.pipeline.candidates || []).map(item => [normalizeCandidateName(item.name), item]));
+    const sharedScoredNames = [...baselineCandidates.keys()].filter(name => currentCandidates.has(name));
+    const scoreChanges = sharedScoredNames.map(key => {
+      const before = baselineCandidates.get(key);
+      const after = currentCandidates.get(key);
+      const similarity = compareNumericFields(before.scores, after.scores);
+      const mechanical = compareNumericFields(before.mechanicalBreakdown, after.mechanicalBreakdown);
+      return {
+        name: after.name || before.name || key,
+        baselinePreFloorRank: before.preFloorRank ?? null,
+        currentPreFloorRank: after.preFloorRank ?? null,
+        baselineFinalRank: (fixture.baseline?.finalRanking || []).find(item => normalizeCandidateName(item.name) === key)?.rank ?? null,
+        currentFinalRank: actualRanks.get(key) ?? null,
+        scoreChanges: similarity,
+        mechanicalBreakdownChanges: mechanical
+      };
+    }).filter(item => item.scoreChanges.length || item.mechanicalBreakdownChanges.length ||
+      item.baselinePreFloorRank !== item.currentPreFloorRank || item.baselineFinalRank !== item.currentFinalRank)
+      .sort((a, b) => {
+        const scoreDelta = item => Math.abs(item.scoreChanges.find(change => change.field === 'similarityScore')?.delta || 0);
+        return scoreDelta(b) - scoreDelta(a);
+      }).slice(0, 40);
+    const baselineScoredNames = new Set(baselineCandidates.keys());
+    const currentScoredNames = new Set(currentCandidates.keys());
+    const newlyScored = [...currentScoredNames].filter(name => !baselineScoredNames.has(name)).map(name => currentCandidates.get(name)?.name || name);
+    const noLongerScored = [...baselineScoredNames].filter(name => !currentScoredNames.has(name)).map(name => baselineCandidates.get(name)?.name || name);
     const expected = fixture.expectations.expectedTopCandidates;
     const expectedTopK = expected.length;
     const actualTopK = actualRanking.slice(0, expectedTopK);
@@ -417,12 +461,22 @@
       case: { title: fixture.title, sourceRunNumber: fixture.source.runNumber ?? null },
       comparedRun: { number: run.number ?? null, completedAt: run.completedAt || null },
       inputCheck: { matches: inputsMatch, changedFields: inputDifferences },
+      scoringEvolution: {
+        baselineScoredCount: baselineCandidates.size,
+        currentScoredCount: currentCandidates.size,
+        sharedScoredCount: sharedScoredNames.length,
+        newlyScoredCandidates: newlyScored.slice(0, 50),
+        noLongerScoredCandidates: noLongerScored.slice(0, 50),
+        changedCandidates: scoreChanges
+      },
       focusCheck: focusName ? {
         candidate: focusName,
         expectation: fixture.expectations.focusBehavior,
         maximumRank: fixture.expectations.maxRank,
         actualRank: focusRank,
-        pass: focusPass
+        pass: focusPass,
+        baselineTrace: fixture.baseline?.focusTrace || null,
+        currentTrace: traceCandidate(run.pipeline, focusName)
       } : null,
       rankingCheck: expected.length ? {
         expectedCount: expected.length,
