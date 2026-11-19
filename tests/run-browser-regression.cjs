@@ -342,7 +342,13 @@ async function main() {
           regressionCompareDoesNotCountFailedRunAsRankingFailure: failedRegressionComparison.status === 'search-error' && failedRegressionComparison.pass === null,
           regressionBuilderRejectsFailedBaseline: refusesFailedBaseline,
           compareNormalizesCandidateNameWhitespaceAndCase: normalizedNameComparison.finalRanking.sharedCount === 1 && normalizedNameComparison.retrieval[0]?.sharedCount === 1,
-          compareIgnoresRequestObjectKeyOrder: Object.values(requestKeyOrderComparison.changes).every(value => value === false),
+          compareIgnoresRequestObjectKeyOrder: [
+            'sourceCardChanged', 'highlightsChanged', 'intentChanged', 'constraintsChanged',
+            'methodsChanged', 'orderingChanged', 'formatChanged', 'colorChanged',
+            'broadChanged', 'divergentChanged', 'plannedStreamsChanged', 'queryPlansChanged'
+          ].every(key => requestKeyOrderComparison.changes[key] === false) &&
+            requestKeyOrderComparison.changes.changedInputFields.length === 0 &&
+            requestKeyOrderComparison.changes.changedDerivedFields.length === 0,
           liveInspectorCapturesProgress: activeSearchBeforeFinish?.progress?.message === 'Searching for candidates',
           liveInspectorIgnoresStaleProgress: activeSearchBeforeFinish?.progress?.message !== 'STALE EVENT MUST BE IGNORED',
           liveInspectorCapturesStreamProgress: activeSearchBeforeFinish?.completedStreams === 1 && activeSearchBeforeFinish?.totalStreams === 2 && activeSearchBeforeFinish?.streams?.[0]?.done === true,
