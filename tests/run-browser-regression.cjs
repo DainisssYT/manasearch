@@ -481,6 +481,8 @@ async function main() {
           compareRunsSurfacesAbilityAwareFunctionScoreDelta: !!sharedScore?.scoreChannelChanges?.some(change => change.field === 'effectAwareFunctionSemanticScore' && Math.abs(change.delta - 0.5) < 1e-9),
           compareRunsSurfacesAbilityEvidenceScoreDelta: !!sharedScore?.scoreChannelChanges?.some(change => change.field === 'functionSemanticEvidence.effectAwareScore' && Math.abs(change.delta - 0.5) < 1e-9),
           compareRunsDetectsAbilityMatchIdentityChange: sharedScore?.functionSemanticEvidence?.abilityMatchesChanged === true && sharedScore.functionSemanticEvidence.laterMatches?.[0]?.candidateIndex === 1,
+          compareSummaryShowsAbilityMatchEvolution: compareSummaryText.includes('Matched ability change:') &&
+            compareSummaryText.includes('candidate ability 1') && compareSummaryText.includes('candidate ability 2'),
           computesRetrievalOverlap: comparison.retrieval.some(item => item.stream === 'Search B' && item.sharedCount === 1 && Math.abs(item.jaccard - (1 / 3)) < 1e-4),
           comparesResolvedRetrievalFailures: comparison.retrievalFailures?.earlierCount === 1 && comparison.retrievalFailures?.laterCount === 0 && comparison.retrievalFailures?.resolved?.[0]?.label === 'Semantic Index',
           historyIsArray: Array.isArray(history),
