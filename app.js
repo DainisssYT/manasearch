@@ -27919,24 +27919,49 @@ async function findSimilarCards() {
     // without changing what it resolves to.
     const totalTrackedStreams = plannedStreamLabels.length;
     let streamsSettled = 0;
-    const streamChecklistState = new Map(); // label -> done (boolean)
+    const streamChecklistState = new Map(); // label -> clean completion (boolean)
     const streamChecklistDetail = new Map(); // label -> current page/status detail
+    const streamChecklistStatus = new Map(); // waiting | running | completed | failed | completed_with_warnings
+    const streamFailureRecords = [];
+    const failedStreamLabels = new Set();
     plannedStreamLabels.forEach(label => {
         streamChecklistState.set(label, false);
+        streamChecklistStatus.set(label, 'waiting');
         streamChecklistDetail.set(label, 'Waiting to start');
     });
+    const recordRetrievalStreamFailure = (label, error) => {
+        if (requestId !== searchRequestId) return;
+        const safeLabel = String(label || 'Unknown retrieval stream');
+        const message = String(error?.message || error || 'Unknown retrieval error').slice(0, 420);
+        failedStreamLabels.add(safeLabel);
+        streamFailureRecords.push({ label: safeLabel, message, at: new Date().toISOString() });
+        const displayLabel = /^Search F #\\d+ \\(Functional Match\\)$/.test(safeLabel) ? 'Functional Match' : safeLabel;
+        if (streamChecklistState.has(displayLabel)) {
+            streamChecklistState.set(displayLabel, false);
+            streamChecklistStatus.set(displayLabel, 'failed');
+            streamChecklistDetail.set(displayLabel, `Failed — ${message}`);
+        }
+        renderStreamChecklist();
+    };
     function renderStreamChecklist() {
-        const streams = [...streamChecklistState.entries()].map(([label, done]) => ({
-            label,
-            done: Boolean(done),
-            detail: streamChecklistDetail.get(label) || (done ? 'Done' : 'Waiting')
-        }));
+        const streams = [...streamChecklistState.entries()].map(([label, done]) => {
+            const streamStatus = streamChecklistStatus.get(label) || (done ? 'completed' : 'waiting');
+            return {
+                label,
+                done: Boolean(done),
+                status: streamStatus,
+                failed: streamStatus === 'failed' || streamStatus === 'completed_with_warnings',
+                detail: streamChecklistDetail.get(label) || (done ? 'Done' : 'Waiting')
+            };
+        });
         try {
             window.dispatchEvent(new CustomEvent('manasearch:search-streams-updated', {
                 detail: {
                     requestId,
                     sourceName: currentSourceCard?.name || '',
-                    completedStreams: streams.filter(stream => stream.done).length,
+                    completedStreams: streams.filter(stream => stream.status === 'completed').length,
+                    failedStreams: streams.filter(stream => stream.status === 'failed').length,
+                    settledStreams: streams.filter(stream => ['completed', 'failed', 'completed_with_warnings'].includes(stream.status)).length,
                     totalStreams: streams.length,
                     streams,
                     at: Date.now()
@@ -27947,7 +27972,8 @@ async function findSimilarCards() {
         streamChecklistEl.innerHTML = '';
         streamChecklistState.forEach((done, label) => {
             const chip = document.createElement('span');
-            chip.className = `stream-chip${done ? ' stream-done' : ''}`;
+            const streamStatus = streamChecklistStatus.get(label) || (done ? 'completed' : 'waiting');
+            chip.className = `stream-chip${done ? ' stream-done' : ''}${streamStatus === 'failed' ? ' stream-failed' : streamStatus === 'completed_with_warnings' ? ' stream-warning' : ''}`;
             const labelSpan = document.createElement('span');
             labelSpan.className = 'stream-chip-label';
             labelSpan.textContent = label;
@@ -27973,13 +27999,18 @@ async function findSimilarCards() {
         const displayLabel = /^Search F #\d+ \(Functional Match\)$/.test(label)
             ? 'Functional Match'
             : label;
-        if (!streamChecklistState.has(displayLabel)) streamChecklistState.set(displayLabel, false);
+        if (!streamChecklistState.has(displayLabel)) {
+            streamChecklistState.set(displayLabel, false);
+            streamChecklistStatus.set(displayLabel, 'waiting');
+        }
+        if (streamChecklistStatus.get(displayLabel) !== 'failed') streamChecklistStatus.set(displayLabel, 'running');
         streamChecklistDetail.set(displayLabel, message || (kind === 'done' ? 'Done' : 'Working'));
         renderStreamChecklist();
     };
 
     const trackStream = (promise, label) => {
         streamChecklistState.set(label, false);
+        streamChecklistStatus.set(label, 'running');
         streamChecklistDetail.set(label, 'Starting');
         renderStreamChecklist();
         return promise.then(r => {
@@ -27988,12 +28019,14 @@ async function findSimilarCards() {
             // search's chips or make its aggregate progress counter inaccurate.
             if (requestId !== searchRequestId) return r;
             streamsSettled++;
-            streamChecklistState.set(label, true);
+            const alreadyFailed = failedStreamLabels.has(label) || streamChecklistStatus.get(label) === 'failed';
+            streamChecklistState.set(label, !alreadyFailed);
+            streamChecklistStatus.set(label, alreadyFailed ? 'failed' : 'completed');
             const coverage = r?.coverage;
             const detail = coverage
                 ? `Done • ${coverage.pagesFetched}/${coverage.maxPages} pages • ${coverage.retrievedCount} cards`
                 : 'Done';
-            streamChecklistDetail.set(label, detail);
+            if (!alreadyFailed) streamChecklistDetail.set(label, detail);
             // Stream completions can arrive while a Related Search owns the result view. Update
             // the hidden main-search bookkeeping, but don't repaint or replace the active view's
             // progress text for a background request.
@@ -28035,7 +28068,7 @@ async function findSimilarCards() {
                 ? retrieveLocalFirst(localExactQueries, searchA_Query, {
                     label: 'Exact Phrase', fallbackMaxPages: benchmarkPageCap, limit: isBroadSearch ? 320 : 220,
                     excludeName: currentSourceCard.name, filters, broadFallbackFilters, highlights: searchHighlightsSnapshot
-                }).catch(() => [])
+                }).catch(error => { recordRetrievalStreamFailure('Exact Phrase', error); return []; })
                 : Promise.resolve([])),
             "Exact Phrase"
         );
@@ -28384,7 +28417,7 @@ async function findSimilarCards() {
                 ? retrieveLocalFirst([cleanKeywords.join(' ')], searchB_Query, {
                     label: 'Oracle Terms', fallbackMaxPages: searchBMaxPages, limit: isBroadSearch ? 360 : 240,
                     excludeName: currentSourceCard.name, filters, broadFallbackFilters, highlights: searchHighlightsSnapshot
-                }).catch(() => [])
+                }).catch(error => { recordRetrievalStreamFailure('Oracle Terms', error); return []; })
                 : Promise.resolve([])),
             "Oracle Terms"
         );
@@ -28395,7 +28428,7 @@ async function findSimilarCards() {
                 ? retrieveLocalFirst(activeTags, searchC_Query, {
                     label: 'Mechanics/Tags', fallbackMaxPages: benchmarkPageCap, limit: isBroadSearch ? 360 : 240,
                     excludeName: currentSourceCard.name, filters, broadFallbackFilters, highlights: searchHighlightsSnapshot
-                }).catch(() => [])
+                }).catch(error => { recordRetrievalStreamFailure('Mechanics/Tags', error); return []; })
                 : Promise.resolve([])),
             "Mechanics/Tags"
         );
@@ -28423,7 +28456,7 @@ async function findSimilarCards() {
                 ? retrieveLocalFirst([primaryType || '', sourceRoleProfileForFloor?.kind || '', ...activeTags], searchE_Query, {
                     label: 'Broader Mechanical', fallbackMaxPages: benchmarkPageCap, limit: isBroadSearch ? 320 : 220,
                     excludeName: currentSourceCard.name, filters, broadFallbackFilters, highlights: searchHighlightsSnapshot
-                }).catch(() => [])
+                }).catch(error => { recordRetrievalStreamFailure('Broader Mechanical', error); return []; })
                 : Promise.resolve([])),
             "Broader Mechanical"
         );
@@ -28439,7 +28472,7 @@ async function findSimilarCards() {
                     ? retrieveLocalFirst([broadSourceText], broadOracleQuery, {
                         label: 'Broad Retrieval', fallbackMaxPages: broadSearchMaxPages, limit: 520,
                         excludeName: currentSourceCard.name, filters, broadFallbackFilters, highlights: searchHighlightsSnapshot
-                    }).catch(() => [])
+                    }).catch(error => { recordRetrievalStreamFailure('Broad Retrieval', error); return []; })
                     : Promise.resolve([])),
                 "Broad Retrieval"
             )
@@ -28452,7 +28485,7 @@ async function findSimilarCards() {
                 retrieveLocalFirst(sharedLocalQueries, sharedSourceTextQuery, {
                     label: 'Shared Source Text', fallbackMaxPages: benchmarkPageCap, limit: 420,
                     excludeName: currentSourceCard.name, filters, broadFallbackFilters, highlights: searchHighlightsSnapshot
-                }).catch(() => []),
+                }).catch(error => { recordRetrievalStreamFailure('Shared Source Text', error); return []; }),
                 "Shared Source Text"
             )
             : Promise.resolve([]);
@@ -28480,7 +28513,7 @@ async function findSimilarCards() {
             const p = retrieveLocalFirst(localQueries, q.query, {
                 label: streamLabel, fallbackMaxPages: benchmarkPageCap, limit: isBroadSearch ? 320 : 220,
                 excludeName: currentSourceCard.name, filters, broadFallbackFilters, highlights: searchHighlightsSnapshot
-            }).catch(() => []);
+            }).catch(error => { recordRetrievalStreamFailure(streamLabel, error); return []; });
             trackPreviewMerge(p, `functional match ${idx + 1}`);
             return p;
         });
@@ -28492,10 +28525,12 @@ async function findSimilarCards() {
                 const totalPages = sets.reduce((sum, r) => sum + (r?.coverage?.pagesFetched || 0), 0);
                 const maxPages = sets.reduce((sum, r) => sum + (r?.coverage?.maxPages || 0), 0);
                 const totalCards = sets.reduce((sum, r) => sum + (r?.length || 0), 0);
-                streamChecklistState.set('Functional Match', true);
+                const failedFunctionalQueries = streamFailureRecords.filter(item => /^Search F #\\d+ \\(Functional Match\\)$/.test(item.label)).length;
+                streamChecklistState.set('Functional Match', failedFunctionalQueries === 0);
+                streamChecklistStatus.set('Functional Match', failedFunctionalQueries ? 'completed_with_warnings' : 'completed');
                 streamChecklistDetail.set(
                     'Functional Match',
-                    `Done • ${totalQueries} queries • ${totalPages}/${maxPages || totalPages} pages • ${totalCards} cards`
+                    `Done • ${totalQueries} queries • ${totalPages}/${maxPages || totalPages} pages • ${totalCards} cards${failedFunctionalQueries ? ` • ${failedFunctionalQueries} query failure(s)` : ''}`
                 );
                 renderStreamChecklist();
                 updateProgress(1, totalSteps, `Retrieval in progress — ${streamsSettled}/${totalTrackedStreams} search streams finished; Functional Match finished.`);
@@ -28508,7 +28543,7 @@ async function findSimilarCards() {
                 retrieveLocalFirst([q.query.match(/\"([^\"]+)\"/)?.[1] || q.query], q.query, {
                     label: streamLabel, fallbackMaxPages: benchmarkPageCap, limit: 260,
                     excludeName: currentSourceCard.name, filters, broadFallbackFilters, highlights: searchHighlightsSnapshot
-                }).catch(() => []),
+                }).catch(error => { recordRetrievalStreamFailure(streamLabel, error); return []; }),
                 streamLabel
             );
             trackPreviewMerge(p, `exact highlight ${idx + 1}`);
@@ -28522,7 +28557,7 @@ async function findSimilarCards() {
                 retrieveLocalFirst(extractLocalRetrievalAlternativesFromQuery(query), query, {
                     label, fallbackMaxPages: benchmarkPageCap, limit: isBroadSearch ? 320 : 220,
                     excludeName: currentSourceCard.name, filters, broadFallbackFilters, highlights: searchHighlightsSnapshot
-                }).catch(() => []),
+                }).catch(error => { recordRetrievalStreamFailure(label, error); return []; }),
                 label
             );
             trackPreviewMerge(promise, key);
@@ -28698,6 +28733,7 @@ async function findSimilarCards() {
                     hydrated
                 };
             } catch (error) {
+                recordRetrievalStreamFailure('Semantic Index', error);
                 console.info('Search G semantic retrieval unavailable; continuing with non-semantic retrieval:', error?.message || error);
                 return { index: null, queryVector: null, semanticRetrievalVector: null, oracleVectors: [], semanticRetrievalVectors: [], matches: [], hydrated: [] };
             }
@@ -29493,6 +29529,7 @@ if (candidates.length > 0) {
         finalResults: candidates.length,
         streams: streamDiagnostics,
         streamCoverage,
+        streamFailures: streamFailureRecords.slice(),
         searchFQueryDetail,
         exactHighlightQueryDetail,
         timings,
@@ -29556,6 +29593,7 @@ if (candidates.length > 0) {
         finalResults: 0,
         streams: streamDiagnostics,
         streamCoverage,
+        streamFailures: streamFailureRecords.slice(),
         searchFQueryDetail,
         exactHighlightQueryDetail,
         timings,
@@ -29589,6 +29627,11 @@ if (candidates.length > 0) {
         pipelineCompleted = true;
         activeSearchStreamProgressReporter = null;
         updateProgress(3, totalSteps, `Finalizing results — ranking complete; found ${Array.isArray(lastSearchResults) ? lastSearchResults.length : 0} final matches.`);
+        if (streamFailureRecords.length && searchOutcome === 'completed') {
+            searchOutcome = 'completed_with_warnings';
+            const examples = streamFailureRecords.slice(0, 4).map(item => `${item.label}: ${item.message}`);
+            searchErrorMessage = `${streamFailureRecords.length} retrieval lane(s) failed and used fallback results. ${examples.join(' | ')}`;
+        }
         clearTimeout(searchTimeoutId);
         if (previewRenderTimer) { clearTimeout(previewRenderTimer); previewRenderTimer = null; }
         previewRenderDirty = false;
@@ -29596,6 +29639,19 @@ if (candidates.length > 0) {
         const renderStartedAt = Date.now();
         renderResults(lastSearchResults);
         updateResultsSummary();
+        try {
+            window.dispatchEvent(new CustomEvent('manasearch:search-preview-updated', {
+                detail: {
+                    requestId,
+                    phase: 'final-ranking',
+                    sourceLabel: 'Authoritative final ranking',
+                    provisional: false,
+                    resultCount: Array.isArray(lastSearchResults) ? lastSearchResults.length : 0,
+                    topNames: (lastSearchResults || []).slice(0, 10).map(card => card?.name || '').filter(Boolean),
+                    at: Date.now()
+                }
+            }));
+        } catch (_) {}
 
         // Search G has already been executed as part of the main candidate pool. The old
         // post-render scan of the same static index was removed because it duplicated work and
