@@ -183,11 +183,13 @@
   const runLabel = run => {
     const source = run?.pipeline?.request?.sourceCard?.name || run?.summary?.sourceName || 'Unknown source';
     const resultCount = run?.summary?.resultCount ?? run?.pipeline?.finalResults?.length ?? 0;
+    const provisionalCount = run?.summary?.provisionalResultCount ?? run?.liveSearch?.provisionalResultCount ?? 0;
     const outcome = run?.status || run?.summary?.status || run?.pipeline?.outcome?.status || 'completed';
     const outcomeLabel = outcome === 'error' ? 'ERROR'
       : outcome === 'completed_with_warnings' ? 'PARTIAL'
         : outcome === 'running' ? 'RUNNING' : 'OK';
-    return '#' + (run?.number ?? '?') + ' [' + outcomeLabel + '] ' + source + ' — ' + resultCount + ' results — ' + new Date(run?.completedAt || 0).toLocaleTimeString();
+    const resultLabel = resultCount + ' final result(s)' + (provisionalCount > 0 ? ' + ' + provisionalCount + ' provisional' : '');
+    return '#' + (run?.number ?? '?') + ' [' + outcomeLabel + '] ' + source + ' — ' + resultLabel + ' — ' + new Date(run?.completedAt || 0).toLocaleTimeString();
   };
   const compareRuns = (earlier, later) => {
     if (!earlier || !later) return { message: 'Select two retained searches to compare. At least two searches are required.' };
@@ -347,6 +349,8 @@
         laterStatus: bStatus,
         earlierResultCount: earlier.summary?.resultCount ?? aFinal.length,
         laterResultCount: later.summary?.resultCount ?? bFinal.length,
+        earlierProvisionalResultCount: earlier.summary?.provisionalResultCount ?? earlier.liveSearch?.provisionalResultCount ?? 0,
+        laterProvisionalResultCount: later.summary?.provisionalResultCount ?? later.liveSearch?.provisionalResultCount ?? 0,
         earlierError: aError,
         laterError: bError,
         rankingComparisonValid: aStatus === 'completed' && bStatus === 'completed',
@@ -469,6 +473,10 @@
       'Later run:   #' + (comparison.later?.number ?? '?') + ' — ' + (outcome.laterStatus || comparison.later?.status || 'unknown') + ' — ' + (outcome.laterResultCount ?? 0) + ' results'
     ];
     if (outcome.note) lines.push('Validity: ' + outcome.note);
+    if (outcome.earlierProvisionalResultCount > 0 || outcome.laterProvisionalResultCount > 0) {
+      lines.push('Provisional cards still visible: earlier ' + (outcome.earlierProvisionalResultCount || 0) +
+        ' → later ' + (outcome.laterProvisionalResultCount || 0) + ' (not included in final ranking counts)');
+    }
     const changedInputs = comparison.changes?.changedInputFields || [];
     const changedDerived = comparison.changes?.changedDerivedFields || [];
     lines.push('Changed user inputs: ' + (changedInputs.length ? changedInputs.join(', ') : 'none'));
