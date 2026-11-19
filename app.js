@@ -8594,7 +8594,7 @@ function deriveCanonicalFunction(effect) {
     const includePreviousRuleContext = a === 'put' && (
         (effect.to === 'battlefield' && previousRuleSearchesForLands) || delayedTopLibraryAcquisition
     );
-    const ruleContext = [localRuleContext, includePreviousRuleContext ? previousRuleText : ''].filter(Boolean).join(' ').trim();
+    const ruleContext = [includePreviousRuleContext ? previousRuleText : '', localRuleContext].filter(Boolean).join(' ').trim();
     const lowerRuleContext = ruleContext.toLowerCase();
     const topLibraryPattern = /\btop\s+(?:(?:one|two|three|four|five|six|seven|eight|nine|ten|\d+)\s+)?cards?\s+of\s+(?:your|their|that player(?:'s)?|that opponent(?:'s)?|an opponent(?:'s)?|a player(?:'s)?)\s+library\b/i;
     const directlyExilesTopLibrary = /\bexiles?\s+(?:the\s+)?top\s+(?:(?:one|two|three|four|five|six|seven|eight|nine|ten|\d+)\s+)?cards?\s+of\s+(?:your|their|that player(?:'s)?|that opponent(?:'s)?|an opponent(?:'s)?|a player(?:'s)?)\s+library\b/i.test(ruleContext);
