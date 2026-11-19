@@ -353,7 +353,7 @@ check('Pages publishes the shared semantic module and browser tests serve ESM wi
 
 check('developer inspector observes the production pipeline without changing scoring', () => {
   execFileSync(process.execPath, ['--check'], { input: inspector, stdio: ['pipe', 'pipe', 'pipe'] });
-  assert.match(html, /search-inspector\.js\?v=20261119-159/);
+  assert.match(html, /search-inspector\.js\?v=20261119-160/);
   assert.match(html, /search-inspector\.css\?v=20261119-140/);
   assert.match(app, /window\.ManaSearchDebug = Object\.freeze\(/);
   assert.match(app, /appBuild: MANASEARCH_APP_BUILD/);
@@ -425,7 +425,7 @@ check('developer inspector observes the production pipeline without changing sco
   assert.match(app, /functionSemanticEvidence/);
   assert.match(app, /effect-aware-function-score-uses-counter-ability-without-dilution-from-land-bounce-rider/);
   assert.match(app, /effect-aware-function-matching-is-one-to-one-across-compound-source-intent/);
-  assert.match(inspector, /functionSemanticEvidence: candidate\\.functionSemanticEvidence/);
+  assert.match(inspector, /functionSemanticEvidence: candidate\.functionSemanticEvidence/);
   assert.match(browserTests, /compareRunsSurfacesAbilityAwareFunctionScoreDelta/);
   assert.match(browserTests, /traceShowsAbilityAwareSemanticEvidence/);
   assert.match(browserTests, /effectAwareCounterEvidenceCaptured/);
