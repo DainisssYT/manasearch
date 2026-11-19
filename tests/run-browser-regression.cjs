@@ -135,7 +135,7 @@ async function main() {
           filterRejections: [{ name: 'Filtered Card', reasons: ['exact highlight mismatch'] }],
           candidates: [{
             name: 'Shared Card', preFloorRank: 1, scores: { mechanicalScore: 0.8, similarityScore: 0.75 },
-            rankingEvidence: { mechanical: 0.8, highlightIntent: 0.9 }, retrievalEvidence: ['Search B']
+            rankingEvidence: { mechanical: 0.8, highlightIntent: 0.9 }, mechanicalBreakdown: { graphScore: 0.82, relationshipMismatch: 0.1 }, retrievalEvidence: ['Search B']
           }],
           finalResults: [{ name: 'Shared Card', rank: 1, similarityScore: 0.75, flags: { weakBackfill: false } }],
           rankingEvidenceTop: [{ name: 'Shared Card', rank: 1, overall: 0.75 }]
@@ -152,6 +152,7 @@ async function main() {
           traceShowsRetrievalProvenance: candidateTrace.retrieval.streams.includes('Search B'),
           traceShowsStageProgression: candidateTrace.stages.find(stage => stage.stage === 'scored')?.present === true,
           traceShowsScoreBreakdown: candidateTrace.scoring?.scores?.mechanicalScore === 0.8 && candidateTrace.scoring?.rankingEvidence?.highlightIntent === 0.9,
+          traceShowsMechanicalBreakdown: candidateTrace.scoring?.mechanicalBreakdown?.graphScore === 0.82,
           traceShowsFinalRank: candidateTrace.finalRanking?.rank === 1,
           traceShowsFilterRejection: filteredTrace.possibleHardFilterRejection?.reasons?.includes('exact highlight mismatch') === true,
           detectsChangedHighlight: comparison.changes.highlightsChanged === true,
