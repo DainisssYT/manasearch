@@ -158,8 +158,9 @@
       if (!windowEl.hidden) render();
     }
   }, true);
-  const observer = new MutationObserver(() => {
-    if (!windowEl.hidden && activeTab === 'live') render();
+  const observer = new MutationObserver(records => {
+    // Ignore our own panel updates to avoid a self-triggering observer loop.
+    if (records.some(record => !panel.contains(record.target)) && !windowEl.hidden && activeTab === 'live') render();
   });
   observer.observe(document.body, { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ['class', 'hidden', 'aria-busy'] });
   addEvent('inspector:ready', { note: 'Diagnostics are read-only; ranking and retrieval are not modified.' });
