@@ -654,7 +654,7 @@
         lines.push('  [' + marker + '] ' + stream.label + ': ' + clip(stream.detail, 200));
       });
     }
-    if (live.provisionalResultCount > 0 && ['error', 'completed_with_warnings'].includes(live.status)) {
+    if (live.provisionalResultCount > 0 && ['error', 'cancelled', 'completed_with_warnings'].includes(live.status)) {
       lines.push('Provisional results still visible: ' + live.provisionalResultCount + ' (not a complete final ranking)');
     }
     if (live.preview) {
@@ -678,13 +678,20 @@
   const formatCompareSummary = comparison => {
     if (!comparison || comparison.message) return String(comparison?.message || 'No comparison is available.');
     const outcome = comparison.outcomeComparison || {};
-    const controlled = outcome.comparableForAlgorithmRegression === true;
+    const algorithmComparison = outcome.comparableForAlgorithmRegression === true;
+    const repeatabilityComparison = outcome.comparableForRepeatability === true;
     const valid = outcome.rankingComparisonAvailable === true;
+    const comparisonLabel = algorithmComparison ? 'CONTROLLED ALGORITHM-REVISION COMPARISON'
+      : repeatabilityComparison ? 'SAME-BUILD REPEATABILITY CHECK'
+        : outcome.comparisonMode === 'data-revision' ? 'DATASET REVISION COMPARISON'
+          : outcome.comparisonMode === 'mixed-code-and-data-revision' ? 'MIXED CODE + DATASET CHANGE'
+            : outcome.comparisonMode === 'user-input-change' ? 'EXPLORATORY — USER INPUTS CHANGED'
+              : outcome.comparisonMode === 'version-unknown' ? 'DESCRIPTIVE — APP/DATA REVISION UNKNOWN'
+                : valid ? 'EXPLORATORY — RUN HEALTH OR INPUT SNAPSHOT DIFFERS'
+                  : 'INVALID — NO TWO AUTHORITATIVE FINAL RANKINGS';
     const lines = [
       'COMPARE RUNS SUMMARY',
-      'Comparison type: ' + (controlled ? 'CONTROLLED ALGORITHM COMPARISON'
-        : valid ? 'EXPLORATORY / INPUTS OR RUN HEALTH DIFFER'
-          : 'INVALID — ONE OR MORE RUNS FAILED'),
+      'Comparison type: ' + comparisonLabel,
       'Earlier run: #' + (comparison.earlier?.number ?? '?') + ' — ' + (outcome.earlierStatus || comparison.earlier?.status || 'unknown') + ' — ' + (outcome.earlierResultCount ?? 0) + ' results',
       'Later run:   #' + (comparison.later?.number ?? '?') + ' — ' + (outcome.laterStatus || comparison.later?.status || 'unknown') + ' — ' + (outcome.laterResultCount ?? 0) + ' results'
     ];
