@@ -1,6 +1,6 @@
 /* ManaSearch build 20261119-145 */
 // ManaSearch deployment build marker. Bump this whenever app.js changes so cached-module issues are easy to diagnose.
-const MANASEARCH_APP_BUILD = '20261119-148';
+const MANASEARCH_APP_BUILD = '20261119-149';
 console.info(`[ManaSearch] app.js build ${MANASEARCH_APP_BUILD}`);
 
 // The source-query and static-index builders share one representation so both sides
@@ -33599,6 +33599,7 @@ window.ManaSearchDebug = Object.freeze({
         }));
         return {
             capturedAt: new Date().toISOString(),
+            appBuild: MANASEARCH_APP_BUILD,
             outcome: lastMainSearchOutcome ? { ...lastMainSearchOutcome } : null,
             request: context, funnel, streams,
             streamCoverage: diagnostics?.streamCoverage || null,
