@@ -29070,7 +29070,7 @@ if (candidates.length > 0) {
     // Preserve the top 300 from the real scored pool after its existing score sort, before the
     // relevance floor removes weaker candidates. This adds no second scoring pass or new sort.
     lastSearchScoredCandidates = candidates.slice(0, 300).map((card, index) => {
-        const scoreFields = ['similarityScore','unclampedSimilarityScore','similarityBeforeCadenceAdjustment','mechanicalScore','contextScore','oracleSemanticScore','functionScore','functionalSimilarityScore','synergyScore','exactnessScore','categoryScore','roleScore','highlightIntentScore','effectCoverageScore','primaryEffectMatchScore','modalModeSimilarityScore','rankingRefinementSignal','calibratedBlendScore','mechanicalConfidence','parseConfidence','constraintPreferenceScore','acquisitionCadenceRankFactor','quantitativeConflictPenalty'];
+        const scoreFields = ['similarityScore','unclampedSimilarityScore','similarityBeforeCadenceAdjustment','mechanicalScore','contextScore','oracleSemanticScore','functionScore','functionalSimilarityScore','synergyScore','exactnessScore','categoryScore','roleScore','highlightIntentScore','effectCoverageScore','primaryEffectMatchScore','modalModeSimilarityScore','rankingRefinementSignal','calibratedBlendScore','mechanicalConfidence','parseConfidence','quantitySimilarityScore','balancedEffectCoverage','proximityScore','constraintPreferenceScore','acquisitionCadenceRankFactor','quantitativeConflictPenalty'];
         const scores = {};
         for (const key of scoreFields) if (card?.[key] !== undefined) scores[key] = card[key];
         const evidence = card?.rankingEvidence || {};
@@ -29093,9 +29093,34 @@ if (candidates.length > 0) {
                 channelScore: evidence.channelScore ?? null
             },
             mechanicalBreakdown: card?.mechanicalBreakdown ? {
+                rawScore: card.mechanicalBreakdown.rawScore ?? null,
+                structuralScore: card.mechanicalBreakdown.structuralScore ?? null,
+                graphScore: card.mechanicalBreakdown.graphScore ?? null,
+                universalScore: card.mechanicalBreakdown.universalScore ?? null,
                 relationshipMismatch: card.mechanicalBreakdown.relationshipMismatch ?? null,
                 repeatabilityMismatch: card.mechanicalBreakdown.repeatabilityMismatch ?? null,
+                relationshipFactor: card.mechanicalBreakdown.relationshipFactor ?? null,
+                repeatabilityFactor: card.mechanicalBreakdown.repeatabilityFactor ?? null,
+                graphSourceCoverage: card.mechanicalBreakdown.graphSourceCoverage ?? null,
+                graphCandidateCoverage: card.mechanicalBreakdown.graphCandidateCoverage ?? null,
+                graphBalancedCoverage: card.mechanicalBreakdown.graphBalancedCoverage ?? null,
+                graphOrderScore: card.mechanicalBreakdown.graphOrderScore ?? null,
+                graphContradiction: card.mechanicalBreakdown.graphContradiction ?? null,
+                graphMatches: Array.isArray(card.mechanicalBreakdown.graphMatches) ? card.mechanicalBreakdown.graphMatches.slice(0, 12) : [],
+                graphEvidence: Array.isArray(card.mechanicalBreakdown.graphEvidence) ? card.mechanicalBreakdown.graphEvidence.slice(0, 12) : [],
                 explicitContrast: card.mechanicalBreakdown.explicitContrast ?? null
+            } : null,
+            mechanicalEvidence: card?.mechanicalEvidence ? {
+                universal: card.mechanicalEvidence.universal ?? null,
+                graph: card.mechanicalEvidence.graph ?? null,
+                evidence: Array.isArray(card.mechanicalEvidence.evidence) ? card.mechanicalEvidence.evidence.slice(0, 12) : [],
+                consensus: Boolean(card.mechanicalEvidence.consensus),
+                referenceName: card.mechanicalEvidence.referenceName || ''
+            } : null,
+            effectCoverage: card?.effectCoverageProfile ? {
+                sourceCoverage: card.effectCoverageProfile.sourceCoverage ?? null,
+                balancedCoverage: card.effectCoverageProfile.balancedCoverage ?? null,
+                primaryMatch: card.effectCoverageProfile.primaryMatch ?? null
             } : null,
             parse: { confidence: card?.parseConfidence ?? null, fieldConfidence: card?.fieldConfidence?.overall ?? null, meaningful: Number(card?.parseConfidence) > 0 },
             rankingIntent: card?.rankingIntent ?? card?._rankingIntent?.kind ?? null,
