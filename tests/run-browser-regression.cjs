@@ -66,7 +66,9 @@ async function main() {
       typeof window.runManaSearchPerformanceSuite === 'function' &&
       typeof window.runManaSearchRealCardBenchmarkSuite === 'function' &&
       typeof window.runManaSearchRealCardBenchmark === 'function' &&
-      typeof window.runManaSearchIntentRegressionSuite === 'function',
+      typeof window.runManaSearchIntentRegressionSuite === 'function' &&
+      typeof window.ManaSearchDebug?.getSnapshot === 'function' &&
+      !!document.getElementById('mana-search-inspector'),
       null, { timeout: 60000 }
       );
     } catch (error) {
@@ -86,7 +88,11 @@ async function main() {
       // JSON fixture on this same test server; scoring remains local and deterministic.
       realCardBenchmark: await window.runManaSearchRealCardBenchmark({ log: false }),
       // Also exercise the suite-named public console entry point with no fixture argument.
-      realCardBenchmarkSuiteNoArgs: await window.runManaSearchRealCardBenchmarkSuite({ log: false })
+      realCardBenchmarkSuiteNoArgs: await window.runManaSearchRealCardBenchmarkSuite({ log: false }),
+      developerDiagnostics: (() => {
+        const snapshot = window.ManaSearchDebug.getSnapshot();
+        return { available: !!snapshot && typeof snapshot === 'object', serializable: JSON.stringify(snapshot).length > 0, hasPipelineFields: ['request', 'funnel', 'streams', 'candidates', 'filterRejections'].every(key => Object.prototype.hasOwnProperty.call(snapshot, key)) };
+      })()
     }));
     const summarize = (label, suite) => {
       if (suite?.checks) {
@@ -131,6 +137,8 @@ async function main() {
         pairCount: report.realCardBenchmarkSuiteNoArgs?.pairCount
       })
     ];
+    console.log('Developer inspector API:', JSON.stringify(report.developerDiagnostics));
+    suitePasses.push(report.developerDiagnostics?.available === true && report.developerDiagnostics?.serializable === true && report.developerDiagnostics?.hasPipelineFields === true);
     console.log('Mechanical scorer performance:', JSON.stringify(report.performance));
     suitePasses.push(report.performance?.pass === true);
     if (!report.performance?.pass) console.error('Performance suite failed: invalid scores, errors, or runtime threshold exceeded.');
