@@ -103,6 +103,12 @@ async function main() {
           completedAt: '2026-11-19T08:00:00.000Z',
           pipeline: {
             request: { sourceCard: { name: 'Source A' }, highlights: [{ text: 'draw a card' }], intent: { sourceText: 'draw a card', semanticText: 'draw a card' }, constraints: {}, methods: { functional: true }, ordering: 'overall' },
+            funnel: { stages: {
+              retrieved: ['Shared Card', 'Removed Card'], passedFilters: ['Shared Card', 'Removed Card'],
+              deduplicated: ['Shared Card', 'Removed Card'], meaningfulParse: ['Shared Card', 'Removed Card'],
+              scored: ['Shared Card', 'Removed Card'], passedRelevanceFloor: ['Shared Card', 'Removed Card'],
+              finalRanked: ['Shared Card', 'Removed Card']
+            } },
             streams: { 'Search B': ['shared card', 'removed card'] },
             finalResults: [{ rank: 1, name: 'Shared Card' }, { rank: 2, name: 'Removed Card' }],
             candidates: [
@@ -116,6 +122,12 @@ async function main() {
           completedAt: '2026-11-19T08:01:00.000Z',
           pipeline: {
             request: { sourceCard: { name: 'Source A' }, highlights: [{ text: 'draw two cards' }], intent: { sourceText: 'draw two cards', semanticText: 'draw two cards' }, constraints: {}, methods: { functional: true }, ordering: 'overall' },
+            funnel: { stages: {
+              retrieved: ['Shared Card', 'Added Card'], passedFilters: ['Shared Card', 'Added Card'],
+              deduplicated: ['Shared Card', 'Added Card'], meaningfulParse: ['Shared Card', 'Added Card'],
+              scored: ['Shared Card', 'Added Card'], passedRelevanceFloor: ['Shared Card', 'Added Card'],
+              finalRanked: ['Added Card', 'Shared Card']
+            } },
             streams: { 'Search B': ['shared card', 'added card'] },
             finalResults: [{ rank: 1, name: 'Added Card' }, { rank: 2, name: 'Shared Card' }],
             candidates: [
@@ -206,10 +218,10 @@ async function main() {
         }));
         window.dispatchEvent(new CustomEvent('manasearch:search-streams-updated', {
           detail: {
-            requestId: 9001, completedStreams: 1, totalStreams: 2,
+            requestId: 9001, completedStreams: 1, failedStreams: 1, settledStreams: 2, totalStreams: 2,
             streams: [
-              { label: 'Exact Phrase', done: true, detail: 'Done · 1 page · 4 cards' },
-              { label: 'Semantic Index', done: false, detail: 'Searching vectors' }
+              { label: 'Exact Phrase', done: true, status: 'completed', failed: false, detail: 'Done · 1 page · 4 cards' },
+              { label: 'Semantic Index', done: false, status: 'failed', failed: true, detail: 'Failed — worker unavailable' }
             ]
           }
         }));
@@ -218,6 +230,9 @@ async function main() {
         }));
         window.dispatchEvent(new CustomEvent('manasearch:progress-updated', {
           detail: { requestId: 9000, step: 2, total: 3, message: 'STALE EVENT MUST BE IGNORED', at: 1200 }
+        }));
+        window.dispatchEvent(new CustomEvent('manasearch:search-preview-updated', {
+          detail: { requestId: 9001, phase: 'final-ranking', sourceLabel: 'Authoritative final ranking', provisional: false, resultCount: 1, topNames: ['Shared Card'], at: 1300 }
         }));
         const activeSearchBeforeFinish = window.ManaSearchInspector.getActiveSearch();
         window.dispatchEvent(new CustomEvent('manasearch:search-finished', {
@@ -336,7 +351,11 @@ async function main() {
           regressionAllowsDerivedIntentEvolution: derivedIntentReport.inputCheck?.matches === true && derivedIntentReport.derivedRequestChanges.includes('intent') && derivedIntentReport.pass === true,
           compareReportsChangedDerivedSearchPlanSeparately: derivedPlanRunComparison.changes.intentChanged === true && derivedPlanRunComparison.changes.queryPlansChanged === true && derivedPlanRunComparison.changes.changedInputFields.length === 0 && derivedPlanRunComparison.changes.changedDerivedFields.includes('intent'),
           compareMarksFailedRunInvalid: errorRunComparison.outcomeComparison?.rankingComparisonValid === false && errorRunComparison.outcomeComparison?.laterStatus === 'error',
-          compareMarksPartialRunIncomplete: partialRunComparison.outcomeComparison?.rankingComparisonValid === true && partialRunComparison.outcomeComparison?.rankingComparisonComplete === false,
+          compareMarksPartialRunIncomplete: partialRunComparison.outcomeComparison?.rankingComparisonValid === false && partialRunComparison.outcomeComparison?.rankingComparisonAvailable === true && partialRunComparison.outcomeComparison?.rankingComparisonComplete === false,
+          compareShowsPipelineStageRecallChanges: comparison.stageProgression.find(stage => stage.stage === 'retrieved')?.addedInLater.includes('Added Card') && comparison.stageProgression.find(stage => stage.stage === 'retrieved')?.missingFromLater.includes('Removed Card'),
+          compareShowsScoredSampleTurnover: comparison.scoredCandidateEvolution?.newlyPresentInSample.includes('Added Card') && comparison.scoredCandidateEvolution?.noLongerPresentInSample.includes('Removed Card') && comparison.scoredCandidateEvolution?.sampleLimit === 300,
+          compareShowsTopKOverlapAndCaptureLimit: comparison.finalRanking?.topKOverlap?.find(item => item.k === 10)?.overlap === 0.1 && comparison.finalRanking?.capturedLimit === 100,
+          compareFlagsChangedInputsAsUncontrolled: comparison.outcomeComparison?.sameUserInputs === false && comparison.outcomeComparison?.comparableForAlgorithmRegression === false,
           regressionCompareTreatsPartialRunAsNoVerdict: partialRegressionComparison.status === 'partial-run' && partialRegressionComparison.pass === null && partialRegressionComparison.comparedRun?.warning === 'Semantic stream timed out',
           compareShowsScoreChannelAndMechanicalBreakdownChanges: comparison.sharedCandidateScoreChanges.some(item => item.name === 'Shared Card' && item.scoreChannelChanges?.some(change => change.field === 'mechanicalScore' && Math.abs(change.delta - 0.1) < 1e-9) && item.mechanicalBreakdownChanges?.some(change => change.field === 'graphScore' && Math.abs(change.delta - 0.15) < 1e-9)),
           regressionCompareDoesNotCountFailedRunAsRankingFailure: failedRegressionComparison.status === 'search-error' && failedRegressionComparison.pass === null,
@@ -351,10 +370,11 @@ async function main() {
             requestKeyOrderComparison.changes.changedDerivedFields.length === 0,
           liveInspectorCapturesProgress: activeSearchBeforeFinish?.progress?.message === 'Searching for candidates',
           liveInspectorIgnoresStaleProgress: activeSearchBeforeFinish?.progress?.message !== 'STALE EVENT MUST BE IGNORED',
-          liveInspectorCapturesStreamProgress: activeSearchBeforeFinish?.completedStreams === 1 && activeSearchBeforeFinish?.totalStreams === 2 && activeSearchBeforeFinish?.streams?.[0]?.done === true,
-          liveInspectorCapturesProvisionalResults: activeSearchBeforeFinish?.preview?.phase === 'progressive-preview' && activeSearchBeforeFinish?.preview?.topNames?.includes('Shared Card'),
+          liveInspectorCapturesStreamProgress: activeSearchBeforeFinish?.completedStreams === 1 && activeSearchBeforeFinish?.failedStreams === 1 && activeSearchBeforeFinish?.settledStreams === 2 && activeSearchBeforeFinish?.totalStreams === 2 && activeSearchBeforeFinish?.streams?.[0]?.done === true && activeSearchBeforeFinish?.streams?.[1]?.failed === true,
+          liveInspectorCapturesProvisionalResults: activeSearchBeforeFinish?.previewHistory?.some(item => item.phase === 'progressive-preview' && item.provisional === true && item.topNames?.includes('Shared Card')),
+          liveInspectorCapturesFinalRanking: activeSearchBeforeFinish?.preview?.phase === 'final-ranking' && activeSearchBeforeFinish?.preview?.provisional === false,
           liveInspectorStoresWarningOutcome: telemetryRun?.status === 'completed_with_warnings' && telemetryRun?.durationMs === 3200,
-          liveInspectorStoresEventTraceWithRun: telemetryRun?.liveSearch?.previewHistory?.length === 1 && telemetryRun?.liveSearch?.streams?.length === 2,
+          liveInspectorStoresEventTraceWithRun: telemetryRun?.liveSearch?.previewHistory?.length === 2 && telemetryRun?.liveSearch?.streams?.length === 2 && telemetryRun?.liveSearch?.failedStreams === 1,
           regressionComparisonChecksMustNotAppear: exclusionReport.focusCheck?.pass === false,
           regressionImportValidationRejectsUnknownSchema: rejectsInvalidCase,
           regressionTabAvailable: !!document.querySelector('[data-tab="regression"]'),
