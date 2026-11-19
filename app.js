@@ -8573,7 +8573,7 @@ function deriveCanonicalFunction(effect) {
     const localRuleContext = `${String(effect.parentRuleText || '')} ${String(effect.contextClause || '')} ${String(effect.raw || '')}`.replace(/[’]/g, "'");
     const previousRuleText = String(effect.previousRuleText || '').replace(/[’]/g, "'");
     const previousRuleSearchesForLands = /\bsearch(?:es)?\b[\s\S]{0,180}\b(?:basic\s+)?land cards?\b/i.test(previousRuleText);
-    const previousRuleExilesTopLibraryCard = /\b(?:reveal|exile)\b[\s\S]{0,180}\btop\s+(?:(?:one|two|three|four|five|six|seven|eight|nine|ten|\d+)\s+)?cards?\s+of\s+(?:your|their|that player(?:'s)?|that opponent(?:'s)?|an opponent(?:'s)?|a player's)\s+library\b/i.test(previousRuleText);
+    const previousRuleExilesTopLibraryCard = /\b(?:reveal|exile)\b[\s\S]{0,180}\btop\s+(?:(?:one|two|three|four|five|six|seven|eight|nine|ten|\d+)\s+)?cards?\s+of\s+(?:your|their|that player(?:'s)?|that opponent(?:'s)?|an opponent(?:'s)?|a player(?:'s)?)\s+library\b/i.test(previousRuleText);
     const currentRulePutsCardInHand = /\b(?:put|place)\s+(?:that card|it)\s+(?:into|to)\s+(?:your|their|that player(?:'s)?|a player(?:'s)?)\s+hand\b/i.test(localRuleContext);
     // Some abilities split top-library acquisition across adjacent Oracle sentences:
     // "Exile the top card of your library face down. Put that card into your hand ...".
