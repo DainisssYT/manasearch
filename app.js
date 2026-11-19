@@ -61,6 +61,11 @@ function cancelActiveMainSearch(reason = 'Search was superseded by another actio
         provisionalResultCount: detail.provisionalResultCount,
         errorMessage: detail.reason
     };
+    // Hide only the loading state owned by this primary request. A Related Search may have
+    // taken over the result view while this request was still resolving in the background.
+    if (activeResultView?.mode === 'main' && activeResultView?.requestId === requestId) {
+        showLoading(false);
+    }
     activeMainSearchRequestId = null;
     try {
         window.dispatchEvent(new CustomEvent('manasearch:search-cancelled', { detail }));
