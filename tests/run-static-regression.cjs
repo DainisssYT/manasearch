@@ -345,7 +345,7 @@ check('Pages publishes the shared semantic module and browser tests serve ESM wi
 
 check('developer inspector observes the production pipeline without changing scoring', () => {
   execFileSync(process.execPath, ['--check'], { input: inspector, stdio: ['pipe', 'pipe', 'pipe'] });
-  assert.match(html, /search-inspector\.js\?v=20261119-148/);
+  assert.match(html, /search-inspector\.js\?v=20261119-149/);
   assert.match(html, /search-inspector\.css\?v=20261119-140/);
   assert.match(app, /window\.ManaSearchDebug = Object\.freeze\(/);
   assert.match(app, /getLiveIntent\(\)/);
@@ -371,6 +371,16 @@ check('developer inspector observes the production pipeline without changing sco
   assert.match(inspector, /data-action="download"/);
   assert.match(inspector, /manasearch-diagnostics-export-v2/);
 
+
+  assert.match(app, /manasearch:progress-updated/);
+  assert.match(app, /manasearch:search-streams-updated/);
+  assert.match(app, /manasearch:search-preview-updated/);
+  assert.match(app, /status: searchOutcome/);
+  assert.match(app, /Search failed:/);
+  assert.match(inspector, /getActiveSearch/);
+  assert.match(inspector, /outcomeComparison/);
+  assert.match(inspector, /status: 'search-error'/);
+  assert.match(inspector, /rankingComparisonValid/);
   assert.match(inspector, /data-tab="regression"/);
   assert.match(inspector, /manasearch-regression-case-v1/);
   assert.match(inspector, /createRegressionCase/);
