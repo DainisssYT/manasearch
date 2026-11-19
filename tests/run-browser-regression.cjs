@@ -110,6 +110,7 @@ async function main() {
               finalRanked: ['Shared Card', 'Removed Card']
             } },
             streams: { 'Search B': ['shared card', 'removed card'] },
+            streamFailures: [{ label: 'Semantic Index', message: 'Worker startup timed out' }],
             finalResults: [{ rank: 1, name: 'Shared Card' }, { rank: 2, name: 'Removed Card' }],
             candidates: [
               { name: 'Shared Card', preFloorRank: 1, scores: { similarityScore: 0.65, mechanicalScore: 0.7 }, mechanicalBreakdown: { graphScore: 0.7 } },
@@ -335,6 +336,7 @@ async function main() {
           detectsRankMovement: comparison.finalRanking.rankChanges.some(item => item.name === 'Shared Card' && item.earlierRank === 1 && item.laterRank === 2),
           detectsScoreDelta: !!sharedScore && Math.abs(sharedScore.delta - 0.10) < 1e-9,
           computesRetrievalOverlap: comparison.retrieval.some(item => item.stream === 'Search B' && item.sharedCount === 1 && Math.abs(item.jaccard - (1 / 3)) < 1e-4),
+          comparesResolvedRetrievalFailures: comparison.retrievalFailures?.earlierCount === 1 && comparison.retrievalFailures?.laterCount === 0 && comparison.retrievalFailures?.resolved?.[0]?.label === 'Semantic Index',
           historyIsArray: Array.isArray(history),
           exportSerializable: JSON.stringify(window.ManaSearchInspector.getExport()).length > 0,
           compareTabAvailable: !!document.querySelector('[data-tab="compare"]'),
@@ -385,7 +387,7 @@ async function main() {
       })(),
       developerDiagnostics: (() => {
         const snapshot = window.ManaSearchDebug.getSnapshot();
-        return { available: !!snapshot && typeof snapshot === 'object', serializable: JSON.stringify(snapshot).length > 0, hasPipelineFields: ['request', 'funnel', 'streams', 'candidates', 'filterRejections'].every(key => Object.prototype.hasOwnProperty.call(snapshot, key)), liveIntentAvailable: typeof window.ManaSearchDebug.getLiveIntent === 'function' };
+        return { available: !!snapshot && typeof snapshot === 'object', serializable: JSON.stringify(snapshot).length > 0, hasPipelineFields: ['request', 'funnel', 'streams', 'streamFailures', 'candidates', 'filterRejections'].every(key => Object.prototype.hasOwnProperty.call(snapshot, key)), liveIntentAvailable: typeof window.ManaSearchDebug.getLiveIntent === 'function' };
       })()
     }));
     // Exercise the real end-to-end local search path, not only isolated scorer helpers.
