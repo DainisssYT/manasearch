@@ -221,7 +221,7 @@ async function main() {
           regressionComparisonShowsScoringPoolCoverage: regressionReport.scoringEvolution?.sharedScoredSampleCount === 1 && regressionReport.scoringEvolution?.newlyPresentInScoredSample.includes('Added Card') && regressionReport.scoringEvolution?.sampleLimit === 300,
           regressionComparisonShowsScoreChannelDeltas: regressionReport.scoringEvolution?.changedSampleCandidates.some(item => item.name === 'Shared Card' && item.scoreChanges.some(change => change.field === 'similarityScore' && Math.abs(change.delta - 0.1) < 1e-9) && item.mechanicalBreakdownChanges.some(change => change.field === 'graphScore' && Math.abs(change.delta - 0.15) < 1e-9)),
           regressionComparisonIncludesCandidateJourneyEvolution: regressionReport.focusCheck?.baselineTrace?.found === true && regressionReport.focusCheck?.currentTrace?.found === true,
-          regressionComparisonRejectsChangedInputs: inputMismatchReport.status === 'input-mismatch' && inputMismatchReport.inputCheck.changedFields.includes('highlights'),
+          regressionComparisonRejectsChangedInputs: inputMismatchReport.status === 'input-mismatch' && inputMismatchReport.pass === null && inputMismatchReport.inputCheck.changedFields.includes('highlights'),
           regressionInputComparisonIgnoresObjectKeyOrder: stableOrderReport.inputCheck?.matches === true && stableOrderReport.pass === true,
           regressionComparisonChecksMustNotAppear: exclusionReport.focusCheck?.pass === false,
           regressionImportValidationRejectsUnknownSchema: rejectsInvalidCase,
