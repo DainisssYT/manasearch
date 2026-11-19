@@ -7461,8 +7461,8 @@ function extractClauseAtoms(effectText, primaryAction) {
         // ("Whenever an opponent taps a land for mana, add {G}"), not to the effect sequence.
         if (/^untaps?$/i.test(match[1]) || /^taps?$/i.test(match[1])) {
             const prefix = effectText.slice(0, match.index);
-            const triggerStart = prefix.search(/\\b(?:when|whenever|if|as long as)\\b/i);
-            const precedingSeparator = prefix.search(/[,;]|\\bthen\\b/i);
+            const triggerStart = prefix.search(/\b(?:when|whenever|if|as long as)\b/i);
+            const precedingSeparator = prefix.search(/[,;]|\bthen\b/i);
             if (triggerStart >= 0 && precedingSeparator < 0) continue;
         }
         // Parse only this verb's span, ending before the next action verb. The original unbounded
@@ -8572,9 +8572,9 @@ function deriveCanonicalFunction(effect) {
     const a = effect.action;
     const localRuleContext = `${String(effect.parentRuleText || '')} ${String(effect.contextClause || '')} ${String(effect.raw || '')}`.replace(/[’]/g, "'");
     const previousRuleText = String(effect.previousRuleText || '').replace(/[’]/g, "'");
-    const previousRuleSearchesForLands = /\\bsearch(?:es)?\\b[\\s\\S]{0,180}\\b(?:basic\\s+)?land cards?\\b/i.test(previousRuleText);
-    const previousRuleExilesTopLibraryCard = /\\b(?:reveal|exile)\\b[\\s\\S]{0,180}\\btop\\s+(?:(?:one|two|three|four|five|six|seven|eight|nine|ten|\\d+)\\s+)?cards?\\s+of\\s+(?:your|their|that player(?:'s)?|that opponent(?:'s)?|an opponent(?:'s)?|a player(?:'s)?)\\s+library\\b/i.test(previousRuleText);
-    const currentRulePutsCardInHand = /\\b(?:put|place)\\s+(?:that card|it)\\s+(?:into|to)\\s+(?:your|their|that player(?:'s)?|a player(?:'s)?)\\s+hand\\b/i.test(localRuleContext);
+    const previousRuleSearchesForLands = /\bsearch(?:es)?\b[\s\S]{0,180}\b(?:basic\s+)?land cards?\b/i.test(previousRuleText);
+    const previousRuleExilesTopLibraryCard = /\b(?:reveal|exile)\b[\s\S]{0,180}\btop\s+(?:(?:one|two|three|four|five|six|seven|eight|nine|ten|\d+)\s+)?cards?\s+of\s+(?:your|their|that player(?:'s)?|that opponent(?:'s)?|an opponent(?:'s)?|a player's)\s+library\b/i.test(previousRuleText);
+    const currentRulePutsCardInHand = /\b(?:put|place)\s+(?:that card|it)\s+(?:into|to)\s+(?:your|their|that player(?:'s)?|a player(?:'s)?)\s+hand\b/i.test(localRuleContext);
     // Some abilities split top-library acquisition across adjacent Oracle sentences:
     // "Exile the top card of your library face down. Put that card into your hand ...".
     // Import only the immediately preceding sentence when both halves explicitly connect.
