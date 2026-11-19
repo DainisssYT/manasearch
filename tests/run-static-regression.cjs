@@ -436,6 +436,10 @@ check('developer inspector observes the production pipeline without changing sco
   assert.match(app, /effect-aware-function-matching-is-one-to-one-across-compound-source-intent/);
   assert.match(inspector, /functionSemanticEvidence: candidate\.functionSemanticEvidence/);
   assert.match(browserRunner, /compareRunsSurfacesAbilityAwareFunctionScoreDelta/);
+  assert.match(browserRunner, /sameBuildSameInputsAreRepeatabilityChecks/);
+  assert.match(browserRunner, /appOnlyRevisionIsControlledAlgorithmComparison/);
+  assert.match(browserRunner, /datasetOnlyRevisionIsNotAlgorithmRegression/);
+  assert.match(browserRunner, /cancelledRunIsRetainedWithProvisionalCards/);
   assert.match(inspector, /largestFactorDelta/);
   assert.match(browserRunner, /traceShowsAbilityAwareSemanticEvidence/);
   assert.match(browserRunner, /effectAwareCounterEvidenceCaptured/);
@@ -453,6 +457,9 @@ check('developer inspector observes the production pipeline without changing sco
   assert.match(app, /top-library-card-put-into-hand-is-card-acquisition-not-tutor/);
   assert.match(app, /life-paid-top-library-acquisition-matches-card-draw-semantically/);
   assert.match(app, /status: searchOutcome/);
+  assert.match(app, /function cancelActiveMainSearch\(/);
+  assert.match(app, /manasearch:search-cancelled/);
+  assert.match(app, /dataBuildId: staticDataBuildId \|\| null/);
   assert.match(app, /Search failed:/);
   assert.match(inspector, /getActiveSearch/);
   assert.match(inspector, /progressHistory/);
@@ -462,6 +469,12 @@ check('developer inspector observes the production pipeline without changing sco
   assert.match(inspector, /scoredCandidateEvolution/);
   assert.match(inspector, /topKOverlap/);
   assert.match(inspector, /comparableForAlgorithmRegression/);
+  assert.match(inspector, /comparableForRepeatability/);
+  assert.match(inspector, /comparisonMode/);
+  assert.match(inspector, /dataBuildId/);
+  assert.match(inspector, /repeatabilityCheck/);
+  assert.match(inspector, /search-cancelled/);
+  assert.match(inspector, /search-cancelled/);
   assert.match(inspector, /rankingComparisonValid/);
   assert.match(inspector, /failedStreams = Number\(detail\.failedStreams\)/);
   assert.match(inspector, /status: 'search-error'/);
