@@ -185,11 +185,12 @@
     const resultCount = run?.summary?.resultCount ?? run?.pipeline?.finalResults?.length ?? 0;
     const provisionalCount = run?.summary?.provisionalResultCount ?? run?.liveSearch?.provisionalResultCount ?? 0;
     const outcome = run?.status || run?.summary?.status || run?.pipeline?.outcome?.status || 'completed';
+    const buildLabel = run?.pipeline?.appBuild || run?.appBuild ? ' · build ' + (run.pipeline?.appBuild || run.appBuild) : '';
     const outcomeLabel = outcome === 'error' ? 'ERROR'
       : outcome === 'completed_with_warnings' ? 'PARTIAL'
         : outcome === 'running' ? 'RUNNING' : 'OK';
     const resultLabel = resultCount + ' final result(s)' + (provisionalCount > 0 ? ' + ' + provisionalCount + ' provisional' : '');
-    return '#' + (run?.number ?? '?') + ' [' + outcomeLabel + '] ' + source + ' — ' + resultLabel + ' — ' + new Date(run?.completedAt || 0).toLocaleTimeString();
+    return '#' + (run?.number ?? '?') + ' [' + outcomeLabel + '] ' + source + buildLabel + ' — ' + resultLabel + ' — ' + new Date(run?.completedAt || 0).toLocaleTimeString();
   };
   const compareRuns = (earlier, later) => {
     if (!earlier || !later) return { message: 'Select two retained searches to compare. At least two searches are required.' };
@@ -197,6 +198,9 @@
     const b = later.pipeline || {};
     const aStatus = earlier.status || earlier.summary?.status || a.outcome?.status || 'completed';
     const bStatus = later.status || later.summary?.status || b.outcome?.status || 'completed';
+    const earlierBuild = a.appBuild || earlier.appBuild || null;
+    const laterBuild = b.appBuild || later.appBuild || null;
+    const buildChanged = Boolean(earlierBuild && laterBuild && earlierBuild !== laterBuild);
     const aFinal = a.finalResults || [];
     const bFinal = b.finalResults || [];
     const keyOf = item => normalizeCandidateName(item?.name);
@@ -401,18 +405,21 @@
     const bError = later.errorMessage || later.summary?.errorMessage || b.outcome?.errorMessage || '';
     return {
       earlier: {
-        number: earlier.number, status: aStatus, errorMessage: aError,
+        number: earlier.number, status: aStatus, appBuild: earlierBuild, errorMessage: aError,
         durationMs: earlier.durationMs ?? earlier.summary?.durationMs ?? a.outcome?.durationMs ?? null,
         completedAt: earlier.completedAt, request: a.request
       },
       later: {
-        number: later.number, status: bStatus, errorMessage: bError,
+        number: later.number, status: bStatus, appBuild: laterBuild, errorMessage: bError,
         durationMs: later.durationMs ?? later.summary?.durationMs ?? b.outcome?.durationMs ?? null,
         completedAt: later.completedAt, request: b.request
       },
       outcomeComparison: {
         earlierStatus: aStatus,
         laterStatus: bStatus,
+        earlierBuild,
+        laterBuild,
+        buildChanged,
         earlierResultCount: earlier.summary?.resultCount ?? aFinal.length,
         laterResultCount: later.summary?.resultCount ?? bFinal.length,
         earlierProvisionalResultCount: earlier.summary?.provisionalResultCount ?? earlier.liveSearch?.provisionalResultCount ?? 0,
@@ -561,6 +568,10 @@
       'Earlier run: #' + (comparison.earlier?.number ?? '?') + ' — ' + (outcome.earlierStatus || comparison.earlier?.status || 'unknown') + ' — ' + (outcome.earlierResultCount ?? 0) + ' results',
       'Later run:   #' + (comparison.later?.number ?? '?') + ' — ' + (outcome.laterStatus || comparison.later?.status || 'unknown') + ' — ' + (outcome.laterResultCount ?? 0) + ' results'
     ];
+    if (outcome.earlierBuild || outcome.laterBuild) {
+      lines.push('App builds: ' + (outcome.earlierBuild || 'unknown') + ' → ' + (outcome.laterBuild || 'unknown') +
+        (outcome.buildChanged ? ' (different builds)' : ''));
+    }
     if (outcome.note) lines.push('Validity: ' + outcome.note);
     if (outcome.earlierProvisionalResultCount > 0 || outcome.laterProvisionalResultCount > 0) {
       lines.push('Provisional cards still visible: earlier ' + (outcome.earlierProvisionalResultCount || 0) +
@@ -751,6 +762,7 @@
       source: {
         runNumber: run.number ?? null,
         completedAt: run.completedAt || null,
+        appBuild: pipeline.appBuild || run.appBuild || null,
         request: cloneJson(pipeline.request || {}),
         ui: cloneJson(run.ui || {})
       },
@@ -822,8 +834,16 @@
         assertionsConfigured: false,
         pass: null,
         status: 'search-error',
-        case: { title: fixture.title, sourceRunNumber: fixture.source.runNumber ?? null },
-        comparedRun: { number: run.number ?? null, status: runStatus, errorMessage: run.errorMessage || run.summary?.errorMessage || run.pipeline?.outcome?.errorMessage || '' },
+        case: { title: fixture.title, sourceRunNumber: fixture.source.runNumber ?? null, appBuild: fixture.source.appBuild || fixture.diagnostics?.appBuild || null },
+        comparedRun: {
+          number: run.number ?? null,
+          status: runStatus,
+          appBuild: run.pipeline?.appBuild || run.appBuild || null,
+          buildChanged: Boolean((fixture.source.appBuild || fixture.diagnostics?.appBuild) &&
+            (run.pipeline?.appBuild || run.appBuild) &&
+            (fixture.source.appBuild || fixture.diagnostics?.appBuild) !== (run.pipeline?.appBuild || run.appBuild)),
+          errorMessage: run.errorMessage || run.summary?.errorMessage || run.pipeline?.outcome?.errorMessage || ''
+        },
         interpretation: 'The search failed before producing a valid ranking. Diagnose the search error rather than counting this as a ranking regression.'
       };
     }
@@ -899,10 +919,14 @@
       assertionsConfigured,
       pass,
       status: !inputsMatch ? 'input-mismatch' : !completeRun ? 'partial-run' : !assertionsConfigured ? 'no-expectations' : pass ? 'pass' : 'fail',
-      case: { title: fixture.title, sourceRunNumber: fixture.source.runNumber ?? null },
+      case: { title: fixture.title, sourceRunNumber: fixture.source.runNumber ?? null, appBuild: fixture.source.appBuild || fixture.diagnostics?.appBuild || null },
       comparedRun: {
         number: run.number ?? null,
         status: runStatus,
+        appBuild: run.pipeline?.appBuild || run.appBuild || null,
+        buildChanged: Boolean((fixture.source.appBuild || fixture.diagnostics?.appBuild) &&
+          (run.pipeline?.appBuild || run.appBuild) &&
+          (fixture.source.appBuild || fixture.diagnostics?.appBuild) !== (run.pipeline?.appBuild || run.appBuild)),
         warning: runStatus === 'completed_with_warnings' ? (run.errorMessage || run.summary?.errorMessage || run.pipeline?.outcome?.errorMessage || '') : '',
         completedAt: run.completedAt || null,
         durationMs: run.durationMs ?? run.summary?.durationMs ?? run.pipeline?.outcome?.durationMs ?? null
