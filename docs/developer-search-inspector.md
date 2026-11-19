@@ -44,6 +44,6 @@ The `retrievalEvidence` field is provenance only: it records which streams found
 ## Known interpretation limits
 
 - The candidate list is bounded to the first 300 objects passed through the final scoring call; very large searches may have more scored candidates.
-- `rankByScore` is the candidate's position in the captured scorer input, not a guaranteed final rank. Use `finalResults` for final rank.
+- `candidateIndex` is the candidate's position in the captured scorer input, not a guaranteed final rank. Use `finalResults` for final rank.
 - Filter rejection reasons are recorded per card name at the first failing hard-filter check; a card can have more than one underlying issue that is not represented by that first reason.
 - Search Deeper and Related Search are separate workflows. This snapshot currently describes the primary Find Similar Cards run.
