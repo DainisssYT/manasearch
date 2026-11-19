@@ -187,8 +187,9 @@
     const outcome = run?.status || run?.summary?.status || run?.pipeline?.outcome?.status || 'completed';
     const buildLabel = run?.pipeline?.appBuild || run?.appBuild ? ' · build ' + (run.pipeline?.appBuild || run.appBuild) : '';
     const outcomeLabel = outcome === 'error' ? 'ERROR'
-      : outcome === 'completed_with_warnings' ? 'PARTIAL'
-        : outcome === 'running' ? 'RUNNING' : 'OK';
+      : outcome === 'cancelled' ? 'CANCELLED'
+        : outcome === 'completed_with_warnings' ? 'PARTIAL'
+          : outcome === 'running' ? 'RUNNING' : 'OK';
     const resultLabel = resultCount + ' final result(s)' + (provisionalCount > 0 ? ' + ' + provisionalCount + ' provisional' : '');
     return '#' + (run?.number ?? '?') + ' [' + outcomeLabel + '] ' + source + buildLabel + ' — ' + resultLabel + ' — ' + new Date(run?.completedAt || 0).toLocaleTimeString();
   };
@@ -201,6 +202,11 @@
     const earlierBuild = a.appBuild || earlier.appBuild || null;
     const laterBuild = b.appBuild || later.appBuild || null;
     const buildChanged = Boolean(earlierBuild && laterBuild && earlierBuild !== laterBuild);
+    const earlierDataBuild = a.dataBuildId || earlier.dataBuildId || null;
+    const laterDataBuild = b.dataBuildId || later.dataBuildId || null;
+    const dataBuildChanged = Boolean(earlierDataBuild && laterDataBuild && earlierDataBuild !== laterDataBuild);
+    const sameAppBuild = Boolean(earlierBuild && laterBuild && earlierBuild === laterBuild);
+    const sameDataBuild = Boolean(earlierDataBuild && laterDataBuild && earlierDataBuild === laterDataBuild);
     const aFinal = a.finalResults || [];
     const bFinal = b.finalResults || [];
     const keyOf = item => normalizeCandidateName(item?.name);
@@ -440,45 +446,119 @@
       .filter(field => requestChanges[field]);
     const aError = earlier.errorMessage || earlier.summary?.errorMessage || a.outcome?.errorMessage || '';
     const bError = later.errorMessage || later.summary?.errorMessage || b.outcome?.errorMessage || '';
+    const bothComplete = aStatus === 'completed' && bStatus === 'completed';
+    const sameUserInputs = inputSnapshotComplete && changedInputFields.length === 0;
+    const comparisonMode = !bothComplete
+      ? 'run-health-difference'
+      : !inputSnapshotComplete
+        ? 'incomplete-input-snapshot'
+        : changedInputFields.length
+          ? 'user-input-change'
+          : !earlierBuild || !laterBuild || !earlierDataBuild || !laterDataBuild
+            ? 'version-unknown'
+            : dataBuildChanged && buildChanged
+              ? 'mixed-code-and-data-revision'
+              : dataBuildChanged
+                ? 'data-revision'
+                : buildChanged
+                  ? 'algorithm-revision'
+                  : 'same-build-repeatability';
+    const comparableForAlgorithmRegression = comparisonMode === 'algorithm-revision';
+    const comparableForRepeatability = comparisonMode === 'same-build-repeatability';
+    const comparisonNote = comparisonMode === 'run-health-difference'
+      ? (aStatus === 'cancelled' || bStatus === 'cancelled'
+          ? 'At least one search was cancelled before it produced an authoritative final ranking. Inspect its provisional cards for context, but do not count it as a zero-result search.'
+          : aStatus === 'error' || bStatus === 'error'
+            ? 'At least one search failed. Treat its empty or partial result list as a failed run, not as a valid zero-result ranking.'
+            : 'At least one run completed with warnings or is incomplete. Inspect failed retrieval lanes before treating missing cards as true misses.')
+      : comparisonMode === 'incomplete-input-snapshot'
+        ? 'At least one run lacks a complete input snapshot. Ranking differences are descriptive only; repeat both searches on a build that captures search depth, ordering features, and ranking weight overrides.'
+        : comparisonMode === 'user-input-change'
+          ? 'The two searches used different user-controlled inputs. This is useful for exploring the effect of those changes, but it is not a controlled algorithm comparison.'
+          : comparisonMode === 'version-unknown'
+            ? 'The captured user inputs match, but one or both app/data revisions are unknown. This is descriptive, not a controlled code or repeatability comparison.'
+            : comparisonMode === 'data-revision'
+              ? 'The app build is the same, but the card/semantic dataset revision changed. Treat ranking differences as a data refresh comparison, not an algorithm-only regression.'
+              : comparisonMode === 'mixed-code-and-data-revision'
+                ? 'Both app code and the card/semantic dataset changed. This comparison cannot isolate which revision caused a ranking difference.'
+                : comparisonMode === 'algorithm-revision'
+                  ? 'Both searches completed with identical captured user inputs and the same dataset revision, while the app build changed. This isolates the app-code revision from a static-corpus refresh.'
+                  : 'Both searches completed with identical captured user inputs, app build, and dataset revision. This is a same-build repeatability check.';
+    const earlierFinalSequence = aFinal.map(item => normalizeCandidateName(item.name)).filter(Boolean);
+    const laterFinalSequence = bFinal.map(item => normalizeCandidateName(item.name)).filter(Boolean);
+    const finalOrderUnchanged = stableJson(earlierFinalSequence) === stableJson(laterFinalSequence);
+    const finalCountUnchanged = earlierFinalSequence.length === laterFinalSequence.length;
+    const retrievalMembershipUnchanged = streamComparison.length > 0 &&
+      streamComparison.every(item => item.earlierCount === item.laterCount && item.jaccard === 1);
+    const stageMembershipUnchanged = stageProgression.length > 0 &&
+      stageProgression.every(item => item.earlierCount === item.laterCount && item.jaccard === 1);
+    const sharedScoredSampleCountForRepeatability = [...earlierScored.keys()].filter(key => laterScored.has(key)).length;
+    const scoredSampleUnchanged = earlierScored.size === laterScored.size &&
+      earlierScored.size === sharedScoredSampleCountForRepeatability;
+    const repeatabilityEligible = comparableForRepeatability;
+    const repeatabilityStable = repeatabilityEligible &&
+      finalOrderUnchanged && finalCountUnchanged &&
+      (streamComparison.length === 0 || retrievalMembershipUnchanged) &&
+      (stageProgression.length === 0 || stageMembershipUnchanged) &&
+      (aCandidates.length === 0 || bCandidates.length === 0 || scoredSampleUnchanged) &&
+      scoreChanges.length === 0;
+    const repeatabilityCheck = {
+      applicable: repeatabilityEligible,
+      assessment: !repeatabilityEligible ? 'not-applicable' : repeatabilityStable ? 'stable' : 'diverged',
+      signals: {
+        finalOrderUnchanged,
+        finalCountUnchanged,
+        retrievalMembershipUnchanged: streamComparison.length ? retrievalMembershipUnchanged : null,
+        stageMembershipUnchanged: stageProgression.length ? stageMembershipUnchanged : null,
+        scoredSampleUnchanged: (a.candidates || []).length && (b.candidates || []).length ? scoredSampleUnchanged : null,
+        scoreChannelsUnchanged: scoreChanges.length === 0
+      },
+      note: repeatabilityEligible && !repeatabilityStable
+        ? 'The same app build, dataset revision, and captured user inputs produced different retained outputs. This is a repeatability signal, not proof of nondeterministic code: inspect remote retrieval, cache state, worker availability, and any data not captured by this snapshot.'
+        : repeatabilityStable
+          ? 'The retained ranking, retrieval membership, stage membership, and scored sample were stable across these same-build runs.'
+          : 'A repeatability verdict requires completed runs with identical captured inputs and the same known app and dataset revisions.'
+    };
     return {
       earlier: {
-        number: earlier.number, status: aStatus, appBuild: earlierBuild, errorMessage: aError,
+        number: earlier.number, status: aStatus, appBuild: earlierBuild, dataBuildId: earlierDataBuild, errorMessage: aError,
         durationMs: earlier.durationMs ?? earlier.summary?.durationMs ?? a.outcome?.durationMs ?? null,
         completedAt: earlier.completedAt, request: a.request
       },
       later: {
-        number: later.number, status: bStatus, appBuild: laterBuild, errorMessage: bError,
+        number: later.number, status: bStatus, appBuild: laterBuild, dataBuildId: laterDataBuild, errorMessage: bError,
         durationMs: later.durationMs ?? later.summary?.durationMs ?? b.outcome?.durationMs ?? null,
         completedAt: later.completedAt, request: b.request
       },
+      repeatabilityCheck,
       outcomeComparison: {
         earlierStatus: aStatus,
         laterStatus: bStatus,
         earlierBuild,
         laterBuild,
         buildChanged,
+        earlierDataBuild,
+        laterDataBuild,
+        dataBuildChanged,
+        comparisonMode,
         earlierResultCount: earlier.summary?.resultCount ?? aFinal.length,
         laterResultCount: later.summary?.resultCount ?? bFinal.length,
         earlierProvisionalResultCount: earlier.summary?.provisionalResultCount ?? earlier.liveSearch?.provisionalResultCount ?? 0,
         laterProvisionalResultCount: later.summary?.provisionalResultCount ?? later.liveSearch?.provisionalResultCount ?? 0,
         earlierError: aError,
         laterError: bError,
-        rankingComparisonValid: aStatus === 'completed' && bStatus === 'completed',
+        rankingComparisonValid: bothComplete,
         rankingComparisonAvailable: ['completed', 'completed_with_warnings'].includes(aStatus) && ['completed', 'completed_with_warnings'].includes(bStatus),
-        rankingComparisonComplete: aStatus === 'completed' && bStatus === 'completed',
+        rankingComparisonComplete: bothComplete,
         inputSnapshotComplete,
         missingInputFields: inputSnapshotMissing,
-        sameUserInputs: inputSnapshotComplete && changedInputFields.length === 0,
-        comparableForAlgorithmRegression: aStatus === 'completed' && bStatus === 'completed' && inputSnapshotComplete && changedInputFields.length === 0,
-        note: aStatus === 'error' || bStatus === 'error'
-          ? 'At least one search failed. Treat its empty or partial result list as a failed run, not as a valid zero-result ranking.'
-          : aStatus !== 'completed' || bStatus !== 'completed'
-            ? 'At least one run completed with warnings or is incomplete. Inspect failed retrieval lanes before treating missing cards as true misses.'
-            : !inputSnapshotComplete
-              ? 'At least one run lacks a complete input snapshot. Ranking differences are descriptive only; repeat both searches on a build that captures search depth, ordering features, and ranking weight overrides.'
-              : changedInputFields.length
-                ? 'The two searches used different user-controlled inputs. This is useful for exploring the effect of those changes, but it is not a controlled algorithm comparison.'
-                : 'Both searches completed with the same captured user-controlled inputs; this is a controlled comparison of retrieval and ranking changes.'
+        sameUserInputs,
+        sameAppBuild,
+        sameDataBuild,
+        comparableForAlgorithmRegression,
+        comparableForRepeatability,
+        comparableForControlledComparison: comparableForAlgorithmRegression || comparableForRepeatability,
+        note: comparisonNote
       },
       changes: {
         sourceCardChanged: requestChanges.sourceCard,
@@ -527,15 +607,13 @@
         interpretation: 'Rank comparison uses the first 100 final-result entries retained in each snapshot. Full reported counts are shown separately.'
       },
       sharedCandidateScoreChanges: scoreChanges,
-      interpretation: aStatus === 'error' || bStatus === 'error'
-        ? 'Resolve the failed search before interpreting ranking changes. A failed run is not evidence that the search engine returned zero relevant cards.'
-        : aStatus !== 'completed' || bStatus !== 'completed'
-          ? 'At least one run is warning-bearing or incomplete. Do not count absent candidates as reliable retrieval misses until its failed lanes are understood.'
-          : !inputSnapshotComplete
-            ? 'The captured inputs are incomplete. The comparison remains descriptive, but cannot be called a controlled algorithm test until search depth, ordering features, and ranking weights are captured for both runs.'
-            : changedInputFields.length
-              ? 'User-controlled inputs changed. The diff is descriptive, not a controlled test of algorithm quality. Use the same source, highlights, constraints, methods, ordering, search depth, ordering features, and ranking weights to evaluate code changes.'
-              : 'The user-controlled inputs match. Stage membership isolates recall changes; score-channel deltas show ranking changes among shared scored candidates; top-K overlap and rank movement show the user-visible effect.'
+      interpretation: comparisonMode === 'run-health-difference'
+        ? comparisonNote
+        : comparisonMode === 'same-build-repeatability'
+          ? repeatabilityCheck.note
+          : comparisonMode === 'algorithm-revision'
+            ? 'The app build changed while the static card/semantic dataset and all captured user inputs stayed fixed. Stage membership isolates recall changes; score-channel deltas show ranking changes among shared candidates.'
+            : comparisonNote
     };
   };
   const formatLiveSummary = snapshotValue => {
@@ -583,7 +661,12 @@
       lines.push('Current results: ' + live.preview.resultCount + (live.preview.provisional ? ' provisional matches' : ' final ranked results'));
       if (live.preview.topNames?.length) lines.push('Top cards: ' + live.preview.topNames.join(' → '));
     }
-    if (live.errorMessage) lines.push('Search warning/error: ' + live.errorMessage);
+    if (live.status === 'cancelled' && live.errorMessage) lines.push('Cancellation reason: ' + live.errorMessage);
+    else if (live.errorMessage) lines.push('Search warning/error: ' + live.errorMessage);
+    if (Array.isArray(live.progressHistory) && live.progressHistory.length) {
+      const recentPhases = live.progressHistory.slice(-5).map(item => clip(item.message, 140)).filter(Boolean);
+      if (recentPhases.length) lines.push('Recent progress: ' + recentPhases.join(' → '));
+    }
     if (Array.isArray(live.previewHistory) && live.previewHistory.length) {
       const provisionalCount = live.previewHistory.filter(item => item.provisional).length;
       const finalCount = live.previewHistory.filter(item => !item.provisional).length;
@@ -608,6 +691,19 @@
     if (outcome.earlierBuild || outcome.laterBuild) {
       lines.push('App builds: ' + (outcome.earlierBuild || 'unknown') + ' → ' + (outcome.laterBuild || 'unknown') +
         (outcome.buildChanged ? ' (different builds)' : ''));
+    }
+    if (outcome.earlierDataBuild || outcome.laterDataBuild) {
+      lines.push('Card/semantic dataset: ' + (outcome.earlierDataBuild || 'unknown') + ' → ' +
+        (outcome.laterDataBuild || 'unknown') + (outcome.dataBuildChanged ? ' (different dataset revisions)' : ''));
+    }
+    if (comparison.repeatabilityCheck?.applicable) {
+      const check = comparison.repeatabilityCheck;
+      lines.push('Same-build repeatability: ' + (check.assessment === 'stable' ? 'STABLE' : 'DIVERGED'));
+      lines.push('  Final order unchanged: ' + (check.signals.finalOrderUnchanged ? 'yes' : 'no'));
+      lines.push('  Retrieval membership unchanged: ' + (check.signals.retrievalMembershipUnchanged === null ? 'not captured' : check.signals.retrievalMembershipUnchanged ? 'yes' : 'no'));
+      lines.push('  Pipeline stage membership unchanged: ' + (check.signals.stageMembershipUnchanged === null ? 'not captured' : check.signals.stageMembershipUnchanged ? 'yes' : 'no'));
+      lines.push('  Scored-candidate sample unchanged: ' + (check.signals.scoredSampleUnchanged === null ? 'not captured' : check.signals.scoredSampleUnchanged ? 'yes' : 'no'));
+      lines.push('  ' + check.note);
     }
     if (outcome.note) lines.push('Validity: ' + outcome.note);
     if (outcome.earlierProvisionalResultCount > 0 || outcome.laterProvisionalResultCount > 0) {
@@ -797,7 +893,11 @@
   const createRegressionCase = (run, options = {}) => {
     if (!run?.pipeline) throw new Error('Choose a search run with a captured production pipeline.');
     const runStatus = run.status || run.summary?.status || run.pipeline?.outcome?.status || 'completed';
-    if (runStatus === 'error') throw new Error('Cannot create a ranking regression case from a failed search. Fix the search failure and capture a valid baseline first.');
+    if (runStatus === 'error' || runStatus === 'cancelled') {
+      throw new Error(runStatus === 'cancelled'
+        ? 'Cannot create a ranking regression case from a cancelled search. Repeat the search and capture an authoritative final ranking first.'
+        : 'Cannot create a ranking regression case from a failed search. Fix the search failure and capture a valid baseline first.');
+    }
     const pipeline = run.pipeline;
     const sourceName = pipeline.request?.sourceCard?.name || run.summary?.sourceName || 'Search';
     const focusCandidate = String(options.focusCandidate || '').trim();
@@ -879,12 +979,12 @@
     const fixture = validateRegressionCase(regressionCase);
     if (!run?.pipeline) return { comparable: false, assertionsConfigured: false, pass: null, status: 'missing-run', message: 'Select a retained search run to compare.' };
     const runStatus = run.status || run.summary?.status || run.pipeline?.outcome?.status || 'completed';
-    if (runStatus === 'error') {
+    if (runStatus === 'error' || runStatus === 'cancelled') {
       return {
         comparable: false,
         assertionsConfigured: false,
         pass: null,
-        status: 'search-error',
+        status: runStatus === 'cancelled' ? 'search-cancelled' : 'search-error',
         case: { title: fixture.title, sourceRunNumber: fixture.source.runNumber ?? null, appBuild: fixture.source.appBuild || fixture.diagnostics?.appBuild || null },
         comparedRun: {
           number: run.number ?? null,
@@ -895,7 +995,9 @@
             (fixture.source.appBuild || fixture.diagnostics?.appBuild) !== (run.pipeline?.appBuild || run.appBuild)),
           errorMessage: run.errorMessage || run.summary?.errorMessage || run.pipeline?.outcome?.errorMessage || ''
         },
-        interpretation: 'The search failed before producing a valid ranking. Diagnose the search error rather than counting this as a ranking regression.'
+        interpretation: runStatus === 'cancelled'
+          ? 'The search was cancelled before producing an authoritative final ranking. Repeat the request before comparing this regression case.'
+          : 'The search failed before producing a valid ranking. Diagnose the search error rather than counting this as a ranking regression.'
       };
     }
     const expectedRequest = fixture.source.request || {};
@@ -1406,6 +1508,60 @@
       topNames: preview.topNames.slice(0, 5)
     });
     renderLiveProgress();
+  });
+  window.addEventListener('manasearch:search-cancelled', event => {
+    const detail = event.detail || {};
+    if (!state.activeSearch || detail.requestId == null ||
+        Number(detail.requestId) !== Number(state.activeSearch.requestId)) return;
+    state.activeSearch.status = 'cancelled';
+    state.activeSearch.finishedAt = detail.finishedAt || new Date().toISOString();
+    state.activeSearch.durationMs = detail.durationMs ?? null;
+    state.activeSearch.errorMessage = detail.reason || 'Search cancelled.';
+    state.activeSearch.resultCount = 0;
+    state.activeSearch.provisionalResultCount = Number(detail.provisionalResultCount) || 0;
+    if (state.activeSearch.provisionalResultCount > 0 && Array.isArray(detail.provisionalCardNames)) {
+      state.activeSearch.preview = {
+        phase: 'cancelled-preview',
+        sourceLabel: 'Last visible provisional results before cancellation',
+        provisional: true,
+        resultCount: state.activeSearch.provisionalResultCount,
+        topNames: detail.provisionalCardNames.slice(0, 10),
+        at: detail.finishedAt || Date.now()
+      };
+    }
+    lastPipelineSnapshot = getPipelineSnapshot();
+    const pipeline = cloneJson(lastPipelineSnapshot);
+    const ui = cloneJson(snapshot());
+    const sourceName = detail.sourceName || state.activeSearch.sourceName || pipeline?.request?.sourceCard?.name || '';
+    const run = {
+      number: state.searchRuns.length ? state.searchRuns[state.searchRuns.length - 1].number + 1 : 1,
+      completedAt: detail.finishedAt || new Date().toISOString(),
+      status: 'cancelled',
+      errorMessage: detail.reason || 'Search cancelled.',
+      durationMs: detail.durationMs ?? null,
+      summary: {
+        sourceName,
+        resultCount: 0,
+        provisionalResultCount: state.activeSearch.provisionalResultCount,
+        status: 'cancelled',
+        errorMessage: detail.reason || 'Search cancelled.',
+        durationMs: detail.durationMs ?? null
+      },
+      liveSearch: cloneJson(state.activeSearch),
+      ui,
+      pipeline
+    };
+    state.searchRuns.push(run);
+    if (state.searchRuns.length > MAX_SEARCH_RUNS) state.searchRuns.shift();
+    addEvent('search:cancelled', {
+      runNumber: run.number,
+      requestId: detail.requestId,
+      sourceName,
+      reason: run.errorMessage,
+      provisionalResultCount: run.summary.provisionalResultCount,
+      provisionalCardNames: detail.provisionalCardNames || []
+    });
+    if (!windowEl.hidden) render();
   });
   window.addEventListener('manasearch:search-finished', event => {
     const detail = event.detail || {};
