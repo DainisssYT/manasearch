@@ -1,6 +1,6 @@
-/* ManaSearch build 20261119-150 */
+/* ManaSearch build 20261119-151 */
 // ManaSearch deployment build marker. Bump this whenever app.js changes so cached-module issues are easy to diagnose.
-const MANASEARCH_APP_BUILD = '20261119-150';
+const MANASEARCH_APP_BUILD = '20261119-151';
 console.info(`[ManaSearch] app.js build ${MANASEARCH_APP_BUILD}`);
 
 // The source-query and static-index builders share one representation so both sides
@@ -28,10 +28,11 @@ function resolveMainSearchOutcome(status, errorMessage = '', streamStatusEntries
     if (currentStatus !== 'completed') {
         return { status: currentStatus, errorMessage: currentMessage };
     }
+    const displayLabel = label => normalizeRetrievalStreamDisplayLabel(String(label || 'Unknown retrieval lane'));
     const warningLabels = streamStatusEntries
         .filter(entry => Array.isArray(entry) && ['failed', 'completed_with_warnings'].includes(entry[1]))
-        .map(entry => String(entry[0] || 'Unknown retrieval lane'));
-    const failureLabels = streamFailures.map(item => String(item?.label || 'Unknown retrieval lane'));
+        .map(entry => displayLabel(entry[0]));
+    const failureLabels = streamFailures.map(item => displayLabel(item?.label));
     const affectedLabels = [...new Set([...warningLabels, ...failureLabels])];
     if (!affectedLabels.length) return { status: currentStatus, errorMessage: currentMessage };
     const failureDetails = streamFailures
