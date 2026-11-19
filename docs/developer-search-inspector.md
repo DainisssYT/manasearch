@@ -62,7 +62,7 @@ console.log(report);
 
 Use `validateRegressionCase(importedJson)` before accepting a case from another source. The comparison report includes `inputCheck`, `focusCheck`, `rankingCheck`, and `scoringEvolution`. A report with `status: "input-mismatch"` should not be counted as a ranking pass or failure until the original inputs have been reproduced.
 
-A comparison is only valid when the source card, selected highlights, interpreted intent, constraints, methods, and ordering match the original request. When they differ, the report marks the result as **input-mismatch** instead of blaming the algorithm. Fix the input differences and rerun the case before evaluating ranking changes.
+A comparison requires the same user-controlled source card, selected highlights, constraints, methods, and ordering. Changes to interpreted intent and generated query plans are reported separately as derived outputs, so a live-intent improvement can be evaluated without being misclassified as a different user request. When they differ, the report marks the result as **input-mismatch** instead of blaming the algorithm. Fix the input differences and rerun the case before evaluating ranking changes.
 
 ## Reading live-search status
 
