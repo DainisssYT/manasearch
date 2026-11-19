@@ -274,6 +274,9 @@ async function main() {
         window.dispatchEvent(new CustomEvent('manasearch:search-preview-updated', {
           detail: { requestId: 9001, phase: 'final-ranking', sourceLabel: 'Authoritative final ranking', provisional: false, resultCount: 1, topNames: ['Shared Card'], at: 1300 }
         }));
+        window.dispatchEvent(new CustomEvent('manasearch:progress-updated', {
+          detail: { requestId: 9001, step: null, total: null, message: 'Search complete. 1 final matches were ranked.', at: 1400 }
+        }));
         const activeSearchBeforeFinish = window.ManaSearchInspector.getActiveSearch();
         const liveSummaryText = window.ManaSearchInspector.formatLiveSummary({
           source: { name: 'Telemetry Source' },
@@ -547,6 +550,7 @@ async function main() {
             requestKeyOrderComparison.changes.changedInputFields.length === 0 &&
             requestKeyOrderComparison.changes.changedDerivedFields.length === 0,
           liveInspectorCapturesProgress: activeSearchBeforeFinish?.progress?.message === 'Searching for candidates',
+          liveInspectorCapturesFinalOutcomeProgress: activeSearchBeforeFinish?.progress?.message === 'Search complete. 1 final matches were ranked.' && activeSearchBeforeFinish?.progress?.step === null,
           liveInspectorIgnoresStaleProgress: activeSearchBeforeFinish?.progress?.message !== 'STALE EVENT MUST BE IGNORED',
           liveInspectorCapturesStreamProgress: activeSearchBeforeFinish?.completedStreams === 1 && activeSearchBeforeFinish?.failedStreams === 1 && activeSearchBeforeFinish?.settledStreams === 2 && activeSearchBeforeFinish?.totalStreams === 2 && activeSearchBeforeFinish?.streams?.[0]?.done === true && activeSearchBeforeFinish?.streams?.[1]?.failed === true,
           liveInspectorCapturesProvisionalResults: activeSearchBeforeFinish?.previewHistory?.some(item => item.phase === 'progressive-preview' && item.provisional === true && item.topNames?.includes('Shared Card')),
