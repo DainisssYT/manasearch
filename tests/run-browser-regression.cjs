@@ -420,6 +420,97 @@ async function main() {
         let rejectsInvalidCase = false;
         try { window.ManaSearchInspector.validateRegressionCase({ schema: 'wrong', version: 1 }); }
         catch (_) { rejectsInvalidCase = true; }
+        // Controlled comparisons require identical user inputs and explicit app/data provenance.
+        // The same retained pipeline is used here so only the revision metadata changes.
+        const controlledRequest = structuredClone(earlier.pipeline.request);
+        controlledRequest.inputSnapshotVersion = 2;
+        controlledRequest.broad = false;
+        controlledRequest.divergent = false;
+        const sameBuildRunA = {
+          number: 20, status: 'completed',
+          summary: { sourceName: 'Source A', resultCount: 2, status: 'completed' },
+          pipeline: {
+            ...structuredClone(earlier.pipeline),
+            appBuild: 'repeatability-build',
+            dataBuildId: 'cards-revision-1',
+            request: structuredClone(controlledRequest)
+          }
+        };
+        const sameBuildRunB = {
+          number: 21, status: 'completed',
+          summary: { sourceName: 'Source A', resultCount: 2, status: 'completed' },
+          pipeline: {
+            ...structuredClone(earlier.pipeline),
+            appBuild: 'repeatability-build',
+            dataBuildId: 'cards-revision-1',
+            request: structuredClone(controlledRequest)
+          }
+        };
+        const repeatabilityComparison = window.ManaSearchInspector.compareRuns(sameBuildRunA, sameBuildRunB);
+        const algorithmRevisionRun = {
+          number: 22, status: 'completed',
+          summary: { sourceName: 'Source A', resultCount: 2, status: 'completed' },
+          pipeline: {
+            ...structuredClone(sameBuildRunB.pipeline),
+            appBuild: 'algorithm-revision-build'
+          }
+        };
+        const algorithmRevisionComparison = window.ManaSearchInspector.compareRuns(sameBuildRunA, algorithmRevisionRun);
+        const dataRevisionRun = {
+          number: 23, status: 'completed',
+          summary: { sourceName: 'Source A', resultCount: 2, status: 'completed' },
+          pipeline: {
+            ...structuredClone(sameBuildRunB.pipeline),
+            dataBuildId: 'cards-revision-2'
+          }
+        };
+        const dataRevisionComparison = window.ManaSearchInspector.compareRuns(sameBuildRunA, dataRevisionRun);
+        const mixedRevisionRun = {
+          number: 24, status: 'completed',
+          summary: { sourceName: 'Source A', resultCount: 2, status: 'completed' },
+          pipeline: {
+            ...structuredClone(sameBuildRunB.pipeline),
+            appBuild: 'algorithm-revision-build',
+            dataBuildId: 'cards-revision-2'
+          }
+        };
+        const mixedRevisionComparison = window.ManaSearchInspector.compareRuns(sameBuildRunA, mixedRevisionRun);
+
+        window.dispatchEvent(new CustomEvent('manasearch:search-started', {
+          detail: { requestId: 9002, sourceName: 'Cancelled Source', highlightCount: 1, startedAt: '2026-11-19T08:11:00.000Z' }
+        }));
+        window.dispatchEvent(new CustomEvent('manasearch:progress-updated', {
+          detail: { requestId: 9002, step: 1, total: 3, message: 'Searching for candidates', at: 2100 }
+        }));
+        window.dispatchEvent(new CustomEvent('manasearch:search-preview-updated', {
+          detail: { requestId: 9002, phase: 'progressive-preview', sourceLabel: 'Local Card Corpus', provisional: true, resultCount: 2, topNames: ['Provisional Mana', 'Provisional Draw'], at: 2200 }
+        }));
+        window.dispatchEvent(new CustomEvent('manasearch:search-cancelled', {
+          detail: {
+            requestId: 9002,
+            status: 'cancelled',
+            reason: 'A newer source card replaced this search.',
+            sourceName: 'Cancelled Source',
+            startedAt: '2026-11-19T08:11:00.000Z',
+            finishedAt: '2026-11-19T08:11:02.500Z',
+            durationMs: 2500,
+            resultCount: 0,
+            provisionalResultCount: 2,
+            provisionalCardNames: ['Provisional Mana', 'Provisional Draw']
+          }
+        }));
+        const cancelledRun = window.ManaSearchInspector.getRunHistory().slice(-1)[0];
+        const cancelledComparison = window.ManaSearchInspector.compareRuns(sameBuildRunA, cancelledRun);
+        const cancelledCompareSummary = window.ManaSearchInspector.formatCompareSummary(cancelledComparison);
+        const cancelledRegressionComparison = window.ManaSearchInspector.compareRegressionCase(regressionCase, cancelledRun);
+        const cancelledLiveSummary = window.ManaSearchInspector.formatLiveSummary({
+          source: { name: 'Cancelled Source' },
+          liveSearch: cancelledRun?.liveSearch || {}
+        });
+        let refusesCancelledBaseline = false;
+        try { window.ManaSearchInspector.createRegressionCase(cancelledRun); }
+        catch (_) { refusesCancelledBaseline = true; }
+
         const cleanLaneOutcome = window.ManaSearchDebug.resolveSearchOutcome(
           'completed', '', [['Exact Phrase', 'completed']], []
         );
@@ -513,6 +604,21 @@ async function main() {
           regressionRejectsChangedBroadAndDivergentInputs: broadOptionRegression.status === 'input-mismatch' && broadOptionRegression.pass === null &&
             broadOptionRegression.inputCheck.changedFields.includes('broad') && broadOptionRegression.inputCheck.changedFields.includes('divergent'),
           compareMarksFailedRunInvalid: errorRunComparison.outcomeComparison?.rankingComparisonValid === false && errorRunComparison.outcomeComparison?.laterStatus === 'error',
+          sameBuildSameInputsAreRepeatabilityChecks: repeatabilityComparison.outcomeComparison?.comparisonMode === 'same-build-repeatability' &&
+            repeatabilityComparison.outcomeComparison?.comparableForRepeatability === true &&
+            repeatabilityComparison.repeatabilityCheck?.assessment === 'stable' &&
+            repeatabilityComparison.outcomeComparison?.comparableForAlgorithmRegression === false,
+          appOnlyRevisionIsControlledAlgorithmComparison: algorithmRevisionComparison.outcomeComparison?.comparisonMode === 'algorithm-revision' &&
+            algorithmRevisionComparison.outcomeComparison?.comparableForAlgorithmRegression === true &&
+            algorithmRevisionComparison.outcomeComparison?.sameDataBuild === true,
+          datasetOnlyRevisionIsNotAlgorithmRegression: dataRevisionComparison.outcomeComparison?.comparisonMode === 'data-revision' &&
+            dataRevisionComparison.outcomeComparison?.dataBuildChanged === true &&
+            dataRevisionComparison.outcomeComparison?.comparableForAlgorithmRegression === false,
+          mixedCodeAndDatasetChangeIsNotControlled: mixedRevisionComparison.outcomeComparison?.comparisonMode === 'mixed-code-and-data-revision' &&
+            mixedRevisionComparison.outcomeComparison?.comparableForAlgorithmRegression === false,
+          compareSummaryLabelsComparisonKinds: window.ManaSearchInspector.formatCompareSummary(repeatabilityComparison).includes('SAME-BUILD REPEATABILITY CHECK') &&
+            window.ManaSearchInspector.formatCompareSummary(algorithmRevisionComparison).includes('CONTROLLED ALGORITHM-REVISION COMPARISON') &&
+            window.ManaSearchInspector.formatCompareSummary(dataRevisionComparison).includes('DATASET REVISION COMPARISON'),
           compareShowsProvisionalCountsForInterruptedRuns: errorRunComparison.outcomeComparison?.laterProvisionalResultCount === 3 &&
             partialRunComparison.outcomeComparison?.laterProvisionalResultCount === 2 &&
             errorCompareSummaryText.includes('Provisional cards still visible: earlier 0 → later 3'),
@@ -541,6 +647,17 @@ async function main() {
           compareShowsScoreChannelAndMechanicalBreakdownChanges: comparison.sharedCandidateScoreChanges.some(item => item.name === 'Shared Card' && item.scoreChannelChanges?.some(change => change.field === 'mechanicalScore' && Math.abs(change.delta - 0.1) < 1e-9) && item.mechanicalBreakdownChanges?.some(change => change.field === 'graphScore' && Math.abs(change.delta - 0.15) < 1e-9)),
           regressionCompareDoesNotCountFailedRunAsRankingFailure: failedRegressionComparison.status === 'search-error' && failedRegressionComparison.pass === null,
           regressionBuilderRejectsFailedBaseline: refusesFailedBaseline,
+          cancelledRunIsRetainedWithProvisionalCards: cancelledRun?.status === 'cancelled' &&
+            cancelledRun.summary?.resultCount === 0 && cancelledRun.summary?.provisionalResultCount === 2 &&
+            cancelledRun.liveSearch?.preview?.topNames?.includes('Provisional Mana'),
+          cancelledRunCannotBeComparedAsACompletedRanking: cancelledComparison.outcomeComparison?.rankingComparisonAvailable === false &&
+            cancelledComparison.outcomeComparison?.comparisonMode === 'run-health-difference' &&
+            cancelledCompareSummary.includes('CANCELLED') && cancelledCompareSummary.includes('not count it as a zero-result search'),
+          cancelledRegressionReplayHasNoVerdict: cancelledRegressionComparison.status === 'search-cancelled' && cancelledRegressionComparison.pass === null,
+          regressionBuilderRejectsCancelledBaseline: refusesCancelledBaseline,
+          cancelledLiveSummaryRetainsProvisionalWarning: cancelledLiveSummary.includes('Status: CANCELLED') &&
+            cancelledLiveSummary.includes('Provisional results still visible: 2') &&
+            cancelledLiveSummary.includes('not a complete final ranking'),
           compareNormalizesCandidateNameWhitespaceAndCase: normalizedNameComparison.finalRanking.sharedCount === 1 && normalizedNameComparison.retrieval[0]?.sharedCount === 1,
           compareIgnoresRequestObjectKeyOrder: [
             'sourceCardChanged', 'highlightsChanged', 'intentChanged', 'constraintsChanged',
