@@ -6017,7 +6017,7 @@ function extractMTGRestrictions(text) {
 
     const words = normalizedText
         .split(/\s+/)
-        .filter(word => word.length > 1 && !ignoreList.has(word));
+        .filter(word => (word.length > 1 || /^\d+$/.test(word)) && !ignoreList.has(word));
 
     return [...controlTokens, ...words];
 }
@@ -9162,7 +9162,7 @@ function inferEffectRepeatabilityProfile(card, effect, fullText = '') {
         kind = 'ongoing_static';
         confidence = replacementEffect ? 0.93 : 0.84;
     } else if (/\b(?:when|whenever)\b/i.test(combined) && isPermanent) {
-        const ownEntry = selfReference && /\b(?:enters? the battlefield|comes into play)\b/i.test(combined);
+        const ownEntry = selfReference && /\b(?:enters?(?:\s+(?:the\s+)?battlefield)?|comes into play)\b/i.test(combined);
         const ownOneTimeEvent = selfReference && /\b(?:dies|leaves the battlefield|is sacrificed|is put into a graveyard)\b/i.test(combined);
         const repeatingCombatEvent = /\b(?:attacks|blocks)\b/i.test(combined) && !ownOneTimeEvent;
         if (ownEntry) {
@@ -15308,6 +15308,36 @@ function runManaSearchMechanicalRegressionSuite({ log = true } = {}) {
             from: animateDeadReturn?.from || null,
             canonicalFunction: animateDeadReturn?.canonical?.function || null,
             canonicalParams: animateDeadReturn?.canonical?.params || null
+        });
+
+        const animateDeadCardContext = {
+            name: 'Animate Dead',
+            type_line: 'Enchantment — Aura',
+            oracle_text: animateDeadText
+        };
+        const reanimateCardContext = {
+            name: 'Reanimate',
+            type_line: 'Sorcery',
+            oracle_text: 'Put target creature card from a graveyard onto the battlefield under your control. You lose life equal to that card\'s mana value.'
+        };
+        annotateEffectRepeatability(animateDeadCardContext, animateDeadEffects, animateDeadText);
+        const reanimateCadenceEffects = parseMTGEffect(reanimateCardContext.oracle_text, reanimateCardContext);
+        annotateEffectRepeatability(reanimateCardContext, reanimateCadenceEffects, reanimateCardContext.oracle_text);
+        const animateDeadReturnCadence = animateDeadReturn?.repeatabilityProfile || null;
+        const reanimateCadence = reanimateCadenceEffects.find(effect => effect?.canonical?.function === 'reanimate')?.repeatabilityProfile || null;
+        const auraReanimationRepeatabilityMismatch = calculateRepeatabilityMismatchSeverity(
+            reanimateCadenceEffects,
+            animateDeadEffects
+        );
+        results.push({
+            id: 'animate-dead-entry-return-is-not-misclassified-as-a-repeatable-engine',
+            pass: animateDeadReturnCadence?.kind === 'entry_trigger' &&
+                animateDeadReturnCadence?.group === 'single_use' &&
+                reanimateCadence?.kind === 'one_shot' &&
+                auraReanimationRepeatabilityMismatch < 0.42,
+            animateDeadCadence: animateDeadReturnCadence,
+            reanimateCadence,
+            mismatch: auraReanimationRepeatabilityMismatch
         });
 
         const handCheat = parseMTGEffect('Put a creature card from your hand onto the battlefield.')
