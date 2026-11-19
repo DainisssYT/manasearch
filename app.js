@@ -9060,6 +9060,8 @@ function calculateEffectAwareFunctionSemanticScore(sourceEntries, candidateEntri
         }
     }
 
+    if (!pairs.length) return null;
+
     pairs.sort((a, b) => b.utility - a.utility || b.similarity - a.similarity);
     const usedSources = new Set();
     const usedCandidates = new Set();
@@ -33260,7 +33262,7 @@ function runManaSearchRankingScoringRegressionSuite({ log = true } = {}) {
             tierNode('Destroy target creature.', 'creature_destroy', 'destroy'),
             tierNode('Destroy all creatures.', 'creature_destroy', 'destroy', { targetKind: 'all', targetObject: 'creature' })
         );
-        check('mechanic-tier-same-mechanic-same-wording-first', sameWordTier === MANASEARCH_MECHANIC_RANKING_TIER.SAME_MECHANIC_SAME_WORDING, `tier=${sameWordTier}`);
+        check('mechanic-tier-same-wording-target-mass-conflict-is-contradiction', sameWordTier === MANASEARCH_MECHANIC_RANKING_TIER.CONTRADICTION_SAME_WORDING, `tier=${sameWordTier}`);
         const sourceSolRingEffect = {
             raw: '{T}: Add {C}{C}.', action: 'add_mana', quantity: 2, amount: 2,
             manaNetAmount: 2, manaOutputAmount: 2,
