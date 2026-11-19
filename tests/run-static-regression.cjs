@@ -418,6 +418,8 @@ check('developer inspector observes the production pipeline without changing sco
 
 
   assert.match(app, /manasearch:progress-updated/);
+  assert.match(app, /function updateProgress\(step, total, message, ownerRequestId = activeMainSearchRequestId\)/);
+  assert.match(app, /updateProgress\(null, null, outcomeMessage, requestId\)/);
   assert.match(app, /manasearch:search-streams-updated/);
   assert.match(app, /manasearch:search-preview-updated/);
   assert.match(app, /phase: 'final-ranking'/);
