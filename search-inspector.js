@@ -186,8 +186,9 @@
       earlier: { number: earlier.number, completedAt: earlier.completedAt, request: a.request },
       later: { number: later.number, completedAt: later.completedAt, request: b.request },
       changes: {
-        sourceCardChanged: (a.request?.sourceCard?.name || '') !== (b.request?.sourceCard?.name || ''),
+        sourceCardChanged: JSON.stringify(a.request?.sourceCard || {}) !== JSON.stringify(b.request?.sourceCard || {}),
         highlightsChanged: JSON.stringify(a.request?.highlights || []) !== JSON.stringify(b.request?.highlights || []),
+        intentChanged: JSON.stringify(a.request?.intent || {}) !== JSON.stringify(b.request?.intent || []),
         constraintsChanged: JSON.stringify(a.request?.constraints || {}) !== JSON.stringify(b.request?.constraints || {}),
         methodsChanged: JSON.stringify(a.request?.methods || {}) !== JSON.stringify(b.request?.methods || {}),
         orderingChanged: (a.request?.ordering || '') !== (b.request?.ordering || '')
