@@ -33054,7 +33054,7 @@ window.ManaSearchDebug = Object.freeze({
             const evidence = card?.rankingEvidence || {};
             return {
                 name: card?.name || '', type_line: card?.type_line || '', oracle_text: String(card?.oracle_text || '').slice(0, 2200),
-                scores, rankByScore: index + 1,
+                scores, candidateIndex: index,
                 retrievalEvidence: Array.isArray(card?.retrievalEvidence) ? card.retrievalEvidence.slice() : [],
                 rankingEvidence: {
                     mechanical: evidence.mechanical ?? null, mechanicalTrusted: evidence.mechanicalTrusted ?? null,
