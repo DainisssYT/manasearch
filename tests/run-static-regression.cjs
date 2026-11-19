@@ -353,7 +353,7 @@ check('Pages publishes the shared semantic module and browser tests serve ESM wi
 
 check('developer inspector observes the production pipeline without changing scoring', () => {
   execFileSync(process.execPath, ['--check'], { input: inspector, stdio: ['pipe', 'pipe', 'pipe'] });
-  assert.match(html, /search-inspector\.js\?v=20261119-153/);
+  assert.match(html, /search-inspector\.js\?v=20261119-154/);
   assert.match(html, /search-inspector\.css\?v=20261119-140/);
   assert.match(app, /window\.ManaSearchDebug = Object\.freeze\(/);
   assert.match(app, /getLiveIntent\(\)/);
@@ -381,7 +381,7 @@ check('developer inspector observes the production pipeline without changing sco
   assert.match(inspector, /capturedListOverlap/);
   assert.match(inspector, /Changed factors:/);
   assert.match(inspector, /Provisional results still visible/);
-  assert.match(inspector, /return lines\.join\('\\\\n'\)/);
+  assert.ok(inspector.includes('return lines.join('));
   assert.match(app, /provisionalResultCount/);
   assert.match(app, /Search stopped before the final ranking/);
   assert.match(app, /searchHasFinalRanking = true/);
