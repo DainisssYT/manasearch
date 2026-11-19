@@ -669,7 +669,26 @@ async function main() {
               } : null
             };
           }),
-          error: strict.errorMessage || ''
+          error: strict.errorMessage || '',
+          // Retain the actual retrieval plan and corpus evidence for low-recall cases.
+          // This lets us identify whether an expected card was absent because the query was
+          // too narrow, its stream failed, or the indexed corpus did not contain the card.
+          retrievalDiagnostics: (strict.recall20 ?? 1) < 0.5 ? {
+            benchmarkSignals: strict.diagnostics?.benchmarkSignals || null,
+            streamCoverage: strict.diagnostics?.streamCoverage || null,
+            streamCounts: Object.fromEntries(Object.entries(strict.diagnostics?.streams || {}).map(([name, values]) => [name, values instanceof Set ? values.size : Array.isArray(values) ? values.length : 0])),
+            functionalQueryResults: strict.diagnostics?.searchFQueryDetail || [],
+            exactHighlightQueryResults: strict.diagnostics?.exactHighlightQueryDetail || [],
+            highlightIntentDiagnostics: strict.diagnostics?.highlightIntentDiagnostics || [],
+            streamFailures: strict.diagnostics?.streamFailures || []
+          } : null,
+          candidateTextEvidence: (strict.recall20 ?? 1) < 0.5
+            ? [...new Set([...(item.expected || []), ...(strict.rankedResults || []).slice(0, 10)])]
+                .slice(0, 20).map(cardName => {
+                  const card = window.ManaSearchApi?.getCardByName?.(cardName);
+                  return card ? { name: card.name, typeLine: card.type_line || '', oracleText: card.oracle_text || '' } : { name: cardName, missingFromLocalCardApi: true };
+                })
+            : []
         };
       });
       return {
