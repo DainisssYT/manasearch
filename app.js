@@ -28114,6 +28114,23 @@ async function findSimilarCards() {
         constraints: filters,
         methods: { ...activeSearchMethodFlags },
         ordering: priorityValue,
+        // These settings alter candidate recall or ranking even when the source/highlights stay unchanged.
+        // Capture them as user-controlled inputs so later comparisons cannot mistake a settings change
+        // for an algorithm change.
+        inputSnapshotVersion: 2,
+        searchDepthPercent: activeSearchDepthPercent,
+        orderingFeatures: { ...activeOrderFeatureFlags },
+        rankingWeights: Object.fromEntries([
+            ['mechanical', 'weight-mechanical'],
+            ['synergy', 'weight-synergy'],
+            ['context', 'weight-context'],
+            ['exactness', 'weight-exactness'],
+            ['category', 'weight-category']
+        ].map(([key, id]) => {
+            const raw = document.getElementById(id)?.value;
+            const value = Number(raw);
+            return [key, raw !== null && raw !== undefined && raw !== '' && Number.isFinite(value) ? value : null];
+        })),
         broad: isBroadSearch,
         divergent: isDivergent,
         plannedStreams: plannedStreamLabels.slice(),
@@ -33535,7 +33552,20 @@ window.ManaSearchDebug = Object.freeze({
                 target: enabled('target-search'), role: enabled('role-search'),
                 alternate: enabled('alternate-search'), synergy: enabled('synergy-search')
             },
-            ordering: document.getElementById('sort-results')?.value || 'overall'
+            ordering: document.getElementById('sort-results')?.value || 'overall',
+            searchDepthPercent: activeSearchDepthPercent,
+            orderingFeatures: { ...activeOrderFeatureFlags },
+            rankingWeights: Object.fromEntries([
+                ['mechanical', 'weight-mechanical'],
+                ['synergy', 'weight-synergy'],
+                ['context', 'weight-context'],
+                ['exactness', 'weight-exactness'],
+                ['category', 'weight-category']
+            ].map(([key, id]) => {
+                const raw = document.getElementById(id)?.value;
+                const value = Number(raw);
+                return [key, raw !== null && raw !== undefined && raw !== '' && Number.isFinite(value) ? value : null];
+            }))
         };
     },
     getSnapshot() {
