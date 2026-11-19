@@ -27793,6 +27793,12 @@ function throwIfSearchCancelled(isCancelled) {
     if (typeof isCancelled === 'function' && isCancelled()) throw createSearchCancellationError();
 }
 
+function normalizeRetrievalStreamDisplayLabel(label) {
+    const value = String(label || 'Unknown retrieval stream');
+    return /^Search F #\d+ \(Functional Match\)$/.test(value)
+        ? 'Functional Match'
+        : value;
+}
 async function findSimilarCards() {
     if (!currentSourceCard) return;
     if (!staticSearchResourcesReady()) {
@@ -28180,7 +28186,7 @@ async function findSimilarCards() {
         const message = String(error?.message || error || 'Unknown retrieval error').slice(0, 420);
         failedStreamLabels.add(safeLabel);
         streamFailureRecords.push({ label: safeLabel, message, at: new Date().toISOString() });
-        const displayLabel = /^Search F #\\d+ \\(Functional Match\\)$/.test(safeLabel) ? 'Functional Match' : safeLabel;
+        const displayLabel = normalizeRetrievalStreamDisplayLabel(safeLabel);
         if (streamChecklistState.has(displayLabel)) {
             streamChecklistState.set(displayLabel, false);
             streamChecklistStatus.set(displayLabel, 'failed');
@@ -28241,9 +28247,7 @@ async function findSimilarCards() {
         // originating request and the view that currently owns the result area.
         if (requestId !== searchRequestId || ownerRequestId !== requestId ||
             activeResultView.mode !== 'main' || activeResultView.requestId !== requestId || !label) return;
-        const displayLabel = /^Search F #\d+ \(Functional Match\)$/.test(label)
-            ? 'Functional Match'
-            : label;
+        const displayLabel = normalizeRetrievalStreamDisplayLabel(label);
         if (!streamChecklistState.has(displayLabel)) {
             streamChecklistState.set(displayLabel, false);
             streamChecklistStatus.set(displayLabel, 'waiting');
@@ -28771,7 +28775,7 @@ async function findSimilarCards() {
                 const totalPages = sets.reduce((sum, r) => sum + (r?.coverage?.pagesFetched || 0), 0);
                 const maxPages = sets.reduce((sum, r) => sum + (r?.coverage?.maxPages || 0), 0);
                 const totalCards = sets.reduce((sum, r) => sum + (r?.length || 0), 0);
-                const failedFunctionalQueries = streamFailureRecords.filter(item => /^Search F #\\d+ \\(Functional Match\\)$/.test(item.label)).length;
+                const failedFunctionalQueries = streamFailureRecords.filter(item => normalizeRetrievalStreamDisplayLabel(item.label) === 'Functional Match').length;
                 streamChecklistState.set('Functional Match', failedFunctionalQueries === 0);
                 streamChecklistStatus.set('Functional Match', failedFunctionalQueries ? 'completed_with_warnings' : 'completed');
                 streamChecklistDetail.set(
@@ -33532,6 +33536,7 @@ function cloneCardForMinigame(card) {
 window.ManaSearchDebug = Object.freeze({
     // Read the same intent model used by Find Similar Cards, even when the optional on-page
     // Search Intent panel is hidden. This is a live read-only view of the current source/highlights.
+    normalizeRetrievalStreamDisplayLabel,
     getLiveIntent() {
         if (!currentSourceCard) return null;
         const highlights = (Array.isArray(manualHighlights) ? manualHighlights : []).map(h => ({
