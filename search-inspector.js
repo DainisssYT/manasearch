@@ -405,6 +405,106 @@
             : 'The user-controlled inputs match. Stage membership isolates recall changes; score-channel deltas show ranking changes among shared scored candidates; top-K overlap and rank movement show the user-visible effect.'
     };
   };
+  const formatLiveSummary = snapshotValue => {
+    const sourceName = snapshotValue?.source?.name || snapshotValue?.liveSearch?.sourceName || 'Unknown source';
+    const live = snapshotValue?.liveSearch || {};
+    const statusValue = live.status || (snapshotValue?.runtime?.loading ? 'running' : 'waiting');
+    const statusLabel = String(statusValue).toUpperCase().replace(/_/g, ' ');
+    const lines = [
+      'LIVE SEARCH SUMMARY',
+      'Source: ' + sourceName,
+      'Status: ' + statusLabel
+    ];
+    if (live.requestId != null) lines.push('Request ID: ' + live.requestId);
+    if (live.durationMs != null) lines.push('Duration: ' + (Number(live.durationMs) / 1000).toFixed(2) + 's');
+    if (live.progress?.message) lines.push('Current phase: ' + live.progress.message);
+    if (live.totalStreams) {
+      lines.push('Retrieval lanes: ' + (live.completedStreams || 0) + ' successful, ' +
+        (live.failedStreams || 0) + ' failed/warning, ' + (live.settledStreams || 0) + '/' + live.totalStreams + ' settled');
+      (live.streams || []).forEach(stream => {
+        const streamStatus = stream.status || (stream.failed ? 'failed' : stream.done ? 'completed' : 'running');
+        const marker = streamStatus === 'completed' ? 'OK'
+          : streamStatus === 'failed' ? 'FAILED'
+            : streamStatus === 'completed_with_warnings' ? 'WARNING'
+              : streamStatus === 'running' ? 'RUNNING' : 'WAITING';
+        lines.push('  [' + marker + '] ' + stream.label + ': ' + clip(stream.detail, 200));
+      });
+    }
+    if (live.preview) {
+      lines.push('Current results: ' + live.preview.resultCount + (live.preview.provisional ? ' provisional matches' : ' final ranked results'));
+      if (live.preview.topNames?.length) lines.push('Top cards: ' + live.preview.topNames.join(' → '));
+    }
+    if (live.errorMessage) lines.push('Search warning/error: ' + live.errorMessage);
+    if (Array.isArray(live.previewHistory) && live.previewHistory.length) {
+      const provisionalCount = live.previewHistory.filter(item => item.provisional).length;
+      const finalCount = live.previewHistory.filter(item => !item.provisional).length;
+      lines.push('Preview history: ' + provisionalCount + ' provisional update(s), ' + finalCount + ' final ranking event(s)');
+    }
+    lines.push('', 'FULL CAPTURED STATE');
+    return lines.join('\\n') + '\\n' + JSON.stringify(snapshotValue, null, 2);
+  };
+  const formatCompareSummary = comparison => {
+    if (!comparison || comparison.message) return String(comparison?.message || 'No comparison is available.');
+    const outcome = comparison.outcomeComparison || {};
+    const controlled = outcome.comparableForAlgorithmRegression === true;
+    const valid = outcome.rankingComparisonAvailable === true;
+    const lines = [
+      'COMPARE RUNS SUMMARY',
+      'Comparison type: ' + (controlled ? 'CONTROLLED ALGORITHM COMPARISON'
+        : valid ? 'EXPLORATORY / INPUTS OR RUN HEALTH DIFFER'
+          : 'INVALID — ONE OR MORE RUNS FAILED'),
+      'Earlier run: #' + (comparison.earlier?.number ?? '?') + ' — ' + (outcome.earlierStatus || comparison.earlier?.status || 'unknown') + ' — ' + (outcome.earlierResultCount ?? 0) + ' results',
+      'Later run:   #' + (comparison.later?.number ?? '?') + ' — ' + (outcome.laterStatus || comparison.later?.status || 'unknown') + ' — ' + (outcome.laterResultCount ?? 0) + ' results'
+    ];
+    if (outcome.note) lines.push('Validity: ' + outcome.note);
+    const changedInputs = comparison.changes?.changedInputFields || [];
+    const changedDerived = comparison.changes?.changedDerivedFields || [];
+    lines.push('Changed user inputs: ' + (changedInputs.length ? changedInputs.join(', ') : 'none'));
+    lines.push('Changed derived intent/query outputs: ' + (changedDerived.length ? changedDerived.join(', ') : 'none'));
+    if (comparison.retrievalFailures) {
+      const failures = comparison.retrievalFailures;
+      lines.push('Retrieval lane failures: ' + (failures.earlierCount || 0) + ' → ' + (failures.laterCount || 0) +
+        '; newly failed ' + (failures.newlyFailed?.length || 0) + '; recovered ' + (failures.resolved?.length || 0));
+      (failures.newlyFailed || []).slice(0, 5).forEach(item => lines.push('  [NEW FAILURE] ' + item.label + ': ' + clip(item.message, 200)));
+      (failures.resolved || []).slice(0, 5).forEach(item => lines.push('  [RECOVERED] ' + item.label + ': ' + clip(item.message, 200)));
+    }
+    lines.push('Pipeline candidate counts (earlier → later):');
+    (comparison.stageProgression || []).forEach(stage => {
+      lines.push('  ' + stage.label + ': ' + stage.earlierCount + ' → ' + stage.laterCount +
+        ' (shared ' + stage.sharedCount + ', overlap ' + Math.round((stage.jaccard || 0) * 100) + '%)');
+      if (stage.addedInLater?.length) lines.push('    Added examples: ' + stage.addedInLater.slice(0, 5).join(', '));
+      if (stage.missingFromLater?.length) lines.push('    Missing examples: ' + stage.missingFromLater.slice(0, 5).join(', '));
+    });
+    if (comparison.scoredCandidateEvolution) {
+      const scored = comparison.scoredCandidateEvolution;
+      lines.push('Scored-candidate sample: ' + scored.sharedSampleCount + ' shared of ' + scored.earlierSampleCount +
+        ' earlier / ' + scored.laterSampleCount + ' later (retained sample cap ' + scored.sampleLimit + ')');
+      if (scored.newlyPresentInSample?.length) lines.push('  Entered sample: ' + scored.newlyPresentInSample.slice(0, 8).join(', '));
+      if (scored.noLongerPresentInSample?.length) lines.push('  Left sample: ' + scored.noLongerPresentInSample.slice(0, 8).join(', '));
+    }
+    if (comparison.finalRanking) {
+      const ranking = comparison.finalRanking;
+      lines.push('Top-K overlap: ' + ((ranking.topKOverlap || []).map(item => 'Top ' + item.k + ' ' + Math.round(item.overlap * 100) + '%').join(' · ') || 'not available'));
+      lines.push('Mean absolute rank movement among shared top-100 cards: ' + (ranking.meanAbsoluteRankMovement ?? 'n/a'));
+      if (ranking.rankChanges?.length) {
+        lines.push('Largest rank movements:');
+        ranking.rankChanges.slice(0, 8).forEach(item => lines.push('  ' + item.name + ': #' + item.earlierRank + ' → #' + item.laterRank +
+          ' (' + (item.movement > 0 ? '+' : '') + item.movement + ')'));
+      }
+      if (ranking.addedInLater?.length) lines.push('New final cards: ' + ranking.addedInLater.slice(0, 10).join(', '));
+      if (ranking.missingFromLater?.length) lines.push('Removed final cards: ' + ranking.missingFromLater.slice(0, 10).join(', '));
+    }
+    const scoreChanges = (comparison.sharedCandidateScoreChanges || [])
+      .filter(item => item.delta !== null)
+      .sort((a, b) => Math.abs(b.delta) - Math.abs(a.delta)).slice(0, 8);
+    if (scoreChanges.length) {
+      lines.push('Largest shared-candidate overall score changes:');
+      scoreChanges.forEach(item => lines.push('  ' + item.name + ': ' + Number(item.earlierScore).toFixed(3) +
+        ' → ' + Number(item.laterScore).toFixed(3) + ' (' + (item.delta > 0 ? '+' : '') + item.delta.toFixed(3) + ')'));
+    }
+    lines.push('', 'FULL COMPARISON JSON');
+    return lines.join('\\n') + '\\n' + JSON.stringify(comparison, null, 2);
+  };
   const normalizeCandidateName = value => String(value || '').normalize('NFKD').replace(/[\u0300-\u036f]/g, '').trim().toLocaleLowerCase().replace(/\s+/g, ' ');
   const traceCandidate = (pipeline, candidateName) => {
     if (!pipeline || !candidateName) return { found: false, candidateName: candidateName || '', message: 'Select a candidate and a completed search.' };
@@ -823,7 +923,7 @@
     runSelectA.value = state.searchRuns.some(run => String(run.number) === currentA) ? currentA : String(state.searchRuns[state.searchRuns.length - 2].number);
     runSelectB.value = state.searchRuns.some(run => String(run.number) === currentB) ? currentB : String(state.searchRuns[state.searchRuns.length - 1].number);
     const [a, b] = selectedRuns();
-    content.textContent = JSON.stringify(compareRuns(a, b), null, 2);
+    content.textContent = formatCompareSummary(compareRuns(a, b));
   };
   const renderTimeline = () => { if (activeTab === 'timeline' && !windowEl.hidden) content.textContent = JSON.stringify(state.events, null, 2); };
   const renderWorker = () => { if (activeTab === 'worker' && !windowEl.hidden) content.textContent = JSON.stringify(state.workerMessages, null, 2); };
@@ -837,7 +937,7 @@
         : state.searchCount ? `${state.searchCount} search action(s) observed` : 'Waiting for search activity';
     if (activeTab === 'live') {
       state.lastSnapshot = snapshot();
-      content.textContent = JSON.stringify(state.lastSnapshot, null, 2);
+      content.textContent = formatLiveSummary(state.lastSnapshot);
       compareControls.hidden = true;
     } else if (activeTab === 'pipeline') {
       const p = getPipelineSnapshot();
@@ -1144,6 +1244,8 @@
     getActiveSearch: () => cloneJson(state.activeSearch),
     getExport: () => cloneJson(buildExport()),
     compareRuns,
+    formatCompareSummary,
+    formatLiveSummary,
     traceCandidate,
     createRegressionCase,
     validateRegressionCase,
