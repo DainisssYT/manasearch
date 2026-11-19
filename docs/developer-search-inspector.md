@@ -4,7 +4,7 @@ The floating **Developer inspector** is an opt-in, read-only view of the real ap
 
 ## How to use it
 
-1. Open the feature branch deployment (or run the app locally from this branch).
+1. Check out the `feature/search-debug-inspector` branch and serve the app from that working copy. The branch is not merged into `main`; use a deployed copy only after it has been published.
 2. Load a source card.
 3. Select the relevant Oracle text and set its Exact/Flexible mode and constraints.
 4. Open **Developer inspector** in the bottom-right corner.
