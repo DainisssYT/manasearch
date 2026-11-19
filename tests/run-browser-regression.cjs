@@ -70,6 +70,7 @@ async function main() {
       typeof window.runLocalBenchmarkInApp === 'function' &&
       typeof window.ManaSearchDebug?.getSnapshot === 'function' &&
       typeof window.ManaSearchDebug?.getLiveIntent === 'function' &&
+      typeof window.ManaSearchDebug?.resolveSearchOutcome === 'function' &&
       typeof window.ManaSearchDebug?.normalizeRetrievalStreamDisplayLabel === 'function' &&
       typeof window.ManaSearchInspector?.getRunHistory === 'function' &&
       typeof window.ManaSearchInspector?.getActiveSearch === 'function' &&
@@ -411,7 +412,30 @@ async function main() {
         let rejectsInvalidCase = false;
         try { window.ManaSearchInspector.validateRegressionCase({ schema: 'wrong', version: 1 }); }
         catch (_) { rejectsInvalidCase = true; }
+        const cleanLaneOutcome = window.ManaSearchDebug.resolveSearchOutcome(
+          'completed', '', [['Exact Phrase', 'completed']], []
+        );
+        const failedLaneOutcome = window.ManaSearchDebug.resolveSearchOutcome(
+          'completed', '',
+          [['Exact Phrase', 'completed'], ['Semantic Index', 'failed']],
+          [{ label: 'Semantic Index', message: 'Worker startup timed out' }]
+        );
+        const partialFunctionalOutcome = window.ManaSearchDebug.resolveSearchOutcome(
+          'completed', '',
+          [['Exact Phrase', 'completed'], ['Functional Match', 'completed_with_warnings']],
+          [{ label: 'Search F #1 (Functional Match)', message: 'One functional query timed out' }]
+        );
+        const fatalSearchOutcome = window.ManaSearchDebug.resolveSearchOutcome(
+          'error', 'Unexpected scorer failure', [['Semantic Index', 'failed']],
+          [{ label: 'Semantic Index', message: 'Worker startup timed out' }]
+        );
         return {
+          cleanSearchOutcomeStaysCompleted: cleanLaneOutcome.status === 'completed' && cleanLaneOutcome.errorMessage === '',
+          failedRetrievalLaneDowngradesSuccessToWarning: failedLaneOutcome.status === 'completed_with_warnings' &&
+            failedLaneOutcome.errorMessage.includes('Semantic Index') && failedLaneOutcome.errorMessage.includes('Worker startup timed out'),
+          functionalQueryWarningIsCountedOnce: partialFunctionalOutcome.status === 'completed_with_warnings' &&
+            (partialFunctionalOutcome.errorMessage.match(/Functional Match/g) || []).length === 1,
+          fatalSearchOutcomeIsNotDowngraded: fatalSearchOutcome.status === 'error' && fatalSearchOutcome.errorMessage === 'Unexpected scorer failure',
           compareApiAvailable: !!comparison && Array.isArray(comparison.finalRanking?.rankChanges),
           compareSummaryExplainsValidityAndMetrics: compareSummaryText.includes('COMPARE RUNS SUMMARY') &&
             compareSummaryText.includes('Changed user inputs:') && compareSummaryText.includes('Top-K overlap:') &&
