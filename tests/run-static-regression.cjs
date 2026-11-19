@@ -82,6 +82,9 @@ check('mechanical suite contains blink, token-multiplier, and cadence guards', (
     'animate-dead-aura-context-is-recognized-as-graveyard-reanimation',
     'explicit-hand-to-battlefield-remains-cheat-into-play',
     'ordinary-enchanted-creature-return-does-not-invent-graveyard-source',
+    'counterspell-trailing-mana-value-restriction-is-preserved',
+    'counterspell-trailing-controller-condition-is-preserved',
+    'unconditional-counterspell-has-no-invented-restriction',
     'repeatable-acquisition-rank-adjustment-is-directional',
     'repeatable-draw-engine-not-equivalent-to-etb-cantrip',
     'draw-trigger-condition-is-not-a-draw-outcome'
