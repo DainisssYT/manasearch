@@ -72,6 +72,8 @@ async function main() {
       typeof window.ManaSearchInspector?.getRunHistory === 'function' &&
       typeof window.ManaSearchInspector?.compareRuns === 'function' &&
       typeof window.ManaSearchInspector?.getExport === 'function' &&
+      typeof window.ManaSearchInspector?.createRegressionCase === 'function' &&
+      typeof window.ManaSearchInspector?.compareRegressionCase === 'function' &&
       !!document.getElementById('mana-search-inspector'),
       null, { timeout: 60000 }
       );
@@ -145,6 +147,33 @@ async function main() {
         const comparison = window.ManaSearchInspector.compareRuns(earlier, later);
         const sharedScore = comparison.sharedCandidateScoreChanges.find(item => item.name === 'Shared Card');
         const history = window.ManaSearchInspector.getRunHistory();
+        const regressionCase = window.ManaSearchInspector.createRegressionCase(earlier, {
+          title: 'Shared Card must stay first',
+          notes: 'A deliberate rank regression fixture.',
+          focusCandidate: 'Shared Card',
+          focusBehavior: 'rank-at-most',
+          maxRank: 1,
+          expectedTopCandidates: ['Shared Card', 'Removed Card']
+        });
+        const replayRun = {
+          number: 3,
+          completedAt: '2026-11-19T08:02:00.000Z',
+          pipeline: {
+            request: structuredClone(earlier.pipeline.request),
+            finalResults: [{ rank: 1, name: 'Added Card' }, { rank: 2, name: 'Shared Card' }]
+          }
+        };
+        const regressionReport = window.ManaSearchInspector.compareRegressionCase(regressionCase, replayRun);
+        const inputMismatchReport = window.ManaSearchInspector.compareRegressionCase(regressionCase, later);
+        const excludedCase = window.ManaSearchInspector.createRegressionCase(earlier, {
+          focusCandidate: 'Added Card',
+          focusBehavior: 'must-not-appear',
+          expectedTopCandidates: []
+        });
+        const exclusionReport = window.ManaSearchInspector.compareRegressionCase(excludedCase, replayRun);
+        let rejectsInvalidCase = false;
+        try { window.ManaSearchInspector.validateRegressionCase({ schema: 'wrong', version: 1 }); }
+        catch (_) { rejectsInvalidCase = true; }
         return {
           compareApiAvailable: !!comparison && Array.isArray(comparison.finalRanking?.rankChanges),
           candidateTraceApiAvailable: typeof window.ManaSearchInspector.traceCandidate === 'function',
@@ -164,6 +193,18 @@ async function main() {
           historyIsArray: Array.isArray(history),
           exportSerializable: JSON.stringify(window.ManaSearchInspector.getExport()).length > 0,
           compareTabAvailable: !!document.querySelector('[data-tab="compare"]'),
+
+          regressionCaseApiAvailable: typeof window.ManaSearchInspector.createRegressionCase === 'function',
+          regressionCaseHasOriginalDiagnostics: !!regressionCase.diagnostics?.request && regressionCase.schema === 'manasearch-regression-case-v1',
+          regressionComparisonDetectsFocusRankFailure: regressionReport.focusCheck?.actualRank === 2 && regressionReport.focusCheck?.pass === false && regressionReport.pass === false,
+          regressionComparisonDetectsRankingRegression: regressionReport.rankingCheck?.exactOrderMatch === false && regressionReport.rankingCheck?.missingFromTop.includes('Removed Card') && regressionReport.rankingCheck?.unexpectedInTop.includes('Added Card'),
+          regressionComparisonMeasuresTopKOverlap: regressionReport.rankingCheck?.overlap === 0.5,
+          regressionComparisonRejectsChangedInputs: inputMismatchReport.status === 'input-mismatch' && inputMismatchReport.inputCheck.changedFields.includes('highlights'),
+          regressionComparisonChecksMustNotAppear: exclusionReport.focusCheck?.pass === false,
+          regressionImportValidationRejectsUnknownSchema: rejectsInvalidCase,
+          regressionTabAvailable: !!document.querySelector('[data-tab="regression"]'),
+          regressionImportControlAvailable: !!document.querySelector('[data-regression-import]'),
+          regressionExpectedRankingEditorAvailable: !!document.querySelector('[data-regression-top]'),
           downloadActionAvailable: !!document.querySelector('[data-action="download"]')
         };
       })(),
