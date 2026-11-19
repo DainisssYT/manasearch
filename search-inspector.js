@@ -75,13 +75,32 @@
   const panel = document.createElement('aside');
   panel.id = 'mana-search-inspector';
   panel.className = 'ms-inspector';
-  panel.innerHTML = '<button type="button" class="ms-inspector-launch" aria-expanded="false">Developer inspector</button><section class="ms-inspector-window" hidden aria-label="ManaSearch developer inspector"><header><div><strong>Search inspector</strong><small>Passive view of the live production search</small></div><button type="button" class="ms-inspector-close" aria-label="Close inspector">×</button></header><nav><button type="button" data-tab="live" class="is-active">Live state</button><button type="button" data-tab="timeline">Timeline</button><button type="button" data-tab="worker">Worker</button></nav><div class="ms-inspector-toolbar"><span class="ms-inspector-state">Waiting for search activity</span><button type="button" data-action="refresh">Refresh</button><button type="button" data-action="copy">Copy JSON</button></div><pre class="ms-inspector-content" aria-live="polite"></pre></section>';
+  panel.innerHTML = '<button type="button" class="ms-inspector-launch" aria-expanded="false">Developer inspector</button><section class="ms-inspector-window" hidden aria-label="ManaSearch developer inspector"><header><div><strong>Search inspector</strong><small>Passive view of the live production search</small></div><button type="button" class="ms-inspector-close" aria-label="Close inspector">×</button></header><nav><button type="button" data-tab="live" class="is-active">Live state</button><button type="button" data-tab="pipeline">Pipeline</button><button type="button" data-tab="candidates">Candidates</button><button type="button" data-tab="exclusions">Exclusions</button><button type="button" data-tab="timeline">Timeline</button><button type="button" data-tab="worker">Worker</button></nav><div class="ms-inspector-toolbar"><span class="ms-inspector-state">Waiting for search activity</span><button type="button" data-action="refresh">Refresh</button><button type="button" data-action="copy">Copy JSON</button></div><pre class="ms-inspector-content" aria-live="polite"></pre></section>';
   document.body.append(panel);
   const launch = panel.querySelector('.ms-inspector-launch');
   const windowEl = panel.querySelector('.ms-inspector-window');
   const content = panel.querySelector('.ms-inspector-content');
   const status = panel.querySelector('.ms-inspector-state');
   let activeTab = 'live';
+  let lastPipelineSnapshot = null;
+  const getPipelineSnapshot = () => {
+    try { if (window.ManaSearchDebug?.getSnapshot) lastPipelineSnapshot = window.ManaSearchDebug.getSnapshot(); }
+    catch (error) { addEvent('diagnostics:error', { message: error?.message || String(error) }); }
+    return lastPipelineSnapshot;
+  };
+  const buildExport = () => ({ exportedAt: new Date().toISOString(), ui: snapshot(), productionPipeline: getPipelineSnapshot(), timeline: state.events, workerMessages: state.workerMessages });
+  const stageLosses = pipeline => {
+    const stages = pipeline?.funnel?.stages;
+    if (!stages) return [];
+    const order = ['retrieved','passedFilters','deduplicated','scored','passedRelevanceFloor','finalRanked'];
+    const labels = { retrieved: 'Raw retrieval', passedFilters: 'Hard constraints / exact highlights', deduplicated: 'Name deduplication', scored: 'Scoring', passedRelevanceFloor: 'Relevance floor', finalRanked: 'Final ranking' };
+    return order.slice(1).map((stage, index) => {
+      const previous = new Set(stages[order[index]] || []);
+      const current = new Set(stages[stage] || []);
+      const removed = [...previous].filter(name => !current.has(name));
+      return { from: labels[order[index]], to: labels[stage], removedCount: removed.length, removedExamples: removed.slice(0, 40) };
+    });
+  };
   const renderTimeline = () => { if (activeTab === 'timeline' && !windowEl.hidden) content.textContent = JSON.stringify(state.events, null, 2); };
   const renderWorker = () => { if (activeTab === 'worker' && !windowEl.hidden) content.textContent = JSON.stringify(state.workerMessages, null, 2); };
   const render = () => {
@@ -89,6 +108,15 @@
     if (activeTab === 'live') {
       state.lastSnapshot = snapshot();
       content.textContent = JSON.stringify(state.lastSnapshot, null, 2);
+    } else if (activeTab === 'pipeline') {
+      const p = getPipelineSnapshot();
+      content.textContent = JSON.stringify(p ? { request: p.request, funnel: p.funnel ? Object.fromEntries(Object.entries(p.funnel).filter(([key]) => key !== 'stages')) : null, retrievalStreams: Object.fromEntries(Object.entries(p.streams || {}).map(([name, cards]) => [name, { count: cards.length, examples: cards.slice(0, 12) }])), streamCoverage: p.streamCoverage, functionalQueryResults: p.functionalQueryResults, exactHighlightQueryResults: p.exactHighlightQueryResults, scoring: p.scoring, benchmarkSignals: p.benchmarkSignals, highlightIntentDiagnostics: p.highlightIntentDiagnostics } : { message: 'No completed production search snapshot yet. Run Find Similar Cards, then refresh.' }, null, 2);
+    } else if (activeTab === 'candidates') {
+      const p = getPipelineSnapshot();
+      content.textContent = JSON.stringify(p ? { explanation: 'Actual candidates scored by ManaSearch, including candidates later removed by the relevance floor. Scores are normalized 0–1 unless noted.', candidates: p.candidates, finalResults: p.finalResults, rankingEvidenceTop: p.rankingEvidenceTop } : { message: 'No scored candidates yet.' }, null, 2);
+    } else if (activeTab === 'exclusions') {
+      const p = getPipelineSnapshot();
+      content.textContent = JSON.stringify(p ? { explanation: 'Compare stage membership to find where a candidate disappeared. Hard-filter rejection reasons are recorded separately.', stageLosses: stageLosses(p), hardFilterRejections: p.filterRejections, stageMembership: p.funnel?.stages } : { message: 'No exclusion diagnostics yet.' }, null, 2);
     } else if (activeTab === 'timeline') renderTimeline();
     else renderWorker();
   };
@@ -107,7 +135,7 @@
   }));
   panel.querySelector('[data-action="refresh"]').addEventListener('click', render);
   panel.querySelector('[data-action="copy"]').addEventListener('click', async () => {
-    const data = JSON.stringify(snapshot(), null, 2);
+    const data = JSON.stringify(buildExport(), null, 2);
     try {
       await navigator.clipboard.writeText(data);
       status.textContent = 'Snapshot copied';
@@ -143,6 +171,13 @@
     });
   }
 
+  window.addEventListener('manasearch:search-finished', event => {
+    const detail = event.detail || {};
+    lastPipelineSnapshot = getPipelineSnapshot();
+    addEvent('search:finished', { sourceName: detail.sourceName || '', resultCount: detail.resultCount ?? null, retrieved: lastPipelineSnapshot?.funnel?.retrieved ?? null, scored: lastPipelineSnapshot?.funnel?.scored ?? null, finalResults: lastPipelineSnapshot?.funnel?.finalResults ?? null });
+    if (!windowEl.hidden) render();
+  });
+  window.addEventListener('manasearch:search-started', event => addEvent('search:production-started', event.detail || {}));
   document.addEventListener('click', event => {
     const button = event.target.closest('#find-similar-btn, #quick-start-search');
     if (button) {
