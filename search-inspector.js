@@ -320,6 +320,9 @@
       constraints: stableJson(a.request?.constraints) !== stableJson(b.request?.constraints),
       methods: stableJson(a.request?.methods) !== stableJson(b.request?.methods),
       ordering: stableJson(a.request?.ordering) !== stableJson(b.request?.ordering),
+      searchDepthPercent: stableJson(a.request?.searchDepthPercent) !== stableJson(b.request?.searchDepthPercent),
+      orderingFeatures: stableJson(a.request?.orderingFeatures) !== stableJson(b.request?.orderingFeatures),
+      rankingWeights: stableJson(a.request?.rankingWeights) !== stableJson(b.request?.rankingWeights),
       format: stableJson(a.request?.format) !== stableJson(b.request?.format),
       color: stableJson(a.request?.color) !== stableJson(b.request?.color),
       broad: stableJson(a.request?.broad) !== stableJson(b.request?.broad),
@@ -327,7 +330,15 @@
       plannedStreams: stableJson(a.request?.plannedStreams) !== stableJson(b.request?.plannedStreams),
       queryPlans: stableJson(a.request?.queryPlans) !== stableJson(b.request?.queryPlans)
     };
-    const changedInputFields = ['sourceCard', 'highlights', 'constraints', 'methods', 'ordering', 'format', 'color', 'broad', 'divergent']
+    const requiredInputFields = ['sourceCard', 'highlights', 'constraints', 'methods', 'ordering', 'searchDepthPercent', 'orderingFeatures', 'rankingWeights'];
+    const inputSnapshotMissing = {
+      earlier: requiredInputFields.filter(field => !Object.prototype.hasOwnProperty.call(a.request || {}, field)),
+      later: requiredInputFields.filter(field => !Object.prototype.hasOwnProperty.call(b.request || {}, field))
+    };
+    const inputSnapshotComplete = Number(a.request?.inputSnapshotVersion) >= 2 &&
+      Number(b.request?.inputSnapshotVersion) >= 2 &&
+      inputSnapshotMissing.earlier.length === 0 && inputSnapshotMissing.later.length === 0;
+    const changedInputFields = ['sourceCard', 'highlights', 'constraints', 'methods', 'ordering', 'searchDepthPercent', 'orderingFeatures', 'rankingWeights', 'format', 'color', 'broad', 'divergent']
       .filter(field => requestChanges[field]);
     const changedDerivedFields = ['intent', 'plannedStreams', 'queryPlans']
       .filter(field => requestChanges[field]);
@@ -356,15 +367,19 @@
         rankingComparisonValid: aStatus === 'completed' && bStatus === 'completed',
         rankingComparisonAvailable: ['completed', 'completed_with_warnings'].includes(aStatus) && ['completed', 'completed_with_warnings'].includes(bStatus),
         rankingComparisonComplete: aStatus === 'completed' && bStatus === 'completed',
-        sameUserInputs: changedInputFields.length === 0,
-        comparableForAlgorithmRegression: aStatus === 'completed' && bStatus === 'completed' && changedInputFields.length === 0,
+        inputSnapshotComplete,
+        missingInputFields: inputSnapshotMissing,
+        sameUserInputs: inputSnapshotComplete && changedInputFields.length === 0,
+        comparableForAlgorithmRegression: aStatus === 'completed' && bStatus === 'completed' && inputSnapshotComplete && changedInputFields.length === 0,
         note: aStatus === 'error' || bStatus === 'error'
           ? 'At least one search failed. Treat its empty or partial result list as a failed run, not as a valid zero-result ranking.'
           : aStatus !== 'completed' || bStatus !== 'completed'
             ? 'At least one run completed with warnings or is incomplete. Inspect failed retrieval lanes before treating missing cards as true misses.'
-            : changedInputFields.length
-              ? 'The two searches used different user-controlled inputs. This is useful for exploring the effect of those changes, but it is not a controlled algorithm comparison.'
-              : 'Both searches completed with the same user-controlled inputs; this is a controlled comparison of retrieval and ranking changes.'
+            : !inputSnapshotComplete
+              ? 'At least one run lacks a complete input snapshot. Ranking differences are descriptive only; repeat both searches on a build that captures search depth, ordering features, and ranking weight overrides.'
+              : changedInputFields.length
+                ? 'The two searches used different user-controlled inputs. This is useful for exploring the effect of those changes, but it is not a controlled algorithm comparison.'
+                : 'Both searches completed with the same captured user-controlled inputs; this is a controlled comparison of retrieval and ranking changes.'
       },
       changes: {
         sourceCardChanged: requestChanges.sourceCard,
@@ -373,6 +388,9 @@
         constraintsChanged: requestChanges.constraints,
         methodsChanged: requestChanges.methods,
         orderingChanged: requestChanges.ordering,
+        searchDepthPercentChanged: requestChanges.searchDepthPercent,
+        orderingFeaturesChanged: requestChanges.orderingFeatures,
+        rankingWeightsChanged: requestChanges.rankingWeights,
         formatChanged: requestChanges.format,
         colorChanged: requestChanges.color,
         broadChanged: requestChanges.broad,
@@ -413,9 +431,11 @@
         ? 'Resolve the failed search before interpreting ranking changes. A failed run is not evidence that the search engine returned zero relevant cards.'
         : aStatus !== 'completed' || bStatus !== 'completed'
           ? 'At least one run is warning-bearing or incomplete. Do not count absent candidates as reliable retrieval misses until its failed lanes are understood.'
-          : changedInputFields.length
-            ? 'User-controlled inputs changed. The diff is descriptive, not a controlled test of algorithm quality. Use the same source, highlights, constraints, methods, and ordering to evaluate code changes.'
-            : 'The user-controlled inputs match. Stage membership isolates recall changes; score-channel deltas show ranking changes among shared scored candidates; top-K overlap and rank movement show the user-visible effect.'
+          : !inputSnapshotComplete
+            ? 'The captured inputs are incomplete. The comparison remains descriptive, but cannot be called a controlled algorithm test until search depth, ordering features, and ranking weights are captured for both runs.'
+            : changedInputFields.length
+              ? 'User-controlled inputs changed. The diff is descriptive, not a controlled test of algorithm quality. Use the same source, highlights, constraints, methods, ordering, search depth, ordering features, and ranking weights to evaluate code changes.'
+              : 'The user-controlled inputs match. Stage membership isolates recall changes; score-channel deltas show ranking changes among shared scored candidates; top-K overlap and rank movement show the user-visible effect.'
     };
   };
   const formatLiveSummary = snapshotValue => {
@@ -479,6 +499,11 @@
     }
     const changedInputs = comparison.changes?.changedInputFields || [];
     const changedDerived = comparison.changes?.changedDerivedFields || [];
+    lines.push('Input snapshot complete: ' + (outcome.inputSnapshotComplete ? 'yes' : 'no'));
+    if (!outcome.inputSnapshotComplete && outcome.missingInputFields) {
+      lines.push('Missing captured settings: earlier [' + (outcome.missingInputFields.earlier || []).join(', ') +
+        ']; later [' + (outcome.missingInputFields.later || []).join(', ') + ']');
+    }
     lines.push('Changed user inputs: ' + (changedInputs.length ? changedInputs.join(', ') : 'none'));
     lines.push('Changed derived intent/query outputs: ' + (changedDerived.length ? changedDerived.join(', ') : 'none'));
     if (comparison.retrievalFailures) {
@@ -722,7 +747,7 @@
     const actualRequest = run.pipeline.request || {};
     // Only user-controlled request fields invalidate a replay. Intent and query plans are outputs
     // of the system under test: changes to them should be reported and evaluated, not rejected.
-    const requestFields = ['sourceCard', 'highlights', 'constraints', 'methods', 'ordering', 'format', 'color', 'broad', 'divergent'];
+    const requestFields = ['inputSnapshotVersion', 'sourceCard', 'highlights', 'constraints', 'methods', 'ordering', 'searchDepthPercent', 'orderingFeatures', 'rankingWeights', 'format', 'color', 'broad', 'divergent'];
     const inputDifferences = requestFields.filter(field => stableJson(expectedRequest[field]) !== stableJson(actualRequest[field]));
     const derivedRequestFields = ['intent', 'plannedStreams', 'queryPlans'];
     const derivedRequestChanges = derivedRequestFields.filter(field => stableJson(expectedRequest[field]) !== stableJson(actualRequest[field]));
