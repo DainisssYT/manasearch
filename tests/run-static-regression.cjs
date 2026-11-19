@@ -426,9 +426,9 @@ check('developer inspector observes the production pipeline without changing sco
   assert.match(app, /effect-aware-function-score-uses-counter-ability-without-dilution-from-land-bounce-rider/);
   assert.match(app, /effect-aware-function-matching-is-one-to-one-across-compound-source-intent/);
   assert.match(inspector, /functionSemanticEvidence: candidate\.functionSemanticEvidence/);
-  assert.match(browserTests, /compareRunsSurfacesAbilityAwareFunctionScoreDelta/);
-  assert.match(browserTests, /traceShowsAbilityAwareSemanticEvidence/);
-  assert.match(browserTests, /effectAwareCounterEvidenceCaptured/);
+  assert.match(browserRunner, /compareRunsSurfacesAbilityAwareFunctionScoreDelta/);
+  assert.match(browserRunner, /traceShowsAbilityAwareSemanticEvidence/);
+  assert.match(browserRunner, /effectAwareCounterEvidenceCaptured/);
   assert.match(app, /streamFailures: streamFailureRecords\.slice\(\)/);
   assert.match(app, /completed_with_warnings/);
   assert.match(app, /status: searchOutcome/);
