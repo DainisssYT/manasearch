@@ -98,6 +98,14 @@ The `retrievalEvidence` field is provenance only: it records which streams found
 - Diagnostic exports may contain card Oracle text, search queries, and user-selected highlight text. Review JSON before sharing it.
 - The inspector is developer tooling, not a user-facing quality guarantee. Use reproducible source/highlight/constraint combinations and compare exported snapshots when tuning the search system.
 
+## Comparing runs correctly
+
+**Broad Search** and **Divergent Search** are user-controlled settings, just like source card, highlights, constraints, search methods, and ordering. Changing either makes a comparison exploratory rather than a controlled algorithm comparison. By contrast, interpreted intent and generated query plans are derived outputs: the compare report shows changes in those fields, but does not reject the comparison merely because the algorithm generated a different intent or plan.
+
+Top-K overlap reports two percentages: overlap against the requested K (intersection divided by K) and overlap against the shorter captured list. The second metric helps interpret searches that return fewer than K final cards; identical short lists should not look artificially dissimilar because they contain fewer than K entries.
+
+When a search stops before the final ranking, the live Results area keeps the provisional banner visible and the inspector records provisional-result count separately from final-result count. Compare Runs carries both counts into the comparison summary. Do not interpret provisional cards as a completed ranking.
+
 ## Known interpretation limits
 
 - The candidate list is bounded to the top 300 by pre-floor similarity score; very large searches may have more scored candidates. The Trace card selector is built from captured streams, stage membership, the scored sample, rejection sample, and final results; candidates outside all retained samples cannot be individually traced.
