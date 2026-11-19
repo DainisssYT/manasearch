@@ -416,8 +416,8 @@ check('developer inspector observes the production pipeline without changing sco
   assert.match(app, /phase: 'final-ranking'/);
   assert.match(app, /recordRetrievalStreamFailure/);
   assert.ok(app.includes('function normalizeRetrievalStreamDisplayLabel(label)'));
-  assert.match(app, /normalizeRetrievalStreamDisplayLabel\\(safeLabel\\)/);
-  assert.match(app, /normalizeRetrievalStreamDisplayLabel\\(item\\.label\\) === 'Functional Match'/);
+  assert.ok(app.includes('normalizeRetrievalStreamDisplayLabel(safeLabel)'));
+  assert.ok(app.includes("normalizeRetrievalStreamDisplayLabel(item.label) === 'Functional Match'"));
   assert.match(app, /normalizeRetrievalStreamDisplayLabel,/);
   assert.match(app, /streamFailures: streamFailureRecords\.slice\(\)/);
   assert.match(app, /completed_with_warnings/);
