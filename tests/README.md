@@ -55,7 +55,7 @@ Run fixture schema/coverage checks without a browser:
 node tests/run-card-benchmark-data.cjs
 ```
 
-The browser runner loads the JSON fixture and passes it to `runManaSearchRealCardBenchmarkSuite`, which uses production parsing, repeatability annotation, profile construction, and scoring. Fixture card pages are provenance links only; the tests are deterministic/offline and do not fetch card data during runs. When modifying a card Oracle-text fixture, recheck its linked reference page and retain the card source URL.
+The browser runner loads the JSON fixture and passes it to `runManaSearchRealCardBenchmarkSuite`, which uses production parsing, repeatability annotation, profile construction, and scoring. It also executes the 12-case `runLocalBenchmarkInApp()` end-to-end retrieval/ranking benchmark with bundled local assets, then verifies that the developer inspector captures request-scoped progress, stream/preview events, run outcomes, and a real run-to-run comparison. Fixture card pages are provenance links only; the tests are deterministic/offline and do not fetch card data during runs. When modifying a card Oracle-text fixture, recheck its linked reference page and retain the card source URL.
 
 
 ## 4. Run the benchmarks from the deployed browser console
