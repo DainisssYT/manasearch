@@ -385,7 +385,7 @@
       plannedStreams: stableJson(a.request?.plannedStreams) !== stableJson(b.request?.plannedStreams),
       queryPlans: stableJson(a.request?.queryPlans) !== stableJson(b.request?.queryPlans)
     };
-    const requiredInputFields = ['sourceCard', 'highlights', 'constraints', 'methods', 'ordering', 'searchDepthPercent', 'orderingFeatures', 'rankingWeights'];
+    const requiredInputFields = ['sourceCard', 'highlights', 'constraints', 'methods', 'ordering', 'searchDepthPercent', 'orderingFeatures', 'rankingWeights', 'broad', 'divergent'];
     const inputSnapshotMissing = {
       earlier: requiredInputFields.filter(field => !Object.prototype.hasOwnProperty.call(a.request || {}, field)),
       later: requiredInputFields.filter(field => !Object.prototype.hasOwnProperty.call(b.request || {}, field))
@@ -499,6 +499,7 @@
     const live = snapshotValue?.liveSearch || {};
     const statusValue = live.status || (snapshotValue?.runtime?.loading ? 'running' : 'waiting');
     const statusLabel = String(statusValue).toUpperCase().replace(/_/g, ' ');
+    const liveSettings = snapshotValue?.searchIntent?.productionModel || {};
     const lines = [
       'LIVE SEARCH SUMMARY',
       'Source: ' + sourceName,
@@ -506,6 +507,18 @@
     ];
     if (live.requestId != null) lines.push('Request ID: ' + live.requestId);
     if (live.durationMs != null) lines.push('Duration: ' + (Number(live.durationMs) / 1000).toFixed(2) + 's');
+    if (Number.isFinite(Number(liveSettings.searchDepthPercent))) {
+      lines.push('Search depth: ' + Number(liveSettings.searchDepthPercent) + '%');
+    }
+    if (liveSettings.orderingFeatures) {
+      const activeOrderFeatures = Object.entries(liveSettings.orderingFeatures).filter(([, enabled]) => Boolean(enabled)).map(([name]) => name);
+      lines.push('Ordering features: ' + (activeOrderFeatures.length ? activeOrderFeatures.join(', ') : 'none'));
+    }
+    if (liveSettings.rankingWeights) {
+      lines.push('Score-weight offsets: ' + Object.entries(liveSettings.rankingWeights).map(([name, value]) =>
+        name + '=' + (value == null ? 'n/a' : value)
+      ).join(', '));
+    }
     if (live.progress?.message) lines.push('Current phase: ' + live.progress.message);
     if (live.totalStreams) {
       lines.push('Retrieval lanes: ' + (live.completedStreams || 0) + ' successful, ' +
