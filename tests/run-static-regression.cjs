@@ -345,8 +345,8 @@ check('Pages publishes the shared semantic module and browser tests serve ESM wi
 
 check('developer inspector observes the production pipeline without changing scoring', () => {
   execFileSync(process.execPath, ['--check'], { input: inspector, stdio: ['pipe', 'pipe', 'pipe'] });
-  assert.match(html, /search-inspector\.js\?v=20261119-140/);
-  assert.match(html, /search-inspector\.css\?v=20261119-138/);
+  assert.match(html, /search-inspector\.js\?v=20261119-141/);
+  assert.match(html, /search-inspector\.css\?v=20261119-139/);
   assert.match(app, /window\.ManaSearchDebug = Object\.freeze\(/);
   assert.match(app, /getLiveIntent\(\)/);
   assert.match(inspector, /productionModel: window\.ManaSearchDebug/);
@@ -354,6 +354,11 @@ check('developer inspector observes the production pipeline without changing sco
   assert.match(app, /filterFailureReasons instanceof Map/);
   assert.match(inspector, /data-tab="pipeline"/);
   assert.match(inspector, /data-tab="candidates"/);
+  assert.match(inspector, /data-tab="trace"/);
+  assert.match(inspector, /traceCandidate/);
+  assert.match(inspector, /firstObservedLoss/);
+  assert.match(inspector, /possibleHardFilterRejection/);
+  assert.match(inspector, /data-trace-candidate/);
   assert.match(inspector, /data-tab="exclusions"/);
   assert.match(inspector, /manasearch:search-finished/);
   assert.match(inspector, /productionPipeline: getPipelineSnapshot\(\)/);
