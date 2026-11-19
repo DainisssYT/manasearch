@@ -538,10 +538,6 @@ async function main() {
             requestKeyOrderComparison.changes.changedInputFields.length === 0 &&
             requestKeyOrderComparison.changes.changedDerivedFields.length === 0,
           liveInspectorCapturesProgress: activeSearchBeforeFinish?.progress?.message === 'Searching for candidates',
-          benchmarkCapturesEffectAwareFunctionEvidence: cases.find(item => item.id === 3)?.expectedCardEvidence?.some(item =>
-            item.name === 'Deprive' && item.score?.functionSemanticEvidence?.effectAwareScore != null &&
-            item.score?.functionSemanticEvidence?.matches?.some(match => match.sourceFunction === 'counter' && match.candidateFunction === 'counter')
-          ) === true,
           liveInspectorIgnoresStaleProgress: activeSearchBeforeFinish?.progress?.message !== 'STALE EVENT MUST BE IGNORED',
           liveInspectorCapturesStreamProgress: activeSearchBeforeFinish?.completedStreams === 1 && activeSearchBeforeFinish?.failedStreams === 1 && activeSearchBeforeFinish?.settledStreams === 2 && activeSearchBeforeFinish?.totalStreams === 2 && activeSearchBeforeFinish?.streams?.[0]?.done === true && activeSearchBeforeFinish?.streams?.[1]?.failed === true,
           liveInspectorCapturesProvisionalResults: activeSearchBeforeFinish?.previewHistory?.some(item => item.phase === 'progressive-preview' && item.provisional === true && item.topNames?.includes('Shared Card')),
@@ -696,6 +692,10 @@ async function main() {
           id: item.id, name: item.name, source: item.source,
           expectedCardEvidence: item.expectedCardEvidence
         })),
+        effectAwareCounterEvidenceCaptured: cases.find(item => item.id === 3)?.expectedCardEvidence?.some(item =>
+          item.name === 'Deprive' && item.score?.functionSemanticEvidence?.effectAwareScore != null &&
+          item.score?.functionSemanticEvidence?.matches?.some(match => match.sourceFunction === 'counter' && match.candidateFunction === 'counter')
+        ) === true,
         inspector: {
           retainedRuns: history.length,
           latestRuns: history.slice(-2).map(run => ({
@@ -739,7 +739,8 @@ async function main() {
       liveSearchEvaluation.summary?.blockedTests === 0 &&
       liveSearchEvaluation.inspector?.retainedRuns >= 2 &&
       liveSearchEvaluation.inspector?.latestRuns?.every(run => run.status !== 'error') &&
-      liveSearchEvaluation.inspector?.comparison?.outcomeComparison?.rankingComparisonValid === true;
+      liveSearchEvaluation.inspector?.comparison?.outcomeComparison?.rankingComparisonValid === true &&
+      liveSearchEvaluation.effectAwareCounterEvidenceCaptured === true;
     console.log('Live search benchmark summary:', JSON.stringify(liveSearchEvaluation.summary));
     console.log('Lowest-recall live search cases:', JSON.stringify(liveSearchEvaluation.lowestRecallCases));
     const suitePasses = [
