@@ -61,6 +61,7 @@ async function main() {
       await page.waitForFunction(() =>
       typeof window.runMechanicalRegressionSuite === 'function' &&
       typeof window.runManaSearchMechanicalRegressionSuite === 'function' &&
+      typeof window.runManaSearchRankingScoringRegressionSuite === 'function' &&
       typeof window.runManaSearchRepeatabilityRegressionSuite === 'function' &&
       typeof window.runManaSearchHighlightIsolationSuite === 'function' &&
       typeof window.runManaSearchPerformanceSuite === 'function' &&
@@ -90,6 +91,7 @@ async function main() {
     const report = await page.evaluate(async () => ({
       base: window.runMechanicalRegressionSuite(),
       mechanical: window.runManaSearchMechanicalRegressionSuite({ log: false }),
+      rankingScoring: window.runManaSearchRankingScoringRegressionSuite({ log: false }),
       repeatability: window.runManaSearchRepeatabilityRegressionSuite({ log: false }),
       highlights: window.runManaSearchHighlightIsolationSuite({ log: false }),
       searchIntent: window.runManaSearchIntentRegressionSuite(),
@@ -536,6 +538,10 @@ async function main() {
             requestKeyOrderComparison.changes.changedInputFields.length === 0 &&
             requestKeyOrderComparison.changes.changedDerivedFields.length === 0,
           liveInspectorCapturesProgress: activeSearchBeforeFinish?.progress?.message === 'Searching for candidates',
+          benchmarkCapturesEffectAwareFunctionEvidence: cases.find(item => item.id === 3)?.expectedCardEvidence?.some(item =>
+            item.name === 'Deprive' && item.score?.functionSemanticEvidence?.effectAwareScore != null &&
+            item.score?.functionSemanticEvidence?.matches?.some(match => match.sourceFunction === 'counter' && match.candidateFunction === 'counter')
+          ) === true,
           liveInspectorIgnoresStaleProgress: activeSearchBeforeFinish?.progress?.message !== 'STALE EVENT MUST BE IGNORED',
           liveInspectorCapturesStreamProgress: activeSearchBeforeFinish?.completedStreams === 1 && activeSearchBeforeFinish?.failedStreams === 1 && activeSearchBeforeFinish?.settledStreams === 2 && activeSearchBeforeFinish?.totalStreams === 2 && activeSearchBeforeFinish?.streams?.[0]?.done === true && activeSearchBeforeFinish?.streams?.[1]?.failed === true,
           liveInspectorCapturesProvisionalResults: activeSearchBeforeFinish?.previewHistory?.some(item => item.phase === 'progressive-preview' && item.provisional === true && item.topNames?.includes('Shared Card')),
@@ -593,6 +599,8 @@ async function main() {
                   similarityScore: score?.similarityScore ?? null,
                   mechanicalScore: score?.mechanicalScore ?? null,
                   functionScore: score?.functionScore ?? null,
+                  effectAwareFunctionSemanticScore: score?.effectAwareFunctionSemanticScore ?? null,
+                  functionSemanticEvidence: score?.functionSemanticEvidence ?? null,
                   roleScore: score?.roleScore ?? null,
                   contextScore: score?.contextScore ?? score?.oracleSemanticScore ?? null,
                   highlightIntentScore: score?.highlightIntentScore ?? null,
@@ -637,6 +645,8 @@ async function main() {
                 similarityScore: score.similarityScore ?? null,
                 mechanicalScore: score.mechanicalScore ?? null,
                 functionScore: score.functionScore ?? null,
+                effectAwareFunctionSemanticScore: score.effectAwareFunctionSemanticScore ?? null,
+                functionSemanticEvidence: score.functionSemanticEvidence ?? null,
                 contextScore: score.contextScore ?? null,
                 highlightIntentScore: score.highlightIntentScore ?? null,
                 exactnessScore: score.exactnessScore ?? null,
@@ -736,6 +746,7 @@ async function main() {
       liveSearchPass,
       summarize('Core mechanical checks', report.base),
       summarize('Mechanical family/ranking regressions', report.mechanical),
+      summarize('Deterministic ranking/scoring regressions', report.rankingScoring),
       summarize('Repeatability regression suite', report.repeatability),
       summarize('Highlight-isolation suite', report.highlights),
       summarize('Live Search intent model/highlight suite', {
