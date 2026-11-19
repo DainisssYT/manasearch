@@ -8610,8 +8610,15 @@ function deriveCanonicalFunction(effect) {
     if (a === "return" || a === "put") {
         const searchesLibrary = /\bsearch(?:es)?\s+(?:your|the|a|target player's|target opponent's)?\s*library\b/i.test(ruleContext);
         const putsIntoHand = /\b(?:put|place)\b[\s\S]{0,140}\b(?:into|to)\s+(?:your|their|the player's|the opponent's)?\s*hand\b/i.test(ruleContext);
+        const topLibraryCardAcquisition = to === "hand" &&
+            /\b(?:reveal|exile)\b[\s\S]{0,180}\btop\s+(?:(?:one|two|three|four|five|six|seven|eight|nine|ten|\d+)\s+)?cards?\s+of\s+(?:your|their|that player(?:'s)?|that opponent(?:'s)?|an opponent(?:'s)?|a player(?:'s)?)\s+library\b[\s\S]{0,260}\b(?:put|place)\s+(?:that card|it)\s+(?:into|to)\s+(?:your|their|that player(?:'s)?|a player(?:'s)?)\s+hand\b/i.test(ruleContext);
         if (from === "graveyard" && to === "battlefield") fn = "reanimate";
         else if (from === "graveyard" && to === "hand") fn = "recursion";
+        // Revealing or exiling the top library card and then putting that card into hand is a
+        // card-acquisition effect, not a tutor. This distinction matters for engines like
+        // Dark Confidant and Necropotence: they produce card advantage without searching a library.
+        // A genuine "search your library ... put it into your hand" remains a tutor below.
+        else if (topLibraryCardAcquisition) fn = "card_draw";
         // Cards fetched from a library and placed into hand are tutors, not bounce. In particular,
         // Fervent Mastery says "Search your library ... put them into your hand" and never returns
         // permanents from the battlefield.
@@ -15318,6 +15325,20 @@ function runManaSearchRepeatabilityRegressionSuite({ log = true } = {}) {
             const darkConfidantProfile = makeCardAdvantageProfile(darkConfidantCard);
             const necropotenceProfile = makeCardAdvantageProfile(necropotenceCard);
             const atlasProfile = makeCardAdvantageProfile(mercadianAtlasCard);
+            const functionNames = profile => getCanonicalFunctions(profile.effects).map(fn => fn.function);
+            const arenaFunctionNames = functionNames({ effects: arenaEffects });
+            const darkConfidantFunctionNames = functionNames(darkConfidantProfile);
+            const necropotenceFunctionNames = functionNames(necropotenceProfile);
+            const cardDrawFunction = getCanonicalFunctions(arenaEffects).find(fn => fn.function === 'card_draw');
+            const darkConfidantDrawFunction = getCanonicalFunctions(darkConfidantProfile.effects).find(fn => fn.function === 'card_draw');
+            const necropotenceDrawFunction = getCanonicalFunctions(necropotenceProfile.effects).find(fn => fn.function === 'card_draw');
+            const semanticPairFor = candidateFunction => calculateEffectAwareFunctionSemanticScore(
+                cardDrawFunction ? [{ ...cardDrawFunction, importance: 1 }] : [],
+                candidateFunction ? [{ ...candidateFunction, importance: 1 }] : [],
+                (source, candidate) => source.function === candidate.function ? 1 : 0.5
+            );
+            const darkConfidantDrawPair = semanticPairFor(darkConfidantDrawFunction);
+            const necropotenceDrawPair = semanticPairFor(necropotenceDrawFunction);
             const darkConfidantRoleScore = calculateStrategicRoleScore(
                 arenaRoles.map(role => ({ role, group: STRATEGIC_ROLE_GROUPS[role] || role, score: 0.90, anchors: ['card draw', 'repeatable acquisition'] })),
                 darkConfidantProfile.roles, buildStrategicRoleFingerprint(arenaCard, arenaEffects, arenaRoleProfile), darkConfidantProfile.fingerprint
@@ -15344,6 +15365,30 @@ function runManaSearchRepeatabilityRegressionSuite({ log = true } = {}) {
                     darkConfidant: { roles: darkConfidantProfile.roles, fingerprint: darkConfidantProfile.fingerprint, score: darkConfidantRoleScore },
                     necropotence: { roles: necropotenceProfile.roles, fingerprint: necropotenceProfile.fingerprint, score: necropotenceRoleScore },
                     mercadianAtlas: { roles: atlasProfile.roles, fingerprint: atlasProfile.fingerprint, score: atlasRoleScore }
+                }
+            });
+
+            results.push({
+                id: 'top-library-card-put-into-hand-is-card-acquisition-not-tutor',
+                pass: arenaFunctionNames.includes('card_draw') &&
+                    darkConfidantFunctionNames.includes('card_draw') &&
+                    !darkConfidantFunctionNames.includes('tutor') &&
+                    necropotenceFunctionNames.includes('card_draw') &&
+                    !necropotenceFunctionNames.includes('tutor'),
+                diagnostics: {
+                    phyrexianArena: arenaFunctionNames,
+                    darkConfidant: darkConfidantFunctionNames,
+                    necropotence: necropotenceFunctionNames
+                }
+            });
+            results.push({
+                id: 'life-paid-top-library-acquisition-matches-card-draw-semantically',
+                pass: darkConfidantDrawPair?.matches?.[0]?.candidateFunction === 'card_draw' &&
+                    necropotenceDrawPair?.matches?.[0]?.candidateFunction === 'card_draw' &&
+                    darkConfidantDrawPair?.score === 1 && necropotenceDrawPair?.score === 1,
+                diagnostics: {
+                    darkConfidant: darkConfidantDrawPair,
+                    necropotence: necropotenceDrawPair
                 }
             });
 
