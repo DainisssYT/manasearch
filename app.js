@@ -33328,6 +33328,7 @@ window.ManaSearchDebug = Object.freeze({
             outcome: lastMainSearchOutcome ? { ...lastMainSearchOutcome } : null,
             request: context, funnel, streams,
             streamCoverage: diagnostics?.streamCoverage || null,
+            streamFailures: diagnostics?.streamFailures || [],
             functionalQueryResults: diagnostics?.searchFQueryDetail || [],
             exactHighlightQueryResults: diagnostics?.exactHighlightQueryDetail || [],
             filterRejections: failures,
