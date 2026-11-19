@@ -66,6 +66,22 @@ Each production pipeline snapshot carries the app build identifier. Compare Runs
 
 A controlled comparison requires the same user-controlled source card, selected highlights, constraints, methods, ordering, search-depth percentage, ordering-feature toggles (Matrix Sweep / Diverse Spread), and scoring-weight offsets. Older snapshots missing any of these settings remain useful for exploration but are not labelled controlled comparisons. Changes to interpreted intent and generated query plans are reported separately as derived outputs, so a live-intent improvement can be evaluated without being misclassified as a different user request. When they differ, the report marks the result as **input-mismatch** instead of blaming the algorithm. Fix the input differences and rerun the case before evaluating ranking changes.
 
+## Running the quality benchmark
+
+The branch adds a headless Chromium benchmark runner at `tests/run-live-search-benchmark.cjs`. It invokes the production `runLocalBenchmarkInApp()` workflow against the bundled card corpus and semantic index, then writes one portable `manasearch-live-search-benchmark-v1` JSON report.
+
+The report is scenario-oriented: expected-card ranks, Recall@5/10/20/50/100, retrieval/filter/dedup/scoring/pruning recall, MRR, NDCG, Precision, semantic coverage, and each retrieval lane's coverage. This makes it possible to identify whether a weak result came from never retrieving the expected card, removing it in a filter/parse stage, pruning it, or ranking it too low.
+
+GitHub Actions publishes the report as an artifact on feature-branch pushes and pull requests. Compare artifacts from different commits using the same scenarios and benchmark configuration. The workflow fails on incomplete/blocked/error runs or unexpected runtime card API usage, but does not hide poor relevance metrics behind a pass threshold.
+
+Run it locally with:
+
+```sh
+npm install --no-save playwright@1.55.0
+npx playwright install chromium
+node tests/run-live-search-benchmark.cjs
+```
+
 ## Reading live-search status
 
 The live inspector follows the same request ID as the production search and listens to progress events emitted by the actual search pipeline:
