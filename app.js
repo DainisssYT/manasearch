@@ -29069,7 +29069,39 @@ if (candidates.length > 0) {
 
     // Preserve the top 300 from the real scored pool after its existing score sort, before the
     // relevance floor removes weaker candidates. This adds no second scoring pass or new sort.
-    lastSearchScoredCandidates = candidates.slice(0, 300);
+    lastSearchScoredCandidates = candidates.slice(0, 300).map((card, index) => {
+        const scoreFields = ['similarityScore','unclampedSimilarityScore','similarityBeforeCadenceAdjustment','mechanicalScore','contextScore','oracleSemanticScore','functionScore','functionalSimilarityScore','synergyScore','exactnessScore','categoryScore','roleScore','highlightIntentScore','effectCoverageScore','primaryEffectMatchScore','modalModeSimilarityScore','rankingRefinementSignal','calibratedBlendScore','mechanicalConfidence','parseConfidence','constraintPreferenceScore','acquisitionCadenceRankFactor','quantitativeConflictPenalty'];
+        const scores = {};
+        for (const key of scoreFields) if (card?.[key] !== undefined) scores[key] = card[key];
+        const evidence = card?.rankingEvidence || {};
+        return {
+            name: card?.name || '', type_line: card?.type_line || '',
+            oracle_text: String(card?.oracle_text || '').slice(0, 2200),
+            scores, preFloorRank: index + 1,
+            retrievalEvidence: Array.isArray(card?.retrievalEvidence) ? card.retrievalEvidence.slice() : [],
+            rankingEvidence: {
+                mechanical: evidence.mechanical ?? null, mechanicalTrusted: evidence.mechanicalTrusted ?? null,
+                mechanicalConfidence: evidence.mechanicalConfidence ?? null, rawSemantic: evidence.rawSemantic ?? null,
+                functionSemantic: evidence.functionSemantic ?? null, roleSemantic: evidence.roleSemantic ?? null,
+                highlightIntent: evidence.highlightIntent ?? null, baseChannelScore: evidence.baseChannelScore ?? null,
+                effectCoverage: evidence.effectCoverage ?? null, balancedCoverage: evidence.balancedCoverage ?? null,
+                primaryEffectMatch: evidence.primaryEffectMatch ?? null, evidenceAgreement: evidence.evidenceAgreement ?? null,
+                retrievalSimilarity: evidence.retrievalSimilarity ?? null, rankingIntent: evidence.rankingIntent ?? null,
+                deterministicFunctionalAnchor: evidence.deterministicFunctionalAnchor ?? null,
+                primaryEffectRankingBoost: evidence.primaryEffectRankingBoost ?? null,
+                relationshipMismatch: evidence.relationshipMismatch ?? null, evidenceGate: evidence.evidenceGate ?? null,
+                channelScore: evidence.channelScore ?? null
+            },
+            mechanicalBreakdown: card?.mechanicalBreakdown ? {
+                relationshipMismatch: card.mechanicalBreakdown.relationshipMismatch ?? null,
+                repeatabilityMismatch: card.mechanicalBreakdown.repeatabilityMismatch ?? null,
+                explicitContrast: card.mechanicalBreakdown.explicitContrast ?? null
+            } : null,
+            parse: { confidence: card?.parseConfidence ?? null, fieldConfidence: card?.fieldConfidence?.overall ?? null, meaningful: Number(card?.parseConfidence) > 0 },
+            rankingIntent: card?.rankingIntent ?? card?._rankingIntent?.kind ?? null,
+            flags: { weakBackfill: Boolean(card?._weakBackfillMatch), relevanceFloorRescue: Boolean(card?._catastrophicEmptyRescue), strategicRoleAnchored: Boolean(card?.strategicRoleAnchored ?? evidence.strategicRoleAnchored) }
+        };
+    });
 
     // Stage 5: Relevance Floor.
     //
@@ -33051,38 +33083,7 @@ window.ManaSearchDebug = Object.freeze({
         const diagnostics = lastSearchDiagnostics;
         const context = lastSearchDebugContext;
         const asNames = value => value instanceof Set ? [...value] : [];
-        const scoreFields = ['similarityScore','unclampedSimilarityScore','similarityBeforeCadenceAdjustment','mechanicalScore','contextScore','oracleSemanticScore','functionScore','functionalSimilarityScore','synergyScore','exactnessScore','categoryScore','roleScore','highlightIntentScore','effectCoverageScore','primaryEffectMatchScore','modalModeSimilarityScore','rankingRefinementSignal','calibratedBlendScore','mechanicalConfidence','parseConfidence','constraintPreferenceScore','acquisitionCadenceRankFactor','quantitativeConflictPenalty'];
-        const candidates = (lastSearchScoredCandidates || []).map((card, index) => {
-            const scores = {};
-            for (const key of scoreFields) if (card?.[key] !== undefined) scores[key] = card[key];
-            const evidence = card?.rankingEvidence || {};
-            return {
-                name: card?.name || '', type_line: card?.type_line || '', oracle_text: String(card?.oracle_text || '').slice(0, 2200),
-                scores, preFloorRank: index + 1,
-                retrievalEvidence: Array.isArray(card?.retrievalEvidence) ? card.retrievalEvidence.slice() : [],
-                rankingEvidence: {
-                    mechanical: evidence.mechanical ?? null, mechanicalTrusted: evidence.mechanicalTrusted ?? null,
-                    mechanicalConfidence: evidence.mechanicalConfidence ?? null, rawSemantic: evidence.rawSemantic ?? null,
-                    functionSemantic: evidence.functionSemantic ?? null, roleSemantic: evidence.roleSemantic ?? null,
-                    highlightIntent: evidence.highlightIntent ?? null, baseChannelScore: evidence.baseChannelScore ?? null,
-                    effectCoverage: evidence.effectCoverage ?? null, balancedCoverage: evidence.balancedCoverage ?? null,
-                    primaryEffectMatch: evidence.primaryEffectMatch ?? null, evidenceAgreement: evidence.evidenceAgreement ?? null,
-                    retrievalSimilarity: evidence.retrievalSimilarity ?? null, rankingIntent: evidence.rankingIntent ?? null,
-                    deterministicFunctionalAnchor: evidence.deterministicFunctionalAnchor ?? null,
-                    primaryEffectRankingBoost: evidence.primaryEffectRankingBoost ?? null,
-                    relationshipMismatch: evidence.relationshipMismatch ?? null, evidenceGate: evidence.evidenceGate ?? null,
-                    channelScore: evidence.channelScore ?? null
-                },
-                mechanicalBreakdown: card?.mechanicalBreakdown ? {
-                    relationshipMismatch: card.mechanicalBreakdown.relationshipMismatch ?? null,
-                    repeatabilityMismatch: card.mechanicalBreakdown.repeatabilityMismatch ?? null,
-                    explicitContrast: card.mechanicalBreakdown.explicitContrast ?? null
-                } : null,
-                parse: { confidence: card?.parseConfidence ?? null, fieldConfidence: card?.fieldConfidence?.overall ?? null, meaningful: Number(card?.parseConfidence) > 0 },
-                rankingIntent: card?.rankingIntent ?? card?._rankingIntent?.kind ?? null,
-                flags: { weakBackfill: Boolean(card?._weakBackfillMatch), relevanceFloorRescue: Boolean(card?._catastrophicEmptyRescue), strategicRoleAnchored: Boolean(card?.strategicRoleAnchored ?? evidence.strategicRoleAnchored) }
-            };
-        });
+        const candidates = (lastSearchScoredCandidates || []).slice();
         const streams = {};
         if (diagnostics?.streams) for (const [name, names] of Object.entries(diagnostics.streams)) streams[name] = asNames(names);
         const funnel = diagnostics ? {
