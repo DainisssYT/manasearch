@@ -1,6 +1,6 @@
 /* ManaSearch build 20261119-154 */
 // ManaSearch deployment build marker. Bump this whenever app.js changes so cached-module issues are easy to diagnose.
-const MANASEARCH_APP_BUILD = '20261119-157';;
+const MANASEARCH_APP_BUILD = '20261119-158';;;
 console.info(`[ManaSearch] app.js build ${MANASEARCH_APP_BUILD}`);
 
 // The source-query and static-index builders share one representation so both sides
@@ -27952,7 +27952,7 @@ async function runManaSearchLiveRetrievalRegressionSuite({ log = true } = {}) {
         currentSourceCard = source;
         const highlights = buildBenchmarkHighlightState(testCase, source);
         manualHighlights = highlights;
-        const plans = buildFunctionalRetrievalQueries(source, parseMTGEffect(source.oracle_text || ''), \`-name:"\${source.name}"\`, 5);
+        const plans = buildFunctionalRetrievalQueries(source, parseMTGEffect(source.oracle_text || ''), '-name:"' + source.name + '"', 5);
         const tapPlan = plans.find(plan => plan.query.includes('o:"{T}: Add"'));
         const localQueries = tapPlan ? extractLocalRetrievalAlternativesFromQuery(tapPlan.query) : [];
         const descriptor = localCorpusScoreDescriptor('{T}: Add', corpus);
