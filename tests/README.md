@@ -113,3 +113,10 @@ The semantic unit tests use a deterministic fake tokenizer to verify that the bu
 splits oversized documents without truncating the final ability text. GitHub Actions also runs the
 browser regression, where the local test server must serve `.mjs` files with a JavaScript MIME type
 so the shared semantic module loads as a browser ES module.
+
+
+## Developer search inspector
+
+The feature branch includes a floating **Developer inspector**. Run a normal Find Similar Cards search, then inspect **Pipeline**, **Candidates**, and **Exclusions** to follow the real retrieval and scoring path. The Candidates view includes pre-relevance-floor score snapshots; Exclusions compares candidate membership across pipeline stages and shows hard-filter reasons. **Copy JSON** exports the UI state, production diagnostics, worker messages, and event timeline together.
+
+See [developer-search-inspector.md](../docs/developer-search-inspector.md) for the full workflow, field meanings, and interpretation limits. The inspector is passive and must not be used as a substitute for the existing regression and retrieval-quality benchmarks.
