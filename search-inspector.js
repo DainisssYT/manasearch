@@ -1333,6 +1333,7 @@
       status: 'running',
       startedAt: detail.startedAt || new Date().toISOString(),
       progress: null,
+      progressHistory: [],
       streams: [],
       completedStreams: 0,
       totalStreams: 0,
@@ -1359,6 +1360,8 @@
     const previous = state.activeSearch.progress;
     if (previous && previous.step === progress.step && previous.total === progress.total && previous.message === progress.message) return;
     state.activeSearch.progress = progress;
+    state.activeSearch.progressHistory.push(progress);
+    state.activeSearch.progressHistory = state.activeSearch.progressHistory.slice(-24);
     addEvent('search:progress', { requestId: state.activeSearch.requestId, ...progress });
     renderLiveProgress();
   });
