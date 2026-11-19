@@ -216,14 +216,20 @@
       const right = bCandidates.get(name);
       const before = Number(left?.scores?.similarityScore);
       const after = Number(right?.scores?.similarityScore);
+      const scoreChannelChanges = compareNumericFields(left?.scores, right?.scores);
+      const mechanicalBreakdownChanges = compareNumericFields(left?.mechanicalBreakdown, right?.mechanicalBreakdown);
       return {
         name: right?.name || left?.name || name,
         earlierScore: Number.isFinite(before) ? before : null,
         laterScore: Number.isFinite(after) ? after : null,
-        delta: Number.isFinite(before) && Number.isFinite(after) ? after - before : null
+        delta: Number.isFinite(before) && Number.isFinite(after) ? after - before : null,
+        scoreChannelChanges,
+        mechanicalBreakdownChanges
       };
-    }).filter(item => item.delta !== null && Math.abs(item.delta) > 0.000001)
-      .sort((x, y) => Math.abs(y.delta) - Math.abs(x.delta)).slice(0, 40);
+    }).filter(item =>
+      (item.delta !== null && Math.abs(item.delta) > 0.000001) ||
+      item.scoreChannelChanges.length > 0 || item.mechanicalBreakdownChanges.length > 0
+    ).sort((x, y) => Math.abs(y.delta || 0) - Math.abs(x.delta || 0)).slice(0, 40);
     const streamNames = new Set([...Object.keys(a.streams || {}), ...Object.keys(b.streams || {})]);
     const streamComparison = [...streamNames].map(name => {
       const left = new Set((a.streams?.[name] || []).map(value => normalizeCandidateName(value)).filter(Boolean));
@@ -263,6 +269,7 @@
         earlierError: aError,
         laterError: bError,
         rankingComparisonValid: aStatus !== 'error' && bStatus !== 'error',
+        rankingComparisonComplete: aStatus === 'completed' && bStatus === 'completed',
         note: aStatus === 'error' || bStatus === 'error'
           ? 'At least one search failed. Treat its empty or partial result list as a failed run, not as a valid zero-result ranking.'
           : 'Both searches returned a ranking. A partial run may still have missing retrieval streams; inspect its warning and stream completion details.'
@@ -395,6 +402,8 @@
         expectedTopCandidates
       },
       baseline: {
+        status: runStatus,
+        warning: runStatus === 'completed_with_warnings' ? (run.errorMessage || run.summary?.errorMessage || pipeline.outcome?.errorMessage || '') : '',
         finalRanking: regressionFinalRanking(pipeline),
         focusTrace: focusCandidate ? traceCandidate(pipeline, focusCandidate) : null
       },
@@ -517,13 +526,16 @@
     else if (focusName && fixture.expectations.focusBehavior === 'must-not-appear') focusPass = focusRank === null;
     else if (focusName && fixture.expectations.focusBehavior === 'rank-at-most') focusPass = focusRank !== null && focusRank <= fixture.expectations.maxRank;
     const assertionsConfigured = rankingPass !== null || focusPass !== null;
-    // Null means no verdict: different inputs or no configured assertions must not be counted as a pass/failure.
-    const pass = inputsMatch && assertionsConfigured ? rankingPass !== false && focusPass !== false : null;
+    const completeRun = runStatus === 'completed';
+    // A warning-bearing run can still be inspected, but it cannot prove that omitted cards were
+    // truly irrelevant: an interrupted retrieval lane may simply not have found them.
+    const pass = inputsMatch && assertionsConfigured && completeRun
+      ? rankingPass !== false && focusPass !== false : null;
     return {
       comparable: inputsMatch,
       assertionsConfigured,
       pass,
-      status: !inputsMatch ? 'input-mismatch' : !assertionsConfigured ? 'no-expectations' : pass ? 'pass' : 'fail',
+      status: !inputsMatch ? 'input-mismatch' : !completeRun ? 'partial-run' : !assertionsConfigured ? 'no-expectations' : pass ? 'pass' : 'fail',
       case: { title: fixture.title, sourceRunNumber: fixture.source.runNumber ?? null },
       comparedRun: {
         number: run.number ?? null,
