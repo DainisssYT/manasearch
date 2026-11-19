@@ -15314,10 +15314,16 @@ function runManaSearchRepeatabilityRegressionSuite({ log = true } = {}) {
         const manaPlans = buildFunctionalRetrievalQueries(solRing, solRingEffects, '-name:"Sol Ring"', 5);
         const tapManaPlan = manaPlans.find(plan => plan.query.includes('o:"{T}: Add"'));
         const localTapAlternatives = tapManaPlan ? extractLocalRetrievalAlternativesFromQuery(tapManaPlan.query) : [];
-        check('tap-symbol-normalizes-to-searchable-local-token', normalizeLocalCorpusText('{T}: Add {C}{C}') === 'tap add c c',
-            normalizeLocalCorpusText('{T}: Add {C}{C}'));
-        check('tap-to-mana-functional-query-is-amount-agnostic', Boolean(tapManaPlan) && localTapAlternatives.some(text => normalizeLocalCorpusText(text).includes('tap') && normalizeLocalCorpusText(text).includes('add')),
-            JSON.stringify({ queries: manaPlans.map(plan => plan.query), alternatives: localTapAlternatives }));
+        results.push({
+            id: 'tap-symbol-normalizes-to-searchable-local-token',
+            pass: normalizeLocalCorpusText('{T}: Add {C}{C}') === 'tap add c c',
+            normalized: normalizeLocalCorpusText('{T}: Add {C}{C}')
+        });
+        results.push({
+            id: 'tap-to-mana-functional-query-is-amount-agnostic',
+            pass: Boolean(tapManaPlan) && localTapAlternatives.some(text => normalizeLocalCorpusText(text).includes('tap') && normalizeLocalCorpusText(text).includes('add')),
+            queries: manaPlans.map(plan => plan.query), alternatives: localTapAlternatives
+        });
 
         // Regression: the subject of "lose 1 life" is inherited from "you draw a card" in
         // conjunction-reduced Oracle text. Losing that atom removes the defining cost from the
@@ -15330,10 +15336,12 @@ function runManaSearchRepeatabilityRegressionSuite({ log = true } = {}) {
         const arenaEffects = parseMTGEffect(phyrexianArena.oracle_text);
         const arenaFunctions = arenaEffects.map(effect => effect?.canonical?.function).filter(Boolean);
         const arenaLifeAtom = arenaEffects.find(effect => effect?.canonical?.function === 'lose_life');
-        check('compound-draw-and-life-loss-preserves-both-canonical-effects',
-            arenaFunctions.includes('card_draw') && arenaFunctions.includes('lose_life') &&
-            /you draw a card and lose 1 life/i.test(arenaLifeAtom?.contextClause || ''),
-            JSON.stringify({ functions: arenaFunctions, lifeAtom: arenaLifeAtom?.canonical || null, context: arenaLifeAtom?.contextClause || '' }));
+        results.push({
+            id: 'compound-draw-and-life-loss-preserves-both-canonical-effects',
+            pass: arenaFunctions.includes('card_draw') && arenaFunctions.includes('lose_life') &&
+                /you draw a card and lose 1 life/i.test(arenaLifeAtom?.contextClause || ''),
+            functions: arenaFunctions, lifeAtom: arenaLifeAtom?.canonical || null, context: arenaLifeAtom?.contextClause || ''
+        });
 
         const arenaDrawStart = phyrexianArena.oracle_text.indexOf('draw a card');
         const arenaLifeStart = phyrexianArena.oracle_text.indexOf('lose 1 life');
@@ -15343,15 +15351,16 @@ function runManaSearchRepeatabilityRegressionSuite({ log = true } = {}) {
             { text: 'draw a card', field: 'oracle', mode: 'variable', origin: 'source', start: arenaDrawStart, end: arenaDrawStart + 'draw a card'.length, colorIndex: 1, attachedTo: null },
             { text: 'lose 1 life', field: 'oracle', mode: 'variable', origin: 'source', start: arenaLifeStart, end: arenaLifeStart + 'lose 1 life'.length, colorIndex: 2, attachedTo: null }
         ];
-        currentSourceCard = phyrexianArena;
-        manualHighlights = arenaHighlights;
         const arenaLiveIntent = getSearchIntent(phyrexianArena, arenaHighlights);
         const arenaIntentFunctions = arenaLiveIntent.parsedEffects.map(effect => effect?.canonical?.function).filter(Boolean);
         const arenaModel = buildSearchIntentPresentationModel(phyrexianArena, arenaHighlights);
-        check('live-highlight-intent-retains-life-payment-as-a-scored-effect',
-            arenaIntentFunctions.includes('card_draw') && arenaIntentFunctions.includes('lose_life') &&
-            arenaModel.effectViews.some(view => view.fn === 'lose_life'),
-            JSON.stringify({ functions: arenaIntentFunctions, effects: arenaModel.effectViews.map(view => ({ fn: view.fn, detail: view.detail })) }));
+        results.push({
+            id: 'live-highlight-intent-retains-life-payment-as-a-scored-effect',
+            pass: arenaIntentFunctions.includes('card_draw') && arenaIntentFunctions.includes('lose_life') &&
+                arenaModel.effectViews.some(view => view.fn === 'lose_life'),
+            functions: arenaIntentFunctions,
+            effects: arenaModel.effectViews.map(view => ({ fn: view.fn, detail: view.detail }))
+        });
 
         const arenaProfile = inferStrategicRoleProfile(phyrexianArena, arenaLiveIntent.parsedEffects, arenaLiveIntent.targetText);
         const arenaFingerprint = buildStrategicRoleFingerprint(phyrexianArena, arenaLiveIntent.parsedEffects, arenaProfile);
@@ -15371,9 +15380,13 @@ function runManaSearchRepeatabilityRegressionSuite({ log = true } = {}) {
         const drawOnlyFingerprint = buildStrategicRoleFingerprint(recurringDrawOnly, drawOnlyEffects, drawOnlyProfile);
         const darkRoleScore = calculateStrategicRoleScore(arenaProfile, darkProfile, arenaFingerprint, darkFingerprint);
         const drawOnlyRoleScore = calculateStrategicRoleScore(arenaProfile, drawOnlyProfile, arenaFingerprint, drawOnlyFingerprint);
-        check('life-cost-card-advantage-role-prefers-life-paid-analogues',
-            arenaFingerprint.lifePaid === true && darkFingerprint.lifePaid === true && drawOnlyFingerprint.lifePaid === false && darkRoleScore > drawOnlyRoleScore,
-            JSON.stringify({ source: arenaFingerprint, darkConfidant: darkFingerprint, drawOnly: drawOnlyFingerprint, darkRoleScore, drawOnlyRoleScore }));
+        results.push({
+            id: 'life-cost-card-advantage-role-prefers-life-paid-analogues',
+            pass: arenaFingerprint.lifePaid === true && darkFingerprint.lifePaid === true &&
+                drawOnlyFingerprint.lifePaid === false && darkRoleScore > drawOnlyRoleScore,
+            source: arenaFingerprint, darkConfidant: darkFingerprint, drawOnly: drawOnlyFingerprint,
+            darkRoleScore, drawOnlyRoleScore
+        });
 
         const chronicler = { name: 'Chronicler of Heroes', type_line: 'Creature — Centaur Wizard', oracle_text: 'When Chronicler of Heroes enters the battlefield, draw a card if you control a creature with a +1/+1 counter on it.' };
         const oak = { name: 'Burlfist Oak', type_line: 'Creature — Treefolk', oracle_text: 'Whenever you draw a card, Burlfist Oak gets +2/+2 until end of turn.' };
