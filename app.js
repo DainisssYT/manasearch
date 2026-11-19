@@ -9417,10 +9417,21 @@ function inferStrategicRoleProfileUncached(card, parsedEffects = [], intentText 
     const topCardAcquisition = /\b(?:reveal|exile)\s+the top card\b[^.]{0,100}\b(?:hand|put it into your hand|cards? exiled)\b/.test(lower);
     const recurringAcquisition = directDraw || handAcquisition || topCardAcquisition;
     const acquisitionText = /\bdraw(?:s)?\s+(?:a|one|two|three|four|five|\d+|x)\s+cards?\b|\b(?:put|puts|return|returns)\b[^.;]{0,100}\b(?:card|cards|it|them)\b[^.;]{0,60}\b(?:into|to) your hand\b|\b(?:reveal|exile)\s+the top card\b/i;
-    const acquisitionIsRepeatable = (parsedEffects || []).some(e =>
-        getEffectRepeatabilityProfile(e)?.group === 'repeatable_engine' &&
-        (e?.canonical?.function === 'card_draw' || acquisitionText.test(String(e?.raw || e?.canonical?.params?.raw || '')))
-    );
+    const acquisitionIsRepeatable = (parsedEffects || []).some(e => {
+        if (getEffectRepeatabilityProfile(e)?.group !== 'repeatable_engine') return false;
+        // Many draw analogues are represented as several atoms from one ability:
+        // "reveal the top card ... and put it into your hand" or "exile the top card ...
+        // put it into your hand". The action atom can contain only "reveal"/"exile";
+        // use its parent clause as the acquisition evidence, while repeatability still
+        // comes from this same effect's annotated trigger/activation profile.
+        const acquisitionContext = [
+            e?.raw,
+            e?.contextClause,
+            e?.parentClauseRaw,
+            e?.canonical?.params?.raw
+        ].filter(Boolean).join(' ');
+        return e?.canonical?.function === 'card_draw' || acquisitionText.test(acquisitionContext);
+    });
     // Investigate grants a reusable Clue token, whose rules-defined {2}, sacrifice it: draw a card
     // ability turns repeatable token production into repeatable card advantage. The derived draw
     // atom is not literally printed on Trail of Evidence, so join it to the matching Clue trigger.
@@ -9608,7 +9619,7 @@ function buildStrategicRoleFingerprintUncached(card, parsedEffects = [], profile
         /\bdraw\s+(?:a|one)\s+card\b/.test(lower) ? 1 : 0,
         0
     );
-    const lifePaid = /\b(?:pay|lose)\s+(?:\d+|a|one)\s+life\b|\bpay\s+life\b|\breveal the top card\b|\bskip your draw step\b/.test(lower);
+    const lifePaid = /\b(?:pay|pays|lose|loses)\s+(?:(?:\d+|a|one)\s+)?life\b|\b(?:pay|pays)\s+life\b|\blose(?:s)?\s+life\s+(?:equal to|based on)\b|\breveal the top card\b|\bskip your draw step\b/.test(lower);
     const lifeLoss = [...lower.matchAll(/\b(?:lose|loses)\s+(\d+)\s+life\b/g)].map(m => Number(m[1])).filter(Number.isFinite);
     const tribeMatch = lower.match(/\b(?:other\s+)?([a-z]+)\s+(?:creatures?|merfolk|elves?|goblins?|zombies?|soldiers?|humans?|spirits?|knights?|wizards?|cats?|dogs?|dragons?|angels?|vampires?|clerics?|warriors?)\s+get\b/i);
     const sourceRole = profile?.find(r => r.role === topRole) || profile?.[0] || null;
@@ -9741,11 +9752,14 @@ function roleFingerprintSimilarity(sourceFingerprint, candidateFingerprint) {
         add(sourceFingerprint.recurring, candidateFingerprint.recurring, 0.07);
         add(sourceFingerprint.activated, candidateFingerprint.activated, 0.03);
     } else if (sourceFingerprint.role === 'card_advantage_engine') {
-        add(sourceFingerprint.recurring, candidateFingerprint.recurring, 0.30);
-        add(sourceFingerprint.lifePaid, candidateFingerprint.lifePaid, 0.20);
-        add(sourceFingerprint.drawAmount || 1, candidateFingerprint.drawAmount || 1, 0.20);
-        add(sourceFingerprint.permanent, candidateFingerprint.permanent, 0.15);
-        add(sourceFingerprint.activated, candidateFingerprint.activated, 0.10);
+        add(sourceFingerprint.recurring, candidateFingerprint.recurring, 0.25);
+        // Whether the engine spends life is a central part of this role, not a minor
+        // side detail. Phyrexian Arena-like effects should prefer Dark Confidant and
+        // Necropotence over otherwise similar recurring draw engines that cost no life.
+        add(sourceFingerprint.lifePaid, candidateFingerprint.lifePaid, 0.38);
+        add(sourceFingerprint.drawAmount || 1, candidateFingerprint.drawAmount || 1, 0.16);
+        add(sourceFingerprint.permanent, candidateFingerprint.permanent, 0.10);
+        add(sourceFingerprint.activated, candidateFingerprint.activated, 0.06);
     } else if (sourceFingerprint.role === 'tribal_anthem') {
         if (sourceFingerprint.tribe || candidateFingerprint.tribe) {
             weight += 0.55;
@@ -15163,6 +15177,59 @@ function runManaSearchRepeatabilityRegressionSuite({ log = true } = {}) {
             const arenaEffects = annotateEffectRepeatability(arenaCard, parseMTGEffect(arenaCard.oracle_text), arenaCard.oracle_text);
             const arenaRoles = inferStrategicRoleProfile(arenaCard, arenaEffects, '').map(r => r.role);
             results.push({ id: 'arena-combined-draw-and-life-loss-is-still-card-advantage-engine', pass: arenaRoles.includes('card_advantage_engine'), roles: arenaRoles });
+
+            const darkConfidantCard = {
+                name: 'Dark Confidant',
+                type_line: 'Creature — Human Wizard',
+                oracle_text: 'At the beginning of your upkeep, reveal the top card of your library and put that card into your hand. You lose life equal to that card\'s mana value.'
+            };
+            const necropotenceCard = {
+                name: 'Necropotence',
+                type_line: 'Enchantment',
+                oracle_text: 'Skip your draw step. Whenever you discard a card, exile it from your graveyard. Pay 1 life: Exile the top card of your library face down. Put that card into your hand at the beginning of the next end step.'
+            };
+            const mercadianAtlasCard = {
+                name: 'Mercadian Atlas',
+                type_line: 'Artifact',
+                oracle_text: 'At the beginning of your end step, if you have no cards in hand, draw a card.'
+            };
+            const makeCardAdvantageProfile = card => {
+                const effects = annotateEffectRepeatability(card, parseMTGEffect(card.oracle_text, card), card.oracle_text);
+                const roles = inferStrategicRoleProfile(card, effects, '');
+                const fingerprint = buildStrategicRoleFingerprint(card, effects, roles);
+                return { effects, roles, fingerprint };
+            };
+            const darkConfidantProfile = makeCardAdvantageProfile(darkConfidantCard);
+            const necropotenceProfile = makeCardAdvantageProfile(necropotenceCard);
+            const atlasProfile = makeCardAdvantageProfile(mercadianAtlasCard);
+            const darkConfidantRoleScore = calculateStrategicRoleScore(
+                arenaRoles.map(role => ({ role, group: STRATEGIC_ROLE_GROUPS[role] || role, score: 0.90, anchors: ['card draw', 'repeatable acquisition'] })),
+                darkConfidantProfile.roles, buildStrategicRoleFingerprint(arenaCard, arenaEffects, arenaRoles), darkConfidantProfile.fingerprint
+            );
+            const necropotenceRoleScore = calculateStrategicRoleScore(
+                arenaRoles.map(role => ({ role, group: STRATEGIC_ROLE_GROUPS[role] || role, score: 0.90, anchors: ['card draw', 'repeatable acquisition'] })),
+                necropotenceProfile.roles, buildStrategicRoleFingerprint(arenaCard, arenaEffects, arenaRoles), necropotenceProfile.fingerprint
+            );
+            const atlasRoleScore = calculateStrategicRoleScore(
+                arenaRoles.map(role => ({ role, group: STRATEGIC_ROLE_GROUPS[role] || role, score: 0.90, anchors: ['card draw', 'repeatable acquisition'] })),
+                atlasProfile.roles, buildStrategicRoleFingerprint(arenaCard, arenaEffects, arenaRoles), atlasProfile.fingerprint
+            );
+            results.push({
+                id: 'life-paid-card-advantage-analogs-outscore-no-life-recurring-draw',
+                pass: darkConfidantProfile.roles.some(role => role.role === 'card_advantage_engine') &&
+                    necropotenceProfile.roles.some(role => role.role === 'card_advantage_engine') &&
+                    atlasProfile.roles.some(role => role.role === 'card_advantage_engine') &&
+                    darkConfidantProfile.fingerprint.lifePaid === true &&
+                    necropotenceProfile.fingerprint.lifePaid === true &&
+                    atlasProfile.fingerprint.lifePaid === false &&
+                    darkConfidantRoleScore > atlasRoleScore &&
+                    necropotenceRoleScore > atlasRoleScore,
+                diagnostics: {
+                    darkConfidant: { roles: darkConfidantProfile.roles, fingerprint: darkConfidantProfile.fingerprint, score: darkConfidantRoleScore },
+                    necropotence: { roles: necropotenceProfile.roles, fingerprint: necropotenceProfile.fingerprint, score: necropotenceRoleScore },
+                    mercadianAtlas: { roles: atlasProfile.roles, fingerprint: atlasProfile.fingerprint, score: atlasRoleScore }
+                }
+            });
 
             const arenaCompareText = buildCompareExplanation(
                 arenaCard,
