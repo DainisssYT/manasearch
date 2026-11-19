@@ -163,6 +163,21 @@ async function main() {
             finalResults: [{ rank: 1, name: 'Added Card' }, { rank: 2, name: 'Shared Card' }]
           }
         };
+        const stableRequest = {
+          ...earlier.pipeline.request,
+          sourceCard: { id: 'stable-id', name: 'Source A' }
+        };
+        const stableFixture = window.ManaSearchInspector.createRegressionCase({
+          number: 4, pipeline: { ...earlier.pipeline, request: stableRequest }
+        }, { expectedTopCandidates: ['Shared Card'] });
+        const reorderedStableRequest = {
+          ...stableRequest,
+          sourceCard: { name: 'Source A', id: 'stable-id' }
+        };
+        const stableOrderReport = window.ManaSearchInspector.compareRegressionCase(stableFixture, {
+          number: 5,
+          pipeline: { request: reorderedStableRequest, finalResults: [{ rank: 1, name: 'Shared Card' }] }
+        });
         const regressionReport = window.ManaSearchInspector.compareRegressionCase(regressionCase, replayRun);
         const inputMismatchReport = window.ManaSearchInspector.compareRegressionCase(regressionCase, later);
         const excludedCase = window.ManaSearchInspector.createRegressionCase(earlier, {
@@ -200,6 +215,7 @@ async function main() {
           regressionComparisonDetectsRankingRegression: regressionReport.rankingCheck?.exactOrderMatch === false && regressionReport.rankingCheck?.missingFromTop.includes('Removed Card') && regressionReport.rankingCheck?.unexpectedInTop.includes('Added Card'),
           regressionComparisonMeasuresTopKOverlap: regressionReport.rankingCheck?.overlap === 0.5,
           regressionComparisonRejectsChangedInputs: inputMismatchReport.status === 'input-mismatch' && inputMismatchReport.inputCheck.changedFields.includes('highlights'),
+          regressionInputComparisonIgnoresObjectKeyOrder: stableOrderReport.inputCheck?.matches === true && stableOrderReport.pass === true,
           regressionComparisonChecksMustNotAppear: exclusionReport.focusCheck?.pass === false,
           regressionImportValidationRejectsUnknownSchema: rejectsInvalidCase,
           regressionTabAvailable: !!document.querySelector('[data-tab="regression"]'),
