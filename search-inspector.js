@@ -299,6 +299,61 @@
     const meanAbsoluteRankMovement = rankMovementValues.length
       ? Number((rankMovementValues.reduce((sum, value) => sum + value, 0) / rankMovementValues.length).toFixed(3))
       : null;
+    // Explain changed final cards using the same candidate trace used by the Trace card tab.
+    // A trace outside the bounded capture is deliberately labelled unknown, never asserted as a miss.
+    const changedFinalKeys = new Set([
+      ...added.map(name => normalizeCandidateName(name)),
+      ...removed.map(name => normalizeCandidateName(name)),
+      ...moved.map(item => normalizeCandidateName(item.name))
+    ].filter(Boolean));
+    const candidatePathChanges = [...changedFinalKeys].map(key => {
+      const displayName = bNames.get(key) || aNames.get(key) || key;
+      const earlierTrace = traceCandidate(a, displayName);
+      const laterTrace = traceCandidate(b, displayName);
+      const stageDifferences = stageOrder.map(([field, label]) => {
+        const earlierPresent = earlierTrace.stages.find(stage => stage.stage === field)?.present === true;
+        const laterPresent = laterTrace.stages.find(stage => stage.stage === field)?.present === true;
+        return { stage: field, label, earlierPresent, laterPresent };
+      }).filter(item => item.earlierPresent !== item.laterPresent);
+      const firstDivergence = stageDifferences[0] || null;
+      let explanation;
+      if (!earlierTrace.found && laterTrace.found) {
+        explanation = 'Not present in the earlier retained trace, but present in the later trace. It may be newly retrieved or may have fallen outside the earlier diagnostic sample.';
+      } else if (earlierTrace.found && !laterTrace.found) {
+        explanation = 'Not present in the later retained trace. It may have left retrieval or fallen outside the later diagnostic sample; this alone is not proof of a retrieval miss.';
+      } else if (!earlierTrace.found && !laterTrace.found) {
+        explanation = 'Neither retained trace contains this card. The bounded snapshots cannot establish where it was lost.';
+      } else if (firstDivergence?.earlierPresent && !firstDivergence.laterPresent) {
+        explanation = 'First recorded stage difference: the card appears in the earlier run but not in the later run at ' + firstDivergence.label + '. Check the later run’s rejection evidence and retrieval streams.';
+      } else if (firstDivergence?.laterPresent && !firstDivergence.earlierPresent) {
+        explanation = 'The later run records this card at ' + firstDivergence.label + ', while the earlier run does not. This is the first observed pipeline difference.';
+      } else if (aRanks.has(key) && bRanks.has(key) && aRanks.get(key) !== bRanks.get(key)) {
+        explanation = 'The card reached the same retained pipeline stages in both runs. Inspect score-channel changes and ordering preferences for the rank movement.';
+      } else {
+        explanation = 'The final membership differs, but the retained stage evidence does not isolate a single cause.';
+      }
+      return {
+        name: displayName,
+        earlierFinalRank: aRanks.get(key) ?? null,
+        laterFinalRank: bRanks.get(key) ?? null,
+        movement: aRanks.has(key) && bRanks.has(key) ? aRanks.get(key) - bRanks.get(key) : null,
+        earlierObserved: earlierTrace.found,
+        laterObserved: laterTrace.found,
+        earlierRetrievalStreams: earlierTrace.retrieval.streams,
+        laterRetrievalStreams: laterTrace.retrieval.streams,
+        stageDifferences,
+        firstDivergence,
+        earlierFirstObservedLoss: earlierTrace.firstObservedLoss,
+        laterFirstObservedLoss: laterTrace.firstObservedLoss,
+        earlierHardFilterRejection: earlierTrace.possibleHardFilterRejection,
+        laterHardFilterRejection: laterTrace.possibleHardFilterRejection,
+        explanation
+      };
+    }).sort((left, right) => {
+      const priority = item => item.earlierFinalRank === null || item.laterFinalRank === null ? 1000
+        : Math.abs(item.movement || 0);
+      return priority(right) - priority(left);
+    }).slice(0, 30);
     const failureList = pipeline => Array.isArray(pipeline?.streamFailures) ? pipeline.streamFailures : [];
     const earlierFailures = failureList(a);
     const laterFailures = failureList(b);
@@ -403,6 +458,7 @@
       retrieval: streamComparison,
       retrievalFailures,
       stageProgression,
+      candidatePathChanges,
       scoredCandidateEvolution: {
         earlierSampleCount: earlierScored.size,
         laterSampleCount: laterScored.size,
@@ -520,6 +576,21 @@
       if (stage.addedInLater?.length) lines.push('    Added examples: ' + stage.addedInLater.slice(0, 5).join(', '));
       if (stage.missingFromLater?.length) lines.push('    Missing examples: ' + stage.missingFromLater.slice(0, 5).join(', '));
     });
+    if (comparison.candidatePathChanges?.length) {
+      lines.push('Changed-card pipeline paths (bounded trace evidence):');
+      comparison.candidatePathChanges.slice(0, 8).forEach(item => {
+        const ranks = '#' + (item.earlierFinalRank ?? '—') + ' → #' + (item.laterFinalRank ?? '—');
+        const divergence = item.firstDivergence
+          ? item.firstDivergence.label + ' (' + (item.firstDivergence.earlierPresent ? 'present' : 'absent') +
+            ' → ' + (item.firstDivergence.laterPresent ? 'present' : 'absent') + ')'
+          : 'no recorded stage divergence';
+        lines.push('  ' + item.name + ': ' + ranks + ' — ' + divergence);
+        if (item.earlierRetrievalStreams.length || item.laterRetrievalStreams.length) {
+          lines.push('    Streams: earlier [' + item.earlierRetrievalStreams.join(', ') + '] → later [' + item.laterRetrievalStreams.join(', ') + ']');
+        }
+        lines.push('    ' + item.explanation);
+      });
+    }
     if (comparison.scoredCandidateEvolution) {
       const scored = comparison.scoredCandidateEvolution;
       lines.push('Scored-candidate sample: ' + scored.sharedSampleCount + ' shared of ' + scored.earlierSampleCount +
