@@ -358,6 +358,7 @@ check('developer inspector observes the production pipeline without changing sco
   assert.match(inspector, /traceCandidate/);
   assert.match(inspector, /firstObservedLoss/);
   assert.match(inspector, /possibleHardFilterRejection/);
+  assert.match(inspector, /mechanicalBreakdown: candidate\.mechanicalBreakdown/);
   assert.match(inspector, /data-trace-candidate/);
   assert.match(inspector, /data-tab="exclusions"/);
   assert.match(inspector, /manasearch:search-finished/);
