@@ -37,7 +37,8 @@ The `retrievalEvidence` field is provenance only: it records which streams found
 
 - The inspector does not launch searches, alter constraints, change score weights, or reorder candidates. It retains the six most recent completed primary searches in page memory only; this history is cleared when the page is reloaded.
 - Candidate snapshots are captured from the production `scoreCardBatch` output before relevance-floor pruning. The inspector does not run a second scorer.
-- Each run snapshot retains at most 300 scored candidates and 500 filter rejection records; the session archive retains at most six runs to bound memory and export size.\n- **Download JSON** produces a versioned `manasearch-diagnostics-export-v2` file. It includes the most recent UI/pipeline state, retained completed runs, timeline, and observed worker messages. No diagnostic history is uploaded or persisted automatically.
+- Each run snapshot retains at most 300 scored candidates and 500 filter rejection records; the session archive retains at most six runs to bound memory and export size.
+- **Download JSON** produces a versioned `manasearch-diagnostics-export-v2` file. It includes the most recent UI/pipeline state, retained completed runs, timeline, and observed worker messages. No diagnostic history is uploaded or persisted automatically.
 - Worker messages are observed without replacing application message handlers or changing message payloads.
 - Diagnostic exports may contain card Oracle text, search queries, and user-selected highlight text. Review the JSON before sharing it.
 - The inspector is developer tooling, not a user-facing quality guarantee. Use reproducible source/highlight/constraint combinations and compare exported snapshots when tuning the search system.
@@ -47,4 +48,5 @@ The `retrievalEvidence` field is provenance only: it records which streams found
 - The candidate list is bounded to the top 300 by pre-floor similarity score; very large searches may have more scored candidates.
 - `preFloorRank` is the candidate's position after score sorting but before relevance-floor pruning. Use `finalResults` for the final displayed rank. Final result rows also include `preFloorScores` alongside the final post-preference similarity score.
 - Filter rejection reasons are recorded per card name at the first failing hard-filter check; a card can have more than one underlying issue that is not represented by that first reason.
-- Search Deeper and Related Search are separate workflows. This snapshot currently describes the primary Find Similar Cards run.\n- Run comparison is descriptive rather than causal: changed ranks may be caused by changed source/highlight/constraints, different retrieval pools, score changes, relevance-floor pruning, or ordering preferences. The comparison output exposes these signals but does not claim which one alone caused a rank change.
+- Search Deeper and Related Search are separate workflows. This snapshot currently describes the primary Find Similar Cards run.
+- Run comparison is descriptive rather than causal: changed ranks may be caused by changed source/highlight/constraints, different retrieval pools, score changes, relevance-floor pruning, or ordering preferences. The comparison output exposes these signals but does not claim which one alone caused a rank change.
