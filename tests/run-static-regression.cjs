@@ -359,12 +359,12 @@ check('developer inspector observes the production pipeline without changing sco
   assert.match(inspector, /productionPipeline: getPipelineSnapshot\(\)/);
   assert.match(inspector, /data-tab="compare"/);
   assert.match(inspector, /MAX_SEARCH_RUNS = 6/);
-  assert.match(inspector, /searchRuns: state\\.searchRuns/);
+  assert.match(inspector, /searchRuns: state\.searchRuns/);
   assert.match(inspector, /sharedCandidateScoreChanges/);
   assert.match(inspector, /rankChanges/);
   assert.match(inspector, /data-action="download"/);
   assert.match(inspector, /manasearch-diagnostics-export-v2/);
-  assert.match(inspector, /htmlEscape\\(clip\\(runLabel\\(run\\), 120\\)\\)/);
+  assert.match(inspector, /htmlEscape\(clip\(runLabel\(run\), 120\)\)/);
   assert.match(inspector, /meaningfulParse/);
   assert.match(inspectorCss, /overflow-x:auto/);
   assert.match(deployWorkflow, /search-inspector\.js search-inspector\.css/);
