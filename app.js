@@ -27960,7 +27960,7 @@ async function findSimilarCards() {
                     requestId,
                     sourceName: currentSourceCard?.name || '',
                     completedStreams: streams.filter(stream => stream.status === 'completed').length,
-                    failedStreams: streams.filter(stream => stream.status === 'failed').length,
+                    failedStreams: streams.filter(stream => ['failed', 'completed_with_warnings'].includes(stream.status)).length,
                     settledStreams: streams.filter(stream => ['completed', 'failed', 'completed_with_warnings'].includes(stream.status)).length,
                     totalStreams: streams.length,
                     streams,
@@ -28032,7 +28032,8 @@ async function findSimilarCards() {
             // progress text for a background request.
             if (activeResultView.mode === 'main' && activeResultView.requestId === requestId) {
                 renderStreamChecklist();
-                updateProgress(1, totalSteps, `Retrieval in progress — ${streamsSettled}/${totalTrackedStreams} search streams finished; ${label} finished.`);
+                const warningLaneCount = [...streamChecklistStatus.values()].filter(value => ['failed', 'completed_with_warnings'].includes(value)).length;
+                updateProgress(1, totalSteps, `Retrieval in progress — ${streamsSettled}/${totalTrackedStreams} streams settled${warningLaneCount ? `; ${warningLaneCount} lane(s) with warnings` : ''}; ${label} finished.`);
             }
             return r;
         });
@@ -28533,7 +28534,8 @@ async function findSimilarCards() {
                     `Done • ${totalQueries} queries • ${totalPages}/${maxPages || totalPages} pages • ${totalCards} cards${failedFunctionalQueries ? ` • ${failedFunctionalQueries} query failure(s)` : ''}`
                 );
                 renderStreamChecklist();
-                updateProgress(1, totalSteps, `Retrieval in progress — ${streamsSettled}/${totalTrackedStreams} search streams finished; Functional Match finished.`);
+                const warningLaneCount = [...streamChecklistStatus.values()].filter(value => ['failed', 'completed_with_warnings'].includes(value)).length;
+                updateProgress(1, totalSteps, `Retrieval in progress — ${streamsSettled}/${totalTrackedStreams} streams settled${warningLaneCount ? `; ${warningLaneCount} lane(s) with warnings` : ''}; Functional Match finished.`);
             }
             return sets;
         })();
