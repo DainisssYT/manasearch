@@ -374,5 +374,11 @@
     if (records.some(record => !panel.contains(record.target)) && !windowEl.hidden && activeTab === 'live') render();
   });
   observer.observe(document.body, { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ['class', 'hidden', 'aria-busy'] });
+  // Read-only console hooks make exported runs and the comparison routine independently testable.
+  window.ManaSearchInspector = Object.freeze({
+    getRunHistory: () => cloneJson(state.searchRuns),
+    getExport: () => cloneJson(buildExport()),
+    compareRuns
+  });
   addEvent('inspector:ready', { note: 'Diagnostics are read-only; ranking and retrieval are not modified.' });
 })();
