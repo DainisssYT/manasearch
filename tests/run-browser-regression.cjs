@@ -128,7 +128,7 @@ async function main() {
             streamFailures: [{ label: 'Semantic Index', message: 'Worker startup timed out' }],
             finalResults: [{ rank: 1, name: 'Shared Card' }, { rank: 2, name: 'Removed Card' }],
             candidates: [
-              { name: 'Shared Card', preFloorRank: 1, scores: { similarityScore: 0.65, mechanicalScore: 0.7 }, mechanicalBreakdown: { graphScore: 0.7 } },
+              { name: 'Shared Card', preFloorRank: 1, scores: { similarityScore: 0.65, mechanicalScore: 0.7, effectAwareFunctionSemanticScore: 0.4 }, mechanicalBreakdown: { graphScore: 0.7 } },
               { name: 'Removed Card', scores: { similarityScore: 0.42 } }
             ]
           }
@@ -177,7 +177,7 @@ async function main() {
           filterRejections: [{ name: 'Filtered Card', reasons: ['exact highlight mismatch'] }],
           candidates: [{
             name: 'Shared Card', preFloorRank: 1, scores: { mechanicalScore: 0.8, similarityScore: 0.75 },
-            rankingEvidence: { mechanical: 0.8, highlightIntent: 0.9 }, mechanicalBreakdown: { graphScore: 0.82, relationshipMismatch: 0.1 }, retrievalEvidence: ['Search B']
+            rankingEvidence: { mechanical: 0.8, highlightIntent: 0.9 }, mechanicalBreakdown: { graphScore: 0.82, relationshipMismatch: 0.1 }, functionSemanticEvidence: { effectAwareScore: 0.94, matches: [{ sourceFunction: 'counter', candidateFunction: 'counter' }] }, retrievalEvidence: ['Search B']
           }],
           finalResults: [{ name: 'Shared Card', rank: 1, similarityScore: 0.75, flags: { weakBackfill: false } }],
           rankingEvidenceTop: [{ name: 'Shared Card', rank: 1, overall: 0.75 }]
@@ -470,6 +470,7 @@ async function main() {
           traceShowsStageProgression: candidateTrace.stages.find(stage => stage.stage === 'scored')?.present === true,
           traceShowsScoreBreakdown: candidateTrace.scoring?.scores?.mechanicalScore === 0.8 && candidateTrace.scoring?.rankingEvidence?.highlightIntent === 0.9,
           traceShowsMechanicalBreakdown: candidateTrace.scoring?.mechanicalBreakdown?.graphScore === 0.82,
+          traceShowsAbilityAwareSemanticEvidence: candidateTrace.scoring?.functionSemanticEvidence?.effectAwareScore === 0.94 && candidateTrace.scoring?.functionSemanticEvidence?.matches?.[0]?.candidateFunction === 'counter',
           traceShowsFinalRank: candidateTrace.finalRanking?.rank === 1,
           traceShowsFilterRejection: filteredTrace.possibleHardFilterRejection?.reasons?.includes('exact highlight mismatch') === true,
           detectsChangedHighlight: comparison.changes.highlightsChanged === true,
@@ -477,6 +478,7 @@ async function main() {
           detectsAddedAndRemovedCards: comparison.finalRanking.addedInLater.includes('Added Card') && comparison.finalRanking.missingFromLater.includes('Removed Card'),
           detectsRankMovement: comparison.finalRanking.rankChanges.some(item => item.name === 'Shared Card' && item.earlierRank === 1 && item.laterRank === 2),
           detectsScoreDelta: !!sharedScore && Math.abs(sharedScore.delta - 0.10) < 1e-9,
+          compareRunsSurfacesAbilityAwareFunctionScoreDelta: !!sharedScore?.scoreChannelChanges?.some(change => change.field === 'effectAwareFunctionSemanticScore' && Math.abs(change.delta - 0.5) < 1e-9),
           computesRetrievalOverlap: comparison.retrieval.some(item => item.stream === 'Search B' && item.sharedCount === 1 && Math.abs(item.jaccard - (1 / 3)) < 1e-4),
           comparesResolvedRetrievalFailures: comparison.retrievalFailures?.earlierCount === 1 && comparison.retrievalFailures?.laterCount === 0 && comparison.retrievalFailures?.resolved?.[0]?.label === 'Semantic Index',
           historyIsArray: Array.isArray(history),
