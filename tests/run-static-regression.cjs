@@ -25,6 +25,8 @@ const semanticText = fs.readFileSync(semanticTextPath, 'utf8');
 const semanticBuilder = fs.readFileSync(semanticBuilderPath, 'utf8');
 const deployWorkflow = fs.readFileSync(deployWorkflowPath, 'utf8');
 const browserRunner = fs.readFileSync(browserRunnerPath, 'utf8');
+const inspector = fs.readFileSync(inspectorPath, 'utf8');
+const inspectorCss = fs.readFileSync(inspectorCssPath, 'utf8');
 const html = fs.readFileSync(htmlPath, 'utf8');
 const css = fs.readFileSync(cssPath, 'utf8');
 
@@ -337,6 +339,21 @@ check('static index builder verifies real model tokens and disables truncation',
 check('Pages publishes the shared semantic module and browser tests serve ESM with JavaScript MIME', () => {
   assert.match(deployWorkflow, /cp scripts\/semantic-text\.mjs _site\/scripts\//);
   assert.match(browserRunner, /['"]\.mjs['"]:\s*['"]text\/javascript; charset=utf-8['"]/);
+});
+
+check('developer inspector observes the production pipeline without changing scoring', () => {
+  execFileSync(process.execPath, ['--check'], { input: inspector, stdio: ['pipe', 'pipe', 'pipe'] });
+  assert.match(html, /search-inspector\.js\?v=20261119-137/);
+  assert.match(html, /search-inspector\.css\?v=20261119-137/);
+  assert.match(app, /window\.ManaSearchDebug = Object\.freeze\(/);
+  assert.match(app, /lastSearchScoredCandidates = candidates\.slice\(0, 300\)/);
+  assert.match(app, /filterFailureReasons instanceof Map/);
+  assert.match(inspector, /data-tab="pipeline"/);
+  assert.match(inspector, /data-tab="candidates"/);
+  assert.match(inspector, /data-tab="exclusions"/);
+  assert.match(inspector, /manasearch:search-finished/);
+  assert.match(inspector, /productionPipeline: getPipelineSnapshot\(\)/);
+  assert.match(inspectorCss, /overflow-x:auto/);
 });
 
 check('semantic worker response envelopes are normalized before array-based result merging', () => {
