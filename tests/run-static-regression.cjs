@@ -455,6 +455,7 @@ check('developer inspector observes the production pipeline without changing sco
   assert.match(app, /status: searchOutcome/);
   assert.match(app, /Search failed:/);
   assert.match(inspector, /getActiveSearch/);
+  assert.match(inspector, /progressHistory/);
   assert.match(inspector, /outcomeComparison/);
   assert.match(inspector, /stageProgression/);
   assert.match(inspector, /retrievalFailures/);
