@@ -15,6 +15,7 @@ let lastSearchResults = [];
 // must always use this same snapshot as the grid, never stale results from the previous search.
 let currentRenderedResultsCards = [];
 let activeMainSearchRequestId = null;
+let lastMainSearchOutcome = null;
 // Results are paginated in the presentation layer; the full ranked candidate list remains intact.
 let currentResultsPage = 1;
 let reorderResultsRequestId = 0;
@@ -16002,6 +16003,18 @@ function updateProgress(step, total, message) {
             p.textContent = message;
         }
     }
+    try {
+        window.dispatchEvent(new CustomEvent('manasearch:progress-updated', {
+            detail: {
+                step: step ?? null,
+                total: total ?? null,
+                message: String(message ?? ''),
+                requestId: activeMainSearchRequestId,
+                resultView: activeResultView?.mode || null,
+                at: Date.now()
+            }
+        }));
+    } catch (_) {}
 }
 
 /**
@@ -27592,10 +27605,26 @@ async function findSimilarCards() {
     // single opaque total (review Priority 10, "Per-Test Timing Breakdown").
     const searchStartedAt = Date.now();
     const timings = {};
+    let searchOutcome = 'completed';
+    let searchErrorMessage = '';
+    lastMainSearchOutcome = {
+        requestId,
+        status: 'running',
+        sourceName: currentSourceCard?.name || '',
+        startedAt: new Date(searchStartedAt).toISOString(),
+        finishedAt: null,
+        durationMs: null,
+        errorMessage: ''
+    };
 
     showLoading(true);
     window.dispatchEvent(new CustomEvent('manasearch:search-started', {
-        detail: { sourceName: currentSourceCard?.name || '', highlightCount: searchHighlightsSnapshot.length }
+        detail: {
+            requestId,
+            sourceName: currentSourceCard?.name || '',
+            highlightCount: searchHighlightsSnapshot.length,
+            startedAt: new Date(searchStartedAt).toISOString()
+        }
     }));
     // Keep the Results area visible during the search. The user should be able to see the
     // first-pass candidates as soon as they arrive instead of waiting for the entire pipeline.
@@ -27897,6 +27926,23 @@ async function findSimilarCards() {
         streamChecklistDetail.set(label, 'Waiting to start');
     });
     function renderStreamChecklist() {
+        const streams = [...streamChecklistState.entries()].map(([label, done]) => ({
+            label,
+            done: Boolean(done),
+            detail: streamChecklistDetail.get(label) || (done ? 'Done' : 'Waiting')
+        }));
+        try {
+            window.dispatchEvent(new CustomEvent('manasearch:search-streams-updated', {
+                detail: {
+                    requestId,
+                    sourceName: currentSourceCard?.name || '',
+                    completedStreams: streams.filter(stream => stream.done).length,
+                    totalStreams: streams.length,
+                    streams,
+                    at: Date.now()
+                }
+            }));
+        } catch (_) {}
         if (!streamChecklistEl) return;
         streamChecklistEl.innerHTML = '';
         streamChecklistState.forEach((done, label) => {
@@ -28226,6 +28272,19 @@ async function findSimilarCards() {
                 updateProgress(1, totalSteps, `First look: ${sorted.length} match${sorted.length === 1 ? '' : 'es'} found so far (just updated by ${renderLabel || 'another search stage'}) - still searching further sources...`);
                 document.getElementById('provisional-results-banner')?.classList.remove('hidden');
                 renderResults(sorted);
+                try {
+                    window.dispatchEvent(new CustomEvent('manasearch:search-preview-updated', {
+                        detail: {
+                            requestId,
+                            phase: 'progressive-preview',
+                            sourceLabel: renderLabel || 'retrieval update',
+                            provisional: true,
+                            resultCount: sorted.length,
+                            topNames: sorted.slice(0, 10).map(card => card?.name || '').filter(Boolean),
+                            at: Date.now()
+                        }
+                    }));
+                } catch (_) {}
                 if (typeof requestProgressiveRanking === 'function') requestProgressiveRanking();
             } finally {
                 previewRenderFlushing = false;
@@ -28301,6 +28360,19 @@ async function findSimilarCards() {
                 updateProgress(1, totalSteps, `Still searching - this one's taking a while. Showing ${partial.length} match${partial.length === 1 ? '' : 'es'} found so far while the rest of the search keeps running...`);
                 document.getElementById('provisional-results-banner')?.classList.remove('hidden');
                 renderResults(partial);
+                try {
+                    window.dispatchEvent(new CustomEvent('manasearch:search-preview-updated', {
+                        detail: {
+                            requestId,
+                            phase: 'slow-search-preview',
+                            sourceLabel: '20-second search timeout',
+                            provisional: true,
+                            resultCount: partial.length,
+                            topNames: partial.slice(0, 10).map(card => card?.name || '').filter(Boolean),
+                            at: Date.now()
+                        }
+                    }));
+                } catch (_) {}
             } else {
                 updateProgress(1, totalSteps, `Still searching - this one's taking a while, no matches found yet. Hang tight...`);
             }
@@ -29544,13 +29616,17 @@ if (candidates.length > 0) {
         clearTimeout(searchTimeoutId);
         document.getElementById('provisional-results-banner')?.classList.add('hidden');
         if (isRuntimeCardApiRateLimitError(error) || error?.isRuntimeCardApiRateLimit) {
+            searchOutcome = 'completed_with_warnings';
+            searchErrorMessage = error?.message || 'A local retrieval stream stopped; completed results were retained.';
             if (!error?.isLocalCooldownRejection) {
                 console.warn('Local retrieval stream stopped:', error?.message || error);
             }
             showLocalDataIssueNotice('A local retrieval stream stopped; any completed local results were retained.');
         } else {
+            searchOutcome = 'error';
+            searchErrorMessage = error?.message || String(error);
             console.error("Error in findSimilarCards:", error);
-            if (typeof alert === 'function') alert(error.message);
+            if (typeof alert === 'function') alert(searchErrorMessage);
         }
     } finally {
         activeLocalCorpusBatchContext = previousLocalCorpusBatchContext;
@@ -29558,12 +29634,38 @@ if (candidates.length > 0) {
         if (requestId === searchRequestId) activeSearchStreamProgressReporter = null;
         clearTimeout(searchTimeoutId);
         if (requestId === searchRequestId && activeResultView.mode === 'main' && activeResultView.requestId === requestId) {
-            updateProgress(null, null, "All done! Candidates retrieved and ranked purely by similarity.");
+            const resultCount = Array.isArray(lastSearchResults) ? lastSearchResults.length : 0;
+            const finishedAt = new Date();
+            const durationMs = Date.now() - searchStartedAt;
+            const outcomeMessage = searchOutcome === 'error'
+                ? `Search failed: ${searchErrorMessage}. This run did not produce a completed ranking.`
+                : searchOutcome === 'completed_with_warnings'
+                    ? `Search completed with warnings: ${searchErrorMessage}. Showing any results retained from completed stages.`
+                    : `Search complete. ${resultCount} final matches were ranked.`;
+            lastMainSearchOutcome = {
+                requestId,
+                status: searchOutcome,
+                sourceName: currentSourceCard?.name || '',
+                startedAt: new Date(searchStartedAt).toISOString(),
+                finishedAt: finishedAt.toISOString(),
+                durationMs,
+                resultCount,
+                errorMessage: searchErrorMessage
+            };
+            updateProgress(null, null, outcomeMessage);
             showLoading(false);
             window.dispatchEvent(new CustomEvent('manasearch:search-finished', {
                 detail: {
+                    requestId,
+                    status: searchOutcome,
+                    success: searchOutcome === 'completed',
+                    partial: searchOutcome === 'completed_with_warnings',
+                    errorMessage: searchErrorMessage,
+                    startedAt: new Date(searchStartedAt).toISOString(),
+                    finishedAt: finishedAt.toISOString(),
+                    durationMs,
                     sourceName: currentSourceCard?.name || '',
-                    resultCount: Array.isArray(lastSearchResults) ? lastSearchResults.length : 0,
+                    resultCount,
                     diagnostics: lastSearchDiagnostics || null
                 }
             }));
@@ -33159,7 +33261,9 @@ window.ManaSearchDebug = Object.freeze({
             flags: { weakBackfill: Boolean(card?._weakBackfillMatch), relevanceFloorRescue: Boolean(card?._catastrophicEmptyRescue) }
         }));
         return {
-            capturedAt: new Date().toISOString(), request: context, funnel, streams,
+            capturedAt: new Date().toISOString(),
+            outcome: lastMainSearchOutcome ? { ...lastMainSearchOutcome } : null,
+            request: context, funnel, streams,
             streamCoverage: diagnostics?.streamCoverage || null,
             functionalQueryResults: diagnostics?.searchFQueryDetail || [],
             exactHighlightQueryResults: diagnostics?.exactHighlightQueryDetail || [],
