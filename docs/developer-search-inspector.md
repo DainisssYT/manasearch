@@ -15,7 +15,7 @@ The floating **Developer inspector** is an opt-in, read-only view of the real ap
 
 - **Live state** — source card, current visible intent, controls, result cards, and recent worker traffic.
 - **Pipeline** — the actual search request, retrieval stream membership, stream coverage, functional/exact-highlight query results, candidate funnel counts, timing, semantic calibration, and relevance-floor settings.
-- **Candidates** — up to 300 candidates from the actual scoring pass, including candidates subsequently removed by the relevance floor. Each candidate includes score channels, ranking evidence, parse confidence, retrieval provenance, and relevant ranking flags.
+- **Candidates** — up to 300 highest-scoring candidates from the actual scoring pass, including candidates subsequently removed by the relevance floor. Each candidate includes score channels, ranking evidence, parse confidence, retrieval provenance, and relevant ranking flags.
 - **Exclusions** — candidates removed between pipeline stages and the recorded hard-filter / exact-highlight rejection explanations.
 - **Timeline** — search start/finish, configuration changes, and worker activity.
 - **Worker** — observed Web Worker request/response payloads.
@@ -43,7 +43,7 @@ The `retrievalEvidence` field is provenance only: it records which streams found
 
 ## Known interpretation limits
 
-- The candidate list is bounded to the first 300 objects passed through the final scoring call; very large searches may have more scored candidates.
-- `candidateIndex` is the candidate's position in the captured scorer input, not a guaranteed final rank. Use `finalResults` for final rank.
+- The candidate list is bounded to the top 300 by pre-floor similarity score; very large searches may have more scored candidates.
+- `preFloorRank` is the candidate's position after score sorting but before relevance-floor pruning. Use `finalResults` for the final displayed rank.
 - Filter rejection reasons are recorded per card name at the first failing hard-filter check; a card can have more than one underlying issue that is not represented by that first reason.
 - Search Deeper and Related Search are separate workflows. This snapshot currently describes the primary Find Similar Cards run.
