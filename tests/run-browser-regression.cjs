@@ -103,6 +103,7 @@ async function main() {
           number: 1,
           completedAt: '2026-11-19T08:00:00.000Z',
           pipeline: {
+            appBuild: '20261119-148',
             request: {
               inputSnapshotVersion: 2,
               sourceCard: { name: 'Source A' },
@@ -133,6 +134,7 @@ async function main() {
           number: 2,
           completedAt: '2026-11-19T08:01:00.000Z',
           pipeline: {
+            appBuild: '20261119-149',
             request: {
               inputSnapshotVersion: 2,
               sourceCard: { name: 'Source A' },
@@ -318,6 +320,7 @@ async function main() {
           number: 3,
           completedAt: '2026-11-19T08:02:00.000Z',
           pipeline: {
+            appBuild: '20261119-149',
             request: structuredClone(earlier.pipeline.request),
             candidates: [
               { name: 'Shared Card', preFloorRank: 2, scores: { similarityScore: 0.75, mechanicalScore: 0.8 }, mechanicalBreakdown: { graphScore: 0.85 } },
@@ -416,6 +419,12 @@ async function main() {
           compareSummaryUsesRealLineBreaks: compareSummaryText.includes('COMPARE RUNS SUMMARY\nComparison type:') &&
             !compareSummaryText.includes('COMPARE RUNS SUMMARY\\nComparison type:'),
           compareSummaryShowsChangedScoringFactors: compareSummaryText.includes('Changed factors:'),
+          compareShowsAppBuildEvolution: comparison.outcomeComparison?.earlierBuild === '20261119-148' &&
+            comparison.outcomeComparison?.laterBuild === '20261119-149' && comparison.outcomeComparison?.buildChanged === true &&
+            compareSummaryText.includes('App builds: 20261119-148 → 20261119-149 (different builds)'),
+          regressionCasePreservesSourceBuild: regressionCase.source.appBuild === '20261119-148' &&
+            regressionReport.comparedRun?.appBuild === '20261119-149' && regressionReport.comparedRun?.buildChanged === true,
+
           compareSummaryIncludesRecoveredStream: compareSummaryText.includes('[RECOVERED] Semantic Index'),
           liveSummaryExplainsCurrentSearch: liveSummaryText.includes('LIVE SEARCH SUMMARY') &&
             liveSummaryText.includes('Telemetry Source') && liveSummaryText.includes('[FAILED] Semantic Index') &&
