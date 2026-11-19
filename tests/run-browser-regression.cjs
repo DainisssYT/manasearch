@@ -694,6 +694,7 @@ async function main() {
         };
       });
       return {
+        labelLintRows: benchmark.labelLintRows || [],
         summary: {
           runId: benchmark.runId,
           durationMs: benchmark.durationMs,
