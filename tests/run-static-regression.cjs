@@ -353,11 +353,12 @@ check('Pages publishes the shared semantic module and browser tests serve ESM wi
 
 check('developer inspector observes the production pipeline without changing scoring', () => {
   execFileSync(process.execPath, ['--check'], { input: inspector, stdio: ['pipe', 'pipe', 'pipe'] });
-  assert.match(html, /search-inspector\.js\?v=20261119-157/);
+  assert.match(html, /search-inspector\.js\?v=20261119-158/);
   assert.match(html, /search-inspector\.css\?v=20261119-140/);
   assert.match(app, /window\.ManaSearchDebug = Object\.freeze\(/);
   assert.match(app, /inputSnapshotVersion: 2/);
   assert.match(app, /searchDepthPercent: activeSearchDepthPercent/);
+  assert.match(app, /searchDepthPercent: getCurrentSearchDepthPercent\(\)/);
   assert.match(app, /orderingFeatures: \{ \.\.\.activeOrderFeatureFlags \}/);
   assert.match(app, /rankingWeights: Object\.fromEntries/);
   assert.match(inspector, /inputSnapshotComplete/);
@@ -391,6 +392,9 @@ check('developer inspector observes the production pipeline without changing sco
   assert.match(inspector, /requestFields = \['inputSnapshotVersion'.*'rankingWeights'.*'broad', 'divergent'\]/);
   assert.match(inspector, /capturedListOverlap/);
   assert.match(inspector, /Changed factors:/);
+  assert.match(inspector, /Search depth:/);
+  assert.match(inspector, /Score-weight offsets:/);
+  assert.match(inspector, /requiredInputFields = .*'broad', 'divergent'/);
   assert.match(inspector, /Provisional results still visible/);
   assert.ok(inspector.includes('return lines.join('));
   assert.match(app, /provisionalResultCount/);
