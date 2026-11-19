@@ -119,7 +119,7 @@ async function main() {
             streams: { 'Search B': ['shared card', 'added card'] },
             finalResults: [{ rank: 1, name: 'Added Card' }, { rank: 2, name: 'Shared Card' }],
             candidates: [
-              { name: 'Shared Card', scores: { similarityScore: 0.75 } },
+              { name: 'Shared Card', scores: { similarityScore: 0.75, mechanicalScore: 0.8 }, mechanicalBreakdown: { graphScore: 0.85 } },
               { name: 'Added Card', scores: { similarityScore: 0.81 } }
             ]
           }
@@ -239,6 +239,18 @@ async function main() {
           expectedTopCandidates: ['Shared Card', 'Removed Card']
         });
         const failedRegressionComparison = window.ManaSearchInspector.compareRegressionCase(regressionCase, errorRun);
+        const partialRun = {
+          number: 11,
+          status: 'completed_with_warnings',
+          errorMessage: 'Semantic stream timed out',
+          summary: { sourceName: 'Source A', resultCount: 1, status: 'completed_with_warnings', errorMessage: 'Semantic stream timed out' },
+          pipeline: {
+            request: structuredClone(earlier.pipeline.request),
+            finalResults: [{ rank: 1, name: 'Shared Card' }]
+          }
+        };
+        const partialRegressionComparison = window.ManaSearchInspector.compareRegressionCase(regressionCase, partialRun);
+        const partialRunComparison = window.ManaSearchInspector.compareRuns(earlier, partialRun);
         const replayRun = {
           number: 3,
           completedAt: '2026-11-19T08:02:00.000Z',
@@ -307,6 +319,9 @@ async function main() {
           regressionComparisonIncludesCandidateJourneyEvolution: regressionReport.focusCheck?.baselineTrace?.found === true && regressionReport.focusCheck?.currentTrace?.found === true,
           regressionComparisonRejectsChangedInputs: inputMismatchReport.status === 'input-mismatch' && inputMismatchReport.pass === null && inputMismatchReport.inputCheck.changedFields.includes('highlights'),
           compareMarksFailedRunInvalid: errorRunComparison.outcomeComparison?.rankingComparisonValid === false && errorRunComparison.outcomeComparison?.laterStatus === 'error',
+          compareMarksPartialRunIncomplete: partialRunComparison.outcomeComparison?.rankingComparisonValid === true && partialRunComparison.outcomeComparison?.rankingComparisonComplete === false,
+          regressionCompareTreatsPartialRunAsNoVerdict: partialRegressionComparison.status === 'partial-run' && partialRegressionComparison.pass === null && partialRegressionComparison.comparedRun?.warning === 'Semantic stream timed out',
+          compareShowsScoreChannelAndMechanicalBreakdownChanges: comparison.sharedCandidateScoreChanges.some(item => item.name === 'Shared Card' && item.scoreChannelChanges?.some(change => change.field === 'mechanicalScore' && Math.abs(change.delta - 0.1) < 1e-9) && item.mechanicalBreakdownChanges?.some(change => change.field === 'graphScore' && Math.abs(change.delta - 0.15) < 1e-9)),
           regressionCompareDoesNotCountFailedRunAsRankingFailure: failedRegressionComparison.status === 'search-error' && failedRegressionComparison.pass === null,
           regressionBuilderRejectsFailedBaseline: refusesFailedBaseline,
           compareNormalizesCandidateNameWhitespaceAndCase: normalizedNameComparison.finalRanking.sharedCount === 1 && normalizedNameComparison.retrieval[0]?.sharedCount === 1,
