@@ -646,9 +646,15 @@
   panel.querySelector('[data-regression-copy]').addEventListener('click', async () => {
     try {
       const fixture = readRegressionForm();
-      await navigator.clipboard.writeText(JSON.stringify(fixture, null, 2));
-      status.textContent = 'Regression case JSON copied';
-    } catch (error) { content.textContent = JSON.stringify({ error: error.message || 'Clipboard unavailable' }, null, 2); }
+      const data = JSON.stringify(fixture, null, 2);
+      try {
+        await navigator.clipboard.writeText(data);
+        status.textContent = 'Regression case JSON copied';
+      } catch (_) {
+        content.textContent = data;
+        status.textContent = 'Clipboard unavailable — select the case JSON below and copy it manually';
+      }
+    } catch (error) { content.textContent = JSON.stringify({ error: error.message || String(error) }, null, 2); }
   });
   panel.querySelector('[data-regression-compare]').addEventListener('click', () => {
     try {
