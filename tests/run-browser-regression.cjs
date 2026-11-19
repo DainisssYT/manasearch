@@ -104,7 +104,7 @@ async function main() {
             streams: { 'Search B': ['shared card', 'removed card'] },
             finalResults: [{ rank: 1, name: 'Shared Card' }, { rank: 2, name: 'Removed Card' }],
             candidates: [
-              { name: 'Shared Card', scores: { similarityScore: 0.65 } },
+              { name: 'Shared Card', preFloorRank: 1, scores: { similarityScore: 0.65, mechanicalScore: 0.7 }, mechanicalBreakdown: { graphScore: 0.7 } },
               { name: 'Removed Card', scores: { similarityScore: 0.42 } }
             ]
           }
@@ -160,6 +160,10 @@ async function main() {
           completedAt: '2026-11-19T08:02:00.000Z',
           pipeline: {
             request: structuredClone(earlier.pipeline.request),
+            candidates: [
+              { name: 'Shared Card', preFloorRank: 2, scores: { similarityScore: 0.75, mechanicalScore: 0.8 }, mechanicalBreakdown: { graphScore: 0.85 } },
+              { name: 'Added Card', preFloorRank: 1, scores: { similarityScore: 0.81 } }
+            ],
             finalResults: [{ rank: 1, name: 'Added Card' }, { rank: 2, name: 'Shared Card' }]
           }
         };
@@ -214,6 +218,9 @@ async function main() {
           regressionComparisonDetectsFocusRankFailure: regressionReport.focusCheck?.actualRank === 2 && regressionReport.focusCheck?.pass === false && regressionReport.pass === false,
           regressionComparisonDetectsRankingRegression: regressionReport.rankingCheck?.exactOrderMatch === false && regressionReport.rankingCheck?.missingFromTop.includes('Removed Card') && regressionReport.rankingCheck?.unexpectedInTop.includes('Added Card'),
           regressionComparisonMeasuresTopKOverlap: regressionReport.rankingCheck?.overlap === 0.5,
+          regressionComparisonShowsScoringPoolCoverage: regressionReport.scoringEvolution?.sharedScoredCount === 1 && regressionReport.scoringEvolution?.newlyScoredCandidates.includes('Added Card'),
+          regressionComparisonShowsScoreChannelDeltas: regressionReport.scoringEvolution?.changedCandidates.some(item => item.name === 'Shared Card' && item.scoreChanges.some(change => change.field === 'similarityScore' && Math.abs(change.delta - 0.1) < 1e-9) && item.mechanicalBreakdownChanges.some(change => change.field === 'graphScore' && Math.abs(change.delta - 0.15) < 1e-9)),
+          regressionComparisonIncludesCandidateJourneyEvolution: regressionReport.focusCheck?.baselineTrace?.found === true && regressionReport.focusCheck?.currentTrace?.found === true,
           regressionComparisonRejectsChangedInputs: inputMismatchReport.status === 'input-mismatch' && inputMismatchReport.inputCheck.changedFields.includes('highlights'),
           regressionInputComparisonIgnoresObjectKeyOrder: stableOrderReport.inputCheck?.matches === true && stableOrderReport.pass === true,
           regressionComparisonChecksMustNotAppear: exclusionReport.focusCheck?.pass === false,
