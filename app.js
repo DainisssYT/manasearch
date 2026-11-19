@@ -6623,6 +6623,35 @@ function parseCounterEffect(clause) {
         effect.payCost = payMatch[1].trim();
     }
 
+    // Oracle text often places a counterspell limitation AFTER the target noun:
+    // "Counter target spell with mana value 4 or greater." The old prefix-only parser
+    // captured "noncreature" in "Counter target noncreature spell", but silently dropped
+    // every trailing qualifier. Retain that text as structured target restrictions.
+    const objectToken = /\b(?:spell|ability)\b/ig;
+    let objectMatch = null;
+    let lastObjectMatch = null;
+    while ((objectMatch = objectToken.exec(text))) lastObjectMatch = objectMatch;
+    const afterObject = lastObjectMatch
+        ? text.slice(lastObjectMatch.index + lastObjectMatch[0].length).trim()
+        : '';
+    const trailingTargetRestriction = afterObject.match(/^(?:with|that|which|whose|not|only)\s+([^,.;]+)/i);
+    if (trailingTargetRestriction) {
+        effect.targetRestrictionText = trailingTargetRestriction[0].trim();
+        effect.restriction = Array.from(new Set([
+            ...(effect.restriction || []),
+            ...extractMTGRestrictions(effect.targetRestrictionText)
+        ]));
+    }
+
+    // Some Oracle clauses put the conditional qualifier after "spell": "Counter target
+    // spell if its controller is poisoned." extractConditionsAndCosts already handles leading
+    // "If ..." clauses, but this action-final form must retain the same condition structure.
+    const trailingIf = afterObject.match(/^if\s+([^,.;]+)/i);
+    if (trailingIf && !effect.condition) {
+        effect.condition = 'if';
+        effect.conditionDetail = extractMTGRestrictions(trailingIf[1]);
+    }
+
     // condition/payCost (if not already set above) and additionalEffects (e.g. "then draw a
     // card", "then scry") are filled in uniformly by parseMTGEffect via extractConditionsAndCosts.
     return effect;
@@ -15298,6 +15327,48 @@ function runManaSearchMechanicalRegressionSuite({ log = true } = {}) {
                 unanchoredEnchantedReturn?.canonical?.function !== 'reanimate',
             from: unanchoredEnchantedReturn?.from || null,
             canonicalFunction: unanchoredEnchantedReturn?.canonical?.function || null
+        });
+
+        const unconditionalCounter = parseMTGEffect('Counter target spell.')
+            .find(effect => effect.action === 'counter');
+        const manaRestrictedCounter = parseMTGEffect('Counter target spell with mana value 4 or greater.')
+            .find(effect => effect.action === 'counter');
+        const poisonedControllerCounter = parseMTGEffect('Counter target spell if its controller is poisoned.')
+            .find(effect => effect.action === 'counter');
+        const unconditionalVsManaRestricted = calculateMechanicalSimilarityDetailed(
+            parseMTGEffect('Counter target spell.'),
+            parseMTGEffect('Counter target spell with mana value 4 or greater.')
+        );
+        const unconditionalVsPoisonRestricted = calculateMechanicalSimilarityDetailed(
+            parseMTGEffect('Counter target spell.'),
+            parseMTGEffect('Counter target spell if its controller is poisoned.')
+        );
+        results.push({
+            id: 'counterspell-trailing-mana-value-restriction-is-preserved',
+            pass: Array.isArray(manaRestrictedCounter?.restriction) &&
+                manaRestrictedCounter.restriction.includes('mana') &&
+                manaRestrictedCounter.restriction.includes('value') &&
+                manaRestrictedCounter.restriction.includes('4') &&
+                manaRestrictedCounter.restriction.includes('greater') &&
+                unconditionalVsManaRestricted.score < 0.99,
+            restriction: manaRestrictedCounter?.restriction || [],
+            score: unconditionalVsManaRestricted.score
+        });
+        results.push({
+            id: 'counterspell-trailing-controller-condition-is-preserved',
+            pass: poisonedControllerCounter?.condition === 'if' &&
+                (poisonedControllerCounter?.conditionDetail || []).includes('poisoned') &&
+                unconditionalVsPoisonRestricted.score < 0.99,
+            condition: poisonedControllerCounter?.condition || null,
+            conditionDetail: poisonedControllerCounter?.conditionDetail || [],
+            score: unconditionalVsPoisonRestricted.score
+        });
+        results.push({
+            id: 'unconditional-counterspell-has-no-invented-restriction',
+            pass: !(unconditionalCounter?.restriction || []).length &&
+                !unconditionalCounter?.condition,
+            restriction: unconditionalCounter?.restriction || [],
+            condition: unconditionalCounter?.condition || null
         });
 
         const oneShotRankFactor = sourceAcquisitionCadenceRankFactor(0.98);
