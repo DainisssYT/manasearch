@@ -307,7 +307,6 @@ async function main() {
             request: {
               ...structuredClone(earlier.pipeline.request),
               intent: { sourceText: 'draw a card', semanticText: 'draw two cards', exactnessText: 'draw two cards' },
-              broad: true,
               queryPlans: { semantic: 'draw two cards' }
             },
             finalResults: structuredClone(earlier.pipeline.finalResults)
@@ -315,6 +314,23 @@ async function main() {
         };
         const derivedIntentReport = window.ManaSearchInspector.compareRegressionCase(regressionCase, derivedIntentRun);
         const derivedPlanRunComparison = window.ManaSearchInspector.compareRuns(earlier, derivedIntentRun);
+        const broadOptionRun = {
+          number: 13,
+          pipeline: {
+            request: { ...structuredClone(earlier.pipeline.request), broad: true, divergent: true },
+            finalResults: structuredClone(earlier.pipeline.finalResults)
+          }
+        };
+        const broadOptionComparison = window.ManaSearchInspector.compareRuns(earlier, broadOptionRun);
+        const broadOptionRegression = window.ManaSearchInspector.compareRegressionCase(regressionCase, broadOptionRun);
+        const provisionalErrorSummary = window.ManaSearchInspector.formatLiveSummary({
+          source: { name: 'Interrupted Source' },
+          liveSearch: {
+            status: 'error', sourceName: 'Interrupted Source',
+            provisionalResultCount: 3,
+            preview: { resultCount: 3, provisional: true, topNames: ['Provisional A'] }
+          }
+        });
         const regressionReport = window.ManaSearchInspector.compareRegressionCase(regressionCase, replayRun);
         const inputMismatchReport = window.ManaSearchInspector.compareRegressionCase(regressionCase, later);
         const excludedCase = window.ManaSearchInspector.createRegressionCase(earlier, {
@@ -331,10 +347,17 @@ async function main() {
           compareSummaryExplainsValidityAndMetrics: compareSummaryText.includes('COMPARE RUNS SUMMARY') &&
             compareSummaryText.includes('Changed user inputs:') && compareSummaryText.includes('Top-K overlap:') &&
             compareSummaryText.includes('FULL COMPARISON JSON'),
+          compareSummaryUsesRealLineBreaks: compareSummaryText.includes('COMPARE RUNS SUMMARY\nComparison type:') &&
+            !compareSummaryText.includes('COMPARE RUNS SUMMARY\\nComparison type:'),
+          compareSummaryShowsChangedScoringFactors: compareSummaryText.includes('Changed factors:'),
           compareSummaryIncludesRecoveredStream: compareSummaryText.includes('[RECOVERED] Semantic Index'),
           liveSummaryExplainsCurrentSearch: liveSummaryText.includes('LIVE SEARCH SUMMARY') &&
             liveSummaryText.includes('Telemetry Source') && liveSummaryText.includes('[FAILED] Semantic Index') &&
             liveSummaryText.includes('FULL CAPTURED STATE'),
+          liveSummaryUsesRealLineBreaks: liveSummaryText.includes('LIVE SEARCH SUMMARY\nSource:') &&
+            !liveSummaryText.includes('LIVE SEARCH SUMMARY\\nSource:'),
+          liveSummaryLabelsVisibleProvisionalResults: provisionalErrorSummary.includes('Provisional results still visible: 3') &&
+            provisionalErrorSummary.includes('not a complete final ranking'),
           liveSummaryShowsFinalRankingEvent: liveSummaryText.includes('final ranked results') &&
             liveSummaryText.includes('Shared Card'),
           candidateTraceApiAvailable: typeof window.ManaSearchInspector.traceCandidate === 'function',
@@ -367,11 +390,16 @@ async function main() {
           regressionComparisonRejectsChangedInputs: inputMismatchReport.status === 'input-mismatch' && inputMismatchReport.pass === null && inputMismatchReport.inputCheck.changedFields.includes('highlights'),
           regressionAllowsDerivedIntentEvolution: derivedIntentReport.inputCheck?.matches === true && derivedIntentReport.derivedRequestChanges.includes('intent') && derivedIntentReport.pass === true,
           compareReportsChangedDerivedSearchPlanSeparately: derivedPlanRunComparison.changes.intentChanged === true && derivedPlanRunComparison.changes.queryPlansChanged === true && derivedPlanRunComparison.changes.changedInputFields.length === 0 && derivedPlanRunComparison.changes.changedDerivedFields.includes('intent'),
+          compareTreatsBroadAndDivergentAsUserInputs: broadOptionComparison.changes.broadChanged === true && broadOptionComparison.changes.divergentChanged === true &&
+            broadOptionComparison.changes.changedInputFields.includes('broad') && broadOptionComparison.changes.changedInputFields.includes('divergent') &&
+            !broadOptionComparison.changes.changedDerivedFields.includes('broad') && !broadOptionComparison.outcomeComparison.comparableForAlgorithmRegression,
+          regressionRejectsChangedBroadAndDivergentInputs: broadOptionRegression.status === 'input-mismatch' && broadOptionRegression.pass === null &&
+            broadOptionRegression.inputCheck.changedFields.includes('broad') && broadOptionRegression.inputCheck.changedFields.includes('divergent'),
           compareMarksFailedRunInvalid: errorRunComparison.outcomeComparison?.rankingComparisonValid === false && errorRunComparison.outcomeComparison?.laterStatus === 'error',
           compareMarksPartialRunIncomplete: partialRunComparison.outcomeComparison?.rankingComparisonValid === false && partialRunComparison.outcomeComparison?.rankingComparisonAvailable === true && partialRunComparison.outcomeComparison?.rankingComparisonComplete === false,
           compareShowsPipelineStageRecallChanges: comparison.stageProgression.find(stage => stage.stage === 'retrieved')?.addedInLater.includes('Added Card') && comparison.stageProgression.find(stage => stage.stage === 'retrieved')?.missingFromLater.includes('Removed Card'),
           compareShowsScoredSampleTurnover: comparison.scoredCandidateEvolution?.newlyPresentInSample.includes('Added Card') && comparison.scoredCandidateEvolution?.noLongerPresentInSample.includes('Removed Card') && comparison.scoredCandidateEvolution?.sampleLimit === 300,
-          compareShowsTopKOverlapAndCaptureLimit: comparison.finalRanking?.topKOverlap?.find(item => item.k === 10)?.overlap === 0.1 && comparison.finalRanking?.capturedLimit === 100,
+          compareShowsTopKOverlapAndCaptureLimit: comparison.finalRanking?.topKOverlap?.find(item => item.k === 10)?.overlap === 0.1 && comparison.finalRanking?.topKOverlap?.find(item => item.k === 10)?.capturedListOverlap === 0.5 && comparison.finalRanking?.capturedLimit === 100,
           compareFlagsChangedInputsAsUncontrolled: comparison.outcomeComparison?.sameUserInputs === false && comparison.outcomeComparison?.comparableForAlgorithmRegression === false,
           regressionCompareTreatsPartialRunAsNoVerdict: partialRegressionComparison.status === 'partial-run' && partialRegressionComparison.pass === null && partialRegressionComparison.comparedRun?.warning === 'Semantic stream timed out',
           compareShowsScoreChannelAndMechanicalBreakdownChanges: comparison.sharedCandidateScoreChanges.some(item => item.name === 'Shared Card' && item.scoreChannelChanges?.some(change => change.field === 'mechanicalScore' && Math.abs(change.delta - 0.1) < 1e-9) && item.mechanicalBreakdownChanges?.some(change => change.field === 'graphScore' && Math.abs(change.delta - 0.15) < 1e-9)),
