@@ -60,7 +60,7 @@ const report = window.ManaSearchInspector.compareRegressionCase(testCase, latest
 console.log(report);
 ```
 
-Use `validateRegressionCase(importedJson)` before accepting a case from another source. The comparison report includes `inputCheck`, `focusCheck`, `rankingCheck`, and `scoringEvolution`. A report with `status: "input-mismatch"` should not be counted as a ranking pass or failure until the original inputs have been reproduced.
+Use `validateRegressionCase(importedJson)` before accepting a case from another source. The comparison report includes `inputCheck`, `focusCheck`, `rankingCheck`, and `scoringEvolution`. Compare Runs also reports numeric changes inside `functionSemanticEvidence` and flags when the matched candidate ability changes. A report with `status: "input-mismatch"` should not be counted as a ranking pass or failure until the original inputs have been reproduced.
 
 Each production pipeline snapshot carries the app build identifier. Compare Runs displays the earlier and later build IDs and flags when they differ; portable regression cases retain the baseline build and show the replay build. This is provenance, not a search-input mismatch: different app builds are expected when measuring an algorithm change.
 
