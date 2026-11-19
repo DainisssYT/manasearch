@@ -38,6 +38,30 @@ Use **Regression cases** when you find a search that behaves incorrectly and wan
 5. Choose **Download case** (or **Copy case JSON**) and keep the JSON file with the issue or code change. The case is portable and can be reviewed by another developer.
 6. After updating ManaSearch, open the new build, import the case, and repeat the original search in the normal UI. Select that new completed run under **Compare against** and choose **Compare with run**.
 
+### Programmatic use
+
+The same case format is exposed for developers and automated tooling through `window.ManaSearchInspector`:
+
+```js
+const history = window.ManaSearchInspector.getRunHistory();
+const latestRun = history[history.length - 1];
+
+const testCase = window.ManaSearchInspector.createRegressionCase(latestRun, {
+  title: 'A focused card should remain in the top three',
+  notes: 'Describe the incorrect ranking and the expected behavior.',
+  focusCandidate: 'Example Card',
+  focusBehavior: 'rank-at-most',
+  maxRank: 3,
+  expectedTopCandidates: ['Best Match', 'Second Match', 'Example Card']
+});
+
+// Save testCase as JSON or pass it to a test runner.
+const report = window.ManaSearchInspector.compareRegressionCase(testCase, latestRun);
+console.log(report);
+```
+
+Use `validateRegressionCase(importedJson)` before accepting a case from another source. The comparison report includes `inputCheck`, `focusCheck`, `rankingCheck`, and `scoringEvolution`. A report with `status: "input-mismatch"` should not be counted as a ranking pass or failure until the original inputs have been reproduced.
+
 A comparison is only valid when the source card, selected highlights, interpreted intent, constraints, methods, and ordering match the original request. When they differ, the report marks the result as **input-mismatch** instead of blaming the algorithm. Fix the input differences and rerun the case before evaluating ranking changes.
 
 ## Reading a diagnostic
