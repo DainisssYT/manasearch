@@ -1,6 +1,6 @@
 /* ManaSearch build 20261119-154 */
 // ManaSearch deployment build marker. Bump this whenever app.js changes so cached-module issues are easy to diagnose.
-const MANASEARCH_APP_BUILD = '20261119-156';
+const MANASEARCH_APP_BUILD = '20261119-157';;
 console.info(`[ManaSearch] app.js build ${MANASEARCH_APP_BUILD}`);
 
 // The source-query and static-index builders share one representation so both sides
@@ -27934,6 +27934,98 @@ function installManaSearchIntentPanel() {
     refreshManaSearchIntentPanel();
 }
 
+async function runManaSearchLiveRetrievalRegressionSuite({ log = true } = {}) {
+    const report = { pass: false, checks: [], scenario: 'Sol Ring → Mana Vault', error: '' };
+    const check = (id, pass, detail = {}) => report.checks.push({ id, pass: Boolean(pass), detail });
+    const previousSource = currentSourceCard;
+    const previousHighlights = manualHighlights;
+    const previousBatchContext = activeLocalCorpusBatchContext;
+    try {
+        const corpus = staticCardCorpusMemory || await loadStaticCardCorpus();
+        if (!corpus?.cards?.length) throw new Error('The bundled local card corpus is unavailable.');
+        const source = findBenchmarkSourceCard('Sol Ring') || corpus.byName?.get(normalizeCardNameForIdentity('Sol Ring'));
+        const candidate = corpus.byName?.get(normalizeCardNameForIdentity('Mana Vault'));
+        if (!source) throw new Error('Sol Ring was not found in the benchmark source catalog.');
+        if (!candidate) throw new Error('Mana Vault was not found in cards.bin.');
+        const testCase = BENCHMARK_SUITE.find(item => item.id === 8);
+        if (!testCase) throw new Error('Fast-mana benchmark scenario #8 is missing.');
+        currentSourceCard = source;
+        const highlights = buildBenchmarkHighlightState(testCase, source);
+        manualHighlights = highlights;
+        const plans = buildFunctionalRetrievalQueries(source, parseMTGEffect(source.oracle_text || ''), \`-name:"\${source.name}"\`, 5);
+        const tapPlan = plans.find(plan => plan.query.includes('o:"{T}: Add"'));
+        const localQueries = tapPlan ? extractLocalRetrievalAlternativesFromQuery(tapPlan.query) : [];
+        const descriptor = localCorpusScoreDescriptor('{T}: Add', corpus);
+        const normalizedText = String(candidate._localSearchText || '');
+        const phrase = normalizeLocalCorpusText('{T}: Add');
+        const indexTerms = descriptor.tokens.map(token => ({
+            token,
+            inCandidate: normalizedText.split(/\\s+/).includes(token),
+            postingCount: Number(corpus.tokenIndex?.get(token)?.length) || 0
+        }));
+        const exactFilterPass = matchesExactHighlightConstraints(candidate, highlights);
+        const candidateScore = scoreLocalCorpusCardForDescriptor(candidate, descriptor);
+        // Run the same shared local retrieval broker used by Find Similar Cards with the actual
+        // benchmark highlight selections. 1,200 is the broker's maximum request cap; the normal
+        // functional stream receives a depth-scaled cap (880 at 100% depth).
+        activeLocalCorpusBatchContext = null;
+        const localResults = await searchStaticCardCorpusAlternatives(localQueries, {
+            limit: 1200,
+            excludeName: source.name,
+            highlights,
+            filters: {},
+            label: 'Fast mana regression diagnostic'
+        });
+        const candidateKey = normalizeCardNameForIdentity(candidate.name);
+        const candidateRank = localResults.findIndex(card => normalizeCardNameForIdentity(card.name) === candidateKey);
+        const normalCap = getDepthScaledLocalLimit(220, 100);
+        const withinNormalFunctionalCap = candidateRank >= 0 && candidateRank < normalCap;
+        const reportData = {
+            source: { name: source.name, oracleText: source.oracle_text || '' },
+            expectedCandidate: {
+                name: candidate.name,
+                typeLine: candidate.type_line || '',
+                oracleText: candidate.oracle_text || '',
+                normalizedText: normalizedText.slice(0, 1800),
+                normalizedPhrasePresent: phrase.length >= 3 && normalizedText.includes(phrase),
+                indexTerms,
+                localDescriptorScore: candidateScore,
+                exactHighlightFilterPass: exactFilterPass
+            },
+            query: {
+                functionalPlan: tapPlan?.query || null,
+                localAlternatives: localQueries,
+                normalizedPhrase: phrase,
+                tokens: descriptor.tokens,
+                retrievalResultCount: localResults.length,
+                candidateRank: candidateRank >= 0 ? candidateRank + 1 : null,
+                normalFunctionalStreamCap: normalCap,
+                withinNormalFunctionalCap,
+                topCandidates: localResults.slice(0, 15).map(card => card.name)
+            }
+        };
+        check('amount-independent-tap-mana-query-is-generated', Boolean(tapPlan), { functionalQueries: plans.map(plan => plan.query) });
+        check('tap-and-add-are-indexed-and-present-on-mana-vault', indexTerms.length >= 2 && indexTerms.every(item => item.inCandidate && item.postingCount > 0), { phrase, indexTerms, normalizedText: normalizedText.slice(0, 1000) });
+        check('mana-vault-receives-nonzero-local-query-score', candidateScore >= 0.18, { candidateScore, descriptorTokens: descriptor.tokens });
+        check('exact-highlight-filter-allows-mana-vault', exactFilterPass, { highlights, failures: explainExactHighlightFailures(candidate, highlights) });
+        check('mana-vault-fits-inside-normal-functional-retrieval-cap', withinNormalFunctionalCap, reportData.query);
+        report.pass = report.checks.every(item => item.pass);
+        report.data = reportData;
+    } catch (error) {
+        report.error = error?.message || String(error);
+        report.checks.push({ id: 'live-retrieval-suite-executes', pass: false, detail: report.error });
+    } finally {
+        currentSourceCard = previousSource;
+        manualHighlights = previousHighlights;
+        activeLocalCorpusBatchContext = previousBatchContext;
+    }
+    if (log) {
+        console.table(report.checks.map(({ id, pass, detail }) => ({ id, pass, detail: JSON.stringify(detail).slice(0, 500) })));
+        console.info(\`[ManaSearch] Live retrieval regression suite: \${report.checks.filter(item => item.pass).length}/\${report.checks.length}\`, report);
+    }
+    return report;
+}
+
 function runManaSearchIntentRegressionSuite() {
     const checks = [];
     const check = (id, pass, detail = '') => checks.push({ id, pass: Boolean(pass), detail });
@@ -28104,6 +28196,7 @@ function runManaSearchIntentRegressionSuite() {
 
 if (typeof window !== 'undefined') {
     window.runManaSearchIntentRegressionSuite = runManaSearchIntentRegressionSuite;
+    window.runManaSearchLiveRetrievalRegressionSuite = runManaSearchLiveRetrievalRegressionSuite;
     window.refreshManaSearchIntentPanel = refreshManaSearchIntentPanel;
 }
 
