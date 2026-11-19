@@ -386,7 +386,7 @@ check('developer inspector observes the production pipeline without changing sco
   assert.match(inspector, /sharedCandidateScoreChanges/);
 
   assert.match(inspector, /changedInputFields = \['sourceCard'.*'broad', 'divergent'\]/);
-  assert.match(inspector, /requestFields = \['sourceCard'.*'broad', 'divergent'\]/);
+  assert.match(inspector, /requestFields = \\['inputSnapshotVersion'.*'rankingWeights'.*'broad', 'divergent'\\]/);
   assert.match(inspector, /capturedListOverlap/);
   assert.match(inspector, /Changed factors:/);
   assert.match(inspector, /Provisional results still visible/);
