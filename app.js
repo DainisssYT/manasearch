@@ -8303,6 +8303,24 @@ function parseMTGEffect(oracleText, cardContext = null) {
         }
     }
 
+    // Some Aura reanimation effects split their source-zone declaration from the return
+    // instruction: the Aura enchants "a creature card in a graveyard", then later says
+    // "return enchanted creature card to the battlefield". Clause-local parsing sees only
+    // "enchanted creature card" and previously labelled this cheat_into_play. Join these two
+    // pieces only when the full Oracle text explicitly defines that Aura/graveyard relationship
+    // and the return atom explicitly names the enchanted creature card. This must not turn ordinary
+    // hand/library battlefield-entry effects into reanimation.
+    const hasGraveyardAuraTarget = /\\benchant\\s+(?:(?:a|an|the|target)\\s+)?(?:creature|permanent)\\s+card\\s+in\\s+(?:a|your|their|any|an opponent's|that player's)?\\s*graveyard\\b/i.test(wholeOracleText);
+    if (hasGraveyardAuraTarget) {
+        for (const effect of results) {
+            if (!effect || !['return', 'put'].includes(effect.action) || effect.from || effect.to !== 'battlefield') continue;
+            if (!/\\b(?:return|put)\\s+(?:that\\s+)?enchanted\\s+(?:creature|permanent)\\s+card\\b/i.test(String(effect.raw || ''))) continue;
+            effect.from = 'graveyard';
+            effect.inferredFromZone = 'graveyard';
+            effect.zoneInferenceSource = 'aura-enchant-graveyard-card';
+        }
+    }
+
     // Add dedicated structured signatures for the mechanic families that a flat keyword anchor
     // cannot explain adequately. Existing parsed atoms remain untouched and continue to describe
     // costs, zone movement, quantities, target scopes, triggers, and outcomes.
@@ -15240,6 +15258,46 @@ function runManaSearchMechanicalRegressionSuite({ log = true } = {}) {
             pass: recursionDetail.explicitContrast?.kind === 'reanimation-vs-graveyard-recursion' && recursionDetail.score <= 0.72,
             score: recursionDetail.score,
             contrast: recursionDetail.explicitContrast
+        });
+
+        // Animate Dead's graveyard zone is declared on the Aura line, while the return action
+        // refers to the same object as "enchanted creature card". The production parser must
+        // preserve that relationship across Oracle sentence boundaries.
+        const animateDeadText = [
+            'Enchant creature card in a graveyard.',
+            'When Animate Dead enters the battlefield, if it is on the battlefield, it loses "enchant creature card in a graveyard" and gains "enchant creature put onto the battlefield with Animate Dead."',
+            'Return enchanted creature card to the battlefield under your control and attach Animate Dead to it.',
+            'When Animate Dead leaves the battlefield, that creature\'s controller sacrifices it.'
+        ].join(' ');
+        const animateDeadEffects = parseMTGEffect(animateDeadText, { name: 'Animate Dead', type_line: 'Enchantment — Aura' });
+        const animateDeadReturn = animateDeadEffects.find(effect => effect.action === 'return' && /enchanted creature card/i.test(effect.raw || ''));
+        results.push({
+            id: 'animate-dead-aura-context-is-recognized-as-graveyard-reanimation',
+            pass: animateDeadReturn?.from === 'graveyard' &&
+                animateDeadReturn?.canonical?.function === 'reanimate' &&
+                animateDeadReturn?.canonical?.params?.from === 'graveyard',
+            from: animateDeadReturn?.from || null,
+            canonicalFunction: animateDeadReturn?.canonical?.function || null,
+            canonicalParams: animateDeadReturn?.canonical?.params || null
+        });
+
+        const handCheat = parseMTGEffect('Put a creature card from your hand onto the battlefield.')
+            .find(effect => effect.action === 'put');
+        results.push({
+            id: 'explicit-hand-to-battlefield-remains-cheat-into-play',
+            pass: handCheat?.from === 'hand' && handCheat?.canonical?.function === 'cheat_into_play',
+            from: handCheat?.from || null,
+            canonicalFunction: handCheat?.canonical?.function || null
+        });
+
+        const unanchoredEnchantedReturn = parseMTGEffect('Enchant creature. Return enchanted creature to the battlefield.')
+            .find(effect => effect.action === 'return');
+        results.push({
+            id: 'ordinary-enchanted-creature-return-does-not-invent-graveyard-source',
+            pass: unanchoredEnchantedReturn?.from !== 'graveyard' &&
+                unanchoredEnchantedReturn?.canonical?.function !== 'reanimate',
+            from: unanchoredEnchantedReturn?.from || null,
+            canonicalFunction: unanchoredEnchantedReturn?.canonical?.function || null
         });
 
         const oneShotRankFactor = sourceAcquisitionCadenceRankFactor(0.98);
