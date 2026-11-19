@@ -328,6 +328,7 @@
   const renderTimeline = () => { if (activeTab === 'timeline' && !windowEl.hidden) content.textContent = JSON.stringify(state.events, null, 2); };
   const renderWorker = () => { if (activeTab === 'worker' && !windowEl.hidden) content.textContent = JSON.stringify(state.workerMessages, null, 2); };
   const render = () => {
+    traceControls.hidden = activeTab !== 'trace';
     status.textContent = state.searchRuns.length
       ? `${state.searchRuns.length} completed search run(s) retained in this session`
       : state.searchCount ? `${state.searchCount} search action(s) observed` : 'Waiting for search activity';
