@@ -148,9 +148,11 @@
     const bFinal = b.finalResults || [];
     const aRanks = new Map(aFinal.map(item => [String(item.name || '').toLowerCase(), item.rank]));
     const bRanks = new Map(bFinal.map(item => [String(item.name || '').toLowerCase(), item.rank]));
+    const aNames = new Map(aFinal.map(item => [String(item.name || '').toLowerCase(), item.name || '']));
+    const bNames = new Map(bFinal.map(item => [String(item.name || '').toLowerCase(), item.name || '']));
     const common = [...aRanks.keys()].filter(name => bRanks.has(name));
-    const added = [...bRanks.keys()].filter(name => !aRanks.has(name));
-    const removed = [...aRanks.keys()].filter(name => !bRanks.has(name));
+    const added = [...bRanks.keys()].filter(name => !aRanks.has(name)).map(name => bNames.get(name) || name);
+    const removed = [...aRanks.keys()].filter(name => !bRanks.has(name)).map(name => aNames.get(name) || name);
     const moved = common.map(name => ({
       name: bFinal.find(item => String(item.name || '').toLowerCase() === name)?.name || name,
       earlierRank: aRanks.get(name),
