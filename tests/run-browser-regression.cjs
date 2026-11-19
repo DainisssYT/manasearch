@@ -69,6 +69,9 @@ async function main() {
       typeof window.runManaSearchIntentRegressionSuite === 'function' &&
       typeof window.ManaSearchDebug?.getSnapshot === 'function' &&
       typeof window.ManaSearchDebug?.getLiveIntent === 'function' &&
+      typeof window.ManaSearchInspector?.getRunHistory === 'function' &&
+      typeof window.ManaSearchInspector?.compareRuns === 'function' &&
+      typeof window.ManaSearchInspector?.getExport === 'function' &&
       !!document.getElementById('mana-search-inspector'),
       null, { timeout: 60000 }
       );
@@ -90,6 +93,49 @@ async function main() {
       realCardBenchmark: await window.runManaSearchRealCardBenchmark({ log: false }),
       // Also exercise the suite-named public console entry point with no fixture argument.
       realCardBenchmarkSuiteNoArgs: await window.runManaSearchRealCardBenchmarkSuite({ log: false }),
+      developerInspectorRegression: (() => {
+        const earlier = {
+          number: 1,
+          completedAt: '2026-11-19T08:00:00.000Z',
+          pipeline: {
+            request: { sourceCard: { name: 'Source A' }, highlights: [{ text: 'draw a card' }], constraints: {}, methods: { functional: true }, ordering: 'overall' },
+            streams: { 'Search B': ['shared card', 'removed card'] },
+            finalResults: [{ rank: 1, name: 'Shared Card' }, { rank: 2, name: 'Removed Card' }],
+            candidates: [
+              { name: 'Shared Card', scores: { similarityScore: 0.65 } },
+              { name: 'Removed Card', scores: { similarityScore: 0.42 } }
+            ]
+          }
+        };
+        const later = {
+          number: 2,
+          completedAt: '2026-11-19T08:01:00.000Z',
+          pipeline: {
+            request: { sourceCard: { name: 'Source A' }, highlights: [{ text: 'draw two cards' }], constraints: {}, methods: { functional: true }, ordering: 'overall' },
+            streams: { 'Search B': ['shared card', 'added card'] },
+            finalResults: [{ rank: 1, name: 'Added Card' }, { rank: 2, name: 'Shared Card' }],
+            candidates: [
+              { name: 'Shared Card', scores: { similarityScore: 0.75 } },
+              { name: 'Added Card', scores: { similarityScore: 0.81 } }
+            ]
+          }
+        };
+        const comparison = window.ManaSearchInspector.compareRuns(earlier, later);
+        const sharedScore = comparison.sharedCandidateScoreChanges.find(item => item.name === 'Shared Card');
+        const history = window.ManaSearchInspector.getRunHistory();
+        return {
+          compareApiAvailable: !!comparison && Array.isArray(comparison.finalRanking?.rankChanges),
+          detectsChangedHighlight: comparison.changes.highlightsChanged === true,
+          detectsAddedAndRemovedCards: comparison.finalRanking.addedInLater.includes('Added Card') && comparison.finalRanking.missingFromLater.includes('Removed Card'),
+          detectsRankMovement: comparison.finalRanking.rankChanges.some(item => item.name === 'Shared Card' && item.earlierRank === 1 && item.laterRank === 2),
+          detectsScoreDelta: !!sharedScore && Math.abs(sharedScore.delta - 0.10) < 1e-9,
+          computesRetrievalOverlap: comparison.retrieval.some(item => item.stream === 'Search B' && item.sharedCount === 1 && Math.abs(item.jaccard - (1 / 3)) < 1e-4),
+          historyIsArray: Array.isArray(history),
+          exportSerializable: JSON.stringify(window.ManaSearchInspector.getExport()).length > 0,
+          compareTabAvailable: !!document.querySelector('[data-tab="compare"]'),
+          downloadActionAvailable: !!document.querySelector('[data-action="download"]')
+        };
+      })(),
       developerDiagnostics: (() => {
         const snapshot = window.ManaSearchDebug.getSnapshot();
         return { available: !!snapshot && typeof snapshot === 'object', serializable: JSON.stringify(snapshot).length > 0, hasPipelineFields: ['request', 'funnel', 'streams', 'candidates', 'filterRejections'].every(key => Object.prototype.hasOwnProperty.call(snapshot, key)), liveIntentAvailable: typeof window.ManaSearchDebug.getLiveIntent === 'function' };
@@ -139,6 +185,8 @@ async function main() {
       })
     ];
     console.log('Developer inspector API:', JSON.stringify(report.developerDiagnostics));
+    console.log('Developer inspector comparison regression:', JSON.stringify(report.developerInspectorRegression));
+    suitePasses.push(Object.values(report.developerInspectorRegression || {}).every(value => value === true));
     suitePasses.push(report.developerDiagnostics?.available === true && report.developerDiagnostics?.serializable === true && report.developerDiagnostics?.hasPipelineFields === true);
     console.log('Mechanical scorer performance:', JSON.stringify(report.performance));
     suitePasses.push(report.performance?.pass === true);
