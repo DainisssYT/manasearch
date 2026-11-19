@@ -128,7 +128,7 @@ async function main() {
             streamFailures: [{ label: 'Semantic Index', message: 'Worker startup timed out' }],
             finalResults: [{ rank: 1, name: 'Shared Card' }, { rank: 2, name: 'Removed Card' }],
             candidates: [
-              { name: 'Shared Card', preFloorRank: 1, scores: { similarityScore: 0.65, mechanicalScore: 0.7, effectAwareFunctionSemanticScore: 0.4 }, mechanicalBreakdown: { graphScore: 0.7 } },
+              { name: 'Shared Card', preFloorRank: 1, scores: { similarityScore: 0.65, mechanicalScore: 0.7, effectAwareFunctionSemanticScore: 0.4 }, functionSemanticEvidence: { effectAwareScore: 0.4, matches: [{ sourceFunction: 'counter', candidateFunction: 'counter', sourceIndex: 0, candidateIndex: 0 }] }, mechanicalBreakdown: { graphScore: 0.7 } },
               { name: 'Removed Card', scores: { similarityScore: 0.42 } }
             ]
           }
@@ -157,7 +157,7 @@ async function main() {
             streams: { 'Search B': ['shared card', 'added card'] },
             finalResults: [{ rank: 1, name: 'Added Card' }, { rank: 2, name: 'Shared Card' }],
             candidates: [
-              { name: 'Shared Card', scores: { similarityScore: 0.75, mechanicalScore: 0.8 }, mechanicalBreakdown: { graphScore: 0.85 } },
+              { name: 'Shared Card', scores: { similarityScore: 0.75, mechanicalScore: 0.8, effectAwareFunctionSemanticScore: 0.9 }, mechanicalBreakdown: { graphScore: 0.85 }, functionSemanticEvidence: { effectAwareScore: 0.9, matches: [{ sourceFunction: 'counter', candidateFunction: 'counter', sourceIndex: 0, candidateIndex: 1 }] } },
               { name: 'Added Card', scores: { similarityScore: 0.81 } }
             ]
           }
@@ -479,6 +479,8 @@ async function main() {
           detectsRankMovement: comparison.finalRanking.rankChanges.some(item => item.name === 'Shared Card' && item.earlierRank === 1 && item.laterRank === 2),
           detectsScoreDelta: !!sharedScore && Math.abs(sharedScore.delta - 0.10) < 1e-9,
           compareRunsSurfacesAbilityAwareFunctionScoreDelta: !!sharedScore?.scoreChannelChanges?.some(change => change.field === 'effectAwareFunctionSemanticScore' && Math.abs(change.delta - 0.5) < 1e-9),
+          compareRunsSurfacesAbilityEvidenceScoreDelta: !!sharedScore?.scoreChannelChanges?.some(change => change.field === 'functionSemanticEvidence.effectAwareScore' && Math.abs(change.delta - 0.5) < 1e-9),
+          compareRunsDetectsAbilityMatchIdentityChange: sharedScore?.functionSemanticEvidence?.abilityMatchesChanged === true && sharedScore.functionSemanticEvidence.laterMatches?.[0]?.candidateIndex === 1,
           computesRetrievalOverlap: comparison.retrieval.some(item => item.stream === 'Search B' && item.sharedCount === 1 && Math.abs(item.jaccard - (1 / 3)) < 1e-4),
           comparesResolvedRetrievalFailures: comparison.retrievalFailures?.earlierCount === 1 && comparison.retrievalFailures?.laterCount === 0 && comparison.retrievalFailures?.resolved?.[0]?.label === 'Semantic Index',
           historyIsArray: Array.isArray(history),
