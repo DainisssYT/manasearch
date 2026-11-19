@@ -110,7 +110,8 @@ async function main() {
               constraints: {}, methods: { functional: true }, ordering: 'overall',
               searchDepthPercent: 100,
               orderingFeatures: { matrix: false, diverse: false },
-              rankingWeights: { mechanical: 0, synergy: 0, context: 0, exactness: 0, category: 0 }
+              rankingWeights: { mechanical: 0, synergy: 0, context: 0, exactness: 0, category: 0 },
+              broad: false, divergent: false
             },
             funnel: { stages: {
               retrieved: ['Shared Card', 'Removed Card'], passedFilters: ['Shared Card', 'Removed Card'],
@@ -215,7 +216,8 @@ async function main() {
               inputSnapshotVersion: 2,
               searchDepthPercent: 100,
               orderingFeatures: { matrix: false, diverse: true },
-              rankingWeights: { mechanical: 0, synergy: 0, context: 0, exactness: 0, category: 0 }
+              rankingWeights: { mechanical: 0, synergy: 0, context: 0, exactness: 0, category: 0 },
+              broad: false, divergent: false
             },
             finalResults: []
           }
@@ -232,7 +234,8 @@ async function main() {
               constraints: { cmc: 2, type: 'creature' },
               intent: { semanticText: 'draw a card', sourceText: 'draw a card' },
               highlights: [{ mode: 'exact', text: 'draw a card' }],
-              sourceCard: { name: 'Source A', id: 'stable' }
+              sourceCard: { name: 'Source A', id: 'stable' },
+              divergent: false, broad: false
             },
             finalResults: []
           }
@@ -267,6 +270,16 @@ async function main() {
         const liveSummaryText = window.ManaSearchInspector.formatLiveSummary({
           source: { name: 'Telemetry Source' },
           liveSearch: activeSearchBeforeFinish,
+          runtime: { loading: true }
+        });
+        const liveSettingsSummaryText = window.ManaSearchInspector.formatLiveSummary({
+          source: { name: 'Settings Source' },
+          searchIntent: { productionModel: {
+            searchDepthPercent: 85,
+            orderingFeatures: { matrix: true, diverse: false },
+            rankingWeights: { mechanical: 0.25, synergy: 0, context: -0.1 }
+          } },
+          liveSearch: { status: 'running' },
           runtime: { loading: true }
         });
         window.dispatchEvent(new CustomEvent('manasearch:search-finished', {
@@ -412,6 +425,9 @@ async function main() {
             provisionalErrorSummary.includes('not a complete final ranking'),
           liveSummaryShowsFinalRankingEvent: liveSummaryText.includes('final ranked results') &&
             liveSummaryText.includes('Shared Card'),
+          liveSummaryShowsCurrentSearchSettings: liveSettingsSummaryText.includes('Search depth: 85%') &&
+            liveSettingsSummaryText.includes('Ordering features: matrix') &&
+            liveSettingsSummaryText.includes('Score-weight offsets: mechanical=0.25'),
           candidateTraceApiAvailable: typeof window.ManaSearchInspector.traceCandidate === 'function',
           traceMatchesCaseInsensitively: candidateTrace.found === true && candidateTrace.candidateName === 'shared card',
           traceShowsRetrievalProvenance: candidateTrace.retrieval.streams.includes('Search B'),
