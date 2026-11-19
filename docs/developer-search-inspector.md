@@ -13,12 +13,12 @@ The floating **Developer inspector** is an opt-in, read-only view of the real ap
 
 ## Views
 
-- **Live state** — source card, current visible intent, controls, result cards, and recent worker traffic.
+- **Live state** — source card, current visible intent, controls, provisional results, the active search phase, per-stream completion progress, and recent worker traffic. The inspector ignores late events from superseded searches.
 - **Pipeline** — the actual search request, retrieval stream membership, stream coverage, functional/exact-highlight query results, candidate funnel counts, timing, semantic calibration, and relevance-floor settings.
 - **Candidates** — up to 300 highest-scoring candidates from the actual scoring pass, including candidates subsequently removed by the relevance floor. Each candidate includes score channels, ranking evidence, parse confidence, retrieval provenance, and relevant ranking flags.
 - **Trace card** — select one card and follow its recorded membership through every pipeline stage, see which retrieval streams found it, inspect hard-filter rejection evidence, review its score channels and ranking evidence, and confirm its final rank.
 - **Exclusions** — candidates removed between pipeline stages and the recorded hard-filter / exact-highlight rejection explanations.
-- **Compare runs** — compare two retained searches, including changed inputs, retrieval-stream overlap, final cards added or removed, rank movement, and score deltas for shared candidates.
+- **Compare runs** — compare two retained searches, including their success/partial/error outcomes, duration, changed inputs, normalized retrieval-stream overlap, final cards added or removed, rank movement, and score deltas for shared candidates. Failed runs are explicitly marked invalid for ranking comparisons rather than treated as successful zero-result searches.
 - **Regression cases** — turn a real search into a portable test case, write down the correct expected result/ranking, export or import the case as JSON, and compare it with a later search run, including score-channel changes and candidate-pool changes for shared candidates.
 - **Timeline** — search start/finish, configuration changes, and worker activity.
 - **Worker** — observed Web Worker request/response payloads.
@@ -63,6 +63,17 @@ console.log(report);
 Use `validateRegressionCase(importedJson)` before accepting a case from another source. The comparison report includes `inputCheck`, `focusCheck`, `rankingCheck`, and `scoringEvolution`. A report with `status: "input-mismatch"` should not be counted as a ranking pass or failure until the original inputs have been reproduced.
 
 A comparison is only valid when the source card, selected highlights, interpreted intent, constraints, methods, and ordering match the original request. When they differ, the report marks the result as **input-mismatch** instead of blaming the algorithm. Fix the input differences and rerun the case before evaluating ranking changes.
+
+## Reading live-search status
+
+The live inspector follows the same request ID as the production search:
+
+- **Running** — current phase/progress text, stream states, and provisional top cards are captured as the search runs.
+- **Completed** — the final pipeline and ranked results were produced normally.
+- **Completed with warnings** — one or more retrieval lanes were interrupted, but completed stages/results were retained. Inspect the stream checklist before comparing rankings.
+- **Error** — the main search failed before producing a valid final ranking. Compare Runs shows the error and marks ranking comparison invalid; a failed run must never be interpreted as a true zero-result search.
+
+A new search replaces the active live trace. Late progress from older request IDs is ignored. Completed runs retain their live progress/stream/preview trace alongside the final diagnostic pipeline.
 
 ## Reading a diagnostic
 
