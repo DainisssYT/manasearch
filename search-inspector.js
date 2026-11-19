@@ -251,9 +251,16 @@
       possibleHardFilterRejection: rejection,
       scoring: candidate ? {
         preFloorRank: candidate.preFloorRank ?? null,
+        typeLine: candidate.type_line || '',
+        oracleText: candidate.oracle_text || '',
         scores: candidate.scores || {},
         rankingEvidence: candidate.rankingEvidence || null,
+        mechanicalBreakdown: candidate.mechanicalBreakdown || null,
+        mechanicalEvidence: candidate.mechanicalEvidence || null,
+        effectCoverage: candidate.effectCoverage || null,
         parse: candidate.parse || candidate.parseDiagnostics || null,
+        rankingIntent: candidate.rankingIntent || null,
+        flags: candidate.flags || {},
         retrievalEvidence: candidate.retrievalEvidence || []
       } : null,
       finalRanking: finalResult ? {
