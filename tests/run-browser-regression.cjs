@@ -120,11 +120,40 @@ async function main() {
             ]
           }
         };
+        const tracePipeline = {
+          request: { sourceCard: { name: 'Source A' } },
+          streams: { 'Search B': ['Shared Card', 'Filtered Card'] },
+          funnel: { stages: {
+            retrieved: ['Shared Card', 'Filtered Card'],
+            passedFilters: ['Shared Card'],
+            deduplicated: ['Shared Card'],
+            meaningfulParse: ['Shared Card'],
+            scored: ['Shared Card'],
+            passedRelevanceFloor: ['Shared Card'],
+            finalRanked: ['Shared Card']
+          } },
+          filterRejections: [{ name: 'Filtered Card', reasons: ['exact highlight mismatch'] }],
+          candidates: [{
+            name: 'Shared Card', preFloorRank: 1, scores: { mechanicalScore: 0.8, similarityScore: 0.75 },
+            rankingEvidence: { mechanical: 0.8, highlightIntent: 0.9 }, retrievalEvidence: ['Search B']
+          }],
+          finalResults: [{ name: 'Shared Card', rank: 1, similarityScore: 0.75, flags: { weakBackfill: false } }],
+          rankingEvidenceTop: [{ name: 'Shared Card', rank: 1, overall: 0.75 }]
+        };
+        const candidateTrace = window.ManaSearchInspector.traceCandidate(tracePipeline, 'shared card');
+        const filteredTrace = window.ManaSearchInspector.traceCandidate(tracePipeline, 'Filtered Card');
         const comparison = window.ManaSearchInspector.compareRuns(earlier, later);
         const sharedScore = comparison.sharedCandidateScoreChanges.find(item => item.name === 'Shared Card');
         const history = window.ManaSearchInspector.getRunHistory();
         return {
           compareApiAvailable: !!comparison && Array.isArray(comparison.finalRanking?.rankChanges),
+          candidateTraceApiAvailable: typeof window.ManaSearchInspector.traceCandidate === 'function',
+          traceMatchesCaseInsensitively: candidateTrace.found === true && candidateTrace.candidateName === 'shared card',
+          traceShowsRetrievalProvenance: candidateTrace.retrieval.streams.includes('Search B'),
+          traceShowsStageProgression: candidateTrace.stages.find(stage => stage.stage === 'scored')?.present === true,
+          traceShowsScoreBreakdown: candidateTrace.scoring?.scores?.mechanicalScore === 0.8 && candidateTrace.scoring?.rankingEvidence?.highlightIntent === 0.9,
+          traceShowsFinalRank: candidateTrace.finalRanking?.rank === 1,
+          traceShowsFilterRejection: filteredTrace.possibleHardFilterRejection?.reasons?.includes('exact highlight mismatch') === true,
           detectsChangedHighlight: comparison.changes.highlightsChanged === true,
           detectsChangedInterpretation: comparison.changes.intentChanged === true,
           detectsAddedAndRemovedCards: comparison.finalRanking.addedInLater.includes('Added Card') && comparison.finalRanking.missingFromLater.includes('Removed Card'),
