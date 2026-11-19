@@ -453,6 +453,7 @@ check('developer inspector observes the production pipeline without changing sco
   assert.match(app, /delayedTopLibraryAcquisition/);
   assert.match(app, /ruleContext = \[includePreviousRuleContext \? previousRuleText : '', localRuleContext\]/);
   assert.match(app, /compound-draw-and-life-loss-retains-both-distinct-actions/);
+  assert.match(app, /runManaSearchLiveRetrievalRegressionSuite/);
   assert.match(app, /isReplacementCreatePrecursor/);
   assert.match(app, /excludeFunctions: \['token_creation'\]/);
   assert.match(app, /necropotenceEffects/);
