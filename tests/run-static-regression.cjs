@@ -356,6 +356,15 @@ check('developer inspector observes the production pipeline without changing sco
   assert.match(html, /search-inspector\.js\?v=20261119-155/);
   assert.match(html, /search-inspector\.css\?v=20261119-140/);
   assert.match(app, /window\.ManaSearchDebug = Object\.freeze\(/);
+  assert.match(app, /inputSnapshotVersion: 2/);
+  assert.match(app, /searchDepthPercent: activeSearchDepthPercent/);
+  assert.match(app, /orderingFeatures: \{ \.\.\.activeOrderFeatureFlags \}/);
+  assert.match(app, /rankingWeights: Object\.fromEntries/);
+  assert.match(inspector, /inputSnapshotComplete/);
+  assert.match(inspector, /searchDepthPercentChanged/);
+  assert.match(inspector, /orderingFeaturesChanged/);
+  assert.match(inspector, /rankingWeightsChanged/);
+
   assert.match(app, /getLiveIntent\(\)/);
   assert.match(inspector, /productionModel: window\.ManaSearchDebug/);
   assert.match(app, /lastSearchScoredCandidates = candidates\.slice\(0, 300\)/);
