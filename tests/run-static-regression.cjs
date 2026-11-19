@@ -348,6 +348,8 @@ check('developer inspector observes the production pipeline without changing sco
   assert.match(html, /search-inspector\.js\?v=20261119-137/);
   assert.match(html, /search-inspector\.css\?v=20261119-137/);
   assert.match(app, /window\.ManaSearchDebug = Object\.freeze\(/);
+  assert.match(app, /getLiveIntent\(\)/);
+  assert.match(inspector, /productionModel: window\.ManaSearchDebug/);
   assert.match(app, /lastSearchScoredCandidates = candidates\.slice\(0, 300\)/);
   assert.match(app, /filterFailureReasons instanceof Map/);
   assert.match(inspector, /data-tab="pipeline"/);
