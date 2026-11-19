@@ -158,7 +158,7 @@ async function main() {
           pipeline: { request: structuredClone(earlier.pipeline.request), finalResults: [] }
         };
         const errorRunComparison = window.ManaSearchInspector.compareRuns(earlier, errorRun);
-        const failedRegressionComparison = window.ManaSearchInspector.compareRegressionCase(regressionCase, errorRun);
+
         let refusesFailedBaseline = false;
         try { window.ManaSearchInspector.createRegressionCase(errorRun); }
         catch (_) { refusesFailedBaseline = true; }
@@ -238,6 +238,7 @@ async function main() {
           maxRank: 1,
           expectedTopCandidates: ['Shared Card', 'Removed Card']
         });
+        const failedRegressionComparison = window.ManaSearchInspector.compareRegressionCase(regressionCase, errorRun);
         const replayRun = {
           number: 3,
           completedAt: '2026-11-19T08:02:00.000Z',
