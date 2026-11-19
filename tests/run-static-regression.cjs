@@ -384,6 +384,8 @@ check('developer inspector observes the production pipeline without changing sco
   assert.match(inspector, /MAX_SEARCH_RUNS = 6/);
   assert.match(inspector, /searchRuns: state\.searchRuns/);
   assert.match(inspector, /sharedCandidateScoreChanges/);
+  assert.match(inspector, /candidatePathChanges/);
+  assert.match(inspector, /Changed-card pipeline paths/);
 
   assert.match(inspector, /changedInputFields = \['sourceCard'.*'broad', 'divergent'\]/);
   assert.match(inspector, /requestFields = \['inputSnapshotVersion'.*'rankingWeights'.*'broad', 'divergent'\]/);
