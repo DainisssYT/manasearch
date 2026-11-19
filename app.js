@@ -15307,6 +15307,74 @@ function runManaSearchRepeatabilityRegressionSuite({ log = true } = {}) {
         // A recurring draw engine should outrank an ETB cantrip, while the draw condition on
         // Burlfist Oak must not be mistaken for a draw outcome at all.
         const rhystic = { name: 'Rhystic Study', type_line: 'Enchantment', oracle_text: 'Whenever an opponent casts a spell, you may draw a card unless that player pays {1}.' };
+        // Regression: variable output amounts must not erase the invariant tap-to-mana
+        // activation structure. The local text index must retain the tap symbol as a useful token.
+        const solRing = { name: 'Sol Ring', type_line: 'Artifact', oracle_text: '{T}: Add {C}{C}.' };
+        const solRingEffects = parseMTGEffect(solRing.oracle_text);
+        const manaPlans = buildFunctionalRetrievalQueries(solRing, solRingEffects, '-name:"Sol Ring"', 5);
+        const tapManaPlan = manaPlans.find(plan => plan.query.includes('o:"{T}: Add"'));
+        const localTapAlternatives = tapManaPlan ? extractLocalRetrievalAlternativesFromQuery(tapManaPlan.query) : [];
+        check('tap-symbol-normalizes-to-searchable-local-token', normalizeLocalCorpusText('{T}: Add {C}{C}') === 'tap add c c',
+            normalizeLocalCorpusText('{T}: Add {C}{C}'));
+        check('tap-to-mana-functional-query-is-amount-agnostic', Boolean(tapManaPlan) && localTapAlternatives.some(text => normalizeLocalCorpusText(text).includes('tap') && normalizeLocalCorpusText(text).includes('add')),
+            JSON.stringify({ queries: manaPlans.map(plan => plan.query), alternatives: localTapAlternatives }));
+
+        // Regression: the subject of "lose 1 life" is inherited from "you draw a card" in
+        // conjunction-reduced Oracle text. Losing that atom removes the defining cost from the
+        // Phyrexian Arena / Dark Confidant / Necropotence-style card-advantage fingerprint.
+        const phyrexianArena = {
+            name: 'Phyrexian Arena',
+            type_line: 'Enchantment',
+            oracle_text: 'At the beginning of your upkeep, you draw a card and lose 1 life.'
+        };
+        const arenaEffects = parseMTGEffect(phyrexianArena.oracle_text);
+        const arenaFunctions = arenaEffects.map(effect => effect?.canonical?.function).filter(Boolean);
+        const arenaLifeAtom = arenaEffects.find(effect => effect?.canonical?.function === 'lose_life');
+        check('compound-draw-and-life-loss-preserves-both-canonical-effects',
+            arenaFunctions.includes('card_draw') && arenaFunctions.includes('lose_life') &&
+            /you draw a card and lose 1 life/i.test(arenaLifeAtom?.contextClause || ''),
+            JSON.stringify({ functions: arenaFunctions, lifeAtom: arenaLifeAtom?.canonical || null, context: arenaLifeAtom?.contextClause || '' }));
+
+        const arenaDrawStart = phyrexianArena.oracle_text.indexOf('draw a card');
+        const arenaLifeStart = phyrexianArena.oracle_text.indexOf('lose 1 life');
+        const arenaTriggerStart = phyrexianArena.oracle_text.indexOf('At the beginning of your upkeep');
+        const arenaHighlights = [
+            { text: 'At the beginning of your upkeep', field: 'oracle', mode: 'variable', origin: 'source', start: arenaTriggerStart, end: arenaTriggerStart + 'At the beginning of your upkeep'.length, colorIndex: 0, attachedTo: null },
+            { text: 'draw a card', field: 'oracle', mode: 'variable', origin: 'source', start: arenaDrawStart, end: arenaDrawStart + 'draw a card'.length, colorIndex: 1, attachedTo: null },
+            { text: 'lose 1 life', field: 'oracle', mode: 'variable', origin: 'source', start: arenaLifeStart, end: arenaLifeStart + 'lose 1 life'.length, colorIndex: 2, attachedTo: null }
+        ];
+        currentSourceCard = phyrexianArena;
+        manualHighlights = arenaHighlights;
+        const arenaLiveIntent = getSearchIntent(phyrexianArena, arenaHighlights);
+        const arenaIntentFunctions = arenaLiveIntent.parsedEffects.map(effect => effect?.canonical?.function).filter(Boolean);
+        const arenaModel = buildSearchIntentPresentationModel(phyrexianArena, arenaHighlights);
+        check('live-highlight-intent-retains-life-payment-as-a-scored-effect',
+            arenaIntentFunctions.includes('card_draw') && arenaIntentFunctions.includes('lose_life') &&
+            arenaModel.effectViews.some(view => view.fn === 'lose_life'),
+            JSON.stringify({ functions: arenaIntentFunctions, effects: arenaModel.effectViews.map(view => ({ fn: view.fn, detail: view.detail })) }));
+
+        const arenaProfile = inferStrategicRoleProfile(phyrexianArena, arenaLiveIntent.parsedEffects, arenaLiveIntent.targetText);
+        const arenaFingerprint = buildStrategicRoleFingerprint(phyrexianArena, arenaLiveIntent.parsedEffects, arenaProfile);
+        const darkConfidant = {
+            name: 'Dark Confidant', type_line: 'Creature — Human Wizard',
+            oracle_text: 'At the beginning of your upkeep, reveal the top card of your library and put that card into your hand. You lose life equal to its mana value.'
+        };
+        const recurringDrawOnly = {
+            name: 'Recurring Draw Only', type_line: 'Enchantment',
+            oracle_text: 'At the beginning of your upkeep, draw a card.'
+        };
+        const darkEffects = parseMTGEffect(darkConfidant.oracle_text);
+        const drawOnlyEffects = parseMTGEffect(recurringDrawOnly.oracle_text);
+        const darkProfile = inferStrategicRoleProfile(darkConfidant, darkEffects, darkConfidant.oracle_text);
+        const drawOnlyProfile = inferStrategicRoleProfile(recurringDrawOnly, drawOnlyEffects, recurringDrawOnly.oracle_text);
+        const darkFingerprint = buildStrategicRoleFingerprint(darkConfidant, darkEffects, darkProfile);
+        const drawOnlyFingerprint = buildStrategicRoleFingerprint(recurringDrawOnly, drawOnlyEffects, drawOnlyProfile);
+        const darkRoleScore = calculateStrategicRoleScore(arenaProfile, darkProfile, arenaFingerprint, darkFingerprint);
+        const drawOnlyRoleScore = calculateStrategicRoleScore(arenaProfile, drawOnlyProfile, arenaFingerprint, drawOnlyFingerprint);
+        check('life-cost-card-advantage-role-prefers-life-paid-analogues',
+            arenaFingerprint.lifePaid === true && darkFingerprint.lifePaid === true && drawOnlyFingerprint.lifePaid === false && darkRoleScore > drawOnlyRoleScore,
+            JSON.stringify({ source: arenaFingerprint, darkConfidant: darkFingerprint, drawOnly: drawOnlyFingerprint, darkRoleScore, drawOnlyRoleScore }));
+
         const chronicler = { name: 'Chronicler of Heroes', type_line: 'Creature — Centaur Wizard', oracle_text: 'When Chronicler of Heroes enters the battlefield, draw a card if you control a creature with a +1/+1 counter on it.' };
         const oak = { name: 'Burlfist Oak', type_line: 'Creature — Treefolk', oracle_text: 'Whenever you draw a card, Burlfist Oak gets +2/+2 until end of turn.' };
         const rhysticEffects = annotateEffectRepeatability(rhystic, parseMTGEffect(rhystic.oracle_text), rhystic.oracle_text);
