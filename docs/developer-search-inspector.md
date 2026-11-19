@@ -101,6 +101,15 @@ The live inspector follows the same request ID as the production search and list
 
 A new search replaces the active live trace. Late progress from older request IDs is ignored. Terminal runs retain their live progress/stream/preview trace alongside the final diagnostic pipeline. The browser regression runner executes the end-to-end local search benchmark against the bundled card corpus and semantic index, and separately verifies live request telemetry, failed-lane state, stage-level comparison, and regression-case behavior. The parser regression suite also protects single-use Aura entry triggers and numeric target restrictions so recent fixes cannot quietly degrade mechanic comparisons. It also protects the life-cost distinction for recurring card-advantage engines.
 
+## Search-quality benchmark findings and fixes
+
+The local-only retrieval benchmark now includes targeted checks for two recurring issues:
+
+- **Tap-to-mana retrieval:** Oracle mana symbols are retained as lexical meaning during local corpus normalization (`{T}` becomes the searchable token `tap`). Functional retrieval also emits an amount-independent `o:"{T}: Add"` lane for tap-activated mana sources, so a different output amount does not hide analogues such as Mana Vault.
+- **Compound life-cost draw engines:** The parser inherits a shared subject for conjunction-reduced life changes such as “you draw a card and lose 1 life”. This retains the separate life-loss atom in the live highlighted intent and makes the life-paid card-advantage fingerprint available to ranking.
+
+The regression suite tests both query construction and source/highlight parsing. The end-to-end benchmark must still verify actual retrieval and ranking; query-generation tests alone are not evidence that an expected analogue reached the final results.
+
 ## Reading a diagnostic
 
 Start with a specific candidate that should or should not have appeared. **Trace card** is the quickest way to see one candidate's recorded path; use **Pipeline**, **Candidates**, and **Exclusions** for the broader context:
