@@ -160,6 +160,7 @@ async function main() {
         const candidateTrace = window.ManaSearchInspector.traceCandidate(tracePipeline, 'shared card');
         const filteredTrace = window.ManaSearchInspector.traceCandidate(tracePipeline, 'Filtered Card');
         const comparison = window.ManaSearchInspector.compareRuns(earlier, later);
+        const compareSummaryText = window.ManaSearchInspector.formatCompareSummary(comparison);
         const sharedScore = comparison.sharedCandidateScoreChanges.find(item => item.name === 'Shared Card');
         const history = window.ManaSearchInspector.getRunHistory();
         const errorRun = {
@@ -236,6 +237,11 @@ async function main() {
           detail: { requestId: 9001, phase: 'final-ranking', sourceLabel: 'Authoritative final ranking', provisional: false, resultCount: 1, topNames: ['Shared Card'], at: 1300 }
         }));
         const activeSearchBeforeFinish = window.ManaSearchInspector.getActiveSearch();
+        const liveSummaryText = window.ManaSearchInspector.formatLiveSummary({
+          source: { name: 'Telemetry Source' },
+          liveSearch: activeSearchBeforeFinish,
+          runtime: { loading: true }
+        });
         window.dispatchEvent(new CustomEvent('manasearch:search-finished', {
           detail: {
             requestId: 9001, status: 'completed_with_warnings', partial: true,
@@ -322,6 +328,15 @@ async function main() {
         catch (_) { rejectsInvalidCase = true; }
         return {
           compareApiAvailable: !!comparison && Array.isArray(comparison.finalRanking?.rankChanges),
+          compareSummaryExplainsValidityAndMetrics: compareSummaryText.includes('COMPARE RUNS SUMMARY') &&
+            compareSummaryText.includes('Changed user inputs:') && compareSummaryText.includes('Top-K overlap:') &&
+            compareSummaryText.includes('FULL COMPARISON JSON'),
+          compareSummaryIncludesRecoveredStream: compareSummaryText.includes('[RECOVERED] Semantic Index'),
+          liveSummaryExplainsCurrentSearch: liveSummaryText.includes('LIVE SEARCH SUMMARY') &&
+            liveSummaryText.includes('Telemetry Source') && liveSummaryText.includes('[FAILED] Semantic Index') &&
+            liveSummaryText.includes('FULL CAPTURED STATE'),
+          liveSummaryShowsFinalRankingEvent: liveSummaryText.includes('final ranked results') &&
+            liveSummaryText.includes('Shared Card'),
           candidateTraceApiAvailable: typeof window.ManaSearchInspector.traceCandidate === 'function',
           traceMatchesCaseInsensitively: candidateTrace.found === true && candidateTrace.candidateName === 'shared card',
           traceShowsRetrievalProvenance: candidateTrace.retrieval.streams.includes('Search B'),
