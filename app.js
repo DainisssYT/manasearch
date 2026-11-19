@@ -18,6 +18,57 @@ let activeMainSearchRequestId = null;
 let lastMainSearchOutcome = null;
 
 /**
+ * Preserve an in-flight main search as an explicit cancelled run before another user action
+ * clears or replaces its diagnostics. Cancelled runs are useful for live debugging, but must
+ * never be interpreted as completed zero-result rankings.
+ */
+function cancelActiveMainSearch(reason = 'Search was superseded by another action.') {
+    const requestId = activeMainSearchRequestId;
+    if (requestId === null || requestId === undefined ||
+        requestId !== searchRequestId ||
+        lastMainSearchOutcome?.requestId !== requestId ||
+        lastMainSearchOutcome?.status !== 'running') return false;
+
+    const finishedAt = new Date();
+    const startedAtMs = Date.parse(lastMainSearchOutcome.startedAt || '');
+    const durationMs = Number.isFinite(startedAtMs) ? Math.max(0, Date.now() - startedAtMs) : null;
+    const provisionalCards = Array.isArray(currentRenderedResultsCards) ? currentRenderedResultsCards : [];
+    const provisionalCardNames = provisionalCards
+        .map(card => String(card?.name || '').trim())
+        .filter(Boolean)
+        .slice(0, 20);
+    const detail = {
+        requestId,
+        status: 'cancelled',
+        success: false,
+        partial: false,
+        reason: String(reason || 'Search was cancelled.').slice(0, 420),
+        errorMessage: '',
+        startedAt: lastMainSearchOutcome.startedAt || null,
+        finishedAt: finishedAt.toISOString(),
+        durationMs,
+        sourceName: lastMainSearchOutcome.sourceName || currentSourceCard?.name || '',
+        resultCount: 0,
+        provisionalResultCount: provisionalCards.length,
+        provisionalCardNames
+    };
+    lastMainSearchOutcome = {
+        ...lastMainSearchOutcome,
+        status: 'cancelled',
+        finishedAt: detail.finishedAt,
+        durationMs,
+        resultCount: 0,
+        provisionalResultCount: detail.provisionalResultCount,
+        errorMessage: detail.reason
+    };
+    activeMainSearchRequestId = null;
+    try {
+        window.dispatchEvent(new CustomEvent('manasearch:search-cancelled', { detail }));
+    } catch (_) {}
+    return true;
+}
+
+/**
  * Keep a successfully rendered ranking from being misreported as a fully complete search when
  * one or more parallel retrieval lanes failed. A fatal top-level error remains fatal; a clean run
  * remains clean. Inputs are plain snapshots so this rule can be tested independently of the UI.
@@ -3667,6 +3718,7 @@ function findBenchmarkSourceCard(sourceName) {
 async function loadBenchmarkSourceCard(sourceName) {
     const localCard = findBenchmarkSourceCard(sourceName);
     if (localCard) {
+        cancelActiveMainSearch('A benchmark source card replaced the in-flight search.');
         ++searchRequestId;
         currentSourceCard = localCard;
         lastSearchResults = [];
@@ -24336,6 +24388,7 @@ function setupSourceCardPicker() {
 }
 
 function clearSourceCard() {
+    cancelActiveMainSearch('The source card was cleared while a search was running.');
     ++searchRequestId;
     activeMainSearchRequestId = null;
     cancelScheduledProgressiveResultRender();
@@ -24402,6 +24455,7 @@ async function loadSourceCard(query, providedCard = null) {
         }
     }
 
+    cancelActiveMainSearch('The source card changed while a search was running.');
     ++relatedSearchRequestId;
     const requestId = ++searchRequestId;
     lastSearchDebugContext = null;
@@ -28078,6 +28132,7 @@ async function findSimilarCards() {
     const searchHighlightsSnapshot = Array.isArray(manualHighlights)
         ? manualHighlights.map(h => ({ ...h, editedFrom: h?.editedFrom ? { ...h.editedFrom } : undefined }))
         : [];
+    cancelActiveMainSearch('A newer Find Similar Cards search replaced this search.');
     const requestId = ++searchRequestId;
     lastSearchDiagnostics = null;
     lastSearchDebugContext = null;
@@ -33911,6 +33966,7 @@ window.ManaSearchDebug = Object.freeze({
         return {
             capturedAt: new Date().toISOString(),
             appBuild: MANASEARCH_APP_BUILD,
+            dataBuildId: staticDataBuildId || null,
             outcome: lastMainSearchOutcome ? { ...lastMainSearchOutcome } : null,
             request: context, funnel, streams,
             streamCoverage: diagnostics?.streamCoverage || null,
