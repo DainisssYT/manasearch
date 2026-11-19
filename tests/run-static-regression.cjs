@@ -439,6 +439,8 @@ check('developer inspector observes the production pipeline without changing sco
   assert.match(browserRunner, /sameBuildSameInputsAreRepeatabilityChecks/);
   assert.match(browserRunner, /appOnlyRevisionIsControlledAlgorithmComparison/);
   assert.match(browserRunner, /datasetOnlyRevisionIsNotAlgorithmRegression/);
+  assert.match(browserRunner, /regressionReplayWithChangedDatasetHasNoVerdict/);
+  assert.match(browserRunner, /legacyRegressionWithoutDatasetProvenanceHasNoVerdict/);
   assert.match(browserRunner, /cancelledRunIsRetainedWithProvisionalCards/);
   assert.match(inspector, /largestFactorDelta/);
   assert.match(browserRunner, /traceShowsAbilityAwareSemanticEvidence/);
