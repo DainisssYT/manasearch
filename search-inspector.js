@@ -664,7 +664,8 @@
       if (ranking.missingFromLater?.length) lines.push('Removed final cards: ' + ranking.missingFromLater.slice(0, 10).join(', '));
     }
     const scoreChanges = (comparison.sharedCandidateScoreChanges || [])
-      .filter(item => item.delta !== null || item.scoreChannelChanges?.length || item.mechanicalBreakdownChanges?.length)
+      .filter(item => item.delta !== null || item.scoreChannelChanges?.length ||
+        item.mechanicalBreakdownChanges?.length || item.functionSemanticEvidence?.abilityMatchesChanged)
       .sort((a, b) => {
         const magnitude = item => Math.max(
           Math.abs(item.delta || 0),
@@ -689,6 +690,18 @@
           lines.push('    Changed factors: ' + channelChanges.map(change =>
             change.group + '.' + change.field + ' ' + (change.delta > 0 ? '+' : '') + change.delta.toFixed(3)
           ).join('; '));
+        }
+        if (item.functionSemanticEvidence?.abilityMatchesChanged) {
+          const describeMatches = matches => matches?.length
+            ? matches.map(match =>
+                (match.sourceFunction || 'unknown') + ' → ' + (match.candidateFunction || 'unknown') +
+                ' (source ability ' + (match.sourceIndex == null ? '?' : match.sourceIndex + 1) +
+                ', candidate ability ' + (match.candidateIndex == null ? '?' : match.candidateIndex + 1) + ')'
+              ).join('; ')
+            : 'no matched ability';
+          lines.push('    Matched ability change: ' +
+            describeMatches(item.functionSemanticEvidence.earlierMatches) + ' → ' +
+            describeMatches(item.functionSemanticEvidence.laterMatches));
         }
       });
     }
