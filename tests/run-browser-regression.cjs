@@ -423,6 +423,13 @@ async function main() {
           }
         };
         const changedDatasetRegressionReport = window.ManaSearchInspector.compareRegressionCase(regressionCase, changedDatasetRegressionRun);
+        const { dataBuildId: omittedDatasetBuild, ...legacyDatasetPipeline } = structuredClone(replayRun.pipeline);
+        const legacyDatasetReplay = {
+          number: 31,
+          status: 'completed',
+          pipeline: legacyDatasetPipeline
+        };
+        const legacyDatasetRegressionReport = window.ManaSearchInspector.compareRegressionCase(regressionCase, legacyDatasetReplay);
         const inputMismatchReport = window.ManaSearchInspector.compareRegressionCase(regressionCase, later);
         const excludedCase = window.ManaSearchInspector.createRegressionCase(earlier, {
           focusCandidate: 'Added Card',
@@ -566,6 +573,9 @@ async function main() {
           regressionReplayWithChangedDatasetHasNoVerdict: changedDatasetRegressionReport.status === 'dataset-changed' &&
             changedDatasetRegressionReport.pass === null && changedDatasetRegressionReport.comparable === false &&
             changedDatasetRegressionReport.revisionCheck?.dataBuildChanged === true,
+          legacyRegressionWithoutDatasetProvenanceHasNoVerdict: legacyDatasetRegressionReport.status === 'revision-unknown' &&
+            legacyDatasetRegressionReport.pass === null && legacyDatasetRegressionReport.comparable === false &&
+            legacyDatasetRegressionReport.revisionCheck?.dataBuildKnown === false,
 
           compareSummaryIncludesRecoveredStream: compareSummaryText.includes('[RECOVERED] Semantic Index'),
           liveSummaryExplainsCurrentSearch: liveSummaryText.includes('LIVE SEARCH SUMMARY') &&
