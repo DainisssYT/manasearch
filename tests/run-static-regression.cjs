@@ -345,7 +345,7 @@ check('Pages publishes the shared semantic module and browser tests serve ESM wi
 
 check('developer inspector observes the production pipeline without changing scoring', () => {
   execFileSync(process.execPath, ['--check'], { input: inspector, stdio: ['pipe', 'pipe', 'pipe'] });
-  assert.match(html, /search-inspector\.js\?v=20261119-151/);
+  assert.match(html, /search-inspector\.js\?v=20261119-152/);
   assert.match(html, /search-inspector\.css\?v=20261119-140/);
   assert.match(app, /window\.ManaSearchDebug = Object\.freeze\(/);
   assert.match(app, /getLiveIntent\(\)/);
@@ -375,12 +375,21 @@ check('developer inspector observes the production pipeline without changing sco
   assert.match(app, /manasearch:progress-updated/);
   assert.match(app, /manasearch:search-streams-updated/);
   assert.match(app, /manasearch:search-preview-updated/);
+  assert.match(app, /phase: 'final-ranking'/);
+  assert.match(app, /recordRetrievalStreamFailure/);
+  assert.match(app, /streamFailures: streamFailureRecords\.slice\(\)/);
+  assert.match(app, /completed_with_warnings/);
   assert.match(app, /status: searchOutcome/);
   assert.match(app, /Search failed:/);
   assert.match(inspector, /getActiveSearch/);
   assert.match(inspector, /outcomeComparison/);
-  assert.match(inspector, /status: 'search-error'/);
+  assert.match(inspector, /stageProgression/);
+  assert.match(inspector, /scoredCandidateEvolution/);
+  assert.match(inspector, /topKOverlap/);
+  assert.match(inspector, /comparableForAlgorithmRegression/);
   assert.match(inspector, /rankingComparisonValid/);
+  assert.match(inspector, /failedStreams = Number\(detail\.failedStreams\)/);
+  assert.match(inspector, /status: 'search-error'/);
   assert.match(inspector, /data-tab="regression"/);
   assert.match(inspector, /manasearch-regression-case-v1/);
   assert.match(inspector, /createRegressionCase/);
@@ -398,6 +407,8 @@ check('developer inspector observes the production pipeline without changing sco
   assert.match(inspector, /htmlEscape\(clip\(runLabel\(run\), 120\)\)/);
   assert.match(inspector, /meaningfulParse/);
   assert.match(inspectorCss, /overflow-x:auto/);
+  assert.match(css, /stream-chip\.stream-failed/);
+  assert.match(css, /stream-chip\.stream-warning/);
   assert.match(deployWorkflow, /search-inspector\.js search-inspector\.css/);
   assert.match(deployWorkflow, /Publish artifact missing/);
 });
