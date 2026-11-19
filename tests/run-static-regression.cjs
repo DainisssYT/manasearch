@@ -18,6 +18,8 @@ const semanticTextPath = path.join(root, 'scripts', 'semantic-text.mjs');
 const semanticBuilderPath = path.join(root, 'scripts', 'build-static-data.mjs');
 const deployWorkflowPath = path.join(root, '.github', 'workflows', 'deploy-pages.yml');
 const browserRunnerPath = path.join(root, 'tests', 'run-browser-regression.cjs');
+const liveSearchBenchmarkRunnerPath = path.join(root, 'tests', 'run-live-search-benchmark.cjs');
+const liveSearchBenchmarkWorkflowPath = path.join(root, '.github', 'workflows', 'live-search-quality-benchmark.yml');
 const inspectorPath = path.join(root, 'search-inspector.js');
 const inspectorCssPath = path.join(root, 'search-inspector.css');
 const app = fs.readFileSync(appPath, 'utf8');
@@ -27,6 +29,8 @@ const semanticText = fs.readFileSync(semanticTextPath, 'utf8');
 const semanticBuilder = fs.readFileSync(semanticBuilderPath, 'utf8');
 const deployWorkflow = fs.readFileSync(deployWorkflowPath, 'utf8');
 const browserRunner = fs.readFileSync(browserRunnerPath, 'utf8');
+const liveSearchBenchmarkRunner = fs.readFileSync(liveSearchBenchmarkRunnerPath, 'utf8');
+const liveSearchBenchmarkWorkflow = fs.readFileSync(liveSearchBenchmarkWorkflowPath, 'utf8');
 const inspector = fs.readFileSync(inspectorPath, 'utf8');
 const inspectorCss = fs.readFileSync(inspectorCssPath, 'utf8');
 const html = fs.readFileSync(htmlPath, 'utf8');
@@ -38,6 +42,9 @@ function check(name, fn) {
   catch (error) { checks.push({ name, pass: false, error: error.message }); }
 }
 check('app.js parses as a valid browser ES module (including reserved-word rules)', () => execFileSync(process.execPath, ['--check', '--input-type=module'], { input: app, stdio: ['pipe', 'pipe', 'pipe'] }));
+check('live-search benchmark runner parses as Node.js JavaScript', () => {
+  execFileSync(process.execPath, ['--check', liveSearchBenchmarkRunnerPath], { stdio: ['pipe', 'pipe', 'pipe'] });
+});
 check('dedicated worker and service worker scripts parse as valid JavaScript', () => {
   execFileSync(process.execPath, ['--check'], { input: searchWorker, stdio: ['pipe', 'pipe', 'pipe'] });
   execFileSync(process.execPath, ['--check'], { input: serviceWorker, stdio: ['pipe', 'pipe', 'pipe'] });
@@ -471,6 +478,16 @@ check('developer inspector observes the production pipeline without changing sco
   assert.match(css, /stream-chip\.stream-warning/);
   assert.match(deployWorkflow, /search-inspector\.js search-inspector\.css/);
   assert.match(deployWorkflow, /Publish artifact missing/);
+
+  assert.match(liveSearchBenchmarkRunner, /runLocalBenchmarkInApp/);
+  assert.match(liveSearchBenchmarkRunner, /cards\.bin/);
+  assert.match(liveSearchBenchmarkRunner, /semantic-index\.bin/);
+  assert.match(liveSearchBenchmarkRunner, /manasearch-live-search-benchmark-v1/);
+  assert.match(liveSearchBenchmarkRunner, /benchmarkFullyMeasured/);
+  assert.match(liveSearchBenchmarkWorkflow, /feature\/search-debug-inspector/);
+  assert.match(liveSearchBenchmarkWorkflow, /run-live-search-benchmark\.cjs/);
+  assert.match(liveSearchBenchmarkWorkflow, /upload-artifact@v6/);
+
 });
 
 check('semantic worker response envelopes are normalized before array-based result merging', () => {
