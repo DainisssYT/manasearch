@@ -1,6 +1,6 @@
 /* ManaSearch build 20261119-154 */
 // ManaSearch deployment build marker. Bump this whenever app.js changes so cached-module issues are easy to diagnose.
-const MANASEARCH_APP_BUILD = '20261119-154';
+const MANASEARCH_APP_BUILD = '20261119-155';
 console.info(`[ManaSearch] app.js build ${MANASEARCH_APP_BUILD}`);
 
 // The source-query and static-index builders share one representation so both sides
@@ -7066,17 +7066,20 @@ function parseManaAbilityEffect(clause) {
  * @param {string} clause
  * @returns {Object|null}
  */
-function parseLifeEffect(clause) {
+function parseLifeEffect(clause, implicitSubject = null) {
     const text = clause.toLowerCase();
 
     const fixedMatch = text.match(/\b(you|target player|target opponent|each player|each opponent|that player|its controller|their controller|controller)\s+(gains?|loses?)\s+(\d+|x|that much)\s+life\b/i);
     const equalToMatch = !fixedMatch && text.match(/\b(you|target player|target opponent|each player|each opponent|that player)\s+(gains?|loses?)\s+life\s+equal\s+to\b/i);
-    const match = fixedMatch || equalToMatch;
+    const implicitMatch = !fixedMatch && !equalToMatch && String(implicitSubject || '').trim()
+        ? text.match(/\b(gains?|loses?)\s+(\d+|x|that much)\s+life\b/i)
+        : null;
+    const match = fixedMatch || equalToMatch || implicitMatch;
     if (!match) return null;
 
-    const subjectPhrase = match[1];
-    const verb = match[2];
-    const rawAmount = fixedMatch ? fixedMatch[3] : 'variable';
+    const subjectPhrase = fixedMatch || equalToMatch ? match[1] : String(implicitSubject).trim().toLowerCase();
+    const verb = fixedMatch || equalToMatch ? match[2] : match[1];
+    const rawAmount = fixedMatch ? match[3] : implicitMatch ? match[2] : 'variable';
     const amount = /^\d+$/.test(rawAmount) ? parseInt(rawAmount, 10) : rawAmount;
 
     let object;
@@ -7504,6 +7507,14 @@ const ATOM_VERBS = 'returns?|puts?|sacrifices?|destroys?|exiles?|discards?|mills
 function extractClauseAtoms(effectText, primaryAction) {
     if (!effectText) return [];
 
+    const inferSharedLifeSubject = verbIndex => {
+        const prefix = String(effectText).slice(0, verbIndex);
+        const clauseStart = Math.max(prefix.lastIndexOf('.'), prefix.lastIndexOf(';'), prefix.lastIndexOf('!'), prefix.lastIndexOf('?'));
+        const localPrefix = prefix.slice(clauseStart + 1);
+        const match = localPrefix.match(/\b(you|target opponent|each opponent|target player|each player|that player|its controller|their controller|controller|opponent|player)\b(?=[\s\S]*\b(?:draw|draws|gain|gains|lose|loses|pay|pays)\b)/i);
+        return match?.[1] || null;
+    };
+
     const atoms = [];
     // Skip only the first atom that repeats the whole-clause parser's dominant action. Further
     // occurrences must survive: Verdant Mastery has two distinct "put ... onto the battlefield"
@@ -7546,7 +7557,7 @@ function extractClauseAtoms(effectText, primaryAction) {
             parseControlChangeEffect(slice) ||
             parseTapEffect(slice) ||
             parseDamageEffect(slice) ||
-            parseLifeEffect(slice) ||
+            parseLifeEffect(slice, inferSharedLifeSubject(match.index)) ||
             parseZoneMovementEffect(slice);
         if (atom && atom.action) {
             if (primaryActionPending.has(atom.action)) {
@@ -17839,7 +17850,11 @@ function getStaticCardCorpusUrl(retryAttempt = 0) {
 
 function normalizeLocalCorpusText(value) {
     return String(value || '').toLowerCase()
-        .replace(/[^a-z0-9+\-/]+/g, ' ')
+        // Mana symbols carry mechanic meaning. In particular, {T} previously collapsed to the
+        // one-letter token "t", which the local index discards, hiding tap-for-mana analogues.
+        .replace(/\{\s*t\s*\}/gi, ' tap ')
+        .replace(/\{\s*q\s*\}/gi, ' untap ')
+        .replace(/[^a-z0-9+\/-]+/g, ' ')
         .replace(/\s+/g, ' ')
         .trim();
 }
@@ -27283,6 +27298,13 @@ function buildFunctionalRetrievalQueries(sourceCard, parsedEffects, excludeSelf,
     for (const [functionIndex, cf] of canonicals.entries()) {
         const vocab = FUNCTION_RETRIEVAL_VOCAB[cf.function];
         const p = cf.params || {};
+
+        // The activation structure is invariant while output amount/color may vary. A source such
+        // as Sol Ring should therefore retrieve Mana Vault from the shared "{T}: Add" phrase.
+        // The local index normalizes {T} to "tap", while Scryfall still receives Oracle syntax.
+        if (cf.function === 'mana_ability' && /\{\s*t\s*\}\s*:\s*add\b/i.test(sourceText)) {
+            addQuery(['o:"{T}: Add"'], true, functionIndex);
+        }
 
         // Formulation 0 - targeted phrase lanes. They run before broad parameter/tag fallbacks so
         // result caps don't starve a less common but genuinely equivalent wording variant.
