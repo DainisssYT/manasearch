@@ -70,6 +70,7 @@ async function main() {
       typeof window.ManaSearchDebug?.getSnapshot === 'function' &&
       typeof window.ManaSearchDebug?.getLiveIntent === 'function' &&
       typeof window.ManaSearchInspector?.getRunHistory === 'function' &&
+      typeof window.ManaSearchInspector?.getActiveSearch === 'function' &&
       typeof window.ManaSearchInspector?.compareRuns === 'function' &&
       typeof window.ManaSearchInspector?.getExport === 'function' &&
       typeof window.ManaSearchInspector?.createRegressionCase === 'function' &&
@@ -147,6 +148,87 @@ async function main() {
         const comparison = window.ManaSearchInspector.compareRuns(earlier, later);
         const sharedScore = comparison.sharedCandidateScoreChanges.find(item => item.name === 'Shared Card');
         const history = window.ManaSearchInspector.getRunHistory();
+        const errorRun = {
+          number: 6,
+          status: 'error',
+          errorMessage: 'Synthetic retrieval failure',
+          durationMs: 3200,
+          summary: { sourceName: 'Source A', resultCount: 0, status: 'error', errorMessage: 'Synthetic retrieval failure' },
+          pipeline: { request: structuredClone(earlier.pipeline.request), finalResults: [] }
+        };
+        const errorRunComparison = window.ManaSearchInspector.compareRuns(earlier, errorRun);
+        const failedRegressionComparison = window.ManaSearchInspector.compareRegressionCase(regressionCase, errorRun);
+        let refusesFailedBaseline = false;
+        try { window.ManaSearchInspector.createRegressionCase(errorRun); }
+        catch (_) { refusesFailedBaseline = true; }
+        const normalizedNameComparison = window.ManaSearchInspector.compareRuns({
+          number: 7,
+          pipeline: { request: earlier.pipeline.request, streams: { 'Search B': ['Shared  Card'] }, finalResults: [{ rank: 1, name: 'Shared  Card' }] }
+        }, {
+          number: 8,
+          pipeline: { request: later.pipeline.request, streams: { 'Search B': [' shared card '] }, finalResults: [{ rank: 1, name: ' shared card ' }] }
+        });
+        const requestKeyOrderComparison = window.ManaSearchInspector.compareRuns({
+          number: 9,
+          pipeline: {
+            request: {
+              sourceCard: { id: 'stable', name: 'Source A' },
+              highlights: [{ text: 'draw a card', mode: 'exact' }],
+              intent: { sourceText: 'draw a card', semanticText: 'draw a card' },
+              constraints: { type: 'creature', cmc: 2 },
+              methods: { functional: true, role: false },
+              ordering: 'overall'
+            },
+            finalResults: []
+          }
+        }, {
+          number: 10,
+          pipeline: {
+            request: {
+              ordering: 'overall',
+              methods: { role: false, functional: true },
+              constraints: { cmc: 2, type: 'creature' },
+              intent: { semanticText: 'draw a card', sourceText: 'draw a card' },
+              highlights: [{ mode: 'exact', text: 'draw a card' }],
+              sourceCard: { name: 'Source A', id: 'stable' }
+            },
+            finalResults: []
+          }
+        });
+        // Feed synthetic request-scoped events through the same browser event listeners used by
+        // the real app, including an old request's late progress update which must be ignored.
+        window.dispatchEvent(new CustomEvent('manasearch:search-started', {
+          detail: { requestId: 9001, sourceName: 'Telemetry Source', highlightCount: 1, startedAt: '2026-11-19T08:10:00.000Z' }
+        }));
+        window.dispatchEvent(new CustomEvent('manasearch:progress-updated', {
+          detail: { requestId: 9001, step: 1, total: 3, message: 'Searching for candidates', at: 1000 }
+        }));
+        window.dispatchEvent(new CustomEvent('manasearch:search-streams-updated', {
+          detail: {
+            requestId: 9001, completedStreams: 1, totalStreams: 2,
+            streams: [
+              { label: 'Exact Phrase', done: true, detail: 'Done · 1 page · 4 cards' },
+              { label: 'Semantic Index', done: false, detail: 'Searching vectors' }
+            ]
+          }
+        }));
+        window.dispatchEvent(new CustomEvent('manasearch:search-preview-updated', {
+          detail: { requestId: 9001, phase: 'progressive-preview', sourceLabel: 'Exact Phrase', provisional: true, resultCount: 1, topNames: ['Shared Card'], at: 1100 }
+        }));
+        window.dispatchEvent(new CustomEvent('manasearch:progress-updated', {
+          detail: { requestId: 9000, step: 2, total: 3, message: 'STALE EVENT MUST BE IGNORED', at: 1200 }
+        }));
+        const activeSearchBeforeFinish = window.ManaSearchInspector.getActiveSearch();
+        window.dispatchEvent(new CustomEvent('manasearch:search-finished', {
+          detail: {
+            requestId: 9001, status: 'completed_with_warnings', partial: true,
+            sourceName: 'Telemetry Source', resultCount: 1, errorMessage: 'One retrieval lane was interrupted',
+            startedAt: '2026-11-19T08:10:00.000Z', finishedAt: '2026-11-19T08:10:03.200Z', durationMs: 3200
+          }
+        }));
+        const telemetryHistory = window.ManaSearchInspector.getRunHistory();
+        const telemetryRun = telemetryHistory.find(run => run.number === (telemetryHistory[telemetryHistory.length - 1]?.number));
+
         const regressionCase = window.ManaSearchInspector.createRegressionCase(earlier, {
           title: 'Shared Card must stay first',
           notes: 'A deliberate rank regression fixture.',
@@ -222,6 +304,18 @@ async function main() {
           regressionComparisonShowsScoreChannelDeltas: regressionReport.scoringEvolution?.changedSampleCandidates.some(item => item.name === 'Shared Card' && item.scoreChanges.some(change => change.field === 'similarityScore' && Math.abs(change.delta - 0.1) < 1e-9) && item.mechanicalBreakdownChanges.some(change => change.field === 'graphScore' && Math.abs(change.delta - 0.15) < 1e-9)),
           regressionComparisonIncludesCandidateJourneyEvolution: regressionReport.focusCheck?.baselineTrace?.found === true && regressionReport.focusCheck?.currentTrace?.found === true,
           regressionComparisonRejectsChangedInputs: inputMismatchReport.status === 'input-mismatch' && inputMismatchReport.pass === null && inputMismatchReport.inputCheck.changedFields.includes('highlights'),
+          compareMarksFailedRunInvalid: errorRunComparison.outcomeComparison?.rankingComparisonValid === false && errorRunComparison.outcomeComparison?.laterStatus === 'error',
+          regressionCompareDoesNotCountFailedRunAsRankingFailure: failedRegressionComparison.status === 'search-error' && failedRegressionComparison.pass === null,
+          regressionBuilderRejectsFailedBaseline: refusesFailedBaseline,
+          compareNormalizesCandidateNameWhitespaceAndCase: normalizedNameComparison.finalRanking.sharedCount === 1 && normalizedNameComparison.retrieval[0]?.sharedCount === 1,
+          compareIgnoresRequestObjectKeyOrder: Object.values(requestKeyOrderComparison.changes).every(value => value === false),
+          liveInspectorCapturesProgress: activeSearchBeforeFinish?.progress?.message === 'Searching for candidates',
+          liveInspectorIgnoresStaleProgress: activeSearchBeforeFinish?.progress?.message !== 'STALE EVENT MUST BE IGNORED',
+          liveInspectorCapturesStreamProgress: activeSearchBeforeFinish?.completedStreams === 1 && activeSearchBeforeFinish?.totalStreams === 2 && activeSearchBeforeFinish?.streams?.[0]?.done === true,
+          liveInspectorCapturesProvisionalResults: activeSearchBeforeFinish?.preview?.phase === 'progressive-preview' && activeSearchBeforeFinish?.preview?.topNames?.includes('Shared Card'),
+          liveInspectorStoresWarningOutcome: telemetryRun?.status === 'completed_with_warnings' && telemetryRun?.durationMs === 3200,
+          liveInspectorStoresEventTraceWithRun: telemetryRun?.liveSearch?.previewHistory?.length === 1 && telemetryRun?.liveSearch?.streams?.length === 2
+
           regressionInputComparisonIgnoresObjectKeyOrder: stableOrderReport.inputCheck?.matches === true && stableOrderReport.pass === true,
           regressionComparisonChecksMustNotAppear: exclusionReport.focusCheck?.pass === false,
           regressionImportValidationRejectsUnknownSchema: rejectsInvalidCase,
