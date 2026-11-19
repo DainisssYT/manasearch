@@ -1,6 +1,6 @@
 /* ManaSearch build 20261119-145 */
 // ManaSearch deployment build marker. Bump this whenever app.js changes so cached-module issues are easy to diagnose.
-const MANASEARCH_APP_BUILD = '20261119-147';
+const MANASEARCH_APP_BUILD = '20261119-148';
 console.info(`[ManaSearch] app.js build ${MANASEARCH_APP_BUILD}`);
 
 // The source-query and static-index builders share one representation so both sides
@@ -28118,7 +28118,7 @@ async function findSimilarCards() {
         // Capture them as user-controlled inputs so later comparisons cannot mistake a settings change
         // for an algorithm change.
         inputSnapshotVersion: 2,
-        searchDepthPercent: activeSearchDepthPercent,
+        searchDepthPercent: getCurrentSearchDepthPercent(),
         orderingFeatures: { ...activeOrderFeatureFlags },
         rankingWeights: Object.fromEntries([
             ['mechanical', 'weight-mechanical'],
