@@ -278,6 +278,7 @@ async function main() {
           detail: { requestId: 9001, step: null, total: null, message: 'Search complete. 1 final matches were ranked.', at: 1400 }
         }));
         const activeSearchBeforeFinish = window.ManaSearchInspector.getActiveSearch();
+        const progressHistoryBeforeFinish = activeSearchBeforeFinish?.progressHistory || [];
         const liveSummaryText = window.ManaSearchInspector.formatLiveSummary({
           source: { name: 'Telemetry Source' },
           liveSearch: activeSearchBeforeFinish,
@@ -549,8 +550,8 @@ async function main() {
           ].every(key => requestKeyOrderComparison.changes[key] === false) &&
             requestKeyOrderComparison.changes.changedInputFields.length === 0 &&
             requestKeyOrderComparison.changes.changedDerivedFields.length === 0,
-          liveInspectorCapturesProgress: activeSearchBeforeFinish?.progress?.message === 'Searching for candidates',
-          liveInspectorCapturesFinalOutcomeProgress: activeSearchBeforeFinish?.progress?.message === 'Search complete. 1 final matches were ranked.' && activeSearchBeforeFinish?.progress?.step === null,
+          liveInspectorCapturesProgress: progressHistoryBeforeFinish.some(item => item.message === 'Searching for candidates'),
+          liveInspectorCapturesFinalOutcomeProgress: activeSearchBeforeFinish?.progress?.message === 'Search complete. 1 final matches were ranked.' && activeSearchBeforeFinish?.progress?.step === null && progressHistoryBeforeFinish.some(item => item.message === 'Search complete. 1 final matches were ranked.'),
           liveInspectorIgnoresStaleProgress: activeSearchBeforeFinish?.progress?.message !== 'STALE EVENT MUST BE IGNORED',
           liveInspectorCapturesStreamProgress: activeSearchBeforeFinish?.completedStreams === 1 && activeSearchBeforeFinish?.failedStreams === 1 && activeSearchBeforeFinish?.settledStreams === 2 && activeSearchBeforeFinish?.totalStreams === 2 && activeSearchBeforeFinish?.streams?.[0]?.done === true && activeSearchBeforeFinish?.streams?.[1]?.failed === true,
           liveInspectorCapturesProvisionalResults: activeSearchBeforeFinish?.previewHistory?.some(item => item.phase === 'progressive-preview' && item.provisional === true && item.topNames?.includes('Shared Card')),
