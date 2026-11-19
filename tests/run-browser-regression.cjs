@@ -67,6 +67,7 @@ async function main() {
       typeof window.runManaSearchRealCardBenchmarkSuite === 'function' &&
       typeof window.runManaSearchRealCardBenchmark === 'function' &&
       typeof window.runManaSearchIntentRegressionSuite === 'function' &&
+      typeof window.runLocalBenchmarkInApp === 'function' &&
       typeof window.ManaSearchDebug?.getSnapshot === 'function' &&
       typeof window.ManaSearchDebug?.getLiveIntent === 'function' &&
       typeof window.ManaSearchInspector?.getRunHistory === 'function' &&
@@ -328,6 +329,79 @@ async function main() {
         return { available: !!snapshot && typeof snapshot === 'object', serializable: JSON.stringify(snapshot).length > 0, hasPipelineFields: ['request', 'funnel', 'streams', 'candidates', 'filterRejections'].every(key => Object.prototype.hasOwnProperty.call(snapshot, key)), liveIntentAvailable: typeof window.ManaSearchDebug.getLiveIntent === 'function' };
       })()
     }));
+    // Exercise the real end-to-end local search path, not only isolated scorer helpers.
+    // The 12 fixed cases use bundled cards.bin + semantic-index.bin and do not call Scryfall.
+    const liveSearchEvaluation = await page.evaluate(async () => {
+      const benchmark = await window.runLocalBenchmarkInApp();
+      const history = window.ManaSearchInspector.getRunHistory();
+      const latestPair = history.length >= 2 ? history.slice(-2) : [];
+      const comparison = latestPair.length === 2
+        ? window.ManaSearchInspector.compareRuns(latestPair[0], latestPair[1])
+        : null;
+      const cases = (benchmark.structuredResults || []).map(item => {
+        const strict = item.strict || {};
+        return {
+          id: item.id,
+          name: item.name,
+          source: item.source,
+          status: strict.testStatus,
+          recall20: strict.recall20 ?? null,
+          adjustedRecall20: strict.adjustedRecall20 ?? null,
+          retrievalRecall: strict.stageRecalls?.retrieval ?? null,
+          filterRecall: strict.stageRecalls?.filter ?? null,
+          scoringRecall: strict.stageRecalls?.scoring ?? null,
+          pruningRecall: strict.stageRecalls?.pruning ?? null,
+          mrr: strict.mrr ?? null,
+          ndcg20: strict.ndcg20 ?? null,
+          precision10: strict.precision10 ?? null,
+          expectedRanks: strict.cardRanks || {},
+          error: strict.errorMessage || ''
+        };
+      });
+      return {
+        summary: {
+          runId: benchmark.runId,
+          durationMs: benchmark.durationMs,
+          totalTests: benchmark.totalTests,
+          completedTests: benchmark.completedTests,
+          measuredTests: benchmark.measuredTests,
+          blockedTests: benchmark.blockedTests,
+          erroredTests: benchmark.erroredTests,
+          benchmarkCompleted: benchmark.benchmarkCompleted,
+          benchmarkFullyMeasured: benchmark.benchmarkFullyMeasured,
+          meanRecall20: benchmark.meanRecall20,
+          meanAdjustedRecall20: benchmark.meanAdjustedRecall20,
+          meanRetrievalRecall: benchmark.meanRetrievalRecall,
+          meanMRR: benchmark.meanMRR,
+          meanNDCG20: benchmark.meanNDCG20,
+          meanPrecision10: benchmark.meanPrecision10
+        },
+        cases,
+        lowestRecallCases: cases.slice().sort((a, b) => (a.recall20 ?? 0) - (b.recall20 ?? 0)).slice(0, 5),
+        inspector: {
+          retainedRuns: history.length,
+          latestRuns: history.slice(-2).map(run => ({
+            number: run.number,
+            status: run.status,
+            sourceName: run.summary?.sourceName,
+            resultCount: run.summary?.resultCount,
+            durationMs: run.durationMs,
+            streamCount: run.liveSearch?.streams?.length || 0,
+            completedStreams: run.liveSearch?.completedStreams || 0,
+            previewCount: run.liveSearch?.previewHistory?.length || 0
+          })),
+          comparison: comparison ? {
+            outcomeComparison: comparison.outcomeComparison,
+            changedInputs: comparison.changes,
+            retrievalStreams: comparison.retrieval,
+            finalRanking: comparison.finalRanking,
+            sharedCandidateScoreChanges: comparison.sharedCandidateScoreChanges.length
+          } : null,
+          activeSearch: window.ManaSearchInspector.getActiveSearch()
+        }
+      };
+    });
+    console.log('Live end-to-end search benchmark:', JSON.stringify(liveSearchEvaluation));
     const summarize = (label, suite) => {
       if (suite?.checks) {
         const failed = suite.checks.filter(x => !x.pass);
@@ -340,7 +414,18 @@ async function main() {
       if (failed.length) console.log(failed.map(x => `${x.id}: ${x.error || JSON.stringify(x)}`).join('\n'));
       return failed.length === 0 && suite?.pass !== false && (suite?.passRate == null || suite.passRate === 1);
     };
+    const liveSearchPass =
+      liveSearchEvaluation.summary?.benchmarkCompleted === true &&
+      liveSearchEvaluation.summary?.completedTests === liveSearchEvaluation.summary?.totalTests &&
+      liveSearchEvaluation.summary?.erroredTests === 0 &&
+      liveSearchEvaluation.summary?.blockedTests === 0 &&
+      liveSearchEvaluation.inspector?.retainedRuns >= 2 &&
+      liveSearchEvaluation.inspector?.latestRuns?.every(run => run.status !== 'error') &&
+      liveSearchEvaluation.inspector?.comparison?.outcomeComparison?.rankingComparisonValid === true;
+    console.log('Live search benchmark summary:', JSON.stringify(liveSearchEvaluation.summary));
+    console.log('Lowest-recall live search cases:', JSON.stringify(liveSearchEvaluation.lowestRecallCases));
     const suitePasses = [
+      liveSearchPass,
       summarize('Core mechanical checks', report.base),
       summarize('Mechanical family/ranking regressions', report.mechanical),
       summarize('Repeatability regression suite', report.repeatability),
