@@ -53,7 +53,8 @@
     highlightedText: visibleText('#selected-highlight, #highlighted-text, .highlight-selection-summary'),
     searchIntent: {
       status: visibleText('#search-intent-status-text'),
-      explanation: visibleText('#search-intent-body')
+      explanation: visibleText('#search-intent-body'),
+      productionModel: window.ManaSearchDebug?.getLiveIntent?.() || null
     },
     searchConfiguration: {
       methods: visibleText('#selected-methods-badge'),
