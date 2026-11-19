@@ -453,9 +453,11 @@
     else if (focusName && fixture.expectations.focusBehavior === 'must-not-appear') focusPass = focusRank === null;
     else if (focusName && fixture.expectations.focusBehavior === 'rank-at-most') focusPass = focusRank !== null && focusRank <= fixture.expectations.maxRank;
     const assertionsConfigured = rankingPass !== null || focusPass !== null;
-    const pass = assertionsConfigured && inputsMatch && rankingPass !== false && focusPass !== false;
+    // Null means no verdict: different inputs or no configured assertions must not be counted as a pass/failure.
+    const pass = inputsMatch && assertionsConfigured ? rankingPass !== false && focusPass !== false : null;
     return {
       comparable: inputsMatch,
+      assertionsConfigured,
       pass,
       status: !inputsMatch ? 'input-mismatch' : !assertionsConfigured ? 'no-expectations' : pass ? 'pass' : 'fail',
       case: { title: fixture.title, sourceRunNumber: fixture.source.runNumber ?? null },
