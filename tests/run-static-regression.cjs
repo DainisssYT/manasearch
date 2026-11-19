@@ -80,6 +80,7 @@ check('mechanical suite contains blink, token-multiplier, and cadence guards', (
     'token-multiplier-is-not-token-creation',
     'graveyard-return-destination-is-mechanically-distinct',
     'animate-dead-aura-context-is-recognized-as-graveyard-reanimation',
+    'animate-dead-entry-return-is-not-misclassified-as-a-repeatable-engine',
     'explicit-hand-to-battlefield-remains-cheat-into-play',
     'ordinary-enchanted-creature-return-does-not-invent-graveyard-source',
     'counterspell-trailing-mana-value-restriction-is-preserved',
