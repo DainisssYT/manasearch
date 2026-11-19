@@ -98,7 +98,7 @@ async function main() {
           number: 1,
           completedAt: '2026-11-19T08:00:00.000Z',
           pipeline: {
-            request: { sourceCard: { name: 'Source A' }, highlights: [{ text: 'draw a card' }], constraints: {}, methods: { functional: true }, ordering: 'overall' },
+            request: { sourceCard: { name: 'Source A' }, highlights: [{ text: 'draw a card' }], intent: { sourceText: 'draw a card', semanticText: 'draw a card' }, constraints: {}, methods: { functional: true }, ordering: 'overall' },
             streams: { 'Search B': ['shared card', 'removed card'] },
             finalResults: [{ rank: 1, name: 'Shared Card' }, { rank: 2, name: 'Removed Card' }],
             candidates: [
@@ -111,7 +111,7 @@ async function main() {
           number: 2,
           completedAt: '2026-11-19T08:01:00.000Z',
           pipeline: {
-            request: { sourceCard: { name: 'Source A' }, highlights: [{ text: 'draw two cards' }], constraints: {}, methods: { functional: true }, ordering: 'overall' },
+            request: { sourceCard: { name: 'Source A' }, highlights: [{ text: 'draw two cards' }], intent: { sourceText: 'draw two cards', semanticText: 'draw two cards' }, constraints: {}, methods: { functional: true }, ordering: 'overall' },
             streams: { 'Search B': ['shared card', 'added card'] },
             finalResults: [{ rank: 1, name: 'Added Card' }, { rank: 2, name: 'Shared Card' }],
             candidates: [
@@ -126,6 +126,7 @@ async function main() {
         return {
           compareApiAvailable: !!comparison && Array.isArray(comparison.finalRanking?.rankChanges),
           detectsChangedHighlight: comparison.changes.highlightsChanged === true,
+          detectsChangedInterpretation: comparison.changes.intentChanged === true,
           detectsAddedAndRemovedCards: comparison.finalRanking.addedInLater.includes('Added Card') && comparison.finalRanking.missingFromLater.includes('Removed Card'),
           detectsRankMovement: comparison.finalRanking.rankChanges.some(item => item.name === 'Shared Card' && item.earlierRank === 1 && item.laterRank === 2),
           detectsScoreDelta: !!sharedScore && Math.abs(sharedScore.delta - 0.10) < 1e-9,
