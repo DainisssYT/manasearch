@@ -234,7 +234,76 @@ async function main() {
                 testStatus: semantic.testStatus || 'unknown',
                 recall20: semantic.recall20 ?? null, mrr: semantic.mrr ?? null,
                 ndcg20: semantic.ndcg20 ?? null, cardRanks: semantic.cardRanks || {}
-              } : null
+              } : null,
+              scoringCandidateCount: Number(diagnostics.scoredNames?.size ?? diagnostics.scoredNames?.length ?? 0),
+              pipelineStages: {
+                retrieved: diagnostics.rawCandidateNames?.size ?? diagnostics.rawCandidateNames?.length ?? 0,
+                passedFilters: diagnostics.passedFilterNames?.size ?? diagnostics.passedFilterNames?.length ?? 0,
+                deduplicated: diagnostics.dedupedNames?.size ?? diagnostics.dedupedNames?.length ?? 0,
+                meaningfulParse: diagnostics.meaningfulParseNames?.size ?? diagnostics.meaningfulParseNames?.length ?? 0,
+                scored: diagnostics.scoredNames?.size ?? diagnostics.scoredNames?.length ?? 0,
+                passedRelevanceFloor: diagnostics.passedRelevanceFloorNames?.size ?? diagnostics.passedRelevanceFloorNames?.length ?? 0,
+                finalRanked: diagnostics.finalRankedNames?.size ?? diagnostics.finalRankedNames?.length ?? 0
+              },
+              topRankedCandidates: (strict.rankedResults || []).slice(0, 25).map((rawName, index) => {
+                const name = typeof rawName === 'string' ? rawName : rawName?.name || '';
+                const key = String(name).trim().toLowerCase();
+                const score = strict.scoreByName instanceof Map
+                  ? strict.scoreByName.get(key) || null
+                  : null;
+                return {
+                  rank: index + 1,
+                  name,
+                  similarityScore: score?.similarityScore ?? null,
+                  mechanicalScore: score?.mechanicalScore ?? null,
+                  functionScore: score?.functionScore ?? null,
+                  effectAwareFunctionSemanticScore: score?.effectAwareFunctionSemanticScore ?? null,
+                  functionSemanticEvidence: score?.functionSemanticEvidence ?? null,
+                  roleScore: score?.roleScore ?? null,
+                  contextScore: score?.contextScore ?? score?.oracleSemanticScore ?? null,
+                  highlightIntentScore: score?.highlightIntentScore ?? null,
+                  exactnessScore: score?.exactnessScore ?? null,
+                  categoryScore: score?.categoryScore ?? null,
+                  rankingIntent: score?.rankingIntent ?? null,
+                  rankingIntentRole: score?.rankingIntentRole ?? null
+                };
+              }),
+              expectedCardEvidence: (item.expected || []).map(name => {
+                const key = String(name || '').trim().toLowerCase();
+                const contains = set => set instanceof Set
+                  ? set.has(key)
+                  : Array.isArray(set) ? set.some(value => String(value || '').trim().toLowerCase() === key) : false;
+                const score = strict.scoreByName instanceof Map ? strict.scoreByName.get(key) || null : null;
+                const rejection = diagnostics.filterFailureReasons instanceof Map
+                  ? diagnostics.filterFailureReasons.get(key) || diagnostics.filterFailureReasons.get(name) || null
+                  : null;
+                return {
+                  name,
+                  rank: strict.cardRanks?.[name] ?? null,
+                  score: score ? {
+                    similarityScore: score.similarityScore ?? null,
+                    mechanicalScore: score.mechanicalScore ?? null,
+                    functionScore: score.functionScore ?? null,
+                    effectAwareFunctionSemanticScore: score.effectAwareFunctionSemanticScore ?? null,
+                    roleScore: score.roleScore ?? null,
+                    contextScore: score.contextScore ?? score.oracleSemanticScore ?? null,
+                    highlightIntentScore: score.highlightIntentScore ?? null,
+                    exactnessScore: score.exactnessScore ?? null,
+                    rankingIntent: score.rankingIntent ?? null,
+                    functionSemanticEvidence: score.functionSemanticEvidence ?? null
+                  } : null,
+                  stages: {
+                    retrieved: contains(diagnostics.rawCandidateNames),
+                    passedFilters: contains(diagnostics.passedFilterNames),
+                    deduplicated: contains(diagnostics.dedupedNames),
+                    meaningfulParse: contains(diagnostics.meaningfulParseNames),
+                    scored: contains(diagnostics.scoredNames),
+                    passedRelevanceFloor: contains(diagnostics.passedRelevanceFloorNames),
+                    finalRanked: contains(diagnostics.finalRankedNames)
+                  },
+                  hardFilterRejection: rejection
+                };
+              })
             };
           })
         },
@@ -273,6 +342,18 @@ async function main() {
       mrr: test.metrics.mrr,
       durationMs: test.durationMs
     })));
+    const diagnosticFailures = compact.tests.filter(test =>
+      test.status !== 'ok' || (test.metrics.recall20 ?? 1) < 0.999
+    );
+    for (const test of diagnosticFailures) {
+      console.log('Search-quality evidence — ' + test.name + ':');
+      console.log(JSON.stringify({
+        expectedCards: test.expectedCardEvidence,
+        topRankedCandidates: test.topRankedCandidates.slice(0, 12),
+        pipelineStages: test.pipelineStages,
+        scoringCandidateCount: test.scoringCandidateCount
+      }, null, 2));
+    }
     console.log('Benchmark JSON: ' + outputPath);
 
     const valid = compact.run.benchmarkCompleted &&
