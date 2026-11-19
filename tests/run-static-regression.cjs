@@ -375,6 +375,16 @@ check('developer inspector observes the production pipeline without changing sco
   assert.match(inspector, /MAX_SEARCH_RUNS = 6/);
   assert.match(inspector, /searchRuns: state\.searchRuns/);
   assert.match(inspector, /sharedCandidateScoreChanges/);
+
+  assert.match(inspector, /changedInputFields = \['sourceCard'.*'broad', 'divergent'\]/);
+  assert.match(inspector, /requestFields = \['sourceCard'.*'broad', 'divergent'\]/);
+  assert.match(inspector, /capturedListOverlap/);
+  assert.match(inspector, /Changed factors:/);
+  assert.match(inspector, /Provisional results still visible/);
+  assert.match(inspector, /return lines\.join\('\\\\n'\)/);
+  assert.match(app, /provisionalResultCount/);
+  assert.match(app, /Search stopped before the final ranking/);
+  assert.match(app, /searchHasFinalRanking = true/);
   assert.match(inspector, /rankChanges/);
   assert.match(inspector, /data-action="download"/);
   assert.match(inspector, /manasearch-diagnostics-export-v2/);
