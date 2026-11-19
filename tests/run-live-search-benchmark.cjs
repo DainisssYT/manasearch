@@ -78,7 +78,11 @@ function compactReport(report, runtime) {
         ndcg20: semantic.ndcg20 ?? null, cardRanks: semantic.cardRanks || {}
       } : null,
       streamCoverage,
-      searchSignals: diagnostics.benchmarkSignals || null
+      searchSignals: diagnostics.benchmarkSignals || null,
+      scoringCandidateCount: item.scoringCandidateCount ?? null,
+      pipelineStages: item.pipelineStages || {},
+      topRankedCandidates: item.topRankedCandidates || [],
+      expectedCardEvidence: item.expectedCardEvidence || []
     };
   });
   return {
