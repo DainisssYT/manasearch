@@ -462,12 +462,14 @@
       comparedRun: { number: run.number ?? null, completedAt: run.completedAt || null },
       inputCheck: { matches: inputsMatch, changedFields: inputDifferences },
       scoringEvolution: {
-        baselineScoredCount: baselineCandidates.size,
-        currentScoredCount: currentCandidates.size,
-        sharedScoredCount: sharedScoredNames.length,
-        newlyScoredCandidates: newlyScored.slice(0, 50),
-        noLongerScoredCandidates: noLongerScored.slice(0, 50),
-        changedCandidates: scoreChanges
+        baselineScoredSampleCount: baselineCandidates.size,
+        currentScoredSampleCount: currentCandidates.size,
+        sharedScoredSampleCount: sharedScoredNames.length,
+        newlyPresentInScoredSample: newlyScored.slice(0, 50),
+        noLongerPresentInScoredSample: noLongerScored.slice(0, 50),
+        changedSampleCandidates: scoreChanges,
+        sampleLimit: 300,
+        interpretation: 'Scored-candidate comparisons use the retained top-300 sample from each run. A card entering or leaving this sample does not prove it was newly scored or stopped being scored outside the captured sample.'
       },
       focusCheck: focusName ? {
         candidate: focusName,
