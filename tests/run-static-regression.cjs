@@ -446,6 +446,9 @@ check('developer inspector observes the production pipeline without changing sco
   assert.match(app, /previousRuleExilesTopLibraryCard/);
   assert.match(app, /delayedTopLibraryAcquisition/);
   assert.match(app, /compound-draw-and-life-loss-retains-both-distinct-actions/);
+  assert.match(app, /isReplacementCreatePrecursor/);
+  assert.match(app, /excludeFunctions: \['token_creation'\]/);
+  assert.match(app, /necropotenceEffects/);
   assert.match(app, /top-library-card-put-into-hand-is-card-acquisition-not-tutor/);
   assert.match(app, /life-paid-top-library-acquisition-matches-card-draw-semantically/);
   assert.match(app, /status: searchOutcome/);
