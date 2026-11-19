@@ -921,6 +921,7 @@
         runNumber: run.number ?? null,
         completedAt: run.completedAt || null,
         appBuild: pipeline.appBuild || run.appBuild || null,
+        dataBuildId: pipeline.dataBuildId || run.dataBuildId || null,
         request: cloneJson(pipeline.request || {}),
         ui: cloneJson(run.ui || {})
       },
@@ -992,14 +993,23 @@
         assertionsConfigured: false,
         pass: null,
         status: runStatus === 'cancelled' ? 'search-cancelled' : 'search-error',
-        case: { title: fixture.title, sourceRunNumber: fixture.source.runNumber ?? null, appBuild: fixture.source.appBuild || fixture.diagnostics?.appBuild || null },
+        case: {
+          title: fixture.title,
+          sourceRunNumber: fixture.source.runNumber ?? null,
+          appBuild: fixture.source.appBuild || fixture.diagnostics?.appBuild || null,
+          dataBuildId: fixture.source.dataBuildId || fixture.diagnostics?.dataBuildId || null
+        },
         comparedRun: {
           number: run.number ?? null,
           status: runStatus,
           appBuild: run.pipeline?.appBuild || run.appBuild || null,
+          dataBuildId: run.pipeline?.dataBuildId || run.dataBuildId || null,
           buildChanged: Boolean((fixture.source.appBuild || fixture.diagnostics?.appBuild) &&
             (run.pipeline?.appBuild || run.appBuild) &&
             (fixture.source.appBuild || fixture.diagnostics?.appBuild) !== (run.pipeline?.appBuild || run.appBuild)),
+          dataBuildChanged: Boolean((fixture.source.dataBuildId || fixture.diagnostics?.dataBuildId) &&
+            (run.pipeline?.dataBuildId || run.dataBuildId) &&
+            (fixture.source.dataBuildId || fixture.diagnostics?.dataBuildId) !== (run.pipeline?.dataBuildId || run.dataBuildId)),
           errorMessage: run.errorMessage || run.summary?.errorMessage || run.pipeline?.outcome?.errorMessage || ''
         },
         interpretation: runStatus === 'cancelled'
@@ -1009,6 +1019,13 @@
     }
     const expectedRequest = fixture.source.request || {};
     const actualRequest = run.pipeline.request || {};
+    const baselineAppBuild = fixture.source.appBuild || fixture.diagnostics?.appBuild || null;
+    const currentAppBuild = run.pipeline.appBuild || run.appBuild || null;
+    const baselineDataBuild = fixture.source.dataBuildId || fixture.diagnostics?.dataBuildId || null;
+    const currentDataBuild = run.pipeline.dataBuildId || run.dataBuildId || null;
+    const appBuildChanged = Boolean(baselineAppBuild && currentAppBuild && baselineAppBuild !== currentAppBuild);
+    const dataBuildKnown = Boolean(baselineDataBuild && currentDataBuild);
+    const dataBuildChanged = Boolean(dataBuildKnown && baselineDataBuild !== currentDataBuild);
     // Only user-controlled request fields invalidate a replay. Intent and query plans are outputs
     // of the system under test: changes to them should be reported and evaluated, not rejected.
     const requestFields = ['inputSnapshotVersion', 'sourceCard', 'highlights', 'constraints', 'methods', 'ordering', 'searchDepthPercent', 'orderingFeatures', 'rankingWeights', 'format', 'color', 'broad', 'divergent'];
@@ -1078,24 +1095,46 @@
     const completeRun = runStatus === 'completed';
     // A warning-bearing run can still be inspected, but it cannot prove that omitted cards were
     // truly irrelevant: an interrupted retrieval lane may simply not have found them.
-    const pass = inputsMatch && assertionsConfigured && completeRun
+    const pass = inputsMatch && assertionsConfigured && completeRun && !dataBuildChanged
       ? rankingPass !== false && focusPass !== false : null;
+    const comparisonStatus = !inputsMatch ? 'input-mismatch'
+      : !completeRun ? 'partial-run'
+        : dataBuildChanged ? 'dataset-changed'
+          : !assertionsConfigured ? 'no-expectations'
+            : pass ? 'pass' : 'fail';
     return {
-      comparable: inputsMatch,
+      comparable: inputsMatch && !dataBuildChanged,
       assertionsConfigured,
       pass,
-      status: !inputsMatch ? 'input-mismatch' : !completeRun ? 'partial-run' : !assertionsConfigured ? 'no-expectations' : pass ? 'pass' : 'fail',
-      case: { title: fixture.title, sourceRunNumber: fixture.source.runNumber ?? null, appBuild: fixture.source.appBuild || fixture.diagnostics?.appBuild || null },
+      status: comparisonStatus,
+      case: {
+        title: fixture.title,
+        sourceRunNumber: fixture.source.runNumber ?? null,
+        appBuild: baselineAppBuild,
+        dataBuildId: baselineDataBuild
+      },
       comparedRun: {
         number: run.number ?? null,
         status: runStatus,
-        appBuild: run.pipeline?.appBuild || run.appBuild || null,
-        buildChanged: Boolean((fixture.source.appBuild || fixture.diagnostics?.appBuild) &&
-          (run.pipeline?.appBuild || run.appBuild) &&
-          (fixture.source.appBuild || fixture.diagnostics?.appBuild) !== (run.pipeline?.appBuild || run.appBuild)),
+        appBuild: currentAppBuild,
+        dataBuildId: currentDataBuild,
+        buildChanged: appBuildChanged,
+        dataBuildChanged,
         warning: runStatus === 'completed_with_warnings' ? (run.errorMessage || run.summary?.errorMessage || run.pipeline?.outcome?.errorMessage || '') : '',
         completedAt: run.completedAt || null,
         durationMs: run.durationMs ?? run.summary?.durationMs ?? run.pipeline?.outcome?.durationMs ?? null
+      },
+      revisionCheck: {
+        appBuildChanged,
+        dataBuildKnown,
+        dataBuildChanged,
+        baselineDataBuild,
+        currentDataBuild,
+        interpretation: dataBuildChanged
+          ? 'The card/semantic dataset changed between the baseline and replay. Ranking differences cannot be attributed to the app-code change; update or re-confirm the expected behavior against the new corpus, then capture a new baseline.'
+          : dataBuildKnown
+            ? 'The dataset revision is fixed between baseline and replay.'
+            : 'At least one regression-case endpoint lacks a dataset revision. The case remains usable, but a data refresh cannot be ruled out.'
       },
       inputCheck: { matches: inputsMatch, changedFields: inputDifferences },
       derivedRequestChanges,
@@ -1131,9 +1170,13 @@
       } : null,
       interpretation: !inputsMatch
         ? 'The compared run used different user-controlled inputs. Repeat the source card, selected highlights, constraints, methods, and ordering before judging the algorithm change.'
-        : derivedRequestChanges.length
-          ? 'User-controlled inputs match. The interpreted intent or generated retrieval plan changed; these are outputs of the system under test and are shown for diagnosis rather than treated as replay mismatches.'
-          : 'A pass requires matching user-controlled inputs and satisfying every configured focus-card and expected-ranking assertion.'
+        : dataBuildChanged
+          ? 'The dataset changed. The report still shows ranking and score differences for diagnosis, but does not issue a pass/fail verdict that could misattribute a data refresh to the app algorithm.'
+          : !dataBuildKnown
+            ? 'The run inputs match, but dataset provenance is incomplete. The ranking assertion is shown; inspect the corpus revision before attributing any regression to app code.'
+            : derivedRequestChanges.length
+              ? 'User-controlled inputs match. The interpreted intent or generated retrieval plan changed; these are outputs of the system under test and are shown for diagnosis rather than treated as replay mismatches.'
+              : 'A pass requires matching user-controlled inputs, a fixed dataset revision, and satisfying every configured focus-card and expected-ranking assertion.'
     };
   };
   const selectedRegressionRun = select => state.searchRuns.find(run => String(run.number) === select.value) || null;
