@@ -416,6 +416,29 @@ async function main() {
           ndcg20: strict.ndcg20 ?? null,
           precision10: strict.precision10 ?? null,
           expectedRanks: strict.cardRanks || {},
+          // Print the leading names and score channels for low-recall cases. This makes it possible
+          // to inspect which false positives outrank known-good cards without rerunning the app
+          // manually or relying on a browser screenshot.
+          topRankedCandidates: (strict.recall20 ?? 1) < 0.5
+            ? (strict.rankedResults || []).slice(0, 20).map((name, index) => {
+                const score = strict.scoreByName instanceof Map ? (strict.scoreByName.get(String(name || '').toLowerCase()) || null) : null;
+                return {
+                  rank: index + 1,
+                  name,
+                  similarityScore: score?.similarityScore ?? null,
+                  mechanicalScore: score?.mechanicalScore ?? null,
+                  functionScore: score?.functionScore ?? null,
+                  roleScore: score?.roleScore ?? null,
+                  contextScore: score?.contextScore ?? score?.oracleSemanticScore ?? null,
+                  highlightIntentScore: score?.highlightIntentScore ?? null,
+                  exactnessScore: score?.exactnessScore ?? null,
+                  mechanicRankingTier: score?.mechanicRankingTier ?? null,
+                  mechanicRankingTierLabel: score?.mechanicRankingTierLabel ?? null,
+                  rankingIntent: score?.rankingIntent ?? null,
+                  rankingIntentRole: score?.rankingIntentRole ?? null
+                };
+              })
+            : [],
           expectedCardEvidence: (item.expected || []).map(name => {
             const key = String(name || '').trim().toLowerCase();
             const score = strict.scoreByName instanceof Map ? (strict.scoreByName.get(key) || null) : null;
