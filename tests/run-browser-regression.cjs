@@ -70,6 +70,7 @@ async function main() {
       typeof window.runLocalBenchmarkInApp === 'function' &&
       typeof window.ManaSearchDebug?.getSnapshot === 'function' &&
       typeof window.ManaSearchDebug?.getLiveIntent === 'function' &&
+      typeof window.ManaSearchDebug?.normalizeRetrievalStreamDisplayLabel === 'function' &&
       typeof window.ManaSearchInspector?.getRunHistory === 'function' &&
       typeof window.ManaSearchInspector?.getActiveSearch === 'function' &&
       typeof window.ManaSearchInspector?.compareRuns === 'function' &&
@@ -518,7 +519,7 @@ async function main() {
       })(),
       developerDiagnostics: (() => {
         const snapshot = window.ManaSearchDebug.getSnapshot();
-        return { available: !!snapshot && typeof snapshot === 'object', serializable: JSON.stringify(snapshot).length > 0, hasPipelineFields: ['request', 'funnel', 'streams', 'streamFailures', 'candidates', 'filterRejections'].every(key => Object.prototype.hasOwnProperty.call(snapshot, key)), liveIntentAvailable: typeof window.ManaSearchDebug.getLiveIntent === 'function' };
+        return { available: !!snapshot && typeof snapshot === 'object', serializable: JSON.stringify(snapshot).length > 0, hasPipelineFields: ['request', 'funnel', 'streams', 'streamFailures', 'candidates', 'filterRejections'].every(key => Object.prototype.hasOwnProperty.call(snapshot, key)), liveIntentAvailable: typeof window.ManaSearchDebug.getLiveIntent === 'function', functionalStreamFailureLabelsNormalize: window.ManaSearchDebug.normalizeRetrievalStreamDisplayLabel('Search F #3 (Functional Match)') === 'Functional Match' && window.ManaSearchDebug.normalizeRetrievalStreamDisplayLabel('Exact Phrase') === 'Exact Phrase' };
       })()
     }));
     // Exercise the real end-to-end local search path, not only isolated scorer helpers.
