@@ -246,8 +246,16 @@
       methods: stableJson(a.request?.methods) !== stableJson(b.request?.methods),
       ordering: stableJson(a.request?.ordering) !== stableJson(b.request?.ordering),
       format: stableJson(a.request?.format) !== stableJson(b.request?.format),
-      color: stableJson(a.request?.color) !== stableJson(b.request?.color)
+      color: stableJson(a.request?.color) !== stableJson(b.request?.color),
+      broad: stableJson(a.request?.broad) !== stableJson(b.request?.broad),
+      divergent: stableJson(a.request?.divergent) !== stableJson(b.request?.divergent),
+      plannedStreams: stableJson(a.request?.plannedStreams) !== stableJson(b.request?.plannedStreams),
+      queryPlans: stableJson(a.request?.queryPlans) !== stableJson(b.request?.queryPlans)
     };
+    const changedInputFields = ['sourceCard', 'highlights', 'constraints', 'methods', 'ordering', 'format', 'color']
+      .filter(field => requestChanges[field]);
+    const changedDerivedFields = ['intent', 'broad', 'divergent', 'plannedStreams', 'queryPlans']
+      .filter(field => requestChanges[field]);
     const aError = earlier.errorMessage || earlier.summary?.errorMessage || a.outcome?.errorMessage || '';
     const bError = later.errorMessage || later.summary?.errorMessage || b.outcome?.errorMessage || '';
     return {
@@ -282,7 +290,13 @@
         methodsChanged: requestChanges.methods,
         orderingChanged: requestChanges.ordering,
         formatChanged: requestChanges.format,
-        colorChanged: requestChanges.color
+        colorChanged: requestChanges.color,
+        broadChanged: requestChanges.broad,
+        divergentChanged: requestChanges.divergent,
+        plannedStreamsChanged: requestChanges.plannedStreams,
+        queryPlansChanged: requestChanges.queryPlans,
+        changedInputFields,
+        changedDerivedFields
       },
       retrieval: streamComparison,
       finalRanking: {
@@ -470,8 +484,12 @@
     }
     const expectedRequest = fixture.source.request || {};
     const actualRequest = run.pipeline.request || {};
-    const requestFields = ['sourceCard', 'highlights', 'intent', 'constraints', 'methods', 'ordering', 'format', 'color'];
+    // Only user-controlled request fields invalidate a replay. Intent and query plans are outputs
+    // of the system under test: changes to them should be reported and evaluated, not rejected.
+    const requestFields = ['sourceCard', 'highlights', 'constraints', 'methods', 'ordering', 'format', 'color'];
     const inputDifferences = requestFields.filter(field => stableJson(expectedRequest[field]) !== stableJson(actualRequest[field]));
+    const derivedRequestFields = ['intent', 'broad', 'divergent', 'plannedStreams', 'queryPlans'];
+    const derivedRequestChanges = derivedRequestFields.filter(field => stableJson(expectedRequest[field]) !== stableJson(actualRequest[field]));
     const inputsMatch = inputDifferences.length === 0;
     const actualRanking = regressionFinalRanking(run.pipeline);
     const actualRanks = new Map(actualRanking.map(item => [normalizeCandidateName(item.name), item.rank]));
@@ -545,6 +563,7 @@
         durationMs: run.durationMs ?? run.summary?.durationMs ?? run.pipeline?.outcome?.durationMs ?? null
       },
       inputCheck: { matches: inputsMatch, changedFields: inputDifferences },
+      derivedRequestChanges,
       scoringEvolution: {
         baselineScoredSampleCount: baselineCandidates.size,
         currentScoredSampleCount: currentCandidates.size,
@@ -576,8 +595,10 @@
         rankChanges
       } : null,
       interpretation: !inputsMatch
-        ? 'The compared run used different search inputs. Repeat the original source card, highlights, constraints, methods, and ordering before judging the algorithm change.'
-        : 'A pass requires matching search inputs and satisfying every configured focus-card and expected-ranking assertion.'
+        ? 'The compared run used different user-controlled inputs. Repeat the source card, selected highlights, constraints, methods, and ordering before judging the algorithm change.'
+        : derivedRequestChanges.length
+          ? 'User-controlled inputs match. The interpreted intent or generated retrieval plan changed; these are outputs of the system under test and are shown for diagnosis rather than treated as replay mismatches.'
+          : 'A pass requires matching user-controlled inputs and satisfying every configured focus-card and expected-ranking assertion.'
     };
   };
   const selectedRegressionRun = select => state.searchRuns.find(run => String(run.number) === select.value) || null;
