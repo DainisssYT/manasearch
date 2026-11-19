@@ -168,10 +168,11 @@ async function main() {
           status: 'error',
           errorMessage: 'Synthetic retrieval failure',
           durationMs: 3200,
-          summary: { sourceName: 'Source A', resultCount: 0, status: 'error', errorMessage: 'Synthetic retrieval failure' },
+          summary: { sourceName: 'Source A', resultCount: 0, provisionalResultCount: 3, status: 'error', errorMessage: 'Synthetic retrieval failure' },
           pipeline: { request: structuredClone(earlier.pipeline.request), finalResults: [] }
         };
         const errorRunComparison = window.ManaSearchInspector.compareRuns(earlier, errorRun);
+        const errorCompareSummaryText = window.ManaSearchInspector.formatCompareSummary(errorRunComparison);
 
         let refusesFailedBaseline = false;
         try { window.ManaSearchInspector.createRegressionCase(errorRun); }
@@ -265,7 +266,7 @@ async function main() {
           number: 11,
           status: 'completed_with_warnings',
           errorMessage: 'Semantic stream timed out',
-          summary: { sourceName: 'Source A', resultCount: 1, status: 'completed_with_warnings', errorMessage: 'Semantic stream timed out' },
+          summary: { sourceName: 'Source A', resultCount: 1, provisionalResultCount: 2, status: 'completed_with_warnings', errorMessage: 'Semantic stream timed out' },
           pipeline: {
             request: structuredClone(earlier.pipeline.request),
             finalResults: [{ rank: 1, name: 'Shared Card' }]
@@ -396,6 +397,9 @@ async function main() {
           regressionRejectsChangedBroadAndDivergentInputs: broadOptionRegression.status === 'input-mismatch' && broadOptionRegression.pass === null &&
             broadOptionRegression.inputCheck.changedFields.includes('broad') && broadOptionRegression.inputCheck.changedFields.includes('divergent'),
           compareMarksFailedRunInvalid: errorRunComparison.outcomeComparison?.rankingComparisonValid === false && errorRunComparison.outcomeComparison?.laterStatus === 'error',
+          compareShowsProvisionalCountsForInterruptedRuns: errorRunComparison.outcomeComparison?.laterProvisionalResultCount === 3 &&
+            partialRunComparison.outcomeComparison?.laterProvisionalResultCount === 2 &&
+            errorCompareSummaryText.includes('Provisional cards still visible: earlier 0 → later 3'),
           compareMarksPartialRunIncomplete: partialRunComparison.outcomeComparison?.rankingComparisonValid === false && partialRunComparison.outcomeComparison?.rankingComparisonAvailable === true && partialRunComparison.outcomeComparison?.rankingComparisonComplete === false,
           compareShowsPipelineStageRecallChanges: comparison.stageProgression.find(stage => stage.stage === 'retrieved')?.addedInLater.includes('Added Card') && comparison.stageProgression.find(stage => stage.stage === 'retrieved')?.missingFromLater.includes('Removed Card'),
           compareShowsScoredSampleTurnover: comparison.scoredCandidateEvolution?.newlyPresentInSample.includes('Added Card') && comparison.scoredCandidateEvolution?.noLongerPresentInSample.includes('Removed Card') && comparison.scoredCandidateEvolution?.sampleLimit === 300,
