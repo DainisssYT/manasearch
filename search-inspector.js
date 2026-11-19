@@ -263,7 +263,18 @@
     }).filter(item =>
       (item.delta !== null && Math.abs(item.delta) > 0.000001) ||
       item.scoreChannelChanges.length > 0 || item.mechanicalBreakdownChanges.length > 0 || item.functionSemanticEvidence.abilityMatchesChanged
-    ).sort((x, y) => Math.abs(y.delta || 0) - Math.abs(x.delta || 0)).slice(0, 40);
+    ).map(item => {
+      const numericChanges = [
+        ...(item.scoreChannelChanges || []),
+        ...(item.mechanicalBreakdownChanges || [])
+      ];
+      const factorMagnitude = numericChanges.reduce((maximum, change) => Math.max(maximum, Math.abs(change.delta || 0)), 0);
+      return { ...item, largestFactorDelta: factorMagnitude };
+    }).sort((x, y) =>
+      Math.max(Math.abs(y.delta || 0), y.largestFactorDelta || 0) -
+      Math.max(Math.abs(x.delta || 0), x.largestFactorDelta || 0) ||
+      Number(y.functionSemanticEvidence.abilityMatchesChanged) - Number(x.functionSemanticEvidence.abilityMatchesChanged)
+    ).slice(0, 40);
     const streamNames = new Set([...Object.keys(a.streams || {}), ...Object.keys(b.streams || {})]);
     const streamComparison = [...streamNames].map(name => {
       const left = new Set((a.streams?.[name] || []).map(value => normalizeCandidateName(value)).filter(Boolean));
