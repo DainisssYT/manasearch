@@ -100,7 +100,7 @@
     <label>Problem and expected behavior <textarea data-regression-notes rows="2" placeholder="Explain what is wrong, what should happen, and why this example matters."></textarea></label>
     <div class="ms-inspector-regression-row">
       <label>Focus card <input type="text" data-regression-focus list="ms-regression-candidates" placeholder="Optional candidate name"><datalist id="ms-regression-candidates"></datalist></label>
-      <label>Focus expectation <select data-regression-behavior><option value="none">No focus assertion</option><option value="must-appear">Must appear</option><option value="must-not-appear">Must not appear</option><option value="rank-at-most">Must rank at or above…</option></select></label>
+      <label>Focus expectation <select data-regression-behavior><option value="none">No focus assertion</option><option value="must-appear">Must appear</option><option value="must-not-appear">Must not appear</option><option value="rank-at-most">Must rank within top N</option></select></label>
       <label>Max rank <input type="number" data-regression-max-rank min="1" max="100" value="3"></label>
     </div>
     <label>Expected top ranking <small>(one card per line, best match first; edit this list to define the correct ranking)</small><textarea data-regression-top rows="5" placeholder="Card name — one per line"></textarea></label>
@@ -368,13 +368,21 @@
       .map(name => String(name || '').trim()).filter(Boolean);
     return checked;
   };
+  const canonicalize = value => {
+    if (Array.isArray(value)) return value.map(canonicalize);
+    if (value && typeof value === 'object') return Object.fromEntries(
+      Object.keys(value).sort().map(key => [key, canonicalize(value[key])])
+    );
+    return value;
+  };
+  const stableJson = value => JSON.stringify(canonicalize(value ?? null));
   const compareRegressionCase = (regressionCase, run) => {
     const fixture = validateRegressionCase(regressionCase);
     if (!run?.pipeline) return { comparable: false, pass: false, message: 'Select a completed search run to compare.' };
     const expectedRequest = fixture.source.request || {};
     const actualRequest = run.pipeline.request || {};
     const requestFields = ['sourceCard', 'highlights', 'intent', 'constraints', 'methods', 'ordering', 'format', 'color'];
-    const inputDifferences = requestFields.filter(field => JSON.stringify(expectedRequest[field] ?? null) !== JSON.stringify(actualRequest[field] ?? null));
+    const inputDifferences = requestFields.filter(field => stableJson(expectedRequest[field]) !== stableJson(actualRequest[field]));
     const inputsMatch = inputDifferences.length === 0;
     const actualRanking = regressionFinalRanking(run.pipeline);
     const actualRanks = new Map(actualRanking.map(item => [normalizeCandidateName(item.name), item.rank]));
