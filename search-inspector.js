@@ -715,6 +715,7 @@
         typeLine: candidate.type_line || '',
         oracleText: candidate.oracle_text || '',
         scores: candidate.scores || {},
+        functionSemanticEvidence: candidate.functionSemanticEvidence || null,
         rankingEvidence: candidate.rankingEvidence || null,
         mechanicalBreakdown: candidate.mechanicalBreakdown || null,
         mechanicalEvidence: candidate.mechanicalEvidence || null,
