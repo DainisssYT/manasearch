@@ -17,6 +17,7 @@ The floating **Developer inspector** is an opt-in, read-only view of the real ap
 - **Pipeline** — the actual search request, retrieval stream membership, stream coverage, functional/exact-highlight query results, candidate funnel counts, timing, semantic calibration, and relevance-floor settings.
 - **Candidates** — up to 300 highest-scoring candidates from the actual scoring pass, including candidates subsequently removed by the relevance floor. Each candidate includes score channels, ranking evidence, parse confidence, retrieval provenance, and relevant ranking flags.
 - **Exclusions** — candidates removed between pipeline stages and the recorded hard-filter / exact-highlight rejection explanations.
+- **Compare runs** — compare two retained searches, including changed inputs, retrieval-stream overlap, final cards added or removed, rank movement, and score deltas for shared candidates.
 - **Timeline** — search start/finish, configuration changes, and worker activity.
 - **Worker** — observed Web Worker request/response payloads.
 
