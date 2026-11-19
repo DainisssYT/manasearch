@@ -44,6 +44,6 @@ The `retrievalEvidence` field is provenance only: it records which streams found
 ## Known interpretation limits
 
 - The candidate list is bounded to the top 300 by pre-floor similarity score; very large searches may have more scored candidates.
-- `preFloorRank` is the candidate's position after score sorting but before relevance-floor pruning. Use `finalResults` for the final displayed rank.
+- `preFloorRank` is the candidate's position after score sorting but before relevance-floor pruning. Use `finalResults` for the final displayed rank. Final result rows also include `preFloorScores` alongside the final post-preference similarity score.
 - Filter rejection reasons are recorded per card name at the first failing hard-filter check; a card can have more than one underlying issue that is not represented by that first reason.
 - Search Deeper and Related Search are separate workflows. This snapshot currently describes the primary Find Similar Cards run.
