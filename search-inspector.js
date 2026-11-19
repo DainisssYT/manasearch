@@ -193,6 +193,62 @@
     const resultLabel = resultCount + ' final result(s)' + (provisionalCount > 0 ? ' + ' + provisionalCount + ' provisional' : '');
     return '#' + (run?.number ?? '?') + ' [' + outcomeLabel + '] ' + source + buildLabel + ' — ' + resultLabel + ' — ' + new Date(run?.completedAt || 0).toLocaleTimeString();
   };
+  const timestampMs = value => {
+    if (typeof value === 'number' && Number.isFinite(value)) return value;
+    const parsed = Date.parse(String(value || ''));
+    return Number.isFinite(parsed) ? parsed : null;
+  };
+  const summarizeLiveSearch = (run, pipeline) => {
+    const live = run?.liveSearch || {};
+    const previews = Array.isArray(live.previewHistory) ? live.previewHistory : [];
+    const startedAt = timestampMs(live.startedAt || pipeline?.outcome?.startedAt);
+    const firstPreviewAt = previews.length ? timestampMs(previews[0].at) : null;
+    const streamRows = Array.isArray(live.streams) ? live.streams : [];
+    const completedStreams = Number(live.completedStreams) || streamRows.filter(stream =>
+      stream.status === 'completed' || (stream.done && !stream.failed)
+    ).length;
+    const failedStreams = Number(live.failedStreams) || streamRows.filter(stream =>
+      stream.failed || stream.status === 'failed' || stream.status === 'completed_with_warnings'
+    ).length;
+    const settledStreams = Number(live.settledStreams) || completedStreams + failedStreams;
+    const finalNames = (pipeline?.finalResults || []).slice(0, 10).map(item => normalizeCandidateName(item.name)).filter(Boolean);
+    const lastPreview = previews[previews.length - 1] || live.preview || null;
+    const previewNames = (lastPreview?.topNames || []).slice(0, 10).map(normalizeCandidateName).filter(Boolean);
+    const intersection = previewNames.filter(name => finalNames.includes(name)).length;
+    const union = new Set([...previewNames, ...finalNames]).size;
+    const adjacentPreviewOverlap = [];
+    for (let i = 1; i < previews.length; i++) {
+      const before = new Set((previews[i - 1].topNames || []).map(normalizeCandidateName).filter(Boolean));
+      const after = new Set((previews[i].topNames || []).map(normalizeCandidateName).filter(Boolean));
+      const shared = [...before].filter(name => after.has(name)).length;
+      const total = new Set([...before, ...after]).size;
+      if (total) adjacentPreviewOverlap.push(shared / total);
+    }
+    const duration = run?.durationMs ?? run?.summary?.durationMs ?? live.durationMs ?? pipeline?.outcome?.durationMs ?? null;
+    return {
+      status: run?.status || run?.summary?.status || live.status || pipeline?.outcome?.status || 'unknown',
+      durationMs: Number.isFinite(Number(duration)) ? Number(duration) : null,
+      firstPreviewLatencyMs: startedAt !== null && firstPreviewAt !== null ? Math.max(0, firstPreviewAt - startedAt) : null,
+      previewUpdateCount: previews.length,
+      progressUpdateCount: Array.isArray(live.progressHistory) ? live.progressHistory.length : 0,
+      completedStreams,
+      failedStreams,
+      settledStreams,
+      totalStreams: Number(live.totalStreams) || streamRows.length,
+      lastPreviewResultCount: lastPreview?.resultCount ?? null,
+      lastPreviewPhase: lastPreview?.phase || null,
+      previewToFinalTop10Overlap: previewNames.length && finalNames.length ? Number((intersection / Math.max(1, union)).toFixed(4)) : null,
+      meanAdjacentPreviewTop10Overlap: adjacentPreviewOverlap.length
+        ? Number((adjacentPreviewOverlap.reduce((sum, value) => sum + value, 0) / adjacentPreviewOverlap.length).toFixed(4))
+        : null,
+      previewTop10: lastPreview?.topNames || [],
+      finalTop10: (pipeline?.finalResults || []).slice(0, 10).map(item => item.name)
+    };
+  };
+  const liveMetricDelta = (earlier, later, field) => {
+    const left = earlier?.[field], right = later?.[field];
+    return Number.isFinite(left) && Number.isFinite(right) ? right - left : null;
+  };
   const compareRuns = (earlier, later) => {
     if (!earlier || !later) return { message: 'Select two retained searches to compare. At least two searches are required.' };
     const a = earlier.pipeline || {};
@@ -519,6 +575,22 @@
           ? 'The retained ranking, retrieval membership, stage membership, and scored sample were stable across these same-build runs.'
           : 'A repeatability verdict requires completed runs with identical captured inputs and the same known app and dataset revisions.'
     };
+    const earlierLiveSearch = summarizeLiveSearch(earlier, a);
+    const laterLiveSearch = summarizeLiveSearch(later, b);
+    const liveSearchComparison = {
+      earlier: earlierLiveSearch,
+      later: laterLiveSearch,
+      deltas: {
+        durationMs: liveMetricDelta(earlierLiveSearch, laterLiveSearch, 'durationMs'),
+        firstPreviewLatencyMs: liveMetricDelta(earlierLiveSearch, laterLiveSearch, 'firstPreviewLatencyMs'),
+        previewUpdateCount: liveMetricDelta(earlierLiveSearch, laterLiveSearch, 'previewUpdateCount'),
+        completedStreams: liveMetricDelta(earlierLiveSearch, laterLiveSearch, 'completedStreams'),
+        failedStreams: liveMetricDelta(earlierLiveSearch, laterLiveSearch, 'failedStreams'),
+        previewToFinalTop10Overlap: liveMetricDelta(earlierLiveSearch, laterLiveSearch, 'previewToFinalTop10Overlap'),
+        meanAdjacentPreviewTop10Overlap: liveMetricDelta(earlierLiveSearch, laterLiveSearch, 'meanAdjacentPreviewTop10Overlap')
+      },
+      interpretation: 'Live metrics describe responsiveness and provisional-result stability, separately from the authoritative final ranking. A lower latency is faster; higher preview/final overlap and adjacent-preview overlap indicate that provisional top cards better anticipate the final order.'
+    };
     return {
       earlier: {
         number: earlier.number, status: aStatus, appBuild: earlierBuild, dataBuildId: earlierDataBuild, errorMessage: aError,
@@ -531,6 +603,7 @@
         completedAt: later.completedAt, request: b.request
       },
       repeatabilityCheck,
+      liveSearchComparison,
       outcomeComparison: {
         earlierStatus: aStatus,
         laterStatus: bStatus,
@@ -702,6 +775,26 @@
     if (outcome.earlierDataBuild || outcome.laterDataBuild) {
       lines.push('Card/semantic dataset: ' + (outcome.earlierDataBuild || 'unknown') + ' → ' +
         (outcome.laterDataBuild || 'unknown') + (outcome.dataBuildChanged ? ' (different dataset revisions)' : ''));
+    }
+    if (comparison.liveSearchComparison) {
+      const live = comparison.liveSearchComparison;
+      const fmtMs = value => value == null ? 'n/a' : (Number(value) / 1000).toFixed(2) + 's';
+      const fmtDelta = value => value == null ? 'n/a' : (value > 0 ? '+' : '') + (Number(value) / 1000).toFixed(2) + 's';
+      const fmtPercent = value => value == null ? 'n/a' : Math.round(value * 100) + '%';
+      lines.push('Live-search experience (earlier → later):');
+      lines.push('  Time to first preview: ' + fmtMs(live.earlier.firstPreviewLatencyMs) + ' → ' +
+        fmtMs(live.later.firstPreviewLatencyMs) + ' (' + fmtDelta(live.deltas.firstPreviewLatencyMs) + ')');
+      lines.push('  Full search duration: ' + fmtMs(live.earlier.durationMs) + ' → ' +
+        fmtMs(live.later.durationMs) + ' (' + fmtDelta(live.deltas.durationMs) + ')');
+      lines.push('  Preview updates: ' + live.earlier.previewUpdateCount + ' → ' + live.later.previewUpdateCount +
+        ' (' + (live.deltas.previewUpdateCount > 0 ? '+' : '') + (live.deltas.previewUpdateCount ?? 'n/a') + ')');
+      lines.push('  Retrieval lanes settled/failed: ' + live.earlier.settledStreams + '/' + live.earlier.totalStreams +
+        ' settled, ' + live.earlier.failedStreams + ' failed → ' + live.later.settledStreams + '/' +
+        live.later.totalStreams + ' settled, ' + live.later.failedStreams + ' failed');
+      lines.push('  Last provisional top-10 overlap with final top-10: ' +
+        fmtPercent(live.earlier.previewToFinalTop10Overlap) + ' → ' + fmtPercent(live.later.previewToFinalTop10Overlap));
+      lines.push('  Mean overlap between successive provisional top-10s: ' +
+        fmtPercent(live.earlier.meanAdjacentPreviewTop10Overlap) + ' → ' + fmtPercent(live.later.meanAdjacentPreviewTop10Overlap));
     }
     if (comparison.repeatabilityCheck?.applicable) {
       const check = comparison.repeatabilityCheck;
