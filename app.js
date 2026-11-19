@@ -15175,7 +15175,8 @@ function runManaSearchRepeatabilityRegressionSuite({ log = true } = {}) {
             }
             const arenaCard = { name: 'Phyrexian Arena', type_line: 'Enchantment', oracle_text: 'At the beginning of your upkeep, you draw a card and you lose 1 life.' };
             const arenaEffects = annotateEffectRepeatability(arenaCard, parseMTGEffect(arenaCard.oracle_text), arenaCard.oracle_text);
-            const arenaRoles = inferStrategicRoleProfile(arenaCard, arenaEffects, '').map(r => r.role);
+            const arenaRoleProfile = inferStrategicRoleProfile(arenaCard, arenaEffects, '');
+            const arenaRoles = arenaRoleProfile.map(r => r.role);
             results.push({ id: 'arena-combined-draw-and-life-loss-is-still-card-advantage-engine', pass: arenaRoles.includes('card_advantage_engine'), roles: arenaRoles });
 
             const darkConfidantCard = {
@@ -15204,7 +15205,7 @@ function runManaSearchRepeatabilityRegressionSuite({ log = true } = {}) {
             const atlasProfile = makeCardAdvantageProfile(mercadianAtlasCard);
             const darkConfidantRoleScore = calculateStrategicRoleScore(
                 arenaRoles.map(role => ({ role, group: STRATEGIC_ROLE_GROUPS[role] || role, score: 0.90, anchors: ['card draw', 'repeatable acquisition'] })),
-                darkConfidantProfile.roles, buildStrategicRoleFingerprint(arenaCard, arenaEffects, arenaRoles), darkConfidantProfile.fingerprint
+                darkConfidantProfile.roles, buildStrategicRoleFingerprint(arenaCard, arenaEffects, arenaRoleProfile), darkConfidantProfile.fingerprint
             );
             const necropotenceRoleScore = calculateStrategicRoleScore(
                 arenaRoles.map(role => ({ role, group: STRATEGIC_ROLE_GROUPS[role] || role, score: 0.90, anchors: ['card draw', 'repeatable acquisition'] })),
