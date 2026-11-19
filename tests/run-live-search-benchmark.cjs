@@ -55,23 +55,17 @@ function compactReport(report, runtime) {
       errorMessage: strict.errorMessage || '',
       durationMs: item.durationMs ?? null,
       metrics: {
-        recall5: strict.recall5 ?? null,
-        recall10: strict.recall10 ?? null,
-        recall20: strict.recall20 ?? null,
-        recall50: strict.recall50 ?? null,
-        recall100: strict.recall100 ?? null,
-        adjustedRecall20: strict.adjustedRecall20 ?? null,
+        recall5: strict.recall5 ?? null, recall10: strict.recall10 ?? null,
+        recall20: strict.recall20 ?? null, recall50: strict.recall50 ?? null,
+        recall100: strict.recall100 ?? null, adjustedRecall20: strict.adjustedRecall20 ?? null,
         retrievalRecall: strict.stageRecalls?.retrieval ?? null,
         filterRecall: strict.stageRecalls?.filter ?? null,
         dedupRecall: strict.stageRecalls?.dedup ?? null,
         scoringRecall: strict.stageRecalls?.scoring ?? null,
         pruningRecall: strict.stageRecalls?.pruning ?? null,
-        mrr: strict.mrr ?? null,
-        ndcg10: strict.ndcg10 ?? null,
-        ndcg20: strict.ndcg20 ?? null,
-        precision10: strict.precision10 ?? null,
-        precision20: strict.precision20 ?? null,
-        averageExpectedRank: strict.avgTestRank ?? null,
+        mrr: strict.mrr ?? null, ndcg10: strict.ndcg10 ?? null,
+        ndcg20: strict.ndcg20 ?? null, precision10: strict.precision10 ?? null,
+        precision20: strict.precision20 ?? null, averageExpectedRank: strict.avgTestRank ?? null,
         cardRanks: strict.cardRanks || {},
         predicatePrecision10: strict.predicatePrecision10 ?? null,
         predicateNdcg10: strict.predicateNdcg10 ?? null,
@@ -80,53 +74,41 @@ function compactReport(report, runtime) {
       },
       semantic: semantic ? {
         status: semantic.testStatus || 'unknown',
-        recall20: semantic.recall20 ?? null,
-        mrr: semantic.mrr ?? null,
-        ndcg20: semantic.ndcg20 ?? null,
-        cardRanks: semantic.cardRanks || {}
+        recall20: semantic.recall20 ?? null, mrr: semantic.mrr ?? null,
+        ndcg20: semantic.ndcg20 ?? null, cardRanks: semantic.cardRanks || {}
       } : null,
       streamCoverage,
       searchSignals: diagnostics.benchmarkSignals || null
     };
   });
-
   return {
     schema: 'manasearch-live-search-benchmark-v1',
     generatedAt: new Date().toISOString(),
     appBuild: runtime.appBuild || null,
     runtime,
     run: {
-      runId: report.runId || null,
-      startedAt: report.startedAt || null,
-      finishedAt: report.finishedAt || null,
-      durationMs: report.durationMs ?? null,
-      totalTests: report.totalTests ?? tests.length,
-      completedTests: report.completedTests ?? tests.length,
-      measuredTests: report.measuredTests ?? null,
-      blockedTests: report.blockedTests ?? null,
+      runId: report.runId || null, startedAt: report.startedAt || null,
+      finishedAt: report.finishedAt || null, durationMs: report.durationMs ?? null,
+      totalTests: report.totalTests ?? tests.length, completedTests: report.completedTests ?? tests.length,
+      measuredTests: report.measuredTests ?? null, blockedTests: report.blockedTests ?? null,
       erroredTests: report.erroredTests ?? null,
       benchmarkCompleted: report.benchmarkCompleted === true,
       benchmarkFullyMeasured: report.benchmarkFullyMeasured === true,
       runtimeCardApiUsed: report.runtimeCardApiUsed === true,
       cardDataSource: report.cardDataSource || null,
-      meanRecall5: report.meanRecall5 ?? null,
-      meanRecall10: report.meanRecall10 ?? null,
-      meanRecall20: report.meanRecall20 ?? null,
-      meanRecall50: report.meanRecall50 ?? null,
+      meanRecall5: report.meanRecall5 ?? null, meanRecall10: report.meanRecall10 ?? null,
+      meanRecall20: report.meanRecall20 ?? null, meanRecall50: report.meanRecall50 ?? null,
       meanRecall100: report.meanRecall100 ?? null,
       meanAdjustedRecall20: report.meanAdjustedRecall20 ?? null,
       meanRetrievalRecall: report.meanRetrievalRecall ?? null,
-      meanMRR: report.meanMRR ?? null,
-      meanNDCG10: report.meanNDCG10 ?? null,
-      meanNDCG20: report.meanNDCG20 ?? null,
-      meanPrecision10: report.meanPrecision10 ?? null,
+      meanMRR: report.meanMRR ?? null, meanNDCG10: report.meanNDCG10 ?? null,
+      meanNDCG20: report.meanNDCG20 ?? null, meanPrecision10: report.meanPrecision10 ?? null,
       meanPrecision20: report.meanPrecision20 ?? null,
       benchmarkConfiguration: report.benchmarkConfiguration || null
     },
     tests
   };
 }
-
 async function main() {
   const server = http.createServer((req, res) => {
     const file = safeFile(req.url || '/');
@@ -171,7 +153,7 @@ async function main() {
       waitUntil: 'domcontentloaded',
       timeout: 60000
     });
-    await page.waitForFunction(() => typeof window.runLocalBenchmarkInApp === 'function', { timeout: 60000 });
+    await page.waitForFunction(() => typeof window.runLocalBenchmarkInApp === 'function', null, { timeout: 60000 });
 
     const payload = await page.evaluate(async () => {
       const report = await window.runLocalBenchmarkInApp();
@@ -204,7 +186,57 @@ async function main() {
           meanPrecision10: report?.meanPrecision10,
           meanPrecision20: report?.meanPrecision20,
           benchmarkConfiguration: report?.benchmarkConfiguration,
-          structuredResults: report?.structuredResults || []
+          structuredResults: (report?.structuredResults || []).map(item => {
+            const strict = item.strict || {};
+            const diagnostics = strict.diagnostics || {};
+            const semantic = item.semantic || null;
+            const streamCoverage = Object.fromEntries(Object.entries(diagnostics.streamCoverage || {}).map(([name, coverage]) => [
+              name,
+              coverage ? {
+                retrievedCount: coverage.retrievedCount ?? null,
+                totalCards: coverage.totalCards ?? null,
+                pagesFetched: coverage.pagesFetched ?? null,
+                maxPages: coverage.maxPages ?? null,
+                fullyCovered: coverage.fullyCovered ?? null,
+                bailedAfterRetries: coverage.bailedAfterRetries ?? null,
+                local: coverage.local ?? null
+              } : null
+            ]));
+            return {
+              id: item.id, name: item.name, source: item.source,
+              highlightDefinitions: item.highlightDefinitions || [],
+              highlights: item.highlights || [],
+              categories: item.categories || [],
+              preferredConstraints: item.preferredConstraints || [],
+              expected: item.expected || [],
+              durationMs: item.durationMs ?? null,
+              strict: {
+                testStatus: strict.testStatus || 'unknown',
+                errorMessage: strict.errorMessage || '',
+                recall5: strict.recall5 ?? null, recall10: strict.recall10 ?? null,
+                recall20: strict.recall20 ?? null, recall50: strict.recall50 ?? null,
+                recall100: strict.recall100 ?? null, adjustedRecall20: strict.adjustedRecall20 ?? null,
+                stageRecalls: strict.stageRecalls || {},
+                mrr: strict.mrr ?? null, ndcg10: strict.ndcg10 ?? null,
+                ndcg20: strict.ndcg20 ?? null, precision10: strict.precision10 ?? null,
+                precision20: strict.precision20 ?? null, avgTestRank: strict.avgTestRank ?? null,
+                cardRanks: strict.cardRanks || {},
+                predicatePrecision10: strict.predicatePrecision10 ?? null,
+                predicateNdcg10: strict.predicateNdcg10 ?? null,
+                semanticAbilityCoverageAt20: strict.semanticAbilityCoverageAt20 ?? null,
+                semanticRetrievalProvenanceAt20: strict.semanticRetrievalProvenanceAt20 || [],
+                diagnostics: {
+                  streamCoverage,
+                  benchmarkSignals: diagnostics.benchmarkSignals || null
+                }
+              },
+              semantic: semantic ? {
+                testStatus: semantic.testStatus || 'unknown',
+                recall20: semantic.recall20 ?? null, mrr: semantic.mrr ?? null,
+                ndcg20: semantic.ndcg20 ?? null, cardRanks: semantic.cardRanks || {}
+              } : null
+            };
+          })
         },
         runtime: {
           appBuild: diagnostics.appBuild || null,
