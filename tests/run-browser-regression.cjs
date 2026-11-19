@@ -452,6 +452,13 @@ async function main() {
             partialRunComparison.outcomeComparison?.laterProvisionalResultCount === 2 &&
             errorCompareSummaryText.includes('Provisional cards still visible: earlier 0 → later 3'),
           compareMarksPartialRunIncomplete: partialRunComparison.outcomeComparison?.rankingComparisonValid === false && partialRunComparison.outcomeComparison?.rankingComparisonAvailable === true && partialRunComparison.outcomeComparison?.rankingComparisonComplete === false,
+          compareExplainsAddedAndRemovedCardPaths: comparison.candidatePathChanges?.some(item => item.name === 'Removed Card' &&
+            item.firstDivergence?.stage === 'retrieved' && item.earlierFinalRank === 2 && item.laterFinalRank === null) &&
+            comparison.candidatePathChanges?.some(item => item.name === 'Added Card' &&
+            item.firstDivergence?.stage === 'retrieved' && item.earlierFinalRank === null && item.laterFinalRank === 1),
+          compareExplainsSharedCardRankMoves: comparison.candidatePathChanges?.some(item => item.name === 'Shared Card' &&
+            item.earlierFinalRank === 1 && item.laterFinalRank === 2 && item.explanation.includes('same retained pipeline stages')),
+          compareSummaryShowsCandidatePathDifferences: compareSummaryText.includes('Changed-card pipeline paths') && compareSummaryText.includes('Removed Card'),
           compareShowsPipelineStageRecallChanges: comparison.stageProgression.find(stage => stage.stage === 'retrieved')?.addedInLater.includes('Added Card') && comparison.stageProgression.find(stage => stage.stage === 'retrieved')?.missingFromLater.includes('Removed Card'),
           compareShowsScoredSampleTurnover: comparison.scoredCandidateEvolution?.newlyPresentInSample.includes('Added Card') && comparison.scoredCandidateEvolution?.noLongerPresentInSample.includes('Removed Card') && comparison.scoredCandidateEvolution?.sampleLimit === 300,
           compareShowsTopKOverlapAndCaptureLimit: comparison.finalRanking?.topKOverlap?.find(item => item.k === 10)?.overlap === 0.1 && comparison.finalRanking?.topKOverlap?.find(item => item.k === 10)?.capturedListOverlap === 0.5 && comparison.finalRanking?.capturedLimit === 100,
