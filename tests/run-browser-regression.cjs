@@ -278,6 +278,21 @@ async function main() {
           number: 5,
           pipeline: { request: reorderedStableRequest, finalResults: [{ rank: 1, name: 'Shared Card' }] }
         });
+
+        const derivedIntentRun = {
+          number: 12,
+          pipeline: {
+            request: {
+              ...structuredClone(earlier.pipeline.request),
+              intent: { sourceText: 'draw a card', semanticText: 'draw two cards', exactnessText: 'draw two cards' },
+              broad: true,
+              queryPlans: { semantic: 'draw two cards' }
+            },
+            finalResults: structuredClone(earlier.pipeline.finalResults)
+          }
+        };
+        const derivedIntentReport = window.ManaSearchInspector.compareRegressionCase(regressionCase, derivedIntentRun);
+        const derivedPlanRunComparison = window.ManaSearchInspector.compareRuns(earlier, derivedIntentRun);
         const regressionReport = window.ManaSearchInspector.compareRegressionCase(regressionCase, replayRun);
         const inputMismatchReport = window.ManaSearchInspector.compareRegressionCase(regressionCase, later);
         const excludedCase = window.ManaSearchInspector.createRegressionCase(earlier, {
@@ -318,6 +333,8 @@ async function main() {
           regressionComparisonShowsScoreChannelDeltas: regressionReport.scoringEvolution?.changedSampleCandidates.some(item => item.name === 'Shared Card' && item.scoreChanges.some(change => change.field === 'similarityScore' && Math.abs(change.delta - 0.1) < 1e-9) && item.mechanicalBreakdownChanges.some(change => change.field === 'graphScore' && Math.abs(change.delta - 0.15) < 1e-9)),
           regressionComparisonIncludesCandidateJourneyEvolution: regressionReport.focusCheck?.baselineTrace?.found === true && regressionReport.focusCheck?.currentTrace?.found === true,
           regressionComparisonRejectsChangedInputs: inputMismatchReport.status === 'input-mismatch' && inputMismatchReport.pass === null && inputMismatchReport.inputCheck.changedFields.includes('highlights'),
+          regressionAllowsDerivedIntentEvolution: derivedIntentReport.inputCheck?.matches === true && derivedIntentReport.derivedRequestChanges.includes('intent') && derivedIntentReport.pass === true,
+          compareReportsChangedDerivedSearchPlanSeparately: derivedPlanRunComparison.changes.intentChanged === true && derivedPlanRunComparison.changes.queryPlansChanged === true && derivedPlanRunComparison.changes.changedInputFields.length === 0 && derivedPlanRunComparison.changes.changedDerivedFields.includes('intent'),
           compareMarksFailedRunInvalid: errorRunComparison.outcomeComparison?.rankingComparisonValid === false && errorRunComparison.outcomeComparison?.laterStatus === 'error',
           compareMarksPartialRunIncomplete: partialRunComparison.outcomeComparison?.rankingComparisonValid === true && partialRunComparison.outcomeComparison?.rankingComparisonComplete === false,
           regressionCompareTreatsPartialRunAsNoVerdict: partialRegressionComparison.status === 'partial-run' && partialRegressionComparison.pass === null && partialRegressionComparison.comparedRun?.warning === 'Semantic stream timed out',
