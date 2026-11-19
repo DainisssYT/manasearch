@@ -431,6 +431,13 @@ check('developer inspector observes the production pipeline without changing sco
   assert.match(browserRunner, /effectAwareCounterEvidenceCaptured/);
   assert.match(app, /streamFailures: streamFailureRecords\.slice\(\)/);
   assert.match(app, /completed_with_warnings/);
+  assert.match(app, /verbMatches = Array.from\(effectText\.matchAll\(verbRegex\)\)/);
+  assert.match(app, /const nextVerbIndex = verbMatches\[verbIndex \+ 1\]/);
+  assert.match(app, /previousRuleExilesTopLibraryCard/);
+  assert.match(app, /delayedTopLibraryAcquisition/);
+  assert.match(app, /compound-draw-and-life-loss-retains-both-distinct-actions/);
+  assert.match(app, /top-library-card-put-into-hand-is-card-acquisition-not-tutor/);
+  assert.match(app, /life-paid-top-library-acquisition-matches-card-draw-semantically/);
   assert.match(app, /status: searchOutcome/);
   assert.match(app, /Search failed:/);
   assert.match(inspector, /getActiveSearch/);
