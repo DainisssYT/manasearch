@@ -89,7 +89,30 @@
   const panel = document.createElement('aside');
   panel.id = 'mana-search-inspector';
   panel.className = 'ms-inspector';
-  panel.innerHTML = '<button type="button" class="ms-inspector-launch" aria-expanded="false">Developer inspector</button><section class="ms-inspector-window" hidden aria-label="ManaSearch developer inspector"><header><div><strong>Search inspector</strong><small>Passive view of the live production search</small></div><button type="button" class="ms-inspector-close" aria-label="Close inspector">×</button></header><nav><button type="button" data-tab="live" class="is-active">Live state</button><button type="button" data-tab="pipeline">Pipeline</button><button type="button" data-tab="candidates">Candidates</button><button type="button" data-tab="trace">Trace card</button><button type="button" data-tab="exclusions">Exclusions</button><button type="button" data-tab="compare">Compare runs</button><button type="button" data-tab="timeline">Timeline</button><button type="button" data-tab="worker">Worker</button></nav><div class="ms-inspector-toolbar"><span class="ms-inspector-state">Waiting for search activity</span><button type="button" data-action="refresh">Refresh</button><button type="button" data-action="copy">Copy JSON</button><button type="button" data-action="download">Download JSON</button></div><div class="ms-inspector-compare-controls" hidden><label>Earlier run <select data-run-side="a"></select></label><label>Later run <select data-run-side="b"></select></label></div><div class="ms-inspector-trace-controls" hidden><label>Candidate <select data-trace-candidate></select></label></div><pre class="ms-inspector-content" aria-live="polite"></pre></section>';
+  panel.innerHTML = '<button type="button" class="ms-inspector-launch" aria-expanded="false">Developer inspector</button><section class="ms-inspector-window" hidden aria-label="ManaSearch developer inspector"><header><div><strong>Search inspector</strong><small>Passive view of the live production search</small></div><button type="button" class="ms-inspector-close" aria-label="Close inspector">×</button></header><nav><button type="button" data-tab="live" class="is-active">Live state</button><button type="button" data-tab="pipeline">Pipeline</button><button type="button" data-tab="candidates">Candidates</button><button type="button" data-tab="trace">Trace card</button><button type="button" data-tab="exclusions">Exclusions</button><button type="button" data-tab="compare">Compare runs</button><button type="button" data-tab="regression">Regression cases</button><button type="button" data-tab="timeline">Timeline</button><button type="button" data-tab="worker">Worker</button></nav><div class="ms-inspector-toolbar"><span class="ms-inspector-state">Waiting for search activity</span><button type="button" data-action="refresh">Refresh</button><button type="button" data-action="copy">Copy JSON</button><button type="button" data-action="download">Download JSON</button></div><div class="ms-inspector-compare-controls" hidden><label>Earlier run <select data-run-side="a"></select></label><label>Later run <select data-run-side="b"></select></label></div><div class="ms-inspector-trace-controls" hidden><label>Candidate <select data-trace-candidate></select></label></div>
+  <div class="ms-inspector-regression-controls" hidden>
+    <div class="ms-inspector-regression-row">
+      <label>Build from run <select data-regression-source-run></select></label>
+      <button type="button" data-regression-build>Build case</button>
+      <label>Compare against <select data-regression-compare-run></select></label>
+    </div>
+    <label>Case title <input type="text" data-regression-title maxlength="140" placeholder="What should this search do?"></label>
+    <label>Problem and expected behavior <textarea data-regression-notes rows="2" placeholder="Explain what is wrong, what should happen, and why this example matters."></textarea></label>
+    <div class="ms-inspector-regression-row">
+      <label>Focus card <input type="text" data-regression-focus list="ms-regression-candidates" placeholder="Optional candidate name"><datalist id="ms-regression-candidates"></datalist></label>
+      <label>Focus expectation <select data-regression-behavior><option value="none">No focus assertion</option><option value="must-appear">Must appear</option><option value="must-not-appear">Must not appear</option><option value="rank-at-most">Must rank at or above…</option></select></label>
+      <label>Max rank <input type="number" data-regression-max-rank min="1" max="100" value="3"></label>
+    </div>
+    <label>Expected top ranking <small>(one card per line, best match first; edit this list to define the correct ranking)</small><textarea data-regression-top rows="5" placeholder="Card name — one per line"></textarea></label>
+    <div class="ms-inspector-regression-actions">
+      <button type="button" data-regression-export>Download case</button>
+      <button type="button" data-regression-copy>Copy case JSON</button>
+      <button type="button" data-regression-compare>Compare with run</button>
+      <button type="button" data-regression-import>Import case</button>
+      <input type="file" data-regression-file accept="application/json,.json" hidden>
+    </div>
+    <small class="ms-inspector-regression-help">Cases are portable JSON files. They include the original request and diagnostic pipeline. Import a case after updating ManaSearch, repeat its search normally, then compare the new run here. No cases are uploaded or saved automatically.</small>
+  </div><pre class="ms-inspector-content" aria-live="polite"></pre></section>';
   document.body.append(panel);
   const launch = panel.querySelector('.ms-inspector-launch');
   const windowEl = panel.querySelector('.ms-inspector-window');
@@ -100,6 +123,17 @@
   const runSelectB = panel.querySelector('[data-run-side="b"]');
   const traceControls = panel.querySelector('.ms-inspector-trace-controls');
   const traceSelect = panel.querySelector('[data-trace-candidate]');
+  const regressionControls = panel.querySelector('.ms-inspector-regression-controls');
+  const regressionSourceRun = panel.querySelector('[data-regression-source-run]');
+  const regressionCompareRun = panel.querySelector('[data-regression-compare-run]');
+  const regressionTitle = panel.querySelector('[data-regression-title]');
+  const regressionNotes = panel.querySelector('[data-regression-notes]');
+  const regressionFocus = panel.querySelector('[data-regression-focus]');
+  const regressionBehavior = panel.querySelector('[data-regression-behavior]');
+  const regressionMaxRank = panel.querySelector('[data-regression-max-rank]');
+  const regressionTop = panel.querySelector('[data-regression-top]');
+  const regressionFile = panel.querySelector('[data-regression-file]');
+  let activeRegressionCase = null;
   let activeTab = 'live';
   let lastPipelineSnapshot = null;
   const getPipelineSnapshot = () => {
@@ -276,6 +310,204 @@
         : 'This candidate is not present in the captured retrieval streams, stage membership, scored-candidate sample, rejection sample, or final results. It may not have been retrieved, or it may fall outside the snapshot limits.'
     };
   };
+  const REGRESSION_CASE_SCHEMA = 'manasearch-regression-case-v1';
+  const regressionFinalRanking = pipeline => (pipeline?.finalResults || []).map((item, index) => ({
+    rank: item.rank ?? index + 1,
+    name: String(item.name || '').trim(),
+    similarityScore: item.similarityScore ?? null
+  })).filter(item => item.name);
+  const createRegressionCase = (run, options = {}) => {
+    if (!run?.pipeline) throw new Error('Choose a completed search run with a captured production pipeline.');
+    const pipeline = run.pipeline;
+    const sourceName = pipeline.request?.sourceCard?.name || run.summary?.sourceName || 'Search';
+    const focusCandidate = String(options.focusCandidate || '').trim();
+    const expectedTopCandidates = Array.isArray(options.expectedTopCandidates)
+      ? options.expectedTopCandidates.map(value => String(value || '').trim()).filter(Boolean)
+      : regressionFinalRanking(pipeline).slice(0, 10).map(item => item.name);
+    return {
+      schema: REGRESSION_CASE_SCHEMA,
+      version: 1,
+      createdAt: new Date().toISOString(),
+      title: String(options.title || (sourceName + ' — regression case')).trim(),
+      notes: String(options.notes || ''),
+      source: {
+        runNumber: run.number ?? null,
+        completedAt: run.completedAt || null,
+        request: cloneJson(pipeline.request || {}),
+        ui: cloneJson(run.ui || {})
+      },
+      expectations: {
+        focusCandidate,
+        focusBehavior: options.focusBehavior || (focusCandidate ? 'must-appear' : 'none'),
+        maxRank: Number(options.maxRank) || 3,
+        expectedTopCandidates
+      },
+      baseline: {
+        finalRanking: regressionFinalRanking(pipeline),
+        focusTrace: focusCandidate ? traceCandidate(pipeline, focusCandidate) : null
+      },
+      diagnostics: cloneJson(pipeline)
+    };
+  };
+  const validateRegressionCase = value => {
+    if (!value || value.schema !== REGRESSION_CASE_SCHEMA || value.version !== 1) {
+      throw new Error('Unsupported regression case. Expected ' + REGRESSION_CASE_SCHEMA + ' version 1.');
+    }
+    if (!value.source || !value.source.request || typeof value.source.request !== 'object') {
+      throw new Error('Regression case is missing its original search request.');
+    }
+    if (!value.expectations || !Array.isArray(value.expectations.expectedTopCandidates)) {
+      throw new Error('Regression case is missing its expected ranking.');
+    }
+    const checked = cloneJson(value);
+    checked.expectations.focusCandidate = String(checked.expectations.focusCandidate || '').trim();
+    checked.expectations.focusBehavior = ['none', 'must-appear', 'must-not-appear', 'rank-at-most'].includes(checked.expectations.focusBehavior)
+      ? checked.expectations.focusBehavior : 'none';
+    checked.expectations.maxRank = Math.max(1, Number(checked.expectations.maxRank) || 3);
+    checked.expectations.expectedTopCandidates = checked.expectations.expectedTopCandidates
+      .map(name => String(name || '').trim()).filter(Boolean);
+    return checked;
+  };
+  const compareRegressionCase = (regressionCase, run) => {
+    const fixture = validateRegressionCase(regressionCase);
+    if (!run?.pipeline) return { comparable: false, pass: false, message: 'Select a completed search run to compare.' };
+    const expectedRequest = fixture.source.request || {};
+    const actualRequest = run.pipeline.request || {};
+    const requestFields = ['sourceCard', 'highlights', 'intent', 'constraints', 'methods', 'ordering', 'format', 'color'];
+    const inputDifferences = requestFields.filter(field => JSON.stringify(expectedRequest[field] ?? null) !== JSON.stringify(actualRequest[field] ?? null));
+    const inputsMatch = inputDifferences.length === 0;
+    const actualRanking = regressionFinalRanking(run.pipeline);
+    const actualRanks = new Map(actualRanking.map(item => [normalizeCandidateName(item.name), item.rank]));
+    const expected = fixture.expectations.expectedTopCandidates;
+    const expectedTopK = expected.length;
+    const actualTopK = actualRanking.slice(0, expectedTopK);
+    const actualTopKeys = new Set(actualTopK.map(item => normalizeCandidateName(item.name)));
+    const expectedKeys = new Set(expected.map(normalizeCandidateName));
+    const matchedTop = expected.filter(name => actualTopKeys.has(normalizeCandidateName(name)));
+    const missingFromTop = expected.filter(name => !actualTopKeys.has(normalizeCandidateName(name)));
+    const unexpectedInTop = actualTopK.filter(item => !expectedKeys.has(normalizeCandidateName(item.name))).map(item => item.name);
+    const rankChanges = expected.map((name, index) => ({
+      name,
+      expectedRank: index + 1,
+      actualRank: actualRanks.get(normalizeCandidateName(name)) ?? null
+    })).filter(item => item.actualRank !== item.expectedRank);
+    const rankingPass = expected.length > 0
+      ? expected.length === actualTopK.length && expected.every((name, index) => normalizeCandidateName(name) === normalizeCandidateName(actualTopK[index]?.name))
+      : null;
+    const focusName = fixture.expectations.focusCandidate;
+    const focusRank = focusName ? (actualRanks.get(normalizeCandidateName(focusName)) ?? null) : null;
+    let focusPass = null;
+    if (focusName && fixture.expectations.focusBehavior === 'must-appear') focusPass = focusRank !== null;
+    else if (focusName && fixture.expectations.focusBehavior === 'must-not-appear') focusPass = focusRank === null;
+    else if (focusName && fixture.expectations.focusBehavior === 'rank-at-most') focusPass = focusRank !== null && focusRank <= fixture.expectations.maxRank;
+    const assertionsConfigured = rankingPass !== null || focusPass !== null;
+    const pass = assertionsConfigured && inputsMatch && rankingPass !== false && focusPass !== false;
+    return {
+      comparable: inputsMatch,
+      pass,
+      status: !inputsMatch ? 'input-mismatch' : !assertionsConfigured ? 'no-expectations' : pass ? 'pass' : 'fail',
+      case: { title: fixture.title, sourceRunNumber: fixture.source.runNumber ?? null },
+      comparedRun: { number: run.number ?? null, completedAt: run.completedAt || null },
+      inputCheck: { matches: inputsMatch, changedFields: inputDifferences },
+      focusCheck: focusName ? {
+        candidate: focusName,
+        expectation: fixture.expectations.focusBehavior,
+        maximumRank: fixture.expectations.maxRank,
+        actualRank: focusRank,
+        pass: focusPass
+      } : null,
+      rankingCheck: expected.length ? {
+        expectedCount: expected.length,
+        matchedInTopK: matchedTop.length,
+        overlap: Number((matchedTop.length / expected.length).toFixed(4)),
+        exactOrderMatch: rankingPass,
+        expectedTop: expected,
+        actualTop: actualTopK.map(item => item.name),
+        missingFromTop,
+        unexpectedInTop,
+        rankChanges
+      } : null,
+      interpretation: !inputsMatch
+        ? 'The compared run used different search inputs. Repeat the original source card, highlights, constraints, methods, and ordering before judging the algorithm change.'
+        : 'A pass requires matching search inputs and satisfying every configured focus-card and expected-ranking assertion.'
+    };
+  };
+  const selectedRegressionRun = select => state.searchRuns.find(run => String(run.number) === select.value) || null;
+  const setRunOptions = (select, preferredNumber) => {
+    const previous = select.value;
+    select.innerHTML = state.searchRuns.map(run =>
+      '<option value="' + htmlEscape(run.number) + '">' + htmlEscape(clip(runLabel(run), 120)) + '</option>'
+    ).join('');
+    const wanted = preferredNumber ?? previous;
+    if (state.searchRuns.some(run => String(run.number) === String(wanted))) select.value = String(wanted);
+    else if (state.searchRuns.length) select.value = String(state.searchRuns[state.searchRuns.length - 1].number);
+  };
+  const populateRegressionCandidateList = run => {
+    const names = new Map();
+    const add = value => {
+      const name = String(value || '').trim();
+      if (name && !names.has(normalizeCandidateName(name))) names.set(normalizeCandidateName(name), name);
+    };
+    const pipeline = run?.pipeline || {};
+    Object.values(pipeline.streams || {}).forEach(values => (values || []).forEach(add));
+    Object.values(pipeline.funnel?.stages || {}).forEach(values => (values || []).forEach(add));
+    (pipeline.candidates || []).forEach(item => add(item.name));
+    (pipeline.filterRejections || []).forEach(item => add(item.name));
+    (pipeline.finalResults || []).forEach(item => add(item.name));
+    panel.querySelector('#ms-regression-candidates').innerHTML = [...names.values()].sort((a, b) => a.localeCompare(b))
+      .map(name => '<option value="' + htmlEscape(name) + '"></option>').join('');
+  };
+  const fillRegressionForm = fixture => {
+    regressionTitle.value = fixture.title || '';
+    regressionNotes.value = fixture.notes || '';
+    regressionFocus.value = fixture.expectations?.focusCandidate || '';
+    regressionBehavior.value = fixture.expectations?.focusBehavior || 'none';
+    regressionMaxRank.value = String(fixture.expectations?.maxRank || 3);
+    regressionTop.value = (fixture.expectations?.expectedTopCandidates || []).join('\n');
+  };
+  const readRegressionForm = () => {
+    let fixture;
+    if (activeRegressionCase) fixture = cloneJson(activeRegressionCase);
+    else {
+      const run = selectedRegressionRun(regressionSourceRun);
+      if (!run) throw new Error('Run Find Similar Cards, then use Build case to capture it.');
+      fixture = createRegressionCase(run, { focusCandidate: regressionFocus.value });
+    }
+    fixture.title = regressionTitle.value.trim() || fixture.title;
+    fixture.notes = regressionNotes.value.trim();
+    fixture.expectations.focusCandidate = regressionFocus.value.trim();
+    fixture.expectations.focusBehavior = regressionBehavior.value;
+    fixture.expectations.maxRank = Math.max(1, Number(regressionMaxRank.value) || 3);
+    fixture.expectations.expectedTopCandidates = regressionTop.value.split(/\r?\n/).map(name => name.trim()).filter(Boolean);
+    activeRegressionCase = validateRegressionCase(fixture);
+    return activeRegressionCase;
+  };
+  const downloadJson = (data, filename) => {
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = filename;
+    link.hidden = true;
+    document.body.append(link);
+    link.click();
+    link.remove();
+    window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+  };
+  const renderRegression = () => {
+    regressionControls.hidden = activeTab !== 'regression';
+    if (activeTab !== 'regression') return;
+    if (!state.searchRuns.length) {
+      content.textContent = JSON.stringify({ message: 'No completed search is retained. Run Find Similar Cards, then open Regression cases and build a case from that run. To compare a case from another build, import its JSON first.' }, null, 2);
+      return;
+    }
+    setRunOptions(regressionSourceRun);
+    setRunOptions(regressionCompareRun);
+    populateRegressionCandidateList(selectedRegressionRun(regressionSourceRun));
+    content.textContent = JSON.stringify(activeRegressionCase
+      ? { message: 'Regression case loaded. Edit its expected behavior above, then download it or compare it with a captured run.', title: activeRegressionCase.title, schema: activeRegressionCase.schema, sourceRunNumber: activeRegressionCase.source.runNumber, expectedTopCandidates: activeRegressionCase.expectations.expectedTopCandidates.length }
+      : { message: 'Build a portable test case from a completed search. The expected ranking starts with the captured result order; edit it to define the correct order before exporting.', retainedRuns: state.searchRuns.length }, null, 2);
+  };
   const renderTrace = () => {
     compareControls.hidden = true;
     traceControls.hidden = activeTab !== 'trace';
@@ -336,6 +568,7 @@
   const renderWorker = () => { if (activeTab === 'worker' && !windowEl.hidden) content.textContent = JSON.stringify(state.workerMessages, null, 2); };
   const render = () => {
     traceControls.hidden = activeTab !== 'trace';
+    regressionControls.hidden = activeTab !== 'regression';
     status.textContent = state.searchRuns.length
       ? `${state.searchRuns.length} completed search run(s) retained in this session`
       : state.searchCount ? `${state.searchCount} search action(s) observed` : 'Waiting for search activity';
@@ -357,6 +590,7 @@
       compareControls.hidden = true;
     } else if (activeTab === 'trace') renderTrace();
     else if (activeTab === 'compare') renderCompare();
+    else if (activeTab === 'regression') renderRegression();
     else if (activeTab === 'timeline') { compareControls.hidden = true; renderTimeline(); }
     else { compareControls.hidden = true; renderWorker(); }
   };
@@ -376,6 +610,63 @@
   runSelectA.addEventListener('change', renderCompare);
   runSelectB.addEventListener('change', renderCompare);
   traceSelect.addEventListener('change', renderTrace);
+  regressionSourceRun.addEventListener('change', () => populateRegressionCandidateList(selectedRegressionRun(regressionSourceRun)));
+  regressionCompareRun.addEventListener('change', () => {
+    if (activeRegressionCase) content.textContent = JSON.stringify(compareRegressionCase(readRegressionForm(), selectedRegressionRun(regressionCompareRun)), null, 2);
+  });
+  panel.querySelector('[data-regression-build]').addEventListener('click', () => {
+    try {
+      const run = selectedRegressionRun(regressionSourceRun);
+      if (!run) throw new Error('No completed run is available to build a case from.');
+      activeRegressionCase = createRegressionCase(run, {
+        focusCandidate: regressionFocus.value || traceSelect.value,
+        focusBehavior: (regressionFocus.value || traceSelect.value) ? 'must-appear' : 'none'
+      });
+      fillRegressionForm(activeRegressionCase);
+      populateRegressionCandidateList(run);
+      content.textContent = JSON.stringify({ message: 'Case built. Edit the expected ranking and focus expectation, then download the JSON.', title: activeRegressionCase.title, baselineRanking: activeRegressionCase.baseline.finalRanking }, null, 2);
+    } catch (error) { content.textContent = JSON.stringify({ error: error.message }, null, 2); }
+  });
+  panel.querySelector('[data-regression-export]').addEventListener('click', () => {
+    try {
+      const fixture = readRegressionForm();
+      const safeName = fixture.title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 60) || 'case';
+      downloadJson(fixture, 'manasearch-regression-' + safeName + '.json');
+      status.textContent = 'Regression case download requested';
+    } catch (error) { content.textContent = JSON.stringify({ error: error.message }, null, 2); }
+  });
+  panel.querySelector('[data-regression-copy]').addEventListener('click', async () => {
+    try {
+      const fixture = readRegressionForm();
+      await navigator.clipboard.writeText(JSON.stringify(fixture, null, 2));
+      status.textContent = 'Regression case JSON copied';
+    } catch (error) { content.textContent = JSON.stringify({ error: error.message || 'Clipboard unavailable' }, null, 2); }
+  });
+  panel.querySelector('[data-regression-compare]').addEventListener('click', () => {
+    try {
+      const fixture = readRegressionForm();
+      const run = selectedRegressionRun(regressionCompareRun);
+      const report = compareRegressionCase(fixture, run);
+      content.textContent = JSON.stringify(report, null, 2);
+      status.textContent = report.pass ? 'Regression case passed' : report.comparable ? 'Regression case failed' : 'Inputs differ — comparison is not valid yet';
+    } catch (error) { content.textContent = JSON.stringify({ error: error.message }, null, 2); }
+  });
+  panel.querySelector('[data-regression-import]').addEventListener('click', () => regressionFile.click());
+  regressionFile.addEventListener('change', async () => {
+    const file = regressionFile.files?.[0];
+    if (!file) return;
+    try {
+      if (file.size > 8 * 1024 * 1024) throw new Error('Case file is larger than 8 MB. Export a smaller diagnostics capture.');
+      const imported = validateRegressionCase(JSON.parse(await file.text()));
+      activeRegressionCase = imported;
+      fillRegressionForm(imported);
+      content.textContent = JSON.stringify({ message: 'Regression case imported. Repeat the search normally, select the new run under Compare against, and compare.', title: imported.title, sourceRunNumber: imported.source.runNumber, expectedTopCandidates: imported.expectations.expectedTopCandidates.length }, null, 2);
+      status.textContent = 'Regression case imported';
+    } catch (error) {
+      content.textContent = JSON.stringify({ importError: error.message || String(error) }, null, 2);
+      status.textContent = 'Could not import regression case';
+    } finally { regressionFile.value = ''; }
+  });
   panel.querySelector('[data-action="refresh"]').addEventListener('click', render);
   panel.querySelector('[data-action="copy"]').addEventListener('click', async () => {
     const data = JSON.stringify(buildExport(), null, 2);
@@ -484,7 +775,10 @@
     getRunHistory: () => cloneJson(state.searchRuns),
     getExport: () => cloneJson(buildExport()),
     compareRuns,
-    traceCandidate
+    traceCandidate,
+    createRegressionCase,
+    validateRegressionCase,
+    compareRegressionCase
   });
   addEvent('inspector:ready', { note: 'Diagnostics are read-only; ranking and retrieval are not modified.' });
 })();
