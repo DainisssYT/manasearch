@@ -282,7 +282,16 @@
       const left = new Set(aFinal.slice(0, k).map(item => normalizeCandidateName(item.name)).filter(Boolean));
       const right = new Set(bFinal.slice(0, k).map(item => normalizeCandidateName(item.name)).filter(Boolean));
       const shared = [...left].filter(name => right.has(name)).length;
-      return { k, earlierCaptured: left.size, laterCaptured: right.size, sharedCount: shared, overlap: Number((shared / k).toFixed(4)) };
+      const shorterCapturedList = Math.min(k, left.size, right.size);
+      return {
+        k,
+        earlierCaptured: left.size,
+        laterCaptured: right.size,
+        sharedCount: shared,
+        overlap: Number((shared / k).toFixed(4)),
+        capturedListOverlap: shorterCapturedList ? Number((shared / shorterCapturedList).toFixed(4)) : null,
+        capturedListDenominator: shorterCapturedList
+      };
     });
     const rankMovementValues = common.map(name => Math.abs((aRanks.get(name) || 0) - (bRanks.get(name) || 0)));
     const meanAbsoluteRankMovement = rankMovementValues.length
@@ -316,9 +325,9 @@
       plannedStreams: stableJson(a.request?.plannedStreams) !== stableJson(b.request?.plannedStreams),
       queryPlans: stableJson(a.request?.queryPlans) !== stableJson(b.request?.queryPlans)
     };
-    const changedInputFields = ['sourceCard', 'highlights', 'constraints', 'methods', 'ordering', 'format', 'color']
+    const changedInputFields = ['sourceCard', 'highlights', 'constraints', 'methods', 'ordering', 'format', 'color', 'broad', 'divergent']
       .filter(field => requestChanges[field]);
-    const changedDerivedFields = ['intent', 'broad', 'divergent', 'plannedStreams', 'queryPlans']
+    const changedDerivedFields = ['intent', 'plannedStreams', 'queryPlans']
       .filter(field => requestChanges[field]);
     const aError = earlier.errorMessage || earlier.summary?.errorMessage || a.outcome?.errorMessage || '';
     const bError = later.errorMessage || later.summary?.errorMessage || b.outcome?.errorMessage || '';
@@ -430,6 +439,9 @@
         lines.push('  [' + marker + '] ' + stream.label + ': ' + clip(stream.detail, 200));
       });
     }
+    if (live.provisionalResultCount > 0 && ['error', 'completed_with_warnings'].includes(live.status)) {
+      lines.push('Provisional results still visible: ' + live.provisionalResultCount + ' (not a complete final ranking)');
+    }
     if (live.preview) {
       lines.push('Current results: ' + live.preview.resultCount + (live.preview.provisional ? ' provisional matches' : ' final ranked results'));
       if (live.preview.topNames?.length) lines.push('Top cards: ' + live.preview.topNames.join(' → '));
@@ -441,7 +453,7 @@
       lines.push('Preview history: ' + provisionalCount + ' provisional update(s), ' + finalCount + ' final ranking event(s)');
     }
     lines.push('', 'FULL CAPTURED STATE');
-    return lines.join('\\n') + '\\n' + JSON.stringify(snapshotValue, null, 2);
+    return lines.join('\n') + '\n' + JSON.stringify(snapshotValue, null, 2);
   };
   const formatCompareSummary = comparison => {
     if (!comparison || comparison.message) return String(comparison?.message || 'No comparison is available.');
@@ -484,7 +496,10 @@
     }
     if (comparison.finalRanking) {
       const ranking = comparison.finalRanking;
-      lines.push('Top-K overlap: ' + ((ranking.topKOverlap || []).map(item => 'Top ' + item.k + ' ' + Math.round(item.overlap * 100) + '%').join(' · ') || 'not available'));
+      lines.push('Top-K overlap: ' + ((ranking.topKOverlap || []).map(item =>
+        'Top ' + item.k + ' ' + Math.round(item.overlap * 100) + '% of K' +
+        (item.capturedListOverlap === null ? '' : ' / ' + Math.round(item.capturedListOverlap * 100) + '% of shorter list (' + item.capturedListDenominator + ')')
+      ).join(' · ') || 'not available'));
       lines.push('Mean absolute rank movement among shared top-100 cards: ' + (ranking.meanAbsoluteRankMovement ?? 'n/a'));
       if (ranking.rankChanges?.length) {
         lines.push('Largest rank movements:');
@@ -495,15 +510,36 @@
       if (ranking.missingFromLater?.length) lines.push('Removed final cards: ' + ranking.missingFromLater.slice(0, 10).join(', '));
     }
     const scoreChanges = (comparison.sharedCandidateScoreChanges || [])
-      .filter(item => item.delta !== null)
-      .sort((a, b) => Math.abs(b.delta) - Math.abs(a.delta)).slice(0, 8);
+      .filter(item => item.delta !== null || item.scoreChannelChanges?.length || item.mechanicalBreakdownChanges?.length)
+      .sort((a, b) => {
+        const magnitude = item => Math.max(
+          Math.abs(item.delta || 0),
+          ...(item.scoreChannelChanges || []).map(change => Math.abs(change.delta || 0)),
+          ...(item.mechanicalBreakdownChanges || []).map(change => Math.abs(change.delta || 0))
+        );
+        return magnitude(b) - magnitude(a);
+      }).slice(0, 8);
     if (scoreChanges.length) {
-      lines.push('Largest shared-candidate overall score changes:');
-      scoreChanges.forEach(item => lines.push('  ' + item.name + ': ' + Number(item.earlierScore).toFixed(3) +
-        ' → ' + Number(item.laterScore).toFixed(3) + ' (' + (item.delta > 0 ? '+' : '') + item.delta.toFixed(3) + ')'));
+      lines.push('Largest shared-candidate score changes:');
+      scoreChanges.forEach(item => {
+        const headline = item.delta === null
+          ? item.name + ': overall similarity unchanged/not captured'
+          : item.name + ': similarity ' + Number(item.earlierScore).toFixed(3) +
+            ' → ' + Number(item.laterScore).toFixed(3) + ' (' + (item.delta > 0 ? '+' : '') + item.delta.toFixed(3) + ')';
+        lines.push('  ' + headline);
+        const channelChanges = [
+          ...(item.scoreChannelChanges || []).map(change => ({ ...change, group: 'score' })),
+          ...(item.mechanicalBreakdownChanges || []).map(change => ({ ...change, group: 'mechanical' }))
+        ].sort((a, b) => Math.abs(b.delta) - Math.abs(a.delta)).slice(0, 6);
+        if (channelChanges.length) {
+          lines.push('    Changed factors: ' + channelChanges.map(change =>
+            change.group + '.' + change.field + ' ' + (change.delta > 0 ? '+' : '') + change.delta.toFixed(3)
+          ).join('; '));
+        }
+      });
     }
     lines.push('', 'FULL COMPARISON JSON');
-    return lines.join('\\n') + '\\n' + JSON.stringify(comparison, null, 2);
+    return lines.join('\n') + '\n' + JSON.stringify(comparison, null, 2);
   };
   const normalizeCandidateName = value => String(value || '').normalize('NFKD').replace(/[\u0300-\u036f]/g, '').trim().toLocaleLowerCase().replace(/\s+/g, ' ');
   const traceCandidate = (pipeline, candidateName) => {
@@ -678,9 +714,9 @@
     const actualRequest = run.pipeline.request || {};
     // Only user-controlled request fields invalidate a replay. Intent and query plans are outputs
     // of the system under test: changes to them should be reported and evaluated, not rejected.
-    const requestFields = ['sourceCard', 'highlights', 'constraints', 'methods', 'ordering', 'format', 'color'];
+    const requestFields = ['sourceCard', 'highlights', 'constraints', 'methods', 'ordering', 'format', 'color', 'broad', 'divergent'];
     const inputDifferences = requestFields.filter(field => stableJson(expectedRequest[field]) !== stableJson(actualRequest[field]));
-    const derivedRequestFields = ['intent', 'broad', 'divergent', 'plannedStreams', 'queryPlans'];
+    const derivedRequestFields = ['intent', 'plannedStreams', 'queryPlans'];
     const derivedRequestChanges = derivedRequestFields.filter(field => stableJson(expectedRequest[field]) !== stableJson(actualRequest[field]));
     const inputsMatch = inputDifferences.length === 0;
     const actualRanking = regressionFinalRanking(run.pipeline);
@@ -1180,6 +1216,7 @@
       state.activeSearch.durationMs = detail.durationMs ?? null;
       state.activeSearch.errorMessage = detail.errorMessage || '';
       state.activeSearch.resultCount = detail.resultCount ?? 0;
+      state.activeSearch.provisionalResultCount = detail.provisionalResultCount ?? 0;
     }
     lastPipelineSnapshot = getPipelineSnapshot();
     const pipeline = cloneJson(lastPipelineSnapshot);
@@ -1195,6 +1232,7 @@
       summary: {
         sourceName,
         resultCount,
+        provisionalResultCount: detail.provisionalResultCount ?? 0,
         status: runStatus,
         errorMessage: detail.errorMessage || '',
         durationMs: detail.durationMs ?? null
