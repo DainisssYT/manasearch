@@ -188,7 +188,7 @@
       changes: {
         sourceCardChanged: JSON.stringify(a.request?.sourceCard || {}) !== JSON.stringify(b.request?.sourceCard || {}),
         highlightsChanged: JSON.stringify(a.request?.highlights || []) !== JSON.stringify(b.request?.highlights || []),
-        intentChanged: JSON.stringify(a.request?.intent || {}) !== JSON.stringify(b.request?.intent || []),
+        intentChanged: JSON.stringify(a.request?.intent || {}) !== JSON.stringify(b.request?.intent || {}),
         constraintsChanged: JSON.stringify(a.request?.constraints || {}) !== JSON.stringify(b.request?.constraints || {}),
         methodsChanged: JSON.stringify(a.request?.methods || {}) !== JSON.stringify(b.request?.methods || {}),
         orderingChanged: (a.request?.ordering || '') !== (b.request?.ordering || '')
