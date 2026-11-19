@@ -33104,6 +33104,31 @@ function cloneCardForMinigame(card) {
     };
 }
 window.ManaSearchDebug = Object.freeze({
+    // Read the same intent model used by Find Similar Cards, even when the optional on-page
+    // Search Intent panel is hidden. This is a live read-only view of the current source/highlights.
+    getLiveIntent() {
+        if (!currentSourceCard) return null;
+        const highlights = (Array.isArray(manualHighlights) ? manualHighlights : []).map(h => ({
+            text: h?.text || '', field: h?.field || 'oracle', mode: h?.mode || 'exact',
+            origin: h?.origin || 'selection', mechanicGroupId: h?.mechanicGroupId || null,
+            relationship: h?.mechanicGroupRelationship || null, aspects: h?.aspects || null
+        }));
+        const intent = getSearchIntent(currentSourceCard, manualHighlights);
+        const enabled = id => Boolean(document.getElementById(id)?.checked);
+        return {
+            sourceCard: { name: currentSourceCard.name || '', type_line: currentSourceCard.type_line || '', oracle_text: currentSourceCard.oracle_text || '' },
+            highlights,
+            intent: { sourceText: intent.sourceText || '', targetText: intent.targetText || '', semanticText: intent.semanticText || '' },
+            constraints: readConstraintFilters(),
+            methods: {
+                broad: enabled('broad-search'), divergent: enabled('divergent-search'),
+                wording: enabled('wording-search'), functional: enabled('functional-search'),
+                target: enabled('target-search'), role: enabled('role-search'),
+                alternate: enabled('alternate-search'), synergy: enabled('synergy-search')
+            },
+            ordering: document.getElementById('sort-results')?.value || 'overall'
+        };
+    },
     getSnapshot() {
         const diagnostics = lastSearchDiagnostics;
         const context = lastSearchDebugContext;
