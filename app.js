@@ -1,11 +1,11 @@
-/* ManaSearch build 20261119-140 */
+/* ManaSearch build 20261119-141 */
 // ManaSearch deployment build marker. Bump this whenever app.js changes so cached-module issues are easy to diagnose.
-const MANASEARCH_APP_BUILD = '20261119-140';
+const MANASEARCH_APP_BUILD = '20261119-141';
 console.info(`[ManaSearch] app.js build ${MANASEARCH_APP_BUILD}`);
 
 // The source-query and static-index builders share one representation so both sides
 // embed the same normalized face/ability/metadata documents.
-import { buildSemanticDocuments, enforceSemanticTokenBudget, mergeSemanticRetrievalRanks } from './scripts/semantic-text.mjs?v=20261119-140';
+import { buildSemanticDocuments, enforceSemanticTokenBudget, mergeSemanticRetrievalRanks } from './scripts/semantic-text.mjs?v=20261119-141';
 
 // State Management
 let currentSourceCard = null;
