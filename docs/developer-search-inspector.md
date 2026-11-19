@@ -101,6 +101,12 @@ The live inspector follows the same request ID as the production search and list
 
 A new search replaces the active live trace. Late progress from older request IDs is ignored. Terminal runs retain their live progress/stream/preview trace alongside the final diagnostic pipeline. The browser regression runner executes the end-to-end local search benchmark against the bundled card corpus and semantic index, and separately verifies live request telemetry, failed-lane state, stage-level comparison, and regression-case behavior. The parser regression suite also protects single-use Aura entry triggers and numeric target restrictions so recent fixes cannot quietly degrade mechanic comparisons. It also protects the life-cost distinction for recurring card-advantage engines.
 
+## Comparing live-search behavior
+
+Compare Runs now includes a separate **Live-search experience** section alongside final ranking and score evolution. It compares time to the first provisional preview, total search duration, number of preview updates, completed/failed retrieval lanes, overlap between the last provisional top-10 and final top-10, and average overlap between consecutive provisional top-10 updates.
+
+These are separate quality dimensions: a build can improve final Recall@20 while making the first useful preview slower, or it can surface candidates quickly but reshuffle them heavily before final ranking. Lower first-preview latency and higher preview/final or successive-preview overlap are generally better, but provisional scores are not authoritative final ranks.
+
 ## Search-quality benchmark findings and fixes
 
 The local-only retrieval benchmark now includes targeted checks for two recurring issues:
