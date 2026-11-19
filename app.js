@@ -1,6 +1,6 @@
 /* ManaSearch build 20261119-154 */
 // ManaSearch deployment build marker. Bump this whenever app.js changes so cached-module issues are easy to diagnose.
-const MANASEARCH_APP_BUILD = '20261119-158';;;
+const MANASEARCH_APP_BUILD = '20261119-159';;;
 console.info(`[ManaSearch] app.js build ${MANASEARCH_APP_BUILD}`);
 
 // The source-query and static-index builders share one representation so both sides
@@ -27960,7 +27960,7 @@ async function runManaSearchLiveRetrievalRegressionSuite({ log = true } = {}) {
         const phrase = normalizeLocalCorpusText('{T}: Add');
         const indexTerms = descriptor.tokens.map(token => ({
             token,
-            inCandidate: normalizedText.split(/\\s+/).includes(token),
+            inCandidate: normalizedText.split(/\s+/).includes(token),
             postingCount: Number(corpus.tokenIndex?.get(token)?.length) || 0
         }));
         const exactFilterPass = matchesExactHighlightConstraints(candidate, highlights);
@@ -28021,7 +28021,7 @@ async function runManaSearchLiveRetrievalRegressionSuite({ log = true } = {}) {
     }
     if (log) {
         console.table(report.checks.map(({ id, pass, detail }) => ({ id, pass, detail: JSON.stringify(detail).slice(0, 500) })));
-        console.info(\`[ManaSearch] Live retrieval regression suite: \${report.checks.filter(item => item.pass).length}/\${report.checks.length}\`, report);
+        console.info('[ManaSearch] Live retrieval regression suite: ' + report.checks.filter(item => item.pass).length + '/' + report.checks.length, report);
     }
     return report;
 }
