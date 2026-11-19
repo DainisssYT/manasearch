@@ -68,6 +68,7 @@ async function main() {
       typeof window.runManaSearchRealCardBenchmark === 'function' &&
       typeof window.runManaSearchIntentRegressionSuite === 'function' &&
       typeof window.ManaSearchDebug?.getSnapshot === 'function' &&
+      typeof window.ManaSearchDebug?.getLiveIntent === 'function' &&
       !!document.getElementById('mana-search-inspector'),
       null, { timeout: 60000 }
       );
@@ -91,7 +92,7 @@ async function main() {
       realCardBenchmarkSuiteNoArgs: await window.runManaSearchRealCardBenchmarkSuite({ log: false }),
       developerDiagnostics: (() => {
         const snapshot = window.ManaSearchDebug.getSnapshot();
-        return { available: !!snapshot && typeof snapshot === 'object', serializable: JSON.stringify(snapshot).length > 0, hasPipelineFields: ['request', 'funnel', 'streams', 'candidates', 'filterRejections'].every(key => Object.prototype.hasOwnProperty.call(snapshot, key)) };
+        return { available: !!snapshot && typeof snapshot === 'object', serializable: JSON.stringify(snapshot).length > 0, hasPipelineFields: ['request', 'funnel', 'streams', 'candidates', 'filterRejections'].every(key => Object.prototype.hasOwnProperty.call(snapshot, key)), liveIntentAvailable: typeof window.ManaSearchDebug.getLiveIntent === 'function' };
       })()
     }));
     const summarize = (label, suite) => {
