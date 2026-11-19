@@ -62,6 +62,8 @@ console.log(report);
 
 Use `validateRegressionCase(importedJson)` before accepting a case from another source. The comparison report includes `inputCheck`, `focusCheck`, `rankingCheck`, and `scoringEvolution`. A report with `status: "input-mismatch"` should not be counted as a ranking pass or failure until the original inputs have been reproduced.
 
+Each production pipeline snapshot carries the app build identifier. Compare Runs displays the earlier and later build IDs and flags when they differ; portable regression cases retain the baseline build and show the replay build. This is provenance, not a search-input mismatch: different app builds are expected when measuring an algorithm change.
+
 A controlled comparison requires the same user-controlled source card, selected highlights, constraints, methods, ordering, search-depth percentage, ordering-feature toggles (Matrix Sweep / Diverse Spread), and scoring-weight offsets. Older snapshots missing any of these settings remain useful for exploration but are not labelled controlled comparisons. Changes to interpreted intent and generated query plans are reported separately as derived outputs, so a live-intent improvement can be evaluated without being misclassified as a different user request. When they differ, the report marks the result as **input-mismatch** instead of blaming the algorithm. Fix the input differences and rerun the case before evaluating ranking changes.
 
 ## Reading live-search status
