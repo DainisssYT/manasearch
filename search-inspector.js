@@ -224,19 +224,45 @@
       const right = bCandidates.get(name);
       const before = Number(left?.scores?.similarityScore);
       const after = Number(right?.scores?.similarityScore);
-      const scoreChannelChanges = compareNumericFields(left?.scores, right?.scores);
+      const scoreChannelChanges = [
+        ...compareNumericFields(left?.scores, right?.scores),
+        ...compareNumericFields(left?.functionSemanticEvidence, right?.functionSemanticEvidence)
+          .map(change => ({ ...change, field: 'functionSemanticEvidence.' + change.field }))
+      ];
       const mechanicalBreakdownChanges = compareNumericFields(left?.mechanicalBreakdown, right?.mechanicalBreakdown);
+      const earlierAbilityMatches = Array.isArray(left?.functionSemanticEvidence?.matches)
+        ? left.functionSemanticEvidence.matches.map(match => ({
+            sourceFunction: match?.sourceFunction || '',
+            candidateFunction: match?.candidateFunction || '',
+            sourceIndex: match?.sourceIndex ?? null,
+            candidateIndex: match?.candidateIndex ?? null
+          })) : [];
+      const laterAbilityMatches = Array.isArray(right?.functionSemanticEvidence?.matches)
+        ? right.functionSemanticEvidence.matches.map(match => ({
+            sourceFunction: match?.sourceFunction || '',
+            candidateFunction: match?.candidateFunction || '',
+            sourceIndex: match?.sourceIndex ?? null,
+            candidateIndex: match?.candidateIndex ?? null
+          })) : [];
+      const abilityMatchesChanged = stableJson(earlierAbilityMatches) !== stableJson(laterAbilityMatches);
       return {
         name: right?.name || left?.name || name,
         earlierScore: Number.isFinite(before) ? before : null,
         laterScore: Number.isFinite(after) ? after : null,
         delta: Number.isFinite(before) && Number.isFinite(after) ? after - before : null,
         scoreChannelChanges,
-        mechanicalBreakdownChanges
+        mechanicalBreakdownChanges,
+        functionSemanticEvidence: {
+          earlierEffectAwareScore: left?.functionSemanticEvidence?.effectAwareScore ?? null,
+          laterEffectAwareScore: right?.functionSemanticEvidence?.effectAwareScore ?? null,
+          earlierMatches: earlierAbilityMatches,
+          laterMatches: laterAbilityMatches,
+          abilityMatchesChanged
+        }
       };
     }).filter(item =>
       (item.delta !== null && Math.abs(item.delta) > 0.000001) ||
-      item.scoreChannelChanges.length > 0 || item.mechanicalBreakdownChanges.length > 0
+      item.scoreChannelChanges.length > 0 || item.mechanicalBreakdownChanges.length > 0 || item.functionSemanticEvidence.abilityMatchesChanged
     ).sort((x, y) => Math.abs(y.delta || 0) - Math.abs(x.delta || 0)).slice(0, 40);
     const streamNames = new Set([...Object.keys(a.streams || {}), ...Object.keys(b.streams || {})]);
     const streamComparison = [...streamNames].map(name => {
@@ -866,8 +892,13 @@
     const scoreChanges = sharedScoredNames.map(key => {
       const before = baselineCandidates.get(key);
       const after = currentCandidates.get(key);
-      const similarity = compareNumericFields(before.scores, after.scores);
+      const similarity = [
+        ...compareNumericFields(before.scores, after.scores),
+        ...compareNumericFields(before.functionSemanticEvidence, after.functionSemanticEvidence)
+          .map(change => ({ ...change, field: 'functionSemanticEvidence.' + change.field }))
+      ];
       const mechanical = compareNumericFields(before.mechanicalBreakdown, after.mechanicalBreakdown);
+      const abilityMatchesChanged = stableJson(before.functionSemanticEvidence?.matches || []) !== stableJson(after.functionSemanticEvidence?.matches || []);
       return {
         name: after.name || before.name || key,
         baselinePreFloorRank: before.preFloorRank ?? null,
@@ -875,9 +906,10 @@
         baselineFinalRank: (fixture.baseline?.finalRanking || []).find(item => normalizeCandidateName(item.name) === key)?.rank ?? null,
         currentFinalRank: actualRanks.get(key) ?? null,
         scoreChanges: similarity,
-        mechanicalBreakdownChanges: mechanical
+        mechanicalBreakdownChanges: mechanical,
+        abilityMatchesChanged
       };
-    }).filter(item => item.scoreChanges.length || item.mechanicalBreakdownChanges.length ||
+    }).filter(item => item.scoreChanges.length || item.mechanicalBreakdownChanges.length || item.abilityMatchesChanged ||
       item.baselinePreFloorRank !== item.currentPreFloorRank || item.baselineFinalRank !== item.currentFinalRank)
       .sort((a, b) => {
         const scoreDelta = item => Math.abs(item.scoreChanges.find(change => change.field === 'similarityScore')?.delta || 0);
