@@ -394,6 +394,61 @@ async function main() {
           ndcg20: strict.ndcg20 ?? null,
           precision10: strict.precision10 ?? null,
           expectedRanks: strict.cardRanks || {},
+          expectedCardEvidence: (item.expected || []).map(name => {
+            const key = String(name || '').trim().toLowerCase();
+            const score = strict.scoreByName instanceof Map ? (strict.scoreByName.get(key) || null) : null;
+            const diagnostics = strict.diagnostics || {};
+            const hasName = values => {
+              if (values instanceof Set) return [...values].some(value => String(value || '').trim().toLowerCase() === key);
+              if (Array.isArray(values)) return values.some(value => String(value || '').trim().toLowerCase() === key);
+              return false;
+            };
+            const stageSources = {
+              retrieved: diagnostics.rawCandidateNames,
+              passedFilters: diagnostics.passedFilterNames,
+              deduplicated: diagnostics.dedupedNames,
+              meaningfulParse: diagnostics.meaningfulParseNames,
+              scored: diagnostics.scoredNames,
+              passedRelevanceFloor: diagnostics.passedRelevanceFloorNames,
+              finalRanked: diagnostics.finalRankedNames
+            };
+            const rejectionEntry = diagnostics.filterFailureReasons instanceof Map
+              ? [...diagnostics.filterFailureReasons.entries()].find(([candidate]) => String(candidate || '').trim().toLowerCase() === key)
+              : null;
+            const retrievalStreams = Object.entries(diagnostics.streams || {})
+              .filter(([, values]) => hasName(values)).map(([stream]) => stream);
+            return {
+              name,
+              rank: strict.cardRanks?.[name] ?? null,
+              stageMembership: Object.fromEntries(Object.entries(stageSources).map(([stage, values]) => [stage, hasName(values)])),
+              retrievalStreams,
+              filterRejection: rejectionEntry ? rejectionEntry[1] : null,
+              score: score ? {
+                similarityScore: score.similarityScore ?? null,
+                mechanicalScore: score.mechanicalScore ?? null,
+                functionScore: score.functionScore ?? null,
+                contextScore: score.contextScore ?? null,
+                highlightIntentScore: score.highlightIntentScore ?? null,
+                exactnessScore: score.exactnessScore ?? null,
+                effectCoverageScore: score.effectCoverageScore ?? null,
+                primaryEffectMatchScore: score.primaryEffectMatchScore ?? null,
+                modalModeSimilarityScore: score.modalModeSimilarityScore ?? null,
+                semanticRrfAgreement: score.semanticRrfAgreement ?? null,
+                semanticAbilityCoverage: score.semanticAbilityCoverage ?? null,
+                semanticRetrievalViews: score.semanticRetrievalViews || [],
+                rankingIntent: score.rankingIntent ?? null,
+                rankingIntentRole: score.rankingIntentRole ?? null,
+                evidenceGate: score.evidenceGate ?? null,
+                mechanicRankingTier: score.mechanicRankingTier ?? null,
+                mechanicRankingTierLabel: score.mechanicRankingTierLabel ?? null,
+                mechanicRankingEvidence: score.mechanicRankingEvidence ?? null,
+                contradictionPenalty: score.contradictionPenalty ?? null,
+                quantitativeConflictPenalty: score.quantitativeConflictPenalty ?? null,
+                acquisitionCadenceRankFactor: score.acquisitionCadenceRankFactor ?? null,
+                mechanicalBreakdown: score.mechanicalBreakdown ?? null
+              } : null
+            };
+          }),
           error: strict.errorMessage || ''
         };
       });
@@ -417,6 +472,10 @@ async function main() {
         },
         cases,
         lowestRecallCases: cases.slice().sort((a, b) => (a.recall20 ?? 0) - (b.recall20 ?? 0)).slice(0, 5),
+        focusCardEvidence: cases.filter(item => [3, 8, 9].includes(item.id)).map(item => ({
+          id: item.id, name: item.name, source: item.source,
+          expectedCardEvidence: item.expectedCardEvidence
+        })),
         inspector: {
           retainedRuns: history.length,
           latestRuns: history.slice(-2).map(run => ({
