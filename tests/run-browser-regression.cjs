@@ -102,7 +102,16 @@ async function main() {
           number: 1,
           completedAt: '2026-11-19T08:00:00.000Z',
           pipeline: {
-            request: { sourceCard: { name: 'Source A' }, highlights: [{ text: 'draw a card' }], intent: { sourceText: 'draw a card', semanticText: 'draw a card' }, constraints: {}, methods: { functional: true }, ordering: 'overall' },
+            request: {
+              inputSnapshotVersion: 2,
+              sourceCard: { name: 'Source A' },
+              highlights: [{ text: 'draw a card' }],
+              intent: { sourceText: 'draw a card', semanticText: 'draw a card' },
+              constraints: {}, methods: { functional: true }, ordering: 'overall',
+              searchDepthPercent: 100,
+              orderingFeatures: { matrix: false, diverse: false },
+              rankingWeights: { mechanical: 0, synergy: 0, context: 0, exactness: 0, category: 0 }
+            },
             funnel: { stages: {
               retrieved: ['Shared Card', 'Removed Card'], passedFilters: ['Shared Card', 'Removed Card'],
               deduplicated: ['Shared Card', 'Removed Card'], meaningfulParse: ['Shared Card', 'Removed Card'],
@@ -122,7 +131,16 @@ async function main() {
           number: 2,
           completedAt: '2026-11-19T08:01:00.000Z',
           pipeline: {
-            request: { sourceCard: { name: 'Source A' }, highlights: [{ text: 'draw two cards' }], intent: { sourceText: 'draw two cards', semanticText: 'draw two cards' }, constraints: {}, methods: { functional: true }, ordering: 'overall' },
+            request: {
+              inputSnapshotVersion: 2,
+              sourceCard: { name: 'Source A' },
+              highlights: [{ text: 'draw two cards' }],
+              intent: { sourceText: 'draw two cards', semanticText: 'draw two cards' },
+              constraints: {}, methods: { functional: true }, ordering: 'overall',
+              searchDepthPercent: 100,
+              orderingFeatures: { matrix: false, diverse: false },
+              rankingWeights: { mechanical: 0, synergy: 0, context: 0, exactness: 0, category: 0 }
+            },
             funnel: { stages: {
               retrieved: ['Shared Card', 'Added Card'], passedFilters: ['Shared Card', 'Added Card'],
               deduplicated: ['Shared Card', 'Added Card'], meaningfulParse: ['Shared Card', 'Added Card'],
@@ -193,7 +211,11 @@ async function main() {
               intent: { sourceText: 'draw a card', semanticText: 'draw a card' },
               constraints: { type: 'creature', cmc: 2 },
               methods: { functional: true, role: false },
-              ordering: 'overall'
+              ordering: 'overall',
+              inputSnapshotVersion: 2,
+              searchDepthPercent: 100,
+              orderingFeatures: { matrix: false, diverse: true },
+              rankingWeights: { mechanical: 0, synergy: 0, context: 0, exactness: 0, category: 0 }
             },
             finalResults: []
           }
@@ -201,6 +223,10 @@ async function main() {
           number: 10,
           pipeline: {
             request: {
+              rankingWeights: { category: 0, exactness: 0, context: 0, synergy: 0, mechanical: 0 },
+              orderingFeatures: { diverse: true, matrix: false },
+              searchDepthPercent: 100,
+              inputSnapshotVersion: 2,
               ordering: 'overall',
               methods: { role: false, functional: true },
               constraints: { cmc: 2, type: 'creature' },
@@ -324,6 +350,31 @@ async function main() {
         };
         const broadOptionComparison = window.ManaSearchInspector.compareRuns(earlier, broadOptionRun);
         const broadOptionRegression = window.ManaSearchInspector.compareRegressionCase(regressionCase, broadOptionRun);
+        const settingsChangedRun = {
+          number: 14,
+          pipeline: {
+            request: {
+              ...structuredClone(earlier.pipeline.request),
+              searchDepthPercent: 70,
+              orderingFeatures: { matrix: true, diverse: false },
+              rankingWeights: { ...earlier.pipeline.request.rankingWeights, mechanical: 0.25 }
+            },
+            finalResults: structuredClone(earlier.pipeline.finalResults)
+          }
+        };
+        const settingsChangedComparison = window.ManaSearchInspector.compareRuns(earlier, settingsChangedRun);
+        const incompleteInputSnapshotRun = {
+          number: 15,
+          pipeline: {
+            request: {
+              sourceCard: { name: 'Source A' },
+              highlights: [{ text: 'draw a card' }],
+              constraints: {}, methods: { functional: true }, ordering: 'overall'
+            },
+            finalResults: structuredClone(earlier.pipeline.finalResults)
+          }
+        };
+        const incompleteInputComparison = window.ManaSearchInspector.compareRuns(earlier, incompleteInputSnapshotRun);
         const provisionalErrorSummary = window.ManaSearchInspector.formatLiveSummary({
           source: { name: 'Interrupted Source' },
           liveSearch: {
@@ -404,6 +455,15 @@ async function main() {
           compareShowsPipelineStageRecallChanges: comparison.stageProgression.find(stage => stage.stage === 'retrieved')?.addedInLater.includes('Added Card') && comparison.stageProgression.find(stage => stage.stage === 'retrieved')?.missingFromLater.includes('Removed Card'),
           compareShowsScoredSampleTurnover: comparison.scoredCandidateEvolution?.newlyPresentInSample.includes('Added Card') && comparison.scoredCandidateEvolution?.noLongerPresentInSample.includes('Removed Card') && comparison.scoredCandidateEvolution?.sampleLimit === 300,
           compareShowsTopKOverlapAndCaptureLimit: comparison.finalRanking?.topKOverlap?.find(item => item.k === 10)?.overlap === 0.1 && comparison.finalRanking?.topKOverlap?.find(item => item.k === 10)?.capturedListOverlap === 0.5 && comparison.finalRanking?.capturedLimit === 100,
+          compareDetectsSearchDepthChange: settingsChangedComparison.changes.searchDepthPercentChanged === true &&
+            settingsChangedComparison.changes.changedInputFields.includes('searchDepthPercent'),
+          compareDetectsOrderingFeatureChange: settingsChangedComparison.changes.orderingFeaturesChanged === true &&
+            settingsChangedComparison.changes.changedInputFields.includes('orderingFeatures'),
+          compareDetectsRankingWeightChange: settingsChangedComparison.changes.rankingWeightsChanged === true &&
+            settingsChangedComparison.changes.changedInputFields.includes('rankingWeights'),
+          compareRejectsIncompleteInputSnapshots: incompleteInputComparison.outcomeComparison?.inputSnapshotComplete === false &&
+            incompleteInputComparison.outcomeComparison?.comparableForAlgorithmRegression === false &&
+            incompleteInputComparison.outcomeComparison?.missingInputFields?.later?.includes('searchDepthPercent'),
           compareFlagsChangedInputsAsUncontrolled: comparison.outcomeComparison?.sameUserInputs === false && comparison.outcomeComparison?.comparableForAlgorithmRegression === false,
           regressionCompareTreatsPartialRunAsNoVerdict: partialRegressionComparison.status === 'partial-run' && partialRegressionComparison.pass === null && partialRegressionComparison.comparedRun?.warning === 'Semantic stream timed out',
           compareShowsScoreChannelAndMechanicalBreakdownChanges: comparison.sharedCandidateScoreChanges.some(item => item.name === 'Shared Card' && item.scoreChannelChanges?.some(change => change.field === 'mechanicalScore' && Math.abs(change.delta - 0.1) < 1e-9) && item.mechanicalBreakdownChanges?.some(change => change.field === 'graphScore' && Math.abs(change.delta - 0.15) < 1e-9)),
@@ -413,7 +473,8 @@ async function main() {
           compareIgnoresRequestObjectKeyOrder: [
             'sourceCardChanged', 'highlightsChanged', 'intentChanged', 'constraintsChanged',
             'methodsChanged', 'orderingChanged', 'formatChanged', 'colorChanged',
-            'broadChanged', 'divergentChanged', 'plannedStreamsChanged', 'queryPlansChanged'
+            'broadChanged', 'divergentChanged', 'searchDepthPercentChanged', 'orderingFeaturesChanged',
+            'rankingWeightsChanged', 'plannedStreamsChanged', 'queryPlansChanged'
           ].every(key => requestKeyOrderComparison.changes[key] === false) &&
             requestKeyOrderComparison.changes.changedInputFields.length === 0 &&
             requestKeyOrderComparison.changes.changedDerivedFields.length === 0,
