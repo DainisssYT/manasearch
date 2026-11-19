@@ -27834,6 +27834,7 @@ async function findSimilarCards() {
     const timings = {};
     let searchOutcome = 'completed';
     let searchErrorMessage = '';
+    let searchHasFinalRanking = false;
     lastMainSearchOutcome = {
         requestId,
         status: 'running',
@@ -29868,6 +29869,7 @@ if (candidates.length > 0) {
         const renderStartedAt = Date.now();
         renderResults(lastSearchResults);
         updateResultsSummary();
+        searchHasFinalRanking = true;
         try {
             window.dispatchEvent(new CustomEvent('manasearch:search-preview-updated', {
                 detail: {
@@ -29899,7 +29901,6 @@ if (candidates.length > 0) {
         if (requestId !== searchRequestId) return;
         pipelineCompleted = true;
         clearTimeout(searchTimeoutId);
-        document.getElementById('provisional-results-banner')?.classList.add('hidden');
         if (isRuntimeCardApiRateLimitError(error) || error?.isRuntimeCardApiRateLimit) {
             searchOutcome = 'completed_with_warnings';
             searchErrorMessage = error?.message || 'A local retrieval stream stopped; completed results were retained.';
@@ -29913,6 +29914,18 @@ if (candidates.length > 0) {
             console.error("Error in findSimilarCards:", error);
             if (typeof alert === 'function') alert(searchErrorMessage);
         }
+        const provisionalBanner = document.getElementById('provisional-results-banner');
+        const provisionalCount = Array.isArray(currentRenderedResultsCards) ? currentRenderedResultsCards.length : 0;
+        if (!searchHasFinalRanking && provisionalCount > 0) {
+            if (provisionalBanner) {
+                provisionalBanner.textContent = searchOutcome === 'error'
+                    ? 'Search stopped before the final ranking. Cards shown below are provisional and may be incomplete.'
+                    : 'Search finished with retrieval warnings. Cards shown below may omit candidates from interrupted search lanes.';
+                provisionalBanner.classList.remove('hidden');
+            }
+        } else if (provisionalBanner) {
+            provisionalBanner.classList.add('hidden');
+        }
     } finally {
         activeLocalCorpusBatchContext = previousLocalCorpusBatchContext;
         if (activeMainSearchRequestId === requestId) activeMainSearchRequestId = null;
@@ -29920,6 +29933,8 @@ if (candidates.length > 0) {
         clearTimeout(searchTimeoutId);
         if (requestId === searchRequestId && activeResultView.mode === 'main' && activeResultView.requestId === requestId) {
             const resultCount = Array.isArray(lastSearchResults) ? lastSearchResults.length : 0;
+            const provisionalResultCount = !searchHasFinalRanking && Array.isArray(currentRenderedResultsCards)
+                ? currentRenderedResultsCards.length : 0;
             const finishedAt = new Date();
             const durationMs = Date.now() - searchStartedAt;
             const outcomeMessage = searchOutcome === 'error'
@@ -29935,6 +29950,7 @@ if (candidates.length > 0) {
                 finishedAt: finishedAt.toISOString(),
                 durationMs,
                 resultCount,
+                provisionalResultCount,
                 errorMessage: searchErrorMessage
             };
             updateProgress(null, null, outcomeMessage);
@@ -29956,6 +29972,7 @@ if (candidates.length > 0) {
                     durationMs,
                     sourceName: currentSourceCard?.name || '',
                     resultCount,
+                    provisionalResultCount,
                     diagnostics: lastSearchDiagnostics || null
                 }
             }));
