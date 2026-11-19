@@ -7452,23 +7452,25 @@ function extractClauseAtoms(effectText, primaryAction) {
     // occurrences must survive: Verdant Mastery has two distinct "put ... onto the battlefield"
     // actions with different recipients, and both are strategically meaningful.
     const primaryActionPending = new Set(primaryAction ? [primaryAction] : []);
-    const verbRegex = new RegExp(`\\b(${ATOM_VERBS})\\b`, 'gi');
+    const verbRegex = new RegExp('\\b(' + ATOM_VERBS + ')\\b', 'gi');
+    const verbMatches = Array.from(effectText.matchAll(verbRegex));
 
-    let match;
-    let guard = 0;
-    while ((match = verbRegex.exec(effectText)) !== null && guard++ < 12) {
+    for (let verbIndex = 0; verbIndex < verbMatches.length && verbIndex < 12; verbIndex++) {
+        const match = verbMatches[verbIndex];
         // A tap/untap verb before the first action separator belongs to a trigger or condition
         // ("Whenever an opponent taps a land for mana, add {G}"), not to the effect sequence.
-        // Direct imperative tap effects after the comma/then remain parseable.
         if (/^untaps?$/i.test(match[1]) || /^taps?$/i.test(match[1])) {
             const prefix = effectText.slice(0, match.index);
-            const triggerStart = prefix.search(/\b(?:when|whenever|if|as long as)\b/i);
-            const precedingSeparator = prefix.search(/[,;]|\bthen\b/i);
+            const triggerStart = prefix.search(/\\b(?:when|whenever|if|as long as)\\b/i);
+            const precedingSeparator = prefix.search(/[,;]|\\bthen\\b/i);
             if (triggerStart >= 0 && precedingSeparator < 0) continue;
         }
-        // Parse from this verb onward, so each atom sees its own object/zones rather than the
-        // whole clause's.
-        const slice = effectText.slice(match.index);
+        // Parse only this verb's span, ending before the next action verb. The original unbounded
+        // suffix let a later unrelated action win a sub-parser's first-match logic: "draw a card and
+        // you lose 1 life" was parsed as lose_life twice and lost its draw atom.
+        // Keep the full clause separately as context below for timing/repeatability interpretation.
+        const nextVerbIndex = verbMatches[verbIndex + 1]?.index ?? effectText.length;
+        const slice = effectText.slice(match.index, nextVerbIndex).trim();
         const atom =
             parseCounterEffect(slice) ||
             parseSearchEffect(slice) ||
@@ -7479,7 +7481,6 @@ function extractClauseAtoms(effectText, primaryAction) {
             parseDamageEffect(slice) ||
             parseLifeEffect(slice) ||
             parseZoneMovementEffect(slice);
-
         if (atom && atom.action) {
             if (primaryActionPending.has(atom.action)) {
                 primaryActionPending.delete(atom.action);
@@ -8571,12 +8572,19 @@ function deriveCanonicalFunction(effect) {
     const a = effect.action;
     const localRuleContext = `${String(effect.parentRuleText || '')} ${String(effect.contextClause || '')} ${String(effect.raw || '')}`.replace(/[’]/g, "'");
     const previousRuleText = String(effect.previousRuleText || '').replace(/[’]/g, "'");
-    const previousRuleSearchesForLands = /\bsearch(?:es)?\b[\s\S]{0,180}\b(?:basic\s+)?land cards?\b/i.test(previousRuleText);
-    // Some modal/ramp spells put the searched-for object onto the battlefield in the next printed
-    // sentence (Verdant Mastery). Import only the immediately preceding sentence when it clearly
-    // searches a library for land cards and this atom is a battlefield put; don't blend whole-card
-    // text into every effect and contaminate unrelated mechanics.
-    const ruleContext = `${localRuleContext} ${a === 'put' && effect.to === 'battlefield' && previousRuleSearchesForLands ? previousRuleText : ''}`.trim();
+    const previousRuleSearchesForLands = /\\bsearch(?:es)?\\b[\\s\\S]{0,180}\\b(?:basic\\s+)?land cards?\\b/i.test(previousRuleText);
+    const previousRuleExilesTopLibraryCard = /\\b(?:reveal|exile)\\b[\\s\\S]{0,180}\\btop\\s+(?:(?:one|two|three|four|five|six|seven|eight|nine|ten|\\d+)\\s+)?cards?\\s+of\\s+(?:your|their|that player(?:'s)?|that opponent(?:'s)?|an opponent(?:'s)?|a player(?:'s)?)\\s+library\\b/i.test(previousRuleText);
+    const currentRulePutsCardInHand = /\\b(?:put|place)\\s+(?:that card|it)\\s+(?:into|to)\\s+(?:your|their|that player(?:'s)?|a player(?:'s)?)\\s+hand\\b/i.test(localRuleContext);
+    // Some abilities split top-library acquisition across adjacent Oracle sentences:
+    // "Exile the top card of your library face down. Put that card into your hand ...".
+    // Import only the immediately preceding sentence when both halves explicitly connect.
+    const delayedTopLibraryAcquisition = a === 'put' && effect.to === 'hand' &&
+        previousRuleExilesTopLibraryCard && currentRulePutsCardInHand;
+    // Verdant Mastery and similar cards split a searched land from the following battlefield put.
+    const includePreviousRuleContext = a === 'put' && (
+        (effect.to === 'battlefield' && previousRuleSearchesForLands) || delayedTopLibraryAcquisition
+    );
+    const ruleContext = [localRuleContext, includePreviousRuleContext ? previousRuleText : ''].filter(Boolean).join(' ').trim();
     const lowerRuleContext = ruleContext.toLowerCase();
     const topLibraryPattern = /\btop\s+(?:(?:one|two|three|four|five|six|seven|eight|nine|ten|\d+)\s+)?cards?\s+of\s+(?:your|their|that player(?:'s)?|that opponent(?:'s)?|an opponent(?:'s)?|a player(?:'s)?)\s+library\b/i;
     const directlyExilesTopLibrary = /\bexiles?\s+(?:the\s+)?top\s+(?:(?:one|two|three|four|five|six|seven|eight|nine|ten|\d+)\s+)?cards?\s+of\s+(?:your|their|that player(?:'s)?|that opponent(?:'s)?|an opponent(?:'s)?|a player(?:'s)?)\s+library\b/i.test(ruleContext);
@@ -15329,6 +15337,17 @@ function runManaSearchRepeatabilityRegressionSuite({ log = true } = {}) {
             const arenaFunctionNames = functionNames({ effects: arenaEffects });
             const darkConfidantFunctionNames = functionNames(darkConfidantProfile);
             const necropotenceFunctionNames = functionNames(necropotenceProfile);
+            const arenaDrawAtoms = arenaEffects.filter(effect => effect?.canonical?.function === 'card_draw');
+            const arenaLifeLossAtoms = arenaEffects.filter(effect => effect?.canonical?.function === 'lose_life');
+            results.push({
+                id: 'compound-draw-and-life-loss-retains-both-distinct-actions',
+                pass: arenaDrawAtoms.length === 1 && arenaLifeLossAtoms.length === 1,
+                diagnostics: {
+                    drawCount: arenaDrawAtoms.length,
+                    lifeLossCount: arenaLifeLossAtoms.length,
+                    effects: arenaEffects.map(effect => ({ action: effect.action, function: effect.canonical?.function, raw: effect.raw }))
+                }
+            });
             const cardDrawFunction = getCanonicalFunctions(arenaEffects).find(fn => fn.function === 'card_draw');
             const darkConfidantDrawFunction = getCanonicalFunctions(darkConfidantProfile.effects).find(fn => fn.function === 'card_draw');
             const necropotenceDrawFunction = getCanonicalFunctions(necropotenceProfile.effects).find(fn => fn.function === 'card_draw');
