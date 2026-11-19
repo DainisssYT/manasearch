@@ -8310,11 +8310,11 @@ function parseMTGEffect(oracleText, cardContext = null) {
     // pieces only when the full Oracle text explicitly defines that Aura/graveyard relationship
     // and the return atom explicitly names the enchanted creature card. This must not turn ordinary
     // hand/library battlefield-entry effects into reanimation.
-    const hasGraveyardAuraTarget = /\\benchant\\s+(?:(?:a|an|the|target)\\s+)?(?:creature|permanent)\\s+card\\s+in\\s+(?:a|your|their|any|an opponent's|that player's)?\\s*graveyard\\b/i.test(wholeOracleText);
+    const hasGraveyardAuraTarget = /\benchant\s+(?:(?:a|an|the|target)\s+)?(?:creature|permanent)\s+card\s+in\s+(?:a|your|their|any|an opponent's|that player's)?\s*graveyard\b/i.test(wholeOracleText);
     if (hasGraveyardAuraTarget) {
         for (const effect of results) {
             if (!effect || !['return', 'put'].includes(effect.action) || effect.from || effect.to !== 'battlefield') continue;
-            if (!/\\b(?:return|put)\\s+(?:that\\s+)?enchanted\\s+(?:creature|permanent)\\s+card\\b/i.test(String(effect.raw || ''))) continue;
+            if (!/\b(?:return|put)\s+(?:that\s+)?enchanted\s+(?:creature|permanent)\s+card\b/i.test(String(effect.raw || ''))) continue;
             effect.from = 'graveyard';
             effect.inferredFromZone = 'graveyard';
             effect.zoneInferenceSource = 'aura-enchant-graveyard-card';
