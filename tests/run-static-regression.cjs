@@ -356,6 +356,11 @@ check('developer inspector observes the production pipeline without changing sco
   assert.match(html, /search-inspector\.js\?v=20261119-159/);
   assert.match(html, /search-inspector\.css\?v=20261119-140/);
   assert.match(app, /window\.ManaSearchDebug = Object\.freeze\(/);
+  assert.match(app, /appBuild: MANASEARCH_APP_BUILD/);
+  assert.match(inspector, /appBuild: pipeline\.appBuild/);
+  assert.match(inspector, /buildChanged/);
+  assert.match(inspector, /App builds:/);
+
   assert.match(app, /inputSnapshotVersion: 2/);
   assert.match(app, /searchDepthPercent: activeSearchDepthPercent/);
   assert.match(app, /searchDepthPercent: getCurrentSearchDepthPercent\(\)/);
