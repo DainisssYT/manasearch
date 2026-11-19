@@ -1095,15 +1095,16 @@
     const completeRun = runStatus === 'completed';
     // A warning-bearing run can still be inspected, but it cannot prove that omitted cards were
     // truly irrelevant: an interrupted retrieval lane may simply not have found them.
-    const pass = inputsMatch && assertionsConfigured && completeRun && !dataBuildChanged
+    const pass = inputsMatch && assertionsConfigured && completeRun && dataBuildKnown && !dataBuildChanged
       ? rankingPass !== false && focusPass !== false : null;
     const comparisonStatus = !inputsMatch ? 'input-mismatch'
       : !completeRun ? 'partial-run'
-        : dataBuildChanged ? 'dataset-changed'
-          : !assertionsConfigured ? 'no-expectations'
-            : pass ? 'pass' : 'fail';
+        : !dataBuildKnown ? 'revision-unknown'
+          : dataBuildChanged ? 'dataset-changed'
+            : !assertionsConfigured ? 'no-expectations'
+              : pass ? 'pass' : 'fail';
     return {
-      comparable: inputsMatch && !dataBuildChanged,
+      comparable: inputsMatch && dataBuildKnown && !dataBuildChanged,
       assertionsConfigured,
       pass,
       status: comparisonStatus,
@@ -1170,10 +1171,10 @@
       } : null,
       interpretation: !inputsMatch
         ? 'The compared run used different user-controlled inputs. Repeat the source card, selected highlights, constraints, methods, and ordering before judging the algorithm change.'
-        : dataBuildChanged
-          ? 'The dataset changed. The report still shows ranking and score differences for diagnosis, but does not issue a pass/fail verdict that could misattribute a data refresh to the app algorithm.'
-          : !dataBuildKnown
-            ? 'The run inputs match, but dataset provenance is incomplete. The ranking assertion is shown; inspect the corpus revision before attributing any regression to app code.'
+        : !dataBuildKnown
+          ? 'The run inputs match, but at least one endpoint lacks a dataset revision. No pass/fail verdict is issued because a corpus refresh cannot be ruled out.'
+          : dataBuildChanged
+            ? 'The dataset changed. The report still shows ranking and score differences for diagnosis, but does not issue a pass/fail verdict that could misattribute a data refresh to the app algorithm.'
             : derivedRequestChanges.length
               ? 'User-controlled inputs match. The interpreted intent or generated retrieval plan changed; these are outputs of the system under test and are shown for diagnosis rather than treated as replay mismatches.'
               : 'A pass requires matching user-controlled inputs, a fixed dataset revision, and satisfying every configured focus-card and expected-ranking assertion.'
