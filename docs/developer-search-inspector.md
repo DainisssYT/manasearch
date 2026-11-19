@@ -19,7 +19,7 @@ The floating **Developer inspector** is an opt-in, read-only view of the real ap
 - **Trace card** — select one card and follow its recorded membership through every pipeline stage, see which retrieval streams found it, inspect hard-filter rejection evidence, review its score channels and ranking evidence, and confirm its final rank.
 - **Exclusions** — candidates removed between pipeline stages and the recorded hard-filter / exact-highlight rejection explanations.
 - **Compare runs** — compare two retained searches, including changed inputs, retrieval-stream overlap, final cards added or removed, rank movement, and score deltas for shared candidates.
-- **Regression cases** — turn a real search into a portable test case, write down the correct expected result/ranking, export or import the case as JSON, and compare it with a later search run.
+- **Regression cases** — turn a real search into a portable test case, write down the correct expected result/ranking, export or import the case as JSON, and compare it with a later search run, including score-channel changes and candidate-pool changes for shared candidates.
 - **Timeline** — search start/finish, configuration changes, and worker activity.
 - **Worker** — observed Web Worker request/response payloads.
 
@@ -34,7 +34,7 @@ Use **Regression cases** when you find a search that behaves incorrectly and wan
    - **Must not appear** — the focus card must be absent from the final displayed result list.
    - **Must rank within top N** — the card must appear no lower than the maximum rank you enter.
    - **No focus assertion** — use only the ordered ranking check.
-4. Edit **Expected top ranking** to the correct card names, one per line, best match first. The captured order is only a starting point; change it when the observed results are wrong. The comparison checks exact order for the listed top K, and reports overlap, missing cards, unexpected cards, and rank changes.
+4. Edit **Expected top ranking** to the correct card names, one per line, best match first. The captured order is only a starting point; change it when the observed results are wrong. The comparison checks exact order for the listed top K, and reports overlap, missing cards, unexpected cards, and rank changes. It also compares shared candidates' numeric score channels and mechanical-breakdown fields, reports candidates newly scored or no longer scored, and shows the focus card's before/after trace.
 5. Choose **Download case** (or **Copy case JSON**) and keep the JSON file with the issue or code change. The case is portable and can be reviewed by another developer.
 6. After updating ManaSearch, open the new build, import the case, and repeat the original search in the normal UI. Select that new completed run under **Compare against** and choose **Compare with run**.
 
@@ -58,7 +58,7 @@ The `retrievalEvidence` field is provenance only: it records which streams found
 - Candidate snapshots are captured from the production `scoreCardBatch` output before relevance-floor pruning. The inspector does not run a second scorer.
 - Each run snapshot retains at most 300 scored candidates and 500 filter rejection records; the session archive retains at most six runs to bound memory and export size.
 - **Download JSON** produces a versioned `manasearch-diagnostics-export-v2` file. It includes the most recent UI/pipeline state, retained completed runs, timeline, and observed worker messages.
-- **Download case** produces a separate, portable `manasearch-regression-case-v1` file. It includes the original request, baseline final ranking, focus-card trace when selected, and captured production pipeline.
+- **Download case** produces a separate, portable `manasearch-regression-case-v1` file. It includes the original request, baseline final ranking, focus-card trace when selected, and captured production pipeline. Imports are capped at 8 MB.
 - Cases and diagnostic exports stay in the browser until the developer explicitly copies or downloads them. Importing a case reads a local JSON file; no diagnostic history or case is uploaded or saved automatically.
 - Diagnostic exports may contain card Oracle text, search queries, and user-selected highlight text. Review JSON before sharing it.
 - The inspector is developer tooling, not a user-facing quality guarantee. Use reproducible source/highlight/constraint combinations and compare exported snapshots when tuning the search system.
