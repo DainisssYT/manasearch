@@ -370,6 +370,20 @@ check('developer inspector observes the production pipeline without changing sco
   assert.match(inspector, /rankChanges/);
   assert.match(inspector, /data-action="download"/);
   assert.match(inspector, /manasearch-diagnostics-export-v2/);
+
+  assert.match(inspector, /data-tab="regression"/);
+  assert.match(inspector, /manasearch-regression-case-v1/);
+  assert.match(inspector, /createRegressionCase/);
+  assert.match(inspector, /validateRegressionCase/);
+  assert.match(inspector, /compareRegressionCase/);
+  assert.match(inspector, /data-regression-build/);
+  assert.match(inspector, /data-regression-export/);
+  assert.match(inspector, /data-regression-import/);
+  assert.match(inspector, /data-regression-compare/);
+  assert.match(inspector, /expectedTopCandidates/);
+  assert.match(inspector, /input-mismatch/);
+  assert.match(inspectorCss, /ms-inspector-regression-controls/);
+
   assert.match(inspector, /htmlEscape\(clip\(runLabel\(run\), 120\)\)/);
   assert.match(inspector, /meaningfulParse/);
   assert.match(inspectorCss, /overflow-x:auto/);
