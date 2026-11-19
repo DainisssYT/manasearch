@@ -13,14 +13,14 @@ The floating **Developer inspector** is an opt-in, read-only view of the real ap
 
 ## Views
 
-- **Live state** — source card, current visible intent, controls, provisional results, the active search phase, per-stream completion progress, and recent worker traffic. The inspector ignores late events from superseded searches.
+- **Live state** — source card, current visible intent, controls, current search phase, per-stream status (waiting, running, completed, failed, or warning-bearing), provisional top cards, the authoritative final ranking event, and recent worker traffic. A fallback result does not make a failed retrieval lane look successful. The inspector ignores late events from superseded searches.
 - **Pipeline** — the actual search request, retrieval stream membership, stream coverage, functional/exact-highlight query results, candidate funnel counts, timing, semantic calibration, and relevance-floor settings.
 - **Candidates** — up to 300 highest-scoring candidates from the actual scoring pass, including candidates subsequently removed by the relevance floor. Each candidate includes score channels, ranking evidence, parse confidence, retrieval provenance, and relevant ranking flags.
 - **Trace card** — select one card and follow its recorded membership through every pipeline stage, see which retrieval streams found it, inspect hard-filter rejection evidence, review its score channels and ranking evidence, and confirm its final rank.
 - **Exclusions** — candidates removed between pipeline stages and the recorded hard-filter / exact-highlight rejection explanations.
-- **Compare runs** — compare two retained searches, including their success/partial/error outcomes, duration, changed inputs, normalized retrieval-stream overlap, final cards added or removed, rank movement, and score deltas for shared candidates. Failed runs are explicitly marked invalid for ranking comparisons rather than treated as successful zero-result searches. Warning-bearing runs remain inspectable, but regression verdicts are neutral (`pass: null`) because incomplete retrieval cannot prove that an absent card was genuinely irrelevant.
+- **Compare runs** — compare two retained searches by stream overlap, candidate membership at every funnel stage (retrieval → filters → deduplication → meaningful parse → scoring → relevance floor → final ranking), scored-sample turnover, numeric score-channel/mechanical-breakdown changes, top-10/20/50 overlap, and final rank movement. It also displays the true reported result counts beside the retained first-100 ranking rows. It marks whether the same user-controlled inputs were used, so an input change is not mistaken for an algorithm improvement. Failed or warning-bearing runs are not valid controlled ranking comparisons.
 - **Regression cases** — turn a real search into a portable test case, write down the correct expected result/ranking, export or import the case as JSON, and compare it with a later search run, including score-channel changes and candidate-pool changes for shared candidates.
-- **Timeline** — search start/finish, configuration changes, and worker activity.
+- **Timeline** — request-scoped search start, progress text, stream transitions/failures, provisional and final preview changes, search outcomes, configuration changes, and worker activity.
 - **Worker** — observed Web Worker request/response payloads.
 
 ## Building a repeatable regression case
@@ -68,12 +68,12 @@ A comparison requires the same user-controlled source card, selected highlights,
 
 The live inspector follows the same request ID as the production search and listens to progress events emitted by the actual search pipeline:
 
-- **Running** — current phase/progress text, stream states, and provisional top cards are captured as the search runs.
+- **Running** — current phase/progress text, stream states, and provisional top cards are captured as the search runs. A final-ranking event replaces the provisional preview when the authoritative ranking is ready.
 - **Completed** — the final pipeline and ranked results were produced normally.
-- **Completed with warnings** — one or more retrieval lanes were interrupted, but completed stages/results were retained. Inspect the stream checklist before comparing rankings.
-- **Error** — the main search failed before producing a valid final ranking. Compare Runs shows the error and marks ranking comparison invalid; a failed run must never be interpreted as a true zero-result search.
+- **Completed with warnings** — one or more retrieval lanes failed and supplied fallback results (or the semantic retrieval lane was unavailable). The search can still return useful cards, but the run is explicitly degraded; inspect the failed lane and its message before drawing recall conclusions.
+- **Error** — the main search failed before producing a valid final ranking. Compare Runs marks ranking comparison invalid; a failed run must never be interpreted as a true zero-result search.
 
-A new search replaces the active live trace. Late progress from older request IDs is ignored. Completed runs retain their live progress/stream/preview trace alongside the final diagnostic pipeline. The browser regression runner also executes the 12-scenario `runLocalBenchmarkInApp()` end-to-end suite against the bundled local card corpus and semantic index, then checks that the inspector captured real finished runs and can compare them.
+A new search replaces the active live trace. Late progress from older request IDs is ignored. Terminal runs retain their live progress/stream/preview trace alongside the final diagnostic pipeline. The browser regression runner executes the end-to-end local search benchmark against the bundled card corpus and semantic index, and separately verifies live request telemetry, failed-lane state, stage-level comparison, and regression-case behavior.
 
 ## Reading a diagnostic
 
@@ -89,9 +89,9 @@ The `retrievalEvidence` field is provenance only: it records which streams found
 
 ## Data and safety boundaries
 
-- The inspector does not launch searches, alter constraints, change score weights, or reorder candidates. It retains the six most recent completed primary searches in page memory only; this history is cleared when the page is reloaded.
+- The inspector does not launch searches, alter constraints, change score weights, or reorder candidates. It retains the six most recent terminal primary-search runs (successful, warning-bearing, or failed) in page memory only; this history is cleared when the page is reloaded.
 - Candidate snapshots are captured from the production `scoreCardBatch` output before relevance-floor pruning. The inspector does not run a second scorer.
-- Each run snapshot retains at most 300 scored candidates and 500 filter rejection records; the session archive retains at most six runs to bound memory and export size.
+- Each run snapshot retains at most 300 scored candidates, 500 filter rejection records, and the first 100 final ranking rows. Full counts are kept separately; candidate/ranking differences beyond those retained samples cannot be reconstructed. Stream failures and their fallback messages are retained in the pipeline snapshot.
 - **Download JSON** produces a versioned `manasearch-diagnostics-export-v2` file. It includes the most recent UI/pipeline state, retained completed runs, timeline, and observed worker messages.
 - **Download case** produces a separate, portable `manasearch-regression-case-v1` file. It includes the original request, baseline final ranking, focus-card trace when selected, and captured production pipeline. Imports are capped at 8 MB.
 - Cases and diagnostic exports stay in the browser until the developer explicitly copies or downloads them. Importing a case reads a local JSON file; no diagnostic history or case is uploaded or saved automatically.
@@ -104,4 +104,4 @@ The `retrievalEvidence` field is provenance only: it records which streams found
 - `preFloorRank` is the candidate's position after score sorting but before relevance-floor pruning. Use `finalResults` for the final displayed rank. Final result rows also include `preFloorScores` alongside the final post-preference similarity score.
 - Filter rejection reasons are recorded per card name at the first failing hard-filter check; a card can have more than one underlying issue that is not represented by that first reason.
 - Search Deeper and Related Search are separate workflows. This snapshot currently describes the primary Find Similar Cards run.
-- Run comparison is descriptive rather than causal: changed ranks may be caused by changed source/highlight/constraints, different retrieval pools, score changes, relevance-floor pruning, or ordering preferences. The comparison output exposes these signals and does not claim which one alone caused a rank change.
+- Compare Runs is descriptive rather than causal: changed ranks may be caused by changed source/highlight/constraints, different retrieval pools, score changes, relevance-floor pruning, ordering preferences, or incomplete retrieval. Its **controlled comparison** flag is only true when both runs completed normally with matching user-controlled inputs. The stage and candidate-sample diffs expose where the retained evidence changed, but do not claim that candidates outside bounded snapshots were absent from the production pipeline.
