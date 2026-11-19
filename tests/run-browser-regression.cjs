@@ -107,6 +107,7 @@ async function main() {
           completedAt: '2026-11-19T08:00:00.000Z',
           pipeline: {
             appBuild: '20261119-148',
+            dataBuildId: 'corpus-revision-1',
             request: {
               inputSnapshotVersion: 2,
               sourceCard: { name: 'Source A' },
@@ -139,6 +140,7 @@ async function main() {
           completedAt: '2026-11-19T08:01:00.000Z',
           pipeline: {
             appBuild: '20261119-149',
+            dataBuildId: 'corpus-revision-1',
             request: {
               inputSnapshotVersion: 2,
               sourceCard: { name: 'Source A' },
@@ -330,6 +332,7 @@ async function main() {
           completedAt: '2026-11-19T08:02:00.000Z',
           pipeline: {
             appBuild: '20261119-149',
+            dataBuildId: 'corpus-revision-1',
             request: structuredClone(earlier.pipeline.request),
             candidates: [
               { name: 'Shared Card', preFloorRank: 2, scores: { similarityScore: 0.75, mechanicalScore: 0.8 }, mechanicalBreakdown: { graphScore: 0.85 } },
@@ -351,12 +354,14 @@ async function main() {
         };
         const stableOrderReport = window.ManaSearchInspector.compareRegressionCase(stableFixture, {
           number: 5,
-          pipeline: { request: reorderedStableRequest, finalResults: [{ rank: 1, name: 'Shared Card' }] }
+          pipeline: { appBuild: '20261119-148', dataBuildId: 'corpus-revision-1', request: reorderedStableRequest, finalResults: [{ rank: 1, name: 'Shared Card' }] }
         });
 
         const derivedIntentRun = {
           number: 12,
           pipeline: {
+            appBuild: '20261119-148',
+            dataBuildId: 'corpus-revision-1',
             request: {
               ...structuredClone(earlier.pipeline.request),
               intent: { sourceText: 'draw a card', semanticText: 'draw two cards', exactnessText: 'draw two cards' },
@@ -410,6 +415,14 @@ async function main() {
           }
         });
         const regressionReport = window.ManaSearchInspector.compareRegressionCase(regressionCase, replayRun);
+        const changedDatasetRegressionRun = {
+          number: 30, status: 'completed',
+          pipeline: {
+            ...structuredClone(replayRun.pipeline),
+            dataBuildId: 'corpus-revision-2'
+          }
+        };
+        const changedDatasetRegressionReport = window.ManaSearchInspector.compareRegressionCase(regressionCase, changedDatasetRegressionRun);
         const inputMismatchReport = window.ManaSearchInspector.compareRegressionCase(regressionCase, later);
         const excludedCase = window.ManaSearchInspector.createRegressionCase(earlier, {
           focusCandidate: 'Added Card',
@@ -547,6 +560,12 @@ async function main() {
             compareSummaryText.includes('App builds: 20261119-148 → 20261119-149 (different builds)'),
           regressionCasePreservesSourceBuild: regressionCase.source.appBuild === '20261119-148' &&
             regressionReport.comparedRun?.appBuild === '20261119-149' && regressionReport.comparedRun?.buildChanged === true,
+          regressionCasePreservesSourceDatasetRevision: regressionCase.source.dataBuildId === 'corpus-revision-1' &&
+            regressionReport.comparedRun?.dataBuildId === 'corpus-revision-1' &&
+            regressionReport.comparedRun?.dataBuildChanged === false,
+          regressionReplayWithChangedDatasetHasNoVerdict: changedDatasetRegressionReport.status === 'dataset-changed' &&
+            changedDatasetRegressionReport.pass === null && changedDatasetRegressionReport.comparable === false &&
+            changedDatasetRegressionReport.revisionCheck?.dataBuildChanged === true,
 
           compareSummaryIncludesRecoveredStream: compareSummaryText.includes('[RECOVERED] Semantic Index'),
           liveSummaryExplainsCurrentSearch: liveSummaryText.includes('LIVE SEARCH SUMMARY') &&
