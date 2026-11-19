@@ -134,6 +134,7 @@
       return { from: labels[order[index]], to: labels[stage], removedCount: removed.length, removedExamples: removed.slice(0, 40) };
     });
   };
+  const htmlEscape = value => String(value ?? '').replace(/[&<>\"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '\"': '&quot;', "'": '&#39;' })[char]);
   const runLabel = run => {
     const source = run?.pipeline?.request?.sourceCard?.name || run?.summary?.sourceName || 'Unknown source';
     const resultCount = run?.summary?.resultCount ?? run?.pipeline?.finalResults?.length ?? 0;
@@ -221,7 +222,7 @@
     }
     const currentA = runSelectA.value;
     const currentB = runSelectB.value;
-    const options = state.searchRuns.map(run => `<option value="${run.number}">${clip(runLabel(run), 120)}</option>`).join('');
+    const options = state.searchRuns.map(run => `<option value="${run.number}">${htmlEscape(clip(runLabel(run), 120))}</option>`).join('');
     runSelectA.innerHTML = options;
     runSelectB.innerHTML = options;
     runSelectA.value = state.searchRuns.some(run => String(run.number) === currentA) ? currentA : String(state.searchRuns[state.searchRuns.length - 2].number);
