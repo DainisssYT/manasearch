@@ -15397,7 +15397,17 @@ function runManaSearchRepeatabilityRegressionSuite({ log = true } = {}) {
                 diagnostics: {
                     phyrexianArena: arenaFunctionNames,
                     darkConfidant: darkConfidantFunctionNames,
-                    necropotence: necropotenceFunctionNames
+                    necropotence: necropotenceFunctionNames,
+                    necropotenceEffects: necropotenceProfile.effects.map(effect => ({
+                        action: effect.action,
+                        from: effect.from ?? null,
+                        to: effect.to ?? null,
+                        function: effect.canonical?.function || null,
+                        raw: effect.raw || '',
+                        parentRuleText: effect.parentRuleText || '',
+                        previousRuleText: effect.previousRuleText || '',
+                        contextClause: effect.contextClause || ''
+                    }))
                 }
             });
             results.push({
