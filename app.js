@@ -1,6 +1,6 @@
-/* ManaSearch build 20261119-149 */
+/* ManaSearch build 20261119-150 */
 // ManaSearch deployment build marker. Bump this whenever app.js changes so cached-module issues are easy to diagnose.
-const MANASEARCH_APP_BUILD = '20261119-149';
+const MANASEARCH_APP_BUILD = '20261119-150';
 console.info(`[ManaSearch] app.js build ${MANASEARCH_APP_BUILD}`);
 
 // The source-query and static-index builders share one representation so both sides
@@ -16,6 +16,34 @@ let lastSearchResults = [];
 let currentRenderedResultsCards = [];
 let activeMainSearchRequestId = null;
 let lastMainSearchOutcome = null;
+
+/**
+ * Keep a successfully rendered ranking from being misreported as a fully complete search when
+ * one or more parallel retrieval lanes failed. A fatal top-level error remains fatal; a clean run
+ * remains clean. Inputs are plain snapshots so this rule can be tested independently of the UI.
+ */
+function resolveMainSearchOutcome(status, errorMessage = '', streamStatusEntries = [], streamFailures = []) {
+    const currentStatus = String(status || 'completed');
+    const currentMessage = String(errorMessage || '');
+    if (currentStatus !== 'completed') {
+        return { status: currentStatus, errorMessage: currentMessage };
+    }
+    const warningLabels = streamStatusEntries
+        .filter(entry => Array.isArray(entry) && ['failed', 'completed_with_warnings'].includes(entry[1]))
+        .map(entry => String(entry[0] || 'Unknown retrieval lane'));
+    const failureLabels = streamFailures.map(item => String(item?.label || 'Unknown retrieval lane'));
+    const affectedLabels = [...new Set([...warningLabels, ...failureLabels])];
+    if (!affectedLabels.length) return { status: currentStatus, errorMessage: currentMessage };
+    const failureDetails = streamFailures
+        .filter(item => item?.message)
+        .map(item => String(item.message).slice(0, 180));
+    const detailText = failureDetails.length ? ' — ' + [...new Set(failureDetails)].slice(0, 3).join('; ') : '';
+    return {
+        status: 'completed_with_warnings',
+        errorMessage: ('Retrieval was incomplete: ' + affectedLabels.join(', ') + detailText +
+            '. The final ranking uses the results available from completed search lanes.').slice(0, 900)
+    };
+}
 // Results are paginated in the presentation layer; the full ranked candidate list remains intact.
 let currentResultsPage = 1;
 let reorderResultsRequestId = 0;
@@ -29953,6 +29981,14 @@ if (candidates.length > 0) {
         if (requestId === searchRequestId) activeSearchStreamProgressReporter = null;
         clearTimeout(searchTimeoutId);
         if (requestId === searchRequestId && activeResultView.mode === 'main' && activeResultView.requestId === requestId) {
+            const resolvedOutcome = resolveMainSearchOutcome(
+                searchOutcome,
+                searchErrorMessage,
+                [...streamChecklistStatus.entries()],
+                streamFailureRecords
+            );
+            searchOutcome = resolvedOutcome.status;
+            searchErrorMessage = resolvedOutcome.errorMessage;
             const resultCount = Array.isArray(lastSearchResults) ? lastSearchResults.length : 0;
             const provisionalResultCount = !searchHasFinalRanking && Array.isArray(currentRenderedResultsCards)
                 ? currentRenderedResultsCards.length : 0;
@@ -33534,6 +33570,7 @@ function cloneCardForMinigame(card) {
     };
 }
 window.ManaSearchDebug = Object.freeze({
+    resolveSearchOutcome: resolveMainSearchOutcome,
     // Read the same intent model used by Find Similar Cards, even when the optional on-page
     // Search Intent panel is hidden. This is a live read-only view of the current source/highlights.
     normalizeRetrievalStreamDisplayLabel,
