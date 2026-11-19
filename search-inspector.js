@@ -9,6 +9,7 @@
     events: [],
     workerMessages: [],
     searchRuns: [],
+    activeSearch: null,
     lastSnapshot: null,
     searchCount: 0
   };
@@ -83,6 +84,7 @@
       resultCount: document.querySelectorAll('#results-grid > *').length,
       searchCount: state.searchCount
     },
+    liveSearch: cloneJson(state.activeSearch),
     results: readResults(),
     recentWorkerMessages: state.workerMessages.slice(0, 30)
   });
@@ -136,6 +138,13 @@
   let activeRegressionCase = null;
   let activeTab = 'live';
   let lastPipelineSnapshot = null;
+  const activeRequestMatches = detail => Boolean(
+    state.activeSearch && detail?.requestId !== undefined && detail?.requestId !== null &&
+    Number(detail.requestId) === Number(state.activeSearch.requestId)
+  );
+  const renderLiveProgress = () => {
+    if (!windowEl.hidden && activeTab === 'live') render();
+  };
   const getPipelineSnapshot = () => {
     try { if (window.ManaSearchDebug?.getSnapshot) lastPipelineSnapshot = window.ManaSearchDebug.getSnapshot(); }
     catch (error) { addEvent('diagnostics:error', { message: error?.message || String(error) }); }
@@ -174,29 +183,34 @@
   const runLabel = run => {
     const source = run?.pipeline?.request?.sourceCard?.name || run?.summary?.sourceName || 'Unknown source';
     const resultCount = run?.summary?.resultCount ?? run?.pipeline?.finalResults?.length ?? 0;
-    return `#${run?.number ?? '?'} ${source} — ${resultCount} results — ${new Date(run?.completedAt || 0).toLocaleTimeString()}`;
+    const outcome = run?.status || run?.summary?.status || 'completed';
+    const outcomeLabel = outcome === 'error' ? 'ERROR' : outcome === 'completed_with_warnings' ? 'PARTIAL' : 'OK';
+    return '#' + (run?.number ?? '?') + ' [' + outcomeLabel + '] ' + source + ' — ' + resultCount + ' results — ' + new Date(run?.completedAt || 0).toLocaleTimeString();
   };
   const compareRuns = (earlier, later) => {
-    if (!earlier || !later) return { message: 'Select two completed searches to compare. At least two searches are required.' };
+    if (!earlier || !later) return { message: 'Select two retained searches to compare. At least two searches are required.' };
     const a = earlier.pipeline || {};
     const b = later.pipeline || {};
+    const aStatus = earlier.status || earlier.summary?.status || a.outcome?.status || 'completed';
+    const bStatus = later.status || later.summary?.status || b.outcome?.status || 'completed';
     const aFinal = a.finalResults || [];
     const bFinal = b.finalResults || [];
-    const aRanks = new Map(aFinal.map(item => [String(item.name || '').toLowerCase(), item.rank]));
-    const bRanks = new Map(bFinal.map(item => [String(item.name || '').toLowerCase(), item.rank]));
-    const aNames = new Map(aFinal.map(item => [String(item.name || '').toLowerCase(), item.name || '']));
-    const bNames = new Map(bFinal.map(item => [String(item.name || '').toLowerCase(), item.name || '']));
+    const keyOf = item => normalizeCandidateName(item?.name);
+    const aRanks = new Map(aFinal.map(item => [keyOf(item), item.rank]).filter(([key]) => key));
+    const bRanks = new Map(bFinal.map(item => [keyOf(item), item.rank]).filter(([key]) => key));
+    const aNames = new Map(aFinal.map(item => [keyOf(item), item.name || '']).filter(([key]) => key));
+    const bNames = new Map(bFinal.map(item => [keyOf(item), item.name || '']).filter(([key]) => key));
     const common = [...aRanks.keys()].filter(name => bRanks.has(name));
     const added = [...bRanks.keys()].filter(name => !aRanks.has(name)).map(name => bNames.get(name) || name);
     const removed = [...aRanks.keys()].filter(name => !bRanks.has(name)).map(name => aNames.get(name) || name);
     const moved = common.map(name => ({
-      name: bFinal.find(item => String(item.name || '').toLowerCase() === name)?.name || name,
+      name: bNames.get(name) || aNames.get(name) || name,
       earlierRank: aRanks.get(name),
       laterRank: bRanks.get(name),
       movement: aRanks.get(name) - bRanks.get(name)
     })).filter(item => item.movement !== 0).sort((x, y) => Math.abs(y.movement) - Math.abs(x.movement)).slice(0, 40);
-    const aCandidates = new Map((a.candidates || []).map(item => [String(item.name || '').toLowerCase(), item]));
-    const bCandidates = new Map((b.candidates || []).map(item => [String(item.name || '').toLowerCase(), item]));
+    const aCandidates = new Map((a.candidates || []).map(item => [normalizeCandidateName(item.name), item]).filter(([key]) => key));
+    const bCandidates = new Map((b.candidates || []).map(item => [normalizeCandidateName(item.name), item]).filter(([key]) => key));
     const scoreChanges = [...aCandidates.keys()].filter(name => bCandidates.has(name)).map(name => {
       const left = aCandidates.get(name);
       const right = bCandidates.get(name);
@@ -212,22 +226,56 @@
       .sort((x, y) => Math.abs(y.delta) - Math.abs(x.delta)).slice(0, 40);
     const streamNames = new Set([...Object.keys(a.streams || {}), ...Object.keys(b.streams || {})]);
     const streamComparison = [...streamNames].map(name => {
-      const left = new Set(a.streams?.[name] || []);
-      const right = new Set(b.streams?.[name] || []);
+      const left = new Set((a.streams?.[name] || []).map(value => normalizeCandidateName(value)).filter(Boolean));
+      const right = new Set((b.streams?.[name] || []).map(value => normalizeCandidateName(value)).filter(Boolean));
       const intersection = [...left].filter(value => right.has(value)).length;
       const union = new Set([...left, ...right]).size;
       return { stream: name, earlierCount: left.size, laterCount: right.size, sharedCount: intersection, jaccard: union ? Number((intersection / union).toFixed(4)) : 1 };
     });
+    const requestChanges = {
+      sourceCard: stableJson(a.request?.sourceCard) !== stableJson(b.request?.sourceCard),
+      highlights: stableJson(a.request?.highlights) !== stableJson(b.request?.highlights),
+      intent: stableJson(a.request?.intent) !== stableJson(b.request?.intent),
+      constraints: stableJson(a.request?.constraints) !== stableJson(b.request?.constraints),
+      methods: stableJson(a.request?.methods) !== stableJson(b.request?.methods),
+      ordering: stableJson(a.request?.ordering) !== stableJson(b.request?.ordering),
+      format: stableJson(a.request?.format) !== stableJson(b.request?.format),
+      color: stableJson(a.request?.color) !== stableJson(b.request?.color)
+    };
+    const aError = earlier.errorMessage || earlier.summary?.errorMessage || a.outcome?.errorMessage || '';
+    const bError = later.errorMessage || later.summary?.errorMessage || b.outcome?.errorMessage || '';
     return {
-      earlier: { number: earlier.number, completedAt: earlier.completedAt, request: a.request },
-      later: { number: later.number, completedAt: later.completedAt, request: b.request },
+      earlier: {
+        number: earlier.number, status: aStatus, errorMessage: aError,
+        durationMs: earlier.durationMs ?? earlier.summary?.durationMs ?? a.outcome?.durationMs ?? null,
+        completedAt: earlier.completedAt, request: a.request
+      },
+      later: {
+        number: later.number, status: bStatus, errorMessage: bError,
+        durationMs: later.durationMs ?? later.summary?.durationMs ?? b.outcome?.durationMs ?? null,
+        completedAt: later.completedAt, request: b.request
+      },
+      outcomeComparison: {
+        earlierStatus: aStatus,
+        laterStatus: bStatus,
+        earlierResultCount: earlier.summary?.resultCount ?? aFinal.length,
+        laterResultCount: later.summary?.resultCount ?? bFinal.length,
+        earlierError: aError,
+        laterError: bError,
+        rankingComparisonValid: aStatus !== 'error' && bStatus !== 'error',
+        note: aStatus === 'error' || bStatus === 'error'
+          ? 'At least one search failed. Treat its empty or partial result list as a failed run, not as a valid zero-result ranking.'
+          : 'Both searches returned a ranking. A partial run may still have missing retrieval streams; inspect its warning and stream completion details.'
+      },
       changes: {
-        sourceCardChanged: JSON.stringify(a.request?.sourceCard || {}) !== JSON.stringify(b.request?.sourceCard || {}),
-        highlightsChanged: JSON.stringify(a.request?.highlights || []) !== JSON.stringify(b.request?.highlights || []),
-        intentChanged: JSON.stringify(a.request?.intent || {}) !== JSON.stringify(b.request?.intent || {}),
-        constraintsChanged: JSON.stringify(a.request?.constraints || {}) !== JSON.stringify(b.request?.constraints || {}),
-        methodsChanged: JSON.stringify(a.request?.methods || {}) !== JSON.stringify(b.request?.methods || {}),
-        orderingChanged: (a.request?.ordering || '') !== (b.request?.ordering || '')
+        sourceCardChanged: requestChanges.sourceCard,
+        highlightsChanged: requestChanges.highlights,
+        intentChanged: requestChanges.intent,
+        constraintsChanged: requestChanges.constraints,
+        methodsChanged: requestChanges.methods,
+        orderingChanged: requestChanges.ordering,
+        formatChanged: requestChanges.format,
+        colorChanged: requestChanges.color
       },
       retrieval: streamComparison,
       finalRanking: {
@@ -239,7 +287,9 @@
         rankChanges: moved
       },
       sharedCandidateScoreChanges: scoreChanges,
-      interpretation: 'Rank movement can result from changed inputs, candidate-pool membership, score changes, relevance pruning, or the selected ordering mode. Compare the request, stream overlap, score deltas, and rank changes together.'
+      interpretation: aStatus === 'error' || bStatus === 'error'
+        ? 'Resolve the failed search before interpreting ranking changes. A failed run is not evidence that the search engine returned zero relevant cards.'
+        : 'Rank movement can result from changed inputs, candidate-pool membership, score changes, relevance pruning, or the selected ordering mode. Compare the request, stream overlap, score deltas, and rank changes together.'
     };
   };
   const normalizeCandidateName = value => String(value || '').normalize('NFKC').trim().toLocaleLowerCase();
@@ -317,7 +367,9 @@
     similarityScore: item.similarityScore ?? null
   })).filter(item => item.name);
   const createRegressionCase = (run, options = {}) => {
-    if (!run?.pipeline) throw new Error('Choose a completed search run with a captured production pipeline.');
+    if (!run?.pipeline) throw new Error('Choose a search run with a captured production pipeline.');
+    const runStatus = run.status || run.summary?.status || run.pipeline?.outcome?.status || 'completed';
+    if (runStatus === 'error') throw new Error('Cannot create a ranking regression case from a failed search. Fix the search failure and capture a valid baseline first.');
     const pipeline = run.pipeline;
     const sourceName = pipeline.request?.sourceCard?.name || run.summary?.sourceName || 'Search';
     const focusCandidate = String(options.focusCandidate || '').trim();
@@ -394,7 +446,19 @@
   };
   const compareRegressionCase = (regressionCase, run) => {
     const fixture = validateRegressionCase(regressionCase);
-    if (!run?.pipeline) return { comparable: false, pass: false, message: 'Select a completed search run to compare.' };
+    if (!run?.pipeline) return { comparable: false, assertionsConfigured: false, pass: null, status: 'missing-run', message: 'Select a retained search run to compare.' };
+    const runStatus = run.status || run.summary?.status || run.pipeline?.outcome?.status || 'completed';
+    if (runStatus === 'error') {
+      return {
+        comparable: false,
+        assertionsConfigured: false,
+        pass: null,
+        status: 'search-error',
+        case: { title: fixture.title, sourceRunNumber: fixture.source.runNumber ?? null },
+        comparedRun: { number: run.number ?? null, status: runStatus, errorMessage: run.errorMessage || run.summary?.errorMessage || run.pipeline?.outcome?.errorMessage || '' },
+        interpretation: 'The search failed before producing a valid ranking. Diagnose the search error rather than counting this as a ranking regression.'
+      };
+    }
     const expectedRequest = fixture.source.request || {};
     const actualRequest = run.pipeline.request || {};
     const requestFields = ['sourceCard', 'highlights', 'intent', 'constraints', 'methods', 'ordering', 'format', 'color'];
@@ -461,7 +525,13 @@
       pass,
       status: !inputsMatch ? 'input-mismatch' : !assertionsConfigured ? 'no-expectations' : pass ? 'pass' : 'fail',
       case: { title: fixture.title, sourceRunNumber: fixture.source.runNumber ?? null },
-      comparedRun: { number: run.number ?? null, completedAt: run.completedAt || null },
+      comparedRun: {
+        number: run.number ?? null,
+        status: runStatus,
+        warning: runStatus === 'completed_with_warnings' ? (run.errorMessage || run.summary?.errorMessage || run.pipeline?.outcome?.errorMessage || '') : '',
+        completedAt: run.completedAt || null,
+        durationMs: run.durationMs ?? run.summary?.durationMs ?? run.pipeline?.outcome?.durationMs ?? null
+      },
       inputCheck: { matches: inputsMatch, changedFields: inputDifferences },
       scoringEvolution: {
         baselineScoredSampleCount: baselineCandidates.size,
@@ -794,18 +864,113 @@
     });
   }
 
+  window.addEventListener('manasearch:search-started', event => {
+    const detail = event.detail || {};
+    state.activeSearch = {
+      requestId: detail.requestId ?? null,
+      sourceName: detail.sourceName || '',
+      status: 'running',
+      startedAt: detail.startedAt || new Date().toISOString(),
+      progress: null,
+      streams: [],
+      completedStreams: 0,
+      totalStreams: 0,
+      preview: null,
+      previewHistory: [],
+      errorMessage: ''
+    };
+    addEvent('search:production-started', {
+      requestId: state.activeSearch.requestId,
+      sourceName: state.activeSearch.sourceName,
+      highlightCount: detail.highlightCount ?? null
+    });
+    renderLiveProgress();
+  });
+  window.addEventListener('manasearch:progress-updated', event => {
+    const detail = event.detail || {};
+    if (!activeRequestMatches(detail)) return;
+    const progress = {
+      step: detail.step ?? null,
+      total: detail.total ?? null,
+      message: String(detail.message || ''),
+      at: detail.at || Date.now()
+    };
+    const previous = state.activeSearch.progress;
+    if (previous && previous.step === progress.step && previous.total === progress.total && previous.message === progress.message) return;
+    state.activeSearch.progress = progress;
+    addEvent('search:progress', { requestId: state.activeSearch.requestId, ...progress });
+    renderLiveProgress();
+  });
+  window.addEventListener('manasearch:search-streams-updated', event => {
+    const detail = event.detail || {};
+    if (!activeRequestMatches(detail)) return;
+    state.activeSearch.streams = cloneJson(detail.streams || []);
+    state.activeSearch.completedStreams = Number(detail.completedStreams) || 0;
+    state.activeSearch.totalStreams = Number(detail.totalStreams) || state.activeSearch.streams.length;
+    const streamKey = state.activeSearch.streams.map(stream => String(stream.label) + ':' + Boolean(stream.done) + ':' + String(stream.detail)).join('|');
+    if (state.activeSearch.lastStreamKey === streamKey) return;
+    state.activeSearch.lastStreamKey = streamKey;
+    addEvent('search:streams', {
+      requestId: state.activeSearch.requestId,
+      completedStreams: state.activeSearch.completedStreams,
+      totalStreams: state.activeSearch.totalStreams,
+      streams: state.activeSearch.streams.map(stream => ({ label: stream.label, done: stream.done, detail: clip(stream.detail, 180) }))
+    });
+    renderLiveProgress();
+  });
+  window.addEventListener('manasearch:search-preview-updated', event => {
+    const detail = event.detail || {};
+    if (!activeRequestMatches(detail)) return;
+    const preview = {
+      phase: detail.phase || 'preview',
+      sourceLabel: detail.sourceLabel || '',
+      provisional: detail.provisional !== false,
+      resultCount: Number(detail.resultCount) || 0,
+      topNames: (detail.topNames || []).slice(0, 10),
+      at: detail.at || Date.now()
+    };
+    state.activeSearch.preview = preview;
+    state.activeSearch.previewHistory.push(preview);
+    state.activeSearch.previewHistory = state.activeSearch.previewHistory.slice(-16);
+    addEvent('search:preview', {
+      requestId: state.activeSearch.requestId,
+      phase: preview.phase,
+      sourceLabel: preview.sourceLabel,
+      resultCount: preview.resultCount,
+      topNames: preview.topNames.slice(0, 5)
+    });
+    renderLiveProgress();
+  });
   window.addEventListener('manasearch:search-finished', event => {
     const detail = event.detail || {};
+    if (state.activeSearch && detail.requestId != null && Number(detail.requestId) !== Number(state.activeSearch.requestId)) return;
+    const runStatus = detail.status || 'completed';
+    if (state.activeSearch) {
+      state.activeSearch.status = runStatus;
+      state.activeSearch.finishedAt = detail.finishedAt || new Date().toISOString();
+      state.activeSearch.durationMs = detail.durationMs ?? null;
+      state.activeSearch.errorMessage = detail.errorMessage || '';
+      state.activeSearch.resultCount = detail.resultCount ?? 0;
+    }
     lastPipelineSnapshot = getPipelineSnapshot();
     const pipeline = cloneJson(lastPipelineSnapshot);
     const ui = cloneJson(snapshot());
+    const sourceName = detail.sourceName || pipeline?.request?.sourceCard?.name || ui?.source?.name || '';
+    const resultCount = detail.resultCount ?? pipeline?.finalResults?.length ?? 0;
     const run = {
       number: state.searchRuns.length ? state.searchRuns[state.searchRuns.length - 1].number + 1 : 1,
-      completedAt: new Date().toISOString(),
+      completedAt: detail.finishedAt || new Date().toISOString(),
+      status: runStatus,
+      errorMessage: detail.errorMessage || '',
+      durationMs: detail.durationMs ?? null,
       summary: {
-        sourceName: detail.sourceName || pipeline?.request?.sourceCard?.name || ui?.source?.name || '',
-        resultCount: detail.resultCount ?? pipeline?.finalResults?.length ?? 0
+        sourceName,
+        resultCount,
+        status: runStatus,
+        errorMessage: detail.errorMessage || '',
+        durationMs: detail.durationMs ?? null
       },
+      liveSearch: cloneJson(state.activeSearch),
       ui,
       pipeline
     };
@@ -813,6 +978,9 @@
     if (state.searchRuns.length > MAX_SEARCH_RUNS) state.searchRuns.shift();
     addEvent('search:finished', {
       runNumber: run.number,
+      status: run.status,
+      errorMessage: run.errorMessage,
+      durationMs: run.durationMs,
       sourceName: run.summary.sourceName,
       resultCount: run.summary.resultCount,
       retrieved: pipeline?.funnel?.retrieved ?? null,
@@ -821,7 +989,6 @@
     });
     if (!windowEl.hidden) render();
   });
-  window.addEventListener('manasearch:search-started', event => addEvent('search:production-started', event.detail || {}));
   document.addEventListener('click', event => {
     const button = event.target.closest('#find-similar-btn, #quick-start-search');
     if (button) {
@@ -845,6 +1012,7 @@
   // Read-only console hooks make exported runs and the comparison routine independently testable.
   window.ManaSearchInspector = Object.freeze({
     getRunHistory: () => cloneJson(state.searchRuns),
+    getActiveSearch: () => cloneJson(state.activeSearch),
     getExport: () => cloneJson(buildExport()),
     compareRuns,
     traceCandidate,
