@@ -31,6 +31,9 @@ let activeSearchDepthPercent = 100;
 // every pipeline stage even on searches that plainly worked. Results data and instrumentation are
 // now separate state (review Priority 1).
 let lastSearchDiagnostics = null;
+// Developer-facing snapshots are captured from the real production pipeline; they never feed back into ranking.
+let lastSearchDebugContext = null;
+let lastSearchScoredCandidates = [];
 // User-facing search totals. This counts unique candidates that survived hard filters and reached
 // the scoring/ranking stage, while lastSearchResults is the final relevance-qualified result set.
 let lastSearchCandidateCount = null;
@@ -23949,6 +23952,8 @@ async function loadSourceCard(query, providedCard = null) {
 
     ++relatedSearchRequestId;
     const requestId = ++searchRequestId;
+    lastSearchDebugContext = null;
+    lastSearchScoredCandidates = [];
     activeMainSearchRequestId = null;
     cancelScheduledProgressiveResultRender();
     cancelDeferredResultRender();
@@ -27840,6 +27845,27 @@ async function findSimilarCards() {
     if (activeSearchMethodFlags.alternate && methodQueries.alternate) plannedStreamLabels.push('Alternative Search');
     if (activeSearchMethodFlags.synergy && methodQueries.synergy) plannedStreamLabels.push('Synergy Search');
 
+    // Capture the effective search request as it enters retrieval. This is a diagnostic copy only.
+    lastSearchDebugContext = {
+        requestId,
+        sourceCard: { name: currentSourceCard?.name || '', type_line: currentSourceCard?.type_line || '', mana_cost: currentSourceCard?.mana_cost || '', oracle_text: currentSourceCard?.oracle_text || '', color_identity: currentSourceCard?.color_identity || [], cmc: currentSourceCard?.cmc ?? null },
+        highlights: searchHighlightsSnapshot.map(h => ({ text: h?.text || '', field: h?.field || 'oracle', mode: h?.mode || 'exact', origin: h?.origin || 'selection', mechanicGroupId: h?.mechanicGroupId || null, relationship: h?.mechanicGroupRelationship || null, aspects: h?.aspects || null })),
+        intent: { sourceText: searchIntent.sourceText || '', targetText: targetTextForScoring || '', semanticText: semanticIntentTextForScoring || '', exactnessText: exactnessTextForScoring || '' },
+        constraints: filters,
+        methods: { ...activeSearchMethodFlags },
+        ordering: priorityValue,
+        broad: isBroadSearch,
+        divergent: isDivergent,
+        plannedStreams: plannedStreamLabels.slice(),
+        queryPlans: {
+            exactPhrase: searchA_Query || '', oracleTerms: searchB_Query || '', mechanicsTags: searchC_Query || '',
+            localCorpus: searchE_Query || '', functional: uniqueFunctionalQueries.map(q => ({ source: q.source || '', query: q.query, narrow: Boolean(q.narrow) })),
+            exactHighlights: exactHighlightQueries.map(q => ({ source: q.source, query: q.query })),
+            methods: Object.fromEntries(Object.entries(methodQueries).map(([key, value]) => [key, value || '']))
+        },
+        startedAt: new Date().toISOString()
+    };
+
     // Confidence-aware retrieval depth for Search B specifically: known synchronously, before any
     // network call, from how cleanly the source card's own text parsed - no need to wait on
     // another stream's live results (which would serialize what's currently launched in
@@ -29018,6 +29044,9 @@ if (candidates.length > 0) {
     // the true "scored" population - captured *before* the relevance floor prunes anything, so it
     // doesn't just duplicate the final-rank stage (project spec 2.11).
     const scoredNames = new Set(candidates.map(c => (c.name || '').toLowerCase()));
+    // Preserve a bounded sample of the exact objects scored by the production scorer, including
+    // candidates later removed by the relevance floor. No candidate or score is modified here.
+    lastSearchScoredCandidates = candidates.slice(0, 300);
     const benchmarkScoreByName = benchmarkRunInProgress
         ? new Map(candidates.map(card => [(card.name || '').toLowerCase(), createBenchmarkScoreSnapshot(card)]).filter(([name]) => Boolean(name)))
         : null;
@@ -33013,6 +33042,79 @@ function cloneCardForMinigame(card) {
         card_faces: Array.isArray(card.card_faces) ? card.card_faces.map(cloneFace) : undefined
     };
 }
+window.ManaSearchDebug = Object.freeze({
+    getSnapshot() {
+        const diagnostics = lastSearchDiagnostics;
+        const context = lastSearchDebugContext;
+        const asNames = value => value instanceof Set ? [...value] : [];
+        const scoreFields = ['similarityScore','unclampedSimilarityScore','similarityBeforeCadenceAdjustment','mechanicalScore','contextScore','oracleSemanticScore','functionScore','functionalSimilarityScore','synergyScore','exactnessScore','categoryScore','roleScore','highlightIntentScore','effectCoverageScore','primaryEffectMatchScore','modalModeSimilarityScore','rankingRefinementSignal','calibratedBlendScore','mechanicalConfidence','parseConfidence','constraintPreferenceScore','acquisitionCadenceRankFactor','quantitativeConflictPenalty'];
+        const candidates = (lastSearchScoredCandidates || []).map((card, index) => {
+            const scores = {};
+            for (const key of scoreFields) if (card?.[key] !== undefined) scores[key] = card[key];
+            const evidence = card?.rankingEvidence || {};
+            return {
+                name: card?.name || '', type_line: card?.type_line || '', oracle_text: String(card?.oracle_text || '').slice(0, 2200),
+                scores, rankByScore: index + 1,
+                retrievalEvidence: Array.isArray(card?.retrievalEvidence) ? card.retrievalEvidence.slice() : [],
+                rankingEvidence: {
+                    mechanical: evidence.mechanical ?? null, mechanicalTrusted: evidence.mechanicalTrusted ?? null,
+                    mechanicalConfidence: evidence.mechanicalConfidence ?? null, rawSemantic: evidence.rawSemantic ?? null,
+                    functionSemantic: evidence.functionSemantic ?? null, roleSemantic: evidence.roleSemantic ?? null,
+                    highlightIntent: evidence.highlightIntent ?? null, baseChannelScore: evidence.baseChannelScore ?? null,
+                    effectCoverage: evidence.effectCoverage ?? null, balancedCoverage: evidence.balancedCoverage ?? null,
+                    primaryEffectMatch: evidence.primaryEffectMatch ?? null, evidenceAgreement: evidence.evidenceAgreement ?? null,
+                    retrievalSimilarity: evidence.retrievalSimilarity ?? null, rankingIntent: evidence.rankingIntent ?? null,
+                    deterministicFunctionalAnchor: evidence.deterministicFunctionalAnchor ?? null,
+                    primaryEffectRankingBoost: evidence.primaryEffectRankingBoost ?? null,
+                    relationshipMismatch: evidence.relationshipMismatch ?? null, evidenceGate: evidence.evidenceGate ?? null,
+                    channelScore: evidence.channelScore ?? null
+                },
+                mechanicalBreakdown: card?.mechanicalBreakdown ? {
+                    relationshipMismatch: card.mechanicalBreakdown.relationshipMismatch ?? null,
+                    repeatabilityMismatch: card.mechanicalBreakdown.repeatabilityMismatch ?? null,
+                    explicitContrast: card.mechanicalBreakdown.explicitContrast ?? null
+                } : null,
+                parse: { confidence: card?.parseConfidence ?? null, fieldConfidence: card?.fieldConfidence?.overall ?? null, meaningful: Number(card?.parseConfidence) > 0 },
+                rankingIntent: card?.rankingIntent ?? card?._rankingIntent?.kind ?? null,
+                flags: { weakBackfill: Boolean(card?._weakBackfillMatch), relevanceFloorRescue: Boolean(card?._catastrophicEmptyRescue), strategicRoleAnchored: Boolean(card?.strategicRoleAnchored ?? evidence.strategicRoleAnchored) }
+            };
+        });
+        const streams = {};
+        if (diagnostics?.streams) for (const [name, names] of Object.entries(diagnostics.streams)) streams[name] = asNames(names);
+        const funnel = diagnostics ? {
+            retrieved: diagnostics.retrieved ?? 0, passedHardFilters: diagnostics.passedFiltersRaw ?? 0,
+            afterHardFiltersUnique: diagnostics.afterHardFilters ?? 0, scored: asNames(diagnostics.scoredNames).length,
+            meaningfulParse: asNames(diagnostics.meaningfulParseNames).length,
+            passedRelevanceFloor: diagnostics.afterRelevanceFloor ?? 0, finalResults: diagnostics.finalResults ?? 0,
+            stages: {
+                retrieved: asNames(diagnostics.rawCandidateNames), passedFilters: asNames(diagnostics.passedFilterNames),
+                deduplicated: asNames(diagnostics.dedupedNames), meaningfulParse: asNames(diagnostics.meaningfulParseNames),
+                scored: asNames(diagnostics.scoredNames), passedRelevanceFloor: asNames(diagnostics.passedRelevanceFloorNames),
+                finalRanked: asNames(diagnostics.finalRankedNames)
+            }
+        } : null;
+        const failures = diagnostics?.filterFailureReasons instanceof Map
+            ? [...diagnostics.filterFailureReasons.entries()].slice(0, 500).map(([name, reasons]) => ({ name, reasons }))
+            : [];
+        const finalResults = (lastSearchResults || []).slice(0, 100).map((card, index) => ({ rank: index + 1, name: card?.name || '', similarityScore: card?.similarityScore ?? null }));
+        return {
+            capturedAt: new Date().toISOString(), request: context, funnel, streams,
+            streamCoverage: diagnostics?.streamCoverage || null,
+            functionalQueryResults: diagnostics?.searchFQueryDetail || [],
+            exactHighlightQueryResults: diagnostics?.exactHighlightQueryDetail || [],
+            filterRejections: failures,
+            scoring: {
+                timings: diagnostics?.timings || null, embedding: diagnostics?.embeddingDiagnostics || null,
+                semanticCalibration: diagnostics?.semanticCalibration || null, previewOptimization: diagnostics?.previewOptimization || null,
+                relevanceFloor: { bestScore: diagnostics?.relevanceFloorBestScore ?? null, relativeThreshold: diagnostics?.relevanceFloorRelativeThreshold ?? null, rescued: diagnostics?.relevanceFloorRescued ?? 0, strictCount: diagnostics?.relevanceFloorStrictCount ?? null }
+            },
+            candidates, finalResults, rankingEvidenceTop: diagnostics?.rankingEvidenceTop || [],
+            benchmarkSignals: diagnostics?.benchmarkSignals || null,
+            highlightIntentDiagnostics: diagnostics?.highlightIntentDiagnostics || []
+        };
+    }
+});
+
 window.ManaSearchApi = Object.freeze({
     async ready() {
         const corpus = await loadStaticCardCorpus();
