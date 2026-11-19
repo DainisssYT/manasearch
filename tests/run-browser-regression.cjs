@@ -166,6 +166,36 @@ async function main() {
             ]
           }
         };
+        earlier.liveSearch = {
+          status: 'completed',
+          startedAt: '2026-11-19T08:00:00.000Z',
+          durationMs: 8000,
+          progressHistory: [{ at: 100, message: 'Searching' }, { at: 400, message: 'Scoring' }],
+          completedStreams: 1, failedStreams: 1, settledStreams: 2, totalStreams: 2,
+          streams: [
+            { label: 'Exact Phrase', done: true, status: 'completed', failed: false },
+            { label: 'Semantic Index', done: false, status: 'failed', failed: true }
+          ],
+          previewHistory: [
+            { at: Date.parse('2026-11-19T08:00:01.000Z'), provisional: true, resultCount: 5, topNames: ['Removed Card', 'Shared Card'], phase: 'progressive-preview' },
+            { at: Date.parse('2026-11-19T08:00:03.000Z'), provisional: true, resultCount: 6, topNames: ['Shared Card', 'Removed Card'], phase: 'progressive-preview' }
+          ]
+        };
+        later.liveSearch = {
+          status: 'completed',
+          startedAt: '2026-11-19T08:01:00.000Z',
+          durationMs: 5000,
+          progressHistory: [{ at: 100, message: 'Searching' }],
+          completedStreams: 2, failedStreams: 0, settledStreams: 2, totalStreams: 2,
+          streams: [
+            { label: 'Exact Phrase', done: true, status: 'completed', failed: false },
+            { label: 'Semantic Index', done: true, status: 'completed', failed: false }
+          ],
+          previewHistory: [
+            { at: Date.parse('2026-11-19T08:01:00.500Z'), provisional: true, resultCount: 5, topNames: ['Removed Card', 'Added Card'], phase: 'progressive-preview' },
+            { at: Date.parse('2026-11-19T08:01:02.000Z'), provisional: true, resultCount: 6, topNames: ['Added Card', 'Shared Card'], phase: 'progressive-preview' }
+          ]
+        };
         const tracePipeline = {
           request: { sourceCard: { name: 'Source A' } },
           streams: { 'Search B': ['Shared Card', 'Filtered Card'] },
@@ -562,6 +592,22 @@ async function main() {
           compareSummaryUsesRealLineBreaks: compareSummaryText.includes('COMPARE RUNS SUMMARY\nComparison type:') &&
             !compareSummaryText.includes('COMPARE RUNS SUMMARY\\nComparison type:'),
           compareSummaryShowsChangedScoringFactors: compareSummaryText.includes('Changed factors:'),
+          compareCapturesLiveSearchLatencyAndDuration: comparison.liveSearchComparison?.earlier.firstPreviewLatencyMs === 1000 &&
+            comparison.liveSearchComparison?.later.firstPreviewLatencyMs === 500 &&
+            comparison.liveSearchComparison?.deltas.firstPreviewLatencyMs === -500 &&
+            comparison.liveSearchComparison?.deltas.durationMs === -3000,
+          compareCapturesProvisionalPreviewStability: comparison.liveSearchComparison?.earlier.previewToFinalTop10Overlap === 1 &&
+            comparison.liveSearchComparison?.later.previewToFinalTop10Overlap === 1 &&
+            comparison.liveSearchComparison?.earlier.meanAdjacentPreviewTop10Overlap === 1 &&
+            comparison.liveSearchComparison?.later.meanAdjacentPreviewTop10Overlap === 0.3333,
+          compareCapturesLiveRetrievalHealth: comparison.liveSearchComparison?.earlier.failedStreams === 1 &&
+            comparison.liveSearchComparison?.later.failedStreams === 0 &&
+            comparison.liveSearchComparison?.deltas.failedStreams === -1 &&
+            comparison.liveSearchComparison?.earlier.settledStreams === 2,
+          compareSummaryShowsLiveSearchMetrics: compareSummaryText.includes('Live-search experience') &&
+            compareSummaryText.includes('Time to first preview: 1.00s → 0.50s') &&
+            compareSummaryText.includes('Retrieval lanes settled/failed:') &&
+            compareSummaryText.includes('Last provisional top-10 overlap with final top-10:'),
           compareShowsAppBuildEvolution: comparison.outcomeComparison?.earlierBuild === '20261119-148' &&
             comparison.outcomeComparison?.laterBuild === '20261119-149' && comparison.outcomeComparison?.buildChanged === true &&
             compareSummaryText.includes('App builds: 20261119-148 → 20261119-149 (different builds)'),
