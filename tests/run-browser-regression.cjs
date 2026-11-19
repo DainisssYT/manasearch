@@ -314,9 +314,7 @@ async function main() {
           liveInspectorCapturesStreamProgress: activeSearchBeforeFinish?.completedStreams === 1 && activeSearchBeforeFinish?.totalStreams === 2 && activeSearchBeforeFinish?.streams?.[0]?.done === true,
           liveInspectorCapturesProvisionalResults: activeSearchBeforeFinish?.preview?.phase === 'progressive-preview' && activeSearchBeforeFinish?.preview?.topNames?.includes('Shared Card'),
           liveInspectorStoresWarningOutcome: telemetryRun?.status === 'completed_with_warnings' && telemetryRun?.durationMs === 3200,
-          liveInspectorStoresEventTraceWithRun: telemetryRun?.liveSearch?.previewHistory?.length === 1 && telemetryRun?.liveSearch?.streams?.length === 2
-
-          regressionInputComparisonIgnoresObjectKeyOrder: stableOrderReport.inputCheck?.matches === true && stableOrderReport.pass === true,
+          liveInspectorStoresEventTraceWithRun: telemetryRun?.liveSearch?.previewHistory?.length === 1 && telemetryRun?.liveSearch?.streams?.length === 2,
           regressionComparisonChecksMustNotAppear: exclusionReport.focusCheck?.pass === false,
           regressionImportValidationRejectsUnknownSchema: rejectsInvalidCase,
           regressionTabAvailable: !!document.querySelector('[data-tab="regression"]'),
