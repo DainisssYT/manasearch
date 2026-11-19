@@ -29099,7 +29099,7 @@ if (candidates.length > 0) {
             } : null,
             parse: { confidence: card?.parseConfidence ?? null, fieldConfidence: card?.fieldConfidence?.overall ?? null, meaningful: Number(card?.parseConfidence) > 0 },
             rankingIntent: card?.rankingIntent ?? card?._rankingIntent?.kind ?? null,
-            flags: { weakBackfill: Boolean(card?._weakBackfillMatch), relevanceFloorRescue: Boolean(card?._catastrophicEmptyRescue), strategicRoleAnchored: Boolean(card?.strategicRoleAnchored ?? evidence.strategicRoleAnchored) }
+            flags: { weakBackfill: Boolean(card?._weakBackfillMatch), strategicRoleAnchored: Boolean(card?.strategicRoleAnchored ?? evidence.strategicRoleAnchored) }
         };
     });
 
@@ -33101,7 +33101,13 @@ window.ManaSearchDebug = Object.freeze({
         const failures = diagnostics?.filterFailureReasons instanceof Map
             ? [...diagnostics.filterFailureReasons.entries()].slice(0, 500).map(([name, reasons]) => ({ name, reasons }))
             : [];
-        const finalResults = (lastSearchResults || []).slice(0, 100).map((card, index) => ({ rank: index + 1, name: card?.name || '', similarityScore: card?.similarityScore ?? null }));
+        const candidateByName = new Map(candidates.map(candidate => [String(candidate.name || '').toLowerCase(), candidate]));
+        const finalResults = (lastSearchResults || []).slice(0, 100).map((card, index) => ({
+            rank: index + 1, name: card?.name || '', similarityScore: card?.similarityScore ?? null,
+            scores: candidateByName.get(String(card?.name || '').toLowerCase())?.scores || null,
+            constraintPreferenceScore: card?.constraintPreferenceScore ?? null,
+            flags: { weakBackfill: Boolean(card?._weakBackfillMatch), relevanceFloorRescue: Boolean(card?._catastrophicEmptyRescue) }
+        }));
         return {
             capturedAt: new Date().toISOString(), request: context, funnel, streams,
             streamCoverage: diagnostics?.streamCoverage || null,
