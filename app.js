@@ -33104,7 +33104,7 @@ window.ManaSearchDebug = Object.freeze({
         const candidateByName = new Map(candidates.map(candidate => [String(candidate.name || '').toLowerCase(), candidate]));
         const finalResults = (lastSearchResults || []).slice(0, 100).map((card, index) => ({
             rank: index + 1, name: card?.name || '', similarityScore: card?.similarityScore ?? null,
-            scores: candidateByName.get(String(card?.name || '').toLowerCase())?.scores || null,
+            preFloorScores: candidateByName.get(String(card?.name || '').toLowerCase())?.scores || null,
             constraintPreferenceScore: card?.constraintPreferenceScore ?? null,
             flags: { weakBackfill: Boolean(card?._weakBackfillMatch), relevanceFloorRescue: Boolean(card?._catastrophicEmptyRescue) }
         }));
