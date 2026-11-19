@@ -288,6 +288,20 @@
     const meanAbsoluteRankMovement = rankMovementValues.length
       ? Number((rankMovementValues.reduce((sum, value) => sum + value, 0) / rankMovementValues.length).toFixed(3))
       : null;
+    const failureList = pipeline => Array.isArray(pipeline?.streamFailures) ? pipeline.streamFailures : [];
+    const earlierFailures = failureList(a);
+    const laterFailures = failureList(b);
+    const failureKey = item => normalizeCandidateName(item?.label || 'unknown stream');
+    const earlierFailureKeys = new Set(earlierFailures.map(failureKey));
+    const laterFailureKeys = new Set(laterFailures.map(failureKey));
+    const retrievalFailures = {
+      earlier: earlierFailures,
+      later: laterFailures,
+      newlyFailed: laterFailures.filter(item => !earlierFailureKeys.has(failureKey(item))),
+      resolved: earlierFailures.filter(item => !laterFailureKeys.has(failureKey(item))),
+      earlierCount: earlierFailures.length,
+      laterCount: laterFailures.length
+    };
     const requestChanges = {
       sourceCard: stableJson(a.request?.sourceCard) !== stableJson(b.request?.sourceCard),
       highlights: stableJson(a.request?.highlights) !== stableJson(b.request?.highlights),
@@ -356,6 +370,7 @@
         changedDerivedFields
       },
       retrieval: streamComparison,
+      retrievalFailures,
       stageProgression,
       scoredCandidateEvolution: {
         earlierSampleCount: earlierScored.size,
@@ -826,7 +841,7 @@
       compareControls.hidden = true;
     } else if (activeTab === 'pipeline') {
       const p = getPipelineSnapshot();
-      content.textContent = JSON.stringify(p ? { request: p.request, funnel: p.funnel ? Object.fromEntries(Object.entries(p.funnel).filter(([key]) => key !== 'stages')) : null, retrievalStreams: Object.fromEntries(Object.entries(p.streams || {}).map(([name, cards]) => [name, { count: cards.length, examples: cards.slice(0, 12) }])), streamCoverage: p.streamCoverage, functionalQueryResults: p.functionalQueryResults, exactHighlightQueryResults: p.exactHighlightQueryResults, scoring: p.scoring, benchmarkSignals: p.benchmarkSignals, highlightIntentDiagnostics: p.highlightIntentDiagnostics } : { message: 'No completed production search snapshot yet. Run Find Similar Cards, then refresh.' }, null, 2);
+      content.textContent = JSON.stringify(p ? { request: p.request, funnel: p.funnel ? Object.fromEntries(Object.entries(p.funnel).filter(([key]) => key !== 'stages')) : null, retrievalStreams: Object.fromEntries(Object.entries(p.streams || {}).map(([name, cards]) => [name, { count: cards.length, examples: cards.slice(0, 12) }])), streamCoverage: p.streamCoverage, streamFailures: p.streamFailures || [], functionalQueryResults: p.functionalQueryResults, exactHighlightQueryResults: p.exactHighlightQueryResults, scoring: p.scoring, benchmarkSignals: p.benchmarkSignals, highlightIntentDiagnostics: p.highlightIntentDiagnostics } : { message: 'No completed production search snapshot yet. Run Find Similar Cards, then refresh.' }, null, 2);
       compareControls.hidden = true;
     } else if (activeTab === 'candidates') {
       const p = getPipelineSnapshot();
@@ -1021,7 +1036,7 @@
     state.activeSearch.failedStreams = Number(detail.failedStreams) || 0;
     state.activeSearch.settledStreams = Number(detail.settledStreams) || (state.activeSearch.completedStreams + state.activeSearch.failedStreams);
     state.activeSearch.totalStreams = Number(detail.totalStreams) || state.activeSearch.streams.length;
-    const streamKey = state.activeSearch.streams.map(stream => String(stream.label) + ':' + Boolean(stream.done) + ':' + String(stream.detail)).join('|');
+    const streamKey = state.activeSearch.streams.map(stream => String(stream.label) + ':' + Boolean(stream.done) + ':' + String(stream.status || '') + ':' + Boolean(stream.failed) + ':' + String(stream.detail)).join('|');
     if (state.activeSearch.lastStreamKey === streamKey) return;
     state.activeSearch.lastStreamKey = streamKey;
     addEvent('search:streams', {
