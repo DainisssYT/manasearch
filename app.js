@@ -2047,6 +2047,8 @@ function createBenchmarkScoreSnapshot(card) {
         mechanicalScore: card.mechanicalScore ?? null,
         contextScore: card.contextScore ?? null,
         functionScore: card.functionScore ?? null,
+        effectAwareFunctionSemanticScore: card._effectAwareFunctionSemanticScore ?? null,
+        functionSemanticEvidence: card.functionSemanticEvidence ?? null,
         synergyScore: card.synergyScore ?? null,
         exactnessScore: card.exactnessScore ?? null,
         categoryScore: card.categoryScore ?? null,
@@ -2163,6 +2165,8 @@ async function runBenchmarkPass(searchFn, test) {
                 mechanicalScore: card.mechanicalScore ?? null,
                 contextScore: card.contextScore ?? null,
                 functionScore: card.functionScore ?? null,
+                effectAwareFunctionSemanticScore: card._effectAwareFunctionSemanticScore ?? null,
+                functionSemanticEvidence: card.functionSemanticEvidence ?? null,
                 synergyScore: card.synergyScore ?? null,
                 exactnessScore: card.exactnessScore ?? null,
                 categoryScore: card.categoryScore ?? null,
@@ -8997,6 +9001,86 @@ function getCanonicalFunctions(effects) {
         .slice()
         .sort((a, b) => (b.importance || 0) - (a.importance || 0))
         .map(e => e.canonical);
+}
+
+const canonicalFunctionEffectEntriesByEffects = new WeakMap();
+function getCachedCanonicalFunctionEffectEntries(parsedEffects) {
+    if (!Array.isArray(parsedEffects)) return [];
+    if (canonicalFunctionEffectEntriesByEffects.has(parsedEffects)) {
+        return canonicalFunctionEffectEntriesByEffects.get(parsedEffects);
+    }
+    const entries = parsedEffects
+        .filter(effect => effect?.canonical)
+        .slice()
+        .sort((a, b) => (b.importance || 0) - (a.importance || 0))
+        .map(effect => ({
+            function: String(effect.canonical.function || ''),
+            importance: Math.max(0.05, Number(effect.importance) || 0.5),
+            text: canonicalFunctionToText([effect.canonical])
+        }))
+        .filter(entry => entry.function && entry.text);
+    canonicalFunctionEffectEntriesByEffects.set(parsedEffects, entries);
+    return entries;
+}
+
+/**
+ * Match source abilities to distinct candidate abilities using semantic similarity.
+ * Extra candidate abilities are not averaged into a source-effect match; an unrelated rider or
+ * drawback must not dilute a strong match for the highlighted mechanic. The one-to-one assignment
+ * prevents a single candidate ability from satisfying multiple source abilities.
+ *
+ * similarityForPair returns a calibrated 0..1 value, or a non-finite value if an embedding is absent.
+ */
+function calculateEffectAwareFunctionSemanticScore(sourceEntries, candidateEntries, similarityForPair) {
+    const source = Array.isArray(sourceEntries) ? sourceEntries.filter(entry => entry?.function) : [];
+    const candidate = Array.isArray(candidateEntries) ? candidateEntries.filter(entry => entry?.function) : [];
+    if (!source.length || !candidate.length || typeof similarityForPair !== 'function') return null;
+
+    const pairs = [];
+    for (let sourceIndex = 0; sourceIndex < source.length; sourceIndex++) {
+        for (let candidateIndex = 0; candidateIndex < candidate.length; candidateIndex++) {
+            const affinity = Math.max(0, Math.min(1, Number(getFunctionAffinity(
+                source[sourceIndex].function, candidate[candidateIndex].function
+            )) || 0));
+            if (affinity < 0.35) continue;
+            const similarity = Number(similarityForPair(source[sourceIndex], candidate[candidateIndex]));
+            if (!Number.isFinite(similarity)) continue;
+            const score = Math.max(0, Math.min(1, similarity));
+            const importance = Math.max(0.05, Number(source[sourceIndex].importance) || 0.5);
+            pairs.push({
+                sourceIndex,
+                candidateIndex,
+                sourceFunction: source[sourceIndex].function,
+                candidateFunction: candidate[candidateIndex].function,
+                similarity: score,
+                affinity,
+                importance,
+                utility: score * affinity * importance
+            });
+        }
+    }
+
+    pairs.sort((a, b) => b.utility - a.utility || b.similarity - a.similarity);
+    const usedSources = new Set();
+    const usedCandidates = new Set();
+    const matches = [];
+    for (const pair of pairs) {
+        if (usedSources.has(pair.sourceIndex) || usedCandidates.has(pair.candidateIndex)) continue;
+        usedSources.add(pair.sourceIndex);
+        usedCandidates.add(pair.candidateIndex);
+        matches.push(pair);
+    }
+
+    const totalImportance = source.reduce((sum, entry) => sum + Math.max(0.05, Number(entry.importance) || 0.5), 0);
+    const weightedScore = matches.reduce((sum, pair) =>
+        sum + pair.similarity * Math.max(0.25, pair.affinity) * pair.importance, 0);
+    return {
+        score: totalImportance > 0 ? Math.max(0, Math.min(1, weightedScore / totalImportance)) : 0,
+        matches: matches.map(({ utility, ...match }) => match),
+        sourceEffectCount: source.length,
+        candidateEffectCount: candidate.length,
+        matchedEffectCount: matches.length
+    };
 }
 
 
@@ -19238,6 +19322,16 @@ async function calibrateBatchSemanticScores(cards) {
         if (Number.isFinite(raw)) card.oracleSemanticScore = Math.max(0, Math.min(1, (raw - localBaseline) / denom));
         const fnRaw = Number(card?._rawFunctionSemanticSimilarity);
         if (Number.isFinite(fnRaw)) card.functionScore = Math.max(0, Math.min(1, (fnRaw - fnBase) / Math.max(0.05, 1 - fnBase)));
+        const effectAwareFunctionScore = Number(card?._effectAwareFunctionSemanticScore);
+        if (Number.isFinite(effectAwareFunctionScore)) {
+            card.functionScore = Math.max(Number(card.functionScore) || 0, effectAwareFunctionScore);
+            if (card.functionSemanticEvidence) {
+                card.functionSemanticEvidence.aggregateCalibratedScore = Number.isFinite(fnRaw)
+                    ? Math.max(0, Math.min(1, (fnRaw - fnBase) / Math.max(0.05, 1 - fnBase)))
+                    : null;
+                card.functionSemanticEvidence.finalFunctionScore = card.functionScore;
+            }
+        }
         const now = getManaResponsivenessNow();
         if (now - sliceStartedAt >= getManaSearchSliceBudgetMs()) {
             await yieldForManaSearchResponsiveness();
@@ -25163,6 +25257,7 @@ async function scoreCardBatch({
     // whole point when the alternative card is worded completely differently (review Priority 8).
     const sourceFunctionText = structuralOnly ? '' : (getCachedCanonicalFunctionText(parsedSourceCard) ||
         buildUniversalFunctionalText(sourceCard, sourceTextToParse, parsedSourceCard));
+    const sourceFunctionEffectEntries = structuralOnly ? [] : getCachedCanonicalFunctionEffectEntries(parsedSourceCard);
     let sourceFunctionVector = suppliedSourceFunctionVector;
     if (!structuralOnly && !sourceFunctionVector && extractor && extractor.type !== 'fallback' && sourceFunctionText) {
         sourceFunctionVector = await getCachedEmbedding(sourceFunctionText, extractor, embeddingDiagnostics);
@@ -25646,6 +25741,7 @@ async function scoreCardBatch({
     if (hasSemanticEngine || sourceFunctionVector) {
         const __embeddingTextPrepStartedAt = __scoreNow();
         const textsToEmbed = [];
+        if (sourceFunctionVector) sourceFunctionEffectEntries.forEach(entry => textsToEmbed.push(entry.text));
         for (const card of semanticEligible) {
             if (card.contextScore !== undefined) continue;
             const cardText = card.oracle_text || (card.card_faces ? card.card_faces.map(f => f.oracle_text).join(' ') : '');
@@ -25655,6 +25751,14 @@ async function scoreCardBatch({
             if (sourceFunctionVector && card._parsedEffects) {
                 const candidateFunctionText = getCachedCanonicalFunctionText(card._parsedEffects);
                 if (candidateFunctionText) textsToEmbed.push(candidateFunctionText);
+                const candidateEffectEntries = getCachedCanonicalFunctionEffectEntries(card._parsedEffects);
+                if (candidateEffectEntries.length > 1) {
+                    candidateEffectEntries.filter(candidateEffect =>
+                        sourceFunctionEffectEntries.some(sourceEffect =>
+                            getFunctionAffinity(sourceEffect.function, candidateEffect.function) >= 0.35
+                        )
+                    ).forEach(entry => textsToEmbed.push(entry.text));
+                }
             }
         }
         __scoreStageTimings.embeddingTextPreparationMs = __scoreNow() - __embeddingTextPrepStartedAt;
@@ -25664,6 +25768,12 @@ async function scoreCardBatch({
         __scoreStageTimings.embeddingWarmCacheMs = __scoreNow() - __embeddingWarmStartedAt;
     }
 
+    const sourceFunctionEffectVectors = sourceFunctionVector
+        ? sourceFunctionEffectEntries.map(entry => ({
+            ...entry,
+            vector: entry.text === sourceFunctionText ? sourceFunctionVector : getCachedEmbeddingValue(entry.text)
+        })).filter(entry => entry.vector)
+        : [];
     const __semanticPassStartedAt = __scoreNow();
     let semanticYieldStartedAt = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
     for (let i = 0; i < cards.length; i++) {
@@ -25729,6 +25839,37 @@ async function scoreCardBatch({
                     if (fnVector) {
                         functionScore = calibratedCosineSimilarity(sourceFunctionVector, fnVector);
                         card._rawFunctionSemanticSimilarity = cosineSimilarity(sourceFunctionVector, fnVector);
+                    }
+                }
+
+                const candidateEffectEntries = getCachedCanonicalFunctionEffectEntries(card._parsedEffects);
+                if (sourceFunctionEffectVectors.length && candidateEffectEntries.length > 1) {
+                    const relevantCandidateEffects = candidateEffectEntries.filter(candidateEffect =>
+                        sourceFunctionEffectVectors.some(sourceEffect =>
+                            getFunctionAffinity(sourceEffect.function, candidateEffect.function) >= 0.35
+                        )
+                    ).map(entry => ({ ...entry, vector: getCachedEmbeddingValue(entry.text) }))
+                        .filter(entry => entry.vector);
+                    if (relevantCandidateEffects.length) {
+                        const effectAware = calculateEffectAwareFunctionSemanticScore(
+                            sourceFunctionEffectVectors,
+                            relevantCandidateEffects,
+                            (sourceEffect, candidateEffect) => calibratedCosineFromRaw(
+                                cosineSimilarity(sourceEffect.vector, candidateEffect.vector)
+                            )
+                        );
+                        if (effectAware) {
+                            card._effectAwareFunctionSemanticScore = effectAware.score;
+                            card.functionSemanticEvidence = {
+                                aggregateRawSimilarity: Number.isFinite(card._rawFunctionSemanticSimilarity)
+                                    ? card._rawFunctionSemanticSimilarity : null,
+                                effectAwareScore: effectAware.score,
+                                sourceEffectCount: effectAware.sourceEffectCount,
+                                candidateEffectCount: candidateEffectEntries.length,
+                                matchedEffectCount: effectAware.matchedEffectCount,
+                                matches: effectAware.matches
+                            };
+                        }
                     }
                 }
             }
@@ -29458,7 +29599,7 @@ if (candidates.length > 0) {
     // Preserve the top 300 from the real scored pool after its existing score sort, before the
     // relevance floor removes weaker candidates. This adds no second scoring pass or new sort.
     lastSearchScoredCandidates = candidates.slice(0, 300).map((card, index) => {
-        const scoreFields = ['similarityScore','unclampedSimilarityScore','similarityBeforeCadenceAdjustment','mechanicalScore','contextScore','oracleSemanticScore','functionScore','functionalSimilarityScore','synergyScore','exactnessScore','categoryScore','roleScore','highlightIntentScore','effectCoverageScore','primaryEffectMatchScore','modalModeSimilarityScore','rankingRefinementSignal','calibratedBlendScore','mechanicalConfidence','parseConfidence','quantitySimilarityScore','balancedEffectCoverage','proximityScore','constraintPreferenceScore','acquisitionCadenceRankFactor','quantitativeConflictPenalty'];
+        const scoreFields = ['similarityScore','unclampedSimilarityScore','similarityBeforeCadenceAdjustment','mechanicalScore','contextScore','oracleSemanticScore','functionScore','effectAwareFunctionSemanticScore','functionalSimilarityScore','synergyScore','exactnessScore','categoryScore','roleScore','highlightIntentScore','effectCoverageScore','primaryEffectMatchScore','modalModeSimilarityScore','rankingRefinementSignal','calibratedBlendScore','mechanicalConfidence','parseConfidence','quantitySimilarityScore','balancedEffectCoverage','proximityScore','constraintPreferenceScore','acquisitionCadenceRankFactor','quantitativeConflictPenalty'];
         const scores = {};
         for (const key of scoreFields) if (card?.[key] !== undefined) scores[key] = card[key];
         const evidence = card?.rankingEvidence || {};
@@ -29466,6 +29607,7 @@ if (candidates.length > 0) {
             name: card?.name || '', type_line: card?.type_line || '',
             oracle_text: String(card?.oracle_text || '').slice(0, 2200),
             scores, preFloorRank: index + 1,
+            functionSemanticEvidence: card?.functionSemanticEvidence || null,
             retrievalEvidence: Array.isArray(card?.retrievalEvidence) ? card.retrievalEvidence.slice() : [],
             rankingEvidence: {
                 mechanical: evidence.mechanical ?? null, mechanicalTrusted: evidence.mechanicalTrusted ?? null,
@@ -33218,6 +33360,43 @@ function runManaSearchRankingScoringRegressionSuite({ log = true } = {}) {
         check('nonmodal-candidate-does-not-invent-modal-group', calculateModalModeSimilarity(mysticParsed, nonModalParsed) === null, 'non-modal candidate');
         const modalIntent = inferRankingIntent({ oracle_text: mysticText }, mysticParsed, 'Choose three Draw a card', [], [{ text: 'Choose three', mode: 'variable' }, { text: 'Draw a card', mode: 'variable' }]);
         check('modal-highlight-does-not-collapse-to-one-strategic-role', modalIntent.kind === 'hybrid_effect' && !modalIntent.role && modalIntent.hasModalModes, JSON.stringify(modalIntent));
+
+        const sourceCounterEntry = [{ function: 'counter', importance: 1 }];
+        const multiAbilityCandidateEntries = [
+            { function: 'bounce', importance: 0.65 },
+            { function: 'counter', importance: 1 }
+        ];
+        const effectAwareCounter = calculateEffectAwareFunctionSemanticScore(
+            sourceCounterEntry, multiAbilityCandidateEntries,
+            (sourceEffect, candidateEffect) => candidateEffect.function === 'counter' ? 0.96 : 0.08
+        );
+        check('effect-aware-function-score-uses-counter-ability-without-dilution-from-land-bounce-rider',
+            effectAwareCounter?.score === 0.96 && effectAwareCounter.matches[0]?.candidateFunction === 'counter' &&
+            effectAwareCounter.matches[0]?.candidateIndex === 1,
+            JSON.stringify(effectAwareCounter));
+        const unrelatedFunction = calculateEffectAwareFunctionSemanticScore(
+            sourceCounterEntry, [{ function: 'token_creation', importance: 0.7 }],
+            () => 0.99
+        );
+        check('effect-aware-function-score-does-not-promote-unrelated-candidate-abilities',
+            unrelatedFunction === null,
+            JSON.stringify(unrelatedFunction));
+        const twoSourceEffects = [
+            { function: 'counter', importance: 1 },
+            { function: 'card_draw', importance: 0.8 }
+        ];
+        const oneCandidateEffect = calculateEffectAwareFunctionSemanticScore(
+            twoSourceEffects, [{ function: 'counter', importance: 1 }],
+            () => 0.95
+        );
+        const bothCandidateEffects = calculateEffectAwareFunctionSemanticScore(
+            twoSourceEffects, [{ function: 'counter', importance: 1 }, { function: 'card_draw', importance: 0.8 }],
+            (sourceEffect, candidateEffect) => sourceEffect.function === candidateEffect.function ? 0.95 : 0.1
+        );
+        check('effect-aware-function-matching-is-one-to-one-across-compound-source-intent',
+            oneCandidateEffect?.matchedEffectCount === 1 && bothCandidateEffects?.matchedEffectCount === 2 &&
+            bothCandidateEffects.score > oneCandidateEffect.score,
+            JSON.stringify({ one: oneCandidateEffect, both: bothCandidateEffects }));
 
         const source = parseMTGEffect('Counter target spell.');
         const deprive = parseMTGEffect('Counter target spell. Return target land you control to its owner’s hand.');
