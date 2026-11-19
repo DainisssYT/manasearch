@@ -7457,10 +7457,20 @@ function extractClauseAtoms(effectText, primaryAction) {
 
     for (let verbIndex = 0; verbIndex < verbMatches.length && verbIndex < 12; verbIndex++) {
         const match = verbMatches[verbIndex];
+        const verbPrefix = effectText.slice(0, match.index);
+        const verbSuffix = effectText.slice(match.index);
+        // "If an effect would create tokens ... it creates twice that many instead" is a single
+        // replacement effect. The first "create" is the condition being modified, not an
+        // independent token-creation action. Keeping it as an atom duplicates/confuses the
+        // token_multiplier node and can make mechanical comparison non-finite.
+        const isReplacementCreatePrecursor = /^creates?$/i.test(match[1]) &&
+            /\bif\b[\s\S]*\bwould\s*$/i.test(verbPrefix) &&
+            /\btokens?\b[\s\S]{0,180}\binstead\b/i.test(verbSuffix);
+        if (isReplacementCreatePrecursor) continue;
         // A tap/untap verb before the first action separator belongs to a trigger or condition
         // ("Whenever an opponent taps a land for mana, add {G}"), not to the effect sequence.
         if (/^untaps?$/i.test(match[1]) || /^taps?$/i.test(match[1])) {
-            const prefix = effectText.slice(0, match.index);
+            const prefix = verbPrefix;
             const triggerStart = prefix.search(/\b(?:when|whenever|if|as long as)\b/i);
             const precedingSeparator = prefix.search(/[,;]|\bthen\b/i);
             if (triggerStart >= 0 && precedingSeparator < 0) continue;
@@ -15138,7 +15148,7 @@ function runManaSearchRepeatabilityRegressionSuite({ log = true } = {}) {
         {
             id: 'replacement-effect-is-ongoing-static',
             card: { name: 'Token Doubler', type_line: 'Legendary Creature — God', oracle_text: 'If one or more tokens would be created under your control, three times that many of those tokens are created instead.' },
-            fn: 'token_multiplier', expected: 'ongoing_static', engine: false, repeatable: true
+            fn: 'token_multiplier', expected: 'ongoing_static', engine: false, repeatable: true, excludeFunctions: ['token_creation']
         },
         {
             id: 'repeatable-sacrifice-cost-does-not-consume-source',
@@ -15198,6 +15208,9 @@ function runManaSearchRepeatabilityRegressionSuite({ log = true } = {}) {
             const effects = annotateEffectRepeatability(item.card, parseMTGEffect(item.card.oracle_text), item.card.oracle_text);
             const matching = effects.filter(e => e?.canonical?.function === item.fn);
             const profileKind = matching.map(e => getEffectRepeatabilityProfile(e)?.kind).find(Boolean) || 'unknown';
+            const forbiddenFunctionsPass = (item.excludeFunctions || []).every(fn =>
+                !effects.some(effect => effect?.canonical?.function === fn)
+            );
             const roleProfile = inferStrategicRoleProfile(item.card, effects, '');
             const role = item.role || (item.fn === 'card_draw' ? 'card_advantage_engine' : 'token_engine');
             const hasRole = roleProfile.some(r => r.role === role);
@@ -15211,11 +15224,11 @@ function runManaSearchRepeatabilityRegressionSuite({ log = true } = {}) {
             const tokenIdentityPass = tokenTypePass && tokenStatsPass && tokenColorsPass;
             results.push({
                 id: item.id,
-                pass: profileKind === item.expected && hasRole === item.engine && repeatabilityPass && tokenIdentityPass,
+                pass: profileKind === item.expected && hasRole === item.engine && repeatabilityPass && tokenIdentityPass && forbiddenFunctionsPass,
                 profileKind, expected: item.expected, hasRole, expectedRole: item.engine,
                 hasRepeatableEffect, expectedRepeatable: item.repeatable, tokenType: tokenParams.tokenType || null,
                 tokenStats: tokenParams.tokenStats || null, tokenColors: tokenParams.tokenColors || [],
-                tokenIdentityPass
+                tokenIdentityPass, forbiddenFunctionsPass
             });
             parsedCases.push({ item, effects });
         } catch (error) {
