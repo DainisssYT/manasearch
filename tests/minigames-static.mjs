@@ -13,7 +13,7 @@ const puzzlesDoc = JSON.parse(read('minigames/puzzles.json'));
 
 assert.match(html, /id="minigames-btn"/);
 assert.match(html, /<dialog id="minigames-dialog"/);
-assert.match(html, /app\.js\?v=20261020-119/);
+assert.match(html, /app\.js\?v=20261119-137/);
 assert.match(app, /window\.ManaSearchApi\s*=\s*Object\.freeze/);
 for (const apiName of ['getCardByName', 'getCardNames', 'getOracleText', 'parseEffects', 'scoreEffectMatch', 'assignEffects', 'openCard']) {
     assert.match(app, new RegExp(`\\b${apiName}\\s*\\(`), `Missing minigame API method: ${apiName}`);

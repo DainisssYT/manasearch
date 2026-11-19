@@ -18,6 +18,10 @@ const semanticTextPath = path.join(root, 'scripts', 'semantic-text.mjs');
 const semanticBuilderPath = path.join(root, 'scripts', 'build-static-data.mjs');
 const deployWorkflowPath = path.join(root, '.github', 'workflows', 'deploy-pages.yml');
 const browserRunnerPath = path.join(root, 'tests', 'run-browser-regression.cjs');
+const liveSearchBenchmarkRunnerPath = path.join(root, 'tests', 'run-live-search-benchmark.cjs');
+const liveSearchBenchmarkWorkflowPath = path.join(root, '.github', 'workflows', 'live-search-quality-benchmark.yml');
+const inspectorPath = path.join(root, 'search-inspector.js');
+const inspectorCssPath = path.join(root, 'search-inspector.css');
 const app = fs.readFileSync(appPath, 'utf8');
 const searchWorker = fs.readFileSync(searchWorkerPath, 'utf8');
 const serviceWorker = fs.readFileSync(serviceWorkerPath, 'utf8');
@@ -25,6 +29,10 @@ const semanticText = fs.readFileSync(semanticTextPath, 'utf8');
 const semanticBuilder = fs.readFileSync(semanticBuilderPath, 'utf8');
 const deployWorkflow = fs.readFileSync(deployWorkflowPath, 'utf8');
 const browserRunner = fs.readFileSync(browserRunnerPath, 'utf8');
+const liveSearchBenchmarkRunner = fs.readFileSync(liveSearchBenchmarkRunnerPath, 'utf8');
+const liveSearchBenchmarkWorkflow = fs.readFileSync(liveSearchBenchmarkWorkflowPath, 'utf8');
+const inspector = fs.readFileSync(inspectorPath, 'utf8');
+const inspectorCss = fs.readFileSync(inspectorCssPath, 'utf8');
 const html = fs.readFileSync(htmlPath, 'utf8');
 const css = fs.readFileSync(cssPath, 'utf8');
 
@@ -34,6 +42,9 @@ function check(name, fn) {
   catch (error) { checks.push({ name, pass: false, error: error.message }); }
 }
 check('app.js parses as a valid browser ES module (including reserved-word rules)', () => execFileSync(process.execPath, ['--check', '--input-type=module'], { input: app, stdio: ['pipe', 'pipe', 'pipe'] }));
+check('live-search benchmark runner parses as Node.js JavaScript', () => {
+  execFileSync(process.execPath, ['--check', liveSearchBenchmarkRunnerPath], { stdio: ['pipe', 'pipe', 'pipe'] });
+});
 check('dedicated worker and service worker scripts parse as valid JavaScript', () => {
   execFileSync(process.execPath, ['--check'], { input: searchWorker, stdio: ['pipe', 'pipe', 'pipe'] });
   execFileSync(process.execPath, ['--check'], { input: serviceWorker, stdio: ['pipe', 'pipe', 'pipe'] });
@@ -75,6 +86,14 @@ check('mechanical suite contains blink, token-multiplier, and cadence guards', (
     'blink-sequence-is-not-exile-removal',
     'token-multiplier-is-not-token-creation',
     'graveyard-return-destination-is-mechanically-distinct',
+    'animate-dead-aura-context-is-recognized-as-graveyard-reanimation',
+    'animate-dead-entry-return-is-not-misclassified-as-a-repeatable-engine',
+    'life-paid-card-advantage-analogs-outscore-no-life-recurring-draw',
+    'explicit-hand-to-battlefield-remains-cheat-into-play',
+    'ordinary-enchanted-creature-return-does-not-invent-graveyard-source',
+    'counterspell-trailing-mana-value-restriction-is-preserved',
+    'counterspell-trailing-controller-condition-is-preserved',
+    'unconditional-counterspell-has-no-invented-restriction',
     'repeatable-acquisition-rank-adjustment-is-directional',
     'repeatable-draw-engine-not-equivalent-to-etb-cantrip',
     'draw-trigger-condition-is-not-a-draw-outcome'
@@ -337,6 +356,163 @@ check('static index builder verifies real model tokens and disables truncation',
 check('Pages publishes the shared semantic module and browser tests serve ESM with JavaScript MIME', () => {
   assert.match(deployWorkflow, /cp scripts\/semantic-text\.mjs _site\/scripts\//);
   assert.match(browserRunner, /['"]\.mjs['"]:\s*['"]text\/javascript; charset=utf-8['"]/);
+});
+
+check('developer inspector observes the production pipeline without changing scoring', () => {
+  execFileSync(process.execPath, ['--check'], { input: inspector, stdio: ['pipe', 'pipe', 'pipe'] });
+  assert.match(html, /search-inspector\.js\?v=20261119-167/);
+  assert.match(html, /search-inspector\.css\?v=20261119-140/);
+  assert.match(app, /window\.ManaSearchDebug = Object\.freeze\(/);
+  assert.match(app, /appBuild: MANASEARCH_APP_BUILD/);
+  assert.match(inspector, /appBuild: pipeline\.appBuild/);
+  assert.match(inspector, /buildChanged/);
+  assert.match(inspector, /App builds:/);
+
+  assert.match(app, /inputSnapshotVersion: 2/);
+  assert.match(app, /searchDepthPercent: activeSearchDepthPercent/);
+  assert.match(app, /searchDepthPercent: getCurrentSearchDepthPercent\(\)/);
+  assert.match(app, /orderingFeatures: \{ \.\.\.activeOrderFeatureFlags \}/);
+  assert.match(app, /rankingWeights: Object\.fromEntries/);
+  assert.match(inspector, /inputSnapshotComplete/);
+  assert.match(inspector, /searchDepthPercentChanged/);
+  assert.match(inspector, /orderingFeaturesChanged/);
+  assert.match(inspector, /rankingWeightsChanged/);
+
+  assert.match(app, /getLiveIntent\(\)/);
+  assert.match(inspector, /productionModel: window\.ManaSearchDebug/);
+  assert.match(app, /lastSearchScoredCandidates = candidates\.slice\(0, 300\)/);
+  assert.match(app, /filterFailureReasons instanceof Map/);
+  assert.match(inspector, /data-tab="pipeline"/);
+  assert.match(inspector, /data-tab="candidates"/);
+  assert.match(inspector, /data-tab="trace"/);
+  assert.match(inspector, /traceCandidate/);
+  assert.match(inspector, /firstObservedLoss/);
+  assert.match(inspector, /possibleHardFilterRejection/);
+  assert.match(inspector, /mechanicalBreakdown: candidate\.mechanicalBreakdown/);
+  assert.match(inspector, /data-trace-candidate/);
+  assert.match(inspector, /data-tab="exclusions"/);
+  assert.match(inspector, /manasearch:search-finished/);
+  assert.match(inspector, /productionPipeline: getPipelineSnapshot\(\)/);
+  assert.match(inspector, /data-tab="compare"/);
+  assert.match(inspector, /MAX_SEARCH_RUNS = 6/);
+  assert.match(inspector, /searchRuns: state\.searchRuns/);
+  assert.match(inspector, /sharedCandidateScoreChanges/);
+  assert.match(inspector, /candidatePathChanges/);
+  assert.match(inspector, /Changed-card pipeline paths/);
+
+  assert.match(inspector, /changedInputFields = \['sourceCard'.*'broad', 'divergent'\]/);
+  assert.match(inspector, /requestFields = \['inputSnapshotVersion'.*'rankingWeights'.*'broad', 'divergent'\]/);
+  assert.match(inspector, /capturedListOverlap/);
+  assert.match(inspector, /Changed factors:/);
+  assert.match(inspector, /Search depth:/);
+  assert.match(inspector, /Score-weight offsets:/);
+  assert.match(inspector, /requiredInputFields = .*'broad', 'divergent'/);
+  assert.match(inspector, /Provisional results still visible/);
+  assert.ok(inspector.includes('return lines.join('));
+  assert.match(app, /provisionalResultCount/);
+  assert.match(app, /Search stopped before the final ranking/);
+  assert.match(app, /searchHasFinalRanking = true/);
+  assert.match(inspector, /rankChanges/);
+  assert.match(inspector, /data-action="download"/);
+  assert.match(inspector, /manasearch-diagnostics-export-v2/);
+
+
+  assert.match(app, /manasearch:progress-updated/);
+  assert.match(app, /function updateProgress\(step, total, message, ownerRequestId = activeMainSearchRequestId\)/);
+  assert.match(app, /updateProgress\(null, null, outcomeMessage, requestId\)/);
+  assert.match(app, /manasearch:search-streams-updated/);
+  assert.match(app, /manasearch:search-preview-updated/);
+  assert.match(app, /phase: 'final-ranking'/);
+  assert.match(app, /recordRetrievalStreamFailure/);
+  assert.ok(app.includes('function normalizeRetrievalStreamDisplayLabel(label)'));
+  assert.ok(app.includes('normalizeRetrievalStreamDisplayLabel(safeLabel)'));
+  assert.ok(app.includes("normalizeRetrievalStreamDisplayLabel(item.label) === 'Functional Match'"));
+  assert.match(app, /normalizeRetrievalStreamDisplayLabel,/);
+  assert.match(app, /function calculateEffectAwareFunctionSemanticScore/);
+  assert.match(app, /getCachedCanonicalFunctionEffectEntries/);
+  assert.match(app, /_effectAwareFunctionSemanticScore/);
+  assert.match(app, /functionSemanticEvidence/);
+  assert.match(app, /effect-aware-function-score-uses-counter-ability-without-dilution-from-land-bounce-rider/);
+  assert.match(app, /effect-aware-function-matching-is-one-to-one-across-compound-source-intent/);
+  assert.match(inspector, /functionSemanticEvidence: candidate\.functionSemanticEvidence/);
+  assert.match(browserRunner, /compareRunsSurfacesAbilityAwareFunctionScoreDelta/);
+  assert.match(browserRunner, /sameBuildSameInputsAreRepeatabilityChecks/);
+  assert.match(browserRunner, /appOnlyRevisionIsControlledAlgorithmComparison/);
+  assert.match(browserRunner, /datasetOnlyRevisionIsNotAlgorithmRegression/);
+  assert.match(browserRunner, /regressionReplayWithChangedDatasetHasNoVerdict/);
+  assert.match(browserRunner, /legacyRegressionWithoutDatasetProvenanceHasNoVerdict/);
+  assert.match(browserRunner, /cancelledRunIsRetainedWithProvisionalCards/);
+  assert.match(inspector, /largestFactorDelta/);
+  assert.match(browserRunner, /traceShowsAbilityAwareSemanticEvidence/);
+  assert.match(browserRunner, /effectAwareCounterEvidenceCaptured/);
+  assert.match(app, /streamFailures: streamFailureRecords\.slice\(\)/);
+  assert.match(app, /completed_with_warnings/);
+  assert.match(app, /verbMatches = Array.from\(effectText\.matchAll\(verbRegex\)\)/);
+  assert.match(app, /const nextVerbIndex = verbMatches\[verbIndex \+ 1\]/);
+  assert.match(app, /previousRuleExilesTopLibraryCard/);
+  assert.match(app, /delayedTopLibraryAcquisition/);
+  assert.match(app, /ruleContext = \[includePreviousRuleContext \? previousRuleText : '', localRuleContext\]/);
+  assert.match(app, /compound-draw-and-life-loss-retains-both-distinct-actions/);
+  assert.match(app, /runManaSearchLiveRetrievalRegressionSuite/);
+  assert.match(app, /isReplacementCreatePrecursor/);
+  assert.match(app, /excludeFunctions: \['token_creation'\]/);
+  assert.match(app, /necropotenceEffects/);
+  assert.match(app, /top-library-card-put-into-hand-is-card-acquisition-not-tutor/);
+  assert.match(app, /life-paid-top-library-acquisition-matches-card-draw-semantically/);
+  assert.match(app, /status: searchOutcome/);
+  assert.match(app, /function cancelActiveMainSearch\(/);
+  assert.match(app, /manasearch:search-cancelled/);
+  assert.match(app, /dataBuildId: staticDataBuildId \|\| null/);
+  assert.match(app, /Search failed:/);
+  assert.match(inspector, /getActiveSearch/);
+  assert.match(inspector, /progressHistory/);
+  assert.match(inspector, /outcomeComparison/);
+  assert.match(inspector, /stageProgression/);
+  assert.match(inspector, /retrievalFailures/);
+  assert.match(inspector, /scoredCandidateEvolution/);
+  assert.match(inspector, /topKOverlap/);
+  assert.match(inspector, /comparableForAlgorithmRegression/);
+  assert.match(inspector, /comparableForRepeatability/);
+  assert.match(inspector, /comparisonMode/);
+  assert.match(inspector, /dataBuildId/);
+  assert.match(inspector, /repeatabilityCheck/);
+  assert.match(inspector, /search-cancelled/);
+  assert.match(inspector, /search-cancelled/);
+  assert.match(inspector, /rankingComparisonValid/);
+  assert.match(inspector, /failedStreams = Number\(detail\.failedStreams\)/);
+  assert.match(inspector, /search-error/);
+  assert.match(inspector, /search-cancelled/);
+  assert.match(inspector, /data-tab="regression"/);
+  assert.match(inspector, /manasearch-regression-case-v1/);
+  assert.match(inspector, /createRegressionCase/);
+  assert.match(inspector, /validateRegressionCase/);
+  assert.match(inspector, /compareRegressionCase/);
+  assert.match(inspector, /stableJson/);
+  assert.match(inspector, /data-regression-build/);
+  assert.match(inspector, /data-regression-export/);
+  assert.match(inspector, /data-regression-import/);
+  assert.match(inspector, /data-regression-compare/);
+  assert.match(inspector, /expectedTopCandidates/);
+  assert.match(inspector, /input-mismatch/);
+  assert.match(inspectorCss, /ms-inspector-regression-controls/);
+
+  assert.match(inspector, /htmlEscape\(clip\(runLabel\(run\), 120\)\)/);
+  assert.match(inspector, /meaningfulParse/);
+  assert.match(inspectorCss, /overflow-x:auto/);
+  assert.match(css, /stream-chip\.stream-failed/);
+  assert.match(css, /stream-chip\.stream-warning/);
+  assert.match(deployWorkflow, /search-inspector\.js search-inspector\.css/);
+  assert.match(deployWorkflow, /Publish artifact missing/);
+
+  assert.match(liveSearchBenchmarkRunner, /runLocalBenchmarkInApp/);
+  assert.match(liveSearchBenchmarkRunner, /cards\.bin/);
+  assert.match(liveSearchBenchmarkRunner, /semantic-index\.bin/);
+  assert.match(liveSearchBenchmarkRunner, /manasearch-live-search-benchmark-v1/);
+  assert.match(liveSearchBenchmarkRunner, /benchmarkFullyMeasured/);
+  assert.match(liveSearchBenchmarkWorkflow, /feature\/search-debug-inspector/);
+  assert.match(liveSearchBenchmarkWorkflow, /run-live-search-benchmark\.cjs/);
+  assert.match(liveSearchBenchmarkWorkflow, /upload-artifact@v6/);
+
 });
 
 check('semantic worker response envelopes are normalized before array-based result merging', () => {

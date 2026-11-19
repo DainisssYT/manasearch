@@ -1,11 +1,11 @@
-/* ManaSearch build 20261110-136 */
+/* ManaSearch build 20261119-154 */
 // ManaSearch deployment build marker. Bump this whenever app.js changes so cached-module issues are easy to diagnose.
-const MANASEARCH_APP_BUILD = '20261110-136';
+const MANASEARCH_APP_BUILD = '20261119-159';;;
 console.info(`[ManaSearch] app.js build ${MANASEARCH_APP_BUILD}`);
 
 // The source-query and static-index builders share one representation so both sides
 // embed the same normalized face/ability/metadata documents.
-import { buildSemanticDocuments, enforceSemanticTokenBudget, mergeSemanticRetrievalRanks } from './scripts/semantic-text.mjs?v=20261110-136';
+import { buildSemanticDocuments, enforceSemanticTokenBudget, mergeSemanticRetrievalRanks } from './scripts/semantic-text.mjs?v=20261119-145';
 
 // State Management
 let currentSourceCard = null;
@@ -15,6 +15,92 @@ let lastSearchResults = [];
 // must always use this same snapshot as the grid, never stale results from the previous search.
 let currentRenderedResultsCards = [];
 let activeMainSearchRequestId = null;
+let lastMainSearchOutcome = null;
+
+/**
+ * Preserve an in-flight main search as an explicit cancelled run before another user action
+ * clears or replaces its diagnostics. Cancelled runs are useful for live debugging, but must
+ * never be interpreted as completed zero-result rankings.
+ */
+function cancelActiveMainSearch(reason = 'Search was superseded by another action.') {
+    const requestId = activeMainSearchRequestId;
+    if (requestId === null || requestId === undefined ||
+        requestId !== searchRequestId ||
+        lastMainSearchOutcome?.requestId !== requestId ||
+        lastMainSearchOutcome?.status !== 'running') return false;
+
+    const finishedAt = new Date();
+    const startedAtMs = Date.parse(lastMainSearchOutcome.startedAt || '');
+    const durationMs = Number.isFinite(startedAtMs) ? Math.max(0, Date.now() - startedAtMs) : null;
+    const provisionalCards = Array.isArray(currentRenderedResultsCards) ? currentRenderedResultsCards : [];
+    const provisionalCardNames = provisionalCards
+        .map(card => String(card?.name || '').trim())
+        .filter(Boolean)
+        .slice(0, 20);
+    const detail = {
+        requestId,
+        status: 'cancelled',
+        success: false,
+        partial: false,
+        reason: String(reason || 'Search was cancelled.').slice(0, 420),
+        errorMessage: '',
+        startedAt: lastMainSearchOutcome.startedAt || null,
+        finishedAt: finishedAt.toISOString(),
+        durationMs,
+        sourceName: lastMainSearchOutcome.sourceName || currentSourceCard?.name || '',
+        resultCount: 0,
+        provisionalResultCount: provisionalCards.length,
+        provisionalCardNames
+    };
+    lastMainSearchOutcome = {
+        ...lastMainSearchOutcome,
+        status: 'cancelled',
+        finishedAt: detail.finishedAt,
+        durationMs,
+        resultCount: 0,
+        provisionalResultCount: detail.provisionalResultCount,
+        errorMessage: detail.reason
+    };
+    // Hide only the loading state owned by this primary request. A Related Search may have
+    // taken over the result view while this request was still resolving in the background.
+    if (activeResultView?.mode === 'main' && activeResultView?.requestId === requestId) {
+        showLoading(false);
+    }
+    activeMainSearchRequestId = null;
+    try {
+        window.dispatchEvent(new CustomEvent('manasearch:search-cancelled', { detail }));
+    } catch (_) {}
+    return true;
+}
+
+/**
+ * Keep a successfully rendered ranking from being misreported as a fully complete search when
+ * one or more parallel retrieval lanes failed. A fatal top-level error remains fatal; a clean run
+ * remains clean. Inputs are plain snapshots so this rule can be tested independently of the UI.
+ */
+function resolveMainSearchOutcome(status, errorMessage = '', streamStatusEntries = [], streamFailures = []) {
+    const currentStatus = String(status || 'completed');
+    const currentMessage = String(errorMessage || '');
+    if (currentStatus !== 'completed') {
+        return { status: currentStatus, errorMessage: currentMessage };
+    }
+    const displayLabel = label => normalizeRetrievalStreamDisplayLabel(String(label || 'Unknown retrieval lane'));
+    const warningLabels = streamStatusEntries
+        .filter(entry => Array.isArray(entry) && ['failed', 'completed_with_warnings'].includes(entry[1]))
+        .map(entry => displayLabel(entry[0]));
+    const failureLabels = streamFailures.map(item => displayLabel(item?.label));
+    const affectedLabels = [...new Set([...warningLabels, ...failureLabels])];
+    if (!affectedLabels.length) return { status: currentStatus, errorMessage: currentMessage };
+    const failureDetails = streamFailures
+        .filter(item => item?.message)
+        .map(item => String(item.message).slice(0, 180));
+    const detailText = failureDetails.length ? ' — ' + [...new Set(failureDetails)].slice(0, 3).join('; ') : '';
+    return {
+        status: 'completed_with_warnings',
+        errorMessage: ('Retrieval was incomplete: ' + affectedLabels.join(', ') + detailText +
+            '. The final ranking uses the results available from completed search lanes.').slice(0, 900)
+    };
+}
 // Results are paginated in the presentation layer; the full ranked candidate list remains intact.
 let currentResultsPage = 1;
 let reorderResultsRequestId = 0;
@@ -31,6 +117,9 @@ let activeSearchDepthPercent = 100;
 // every pipeline stage even on searches that plainly worked. Results data and instrumentation are
 // now separate state (review Priority 1).
 let lastSearchDiagnostics = null;
+// Developer-facing snapshots are captured from the real production pipeline; they never feed back into ranking.
+let lastSearchDebugContext = null;
+let lastSearchScoredCandidates = [];
 // User-facing search totals. This counts unique candidates that survived hard filters and reached
 // the scoring/ranking stage, while lastSearchResults is the final relevance-qualified result set.
 let lastSearchCandidateCount = null;
@@ -2014,6 +2103,8 @@ function createBenchmarkScoreSnapshot(card) {
         mechanicalScore: card.mechanicalScore ?? null,
         contextScore: card.contextScore ?? null,
         functionScore: card.functionScore ?? null,
+        effectAwareFunctionSemanticScore: card._effectAwareFunctionSemanticScore ?? null,
+        functionSemanticEvidence: card.functionSemanticEvidence ?? null,
         synergyScore: card.synergyScore ?? null,
         exactnessScore: card.exactnessScore ?? null,
         categoryScore: card.categoryScore ?? null,
@@ -2130,6 +2221,8 @@ async function runBenchmarkPass(searchFn, test) {
                 mechanicalScore: card.mechanicalScore ?? null,
                 contextScore: card.contextScore ?? null,
                 functionScore: card.functionScore ?? null,
+                effectAwareFunctionSemanticScore: card._effectAwareFunctionSemanticScore ?? null,
+                functionSemanticEvidence: card.functionSemanticEvidence ?? null,
                 synergyScore: card.synergyScore ?? null,
                 exactnessScore: card.exactnessScore ?? null,
                 categoryScore: card.categoryScore ?? null,
@@ -3630,6 +3723,7 @@ function findBenchmarkSourceCard(sourceName) {
 async function loadBenchmarkSourceCard(sourceName) {
     const localCard = findBenchmarkSourceCard(sourceName);
     if (localCard) {
+        cancelActiveMainSearch('A benchmark source card replaced the in-flight search.');
         ++searchRequestId;
         currentSourceCard = localCard;
         lastSearchResults = [];
@@ -6013,7 +6107,7 @@ function extractMTGRestrictions(text) {
 
     const words = normalizedText
         .split(/\s+/)
-        .filter(word => word.length > 1 && !ignoreList.has(word));
+        .filter(word => (word.length > 1 || /^\d+$/.test(word)) && !ignoreList.has(word));
 
     return [...controlTokens, ...words];
 }
@@ -6619,6 +6713,35 @@ function parseCounterEffect(clause) {
         effect.payCost = payMatch[1].trim();
     }
 
+    // Oracle text often places a counterspell limitation AFTER the target noun:
+    // "Counter target spell with mana value 4 or greater." The old prefix-only parser
+    // captured "noncreature" in "Counter target noncreature spell", but silently dropped
+    // every trailing qualifier. Retain that text as structured target restrictions.
+    const objectToken = /\b(?:spell|ability)\b/ig;
+    let objectMatch = null;
+    let lastObjectMatch = null;
+    while ((objectMatch = objectToken.exec(text))) lastObjectMatch = objectMatch;
+    const afterObject = lastObjectMatch
+        ? text.slice(lastObjectMatch.index + lastObjectMatch[0].length).trim()
+        : '';
+    const trailingTargetRestriction = afterObject.match(/^(?:with|that|which|whose|not|only)\s+([^,.;]+)/i);
+    if (trailingTargetRestriction) {
+        effect.targetRestrictionText = trailingTargetRestriction[0].trim();
+        effect.restriction = Array.from(new Set([
+            ...(effect.restriction || []),
+            ...extractMTGRestrictions(effect.targetRestrictionText)
+        ]));
+    }
+
+    // Some Oracle clauses put the conditional qualifier after "spell": "Counter target
+    // spell if its controller is poisoned." extractConditionsAndCosts already handles leading
+    // "If ..." clauses, but this action-final form must retain the same condition structure.
+    const trailingIf = afterObject.match(/^if\s+([^,.;]+)/i);
+    if (trailingIf && !effect.condition) {
+        effect.condition = 'if';
+        effect.conditionDetail = extractMTGRestrictions(trailingIf[1]);
+    }
+
     // condition/payCost (if not already set above) and additionalEffects (e.g. "then draw a
     // card", "then scry") are filled in uniformly by parseMTGEffect via extractConditionsAndCosts.
     return effect;
@@ -6943,17 +7066,20 @@ function parseManaAbilityEffect(clause) {
  * @param {string} clause
  * @returns {Object|null}
  */
-function parseLifeEffect(clause) {
+function parseLifeEffect(clause, implicitSubject = null) {
     const text = clause.toLowerCase();
 
     const fixedMatch = text.match(/\b(you|target player|target opponent|each player|each opponent|that player|its controller|their controller|controller)\s+(gains?|loses?)\s+(\d+|x|that much)\s+life\b/i);
     const equalToMatch = !fixedMatch && text.match(/\b(you|target player|target opponent|each player|each opponent|that player)\s+(gains?|loses?)\s+life\s+equal\s+to\b/i);
-    const match = fixedMatch || equalToMatch;
+    const implicitMatch = !fixedMatch && !equalToMatch && String(implicitSubject || '').trim()
+        ? text.match(/\b(gains?|loses?)\s+(\d+|x|that much)\s+life\b/i)
+        : null;
+    const match = fixedMatch || equalToMatch || implicitMatch;
     if (!match) return null;
 
-    const subjectPhrase = match[1];
-    const verb = match[2];
-    const rawAmount = fixedMatch ? fixedMatch[3] : 'variable';
+    const subjectPhrase = fixedMatch || equalToMatch ? match[1] : String(implicitSubject).trim().toLowerCase();
+    const verb = fixedMatch || equalToMatch ? match[2] : match[1];
+    const rawAmount = fixedMatch ? match[3] : implicitMatch ? match[2] : 'variable';
     const amount = /^\d+$/.test(rawAmount) ? parseInt(rawAmount, 10) : rawAmount;
 
     let object;
@@ -7381,28 +7507,48 @@ const ATOM_VERBS = 'returns?|puts?|sacrifices?|destroys?|exiles?|discards?|mills
 function extractClauseAtoms(effectText, primaryAction) {
     if (!effectText) return [];
 
+    const inferSharedLifeSubject = verbIndex => {
+        const prefix = String(effectText).slice(0, verbIndex);
+        const clauseStart = Math.max(prefix.lastIndexOf('.'), prefix.lastIndexOf(';'), prefix.lastIndexOf('!'), prefix.lastIndexOf('?'));
+        const localPrefix = prefix.slice(clauseStart + 1);
+        const match = localPrefix.match(/\b(you|target opponent|each opponent|target player|each player|that player|its controller|their controller|controller|opponent|player)\b(?=[\s\S]*\b(?:draw|draws|gain|gains|lose|loses|pay|pays)\b)/i);
+        return match?.[1] || null;
+    };
+
     const atoms = [];
     // Skip only the first atom that repeats the whole-clause parser's dominant action. Further
     // occurrences must survive: Verdant Mastery has two distinct "put ... onto the battlefield"
     // actions with different recipients, and both are strategically meaningful.
     const primaryActionPending = new Set(primaryAction ? [primaryAction] : []);
-    const verbRegex = new RegExp(`\\b(${ATOM_VERBS})\\b`, 'gi');
+    const verbRegex = new RegExp('\\b(' + ATOM_VERBS + ')\\b', 'gi');
+    const verbMatches = Array.from(effectText.matchAll(verbRegex));
 
-    let match;
-    let guard = 0;
-    while ((match = verbRegex.exec(effectText)) !== null && guard++ < 12) {
+    for (let verbIndex = 0; verbIndex < verbMatches.length && verbIndex < 12; verbIndex++) {
+        const match = verbMatches[verbIndex];
+        const verbPrefix = effectText.slice(0, match.index);
+        const verbSuffix = effectText.slice(match.index);
+        // "If an effect would create tokens ... it creates twice that many instead" is a single
+        // replacement effect. The first "create" is the condition being modified, not an
+        // independent token-creation action. Keeping it as an atom duplicates/confuses the
+        // token_multiplier node and can make mechanical comparison non-finite.
+        const isReplacementCreatePrecursor = /^creates?$/i.test(match[1]) &&
+            /\bif\b[\s\S]*\bwould\s*$/i.test(verbPrefix) &&
+            /\btokens?\b[\s\S]{0,180}\binstead\b/i.test(verbSuffix);
+        if (isReplacementCreatePrecursor) continue;
         // A tap/untap verb before the first action separator belongs to a trigger or condition
         // ("Whenever an opponent taps a land for mana, add {G}"), not to the effect sequence.
-        // Direct imperative tap effects after the comma/then remain parseable.
         if (/^untaps?$/i.test(match[1]) || /^taps?$/i.test(match[1])) {
-            const prefix = effectText.slice(0, match.index);
+            const prefix = verbPrefix;
             const triggerStart = prefix.search(/\b(?:when|whenever|if|as long as)\b/i);
             const precedingSeparator = prefix.search(/[,;]|\bthen\b/i);
             if (triggerStart >= 0 && precedingSeparator < 0) continue;
         }
-        // Parse from this verb onward, so each atom sees its own object/zones rather than the
-        // whole clause's.
-        const slice = effectText.slice(match.index);
+        // Parse only this verb's span, ending before the next action verb. The original unbounded
+        // suffix let a later unrelated action win a sub-parser's first-match logic: "draw a card and
+        // you lose 1 life" was parsed as lose_life twice and lost its draw atom.
+        // Keep the full clause separately as context below for timing/repeatability interpretation.
+        const nextVerbIndex = verbMatches[verbIndex + 1]?.index ?? effectText.length;
+        const slice = effectText.slice(match.index, nextVerbIndex).trim();
         const atom =
             parseCounterEffect(slice) ||
             parseSearchEffect(slice) ||
@@ -7411,9 +7557,8 @@ function extractClauseAtoms(effectText, primaryAction) {
             parseControlChangeEffect(slice) ||
             parseTapEffect(slice) ||
             parseDamageEffect(slice) ||
-            parseLifeEffect(slice) ||
+            parseLifeEffect(slice, inferSharedLifeSubject(match.index)) ||
             parseZoneMovementEffect(slice);
-
         if (atom && atom.action) {
             if (primaryActionPending.has(atom.action)) {
                 primaryActionPending.delete(atom.action);
@@ -8299,6 +8444,24 @@ function parseMTGEffect(oracleText, cardContext = null) {
         }
     }
 
+    // Some Aura reanimation effects split their source-zone declaration from the return
+    // instruction: the Aura enchants "a creature card in a graveyard", then later says
+    // "return enchanted creature card to the battlefield". Clause-local parsing sees only
+    // "enchanted creature card" and previously labelled this cheat_into_play. Join these two
+    // pieces only when the full Oracle text explicitly defines that Aura/graveyard relationship
+    // and the return atom explicitly names the enchanted creature card. This must not turn ordinary
+    // hand/library battlefield-entry effects into reanimation.
+    const hasGraveyardAuraTarget = /\benchant\s+(?:(?:a|an|the|target)\s+)?(?:creature|permanent)\s+card\s+in\s+(?:a|your|their|any|an opponent's|that player's)?\s*graveyard\b/i.test(wholeOracleText);
+    if (hasGraveyardAuraTarget) {
+        for (const effect of results) {
+            if (!effect || !['return', 'put'].includes(effect.action) || effect.from || effect.to !== 'battlefield') continue;
+            if (!/\b(?:return|put)\s+(?:that\s+)?enchanted\s+(?:creature|permanent)\s+card\b/i.test(String(effect.raw || ''))) continue;
+            effect.from = 'graveyard';
+            effect.inferredFromZone = 'graveyard';
+            effect.zoneInferenceSource = 'aura-enchant-graveyard-card';
+        }
+    }
+
     // Add dedicated structured signatures for the mechanic families that a flat keyword anchor
     // cannot explain adequately. Existing parsed atoms remain untouched and continue to describe
     // costs, zone movement, quantities, target scopes, triggers, and outcomes.
@@ -8488,11 +8651,18 @@ function deriveCanonicalFunction(effect) {
     const localRuleContext = `${String(effect.parentRuleText || '')} ${String(effect.contextClause || '')} ${String(effect.raw || '')}`.replace(/[’]/g, "'");
     const previousRuleText = String(effect.previousRuleText || '').replace(/[’]/g, "'");
     const previousRuleSearchesForLands = /\bsearch(?:es)?\b[\s\S]{0,180}\b(?:basic\s+)?land cards?\b/i.test(previousRuleText);
-    // Some modal/ramp spells put the searched-for object onto the battlefield in the next printed
-    // sentence (Verdant Mastery). Import only the immediately preceding sentence when it clearly
-    // searches a library for land cards and this atom is a battlefield put; don't blend whole-card
-    // text into every effect and contaminate unrelated mechanics.
-    const ruleContext = `${localRuleContext} ${a === 'put' && effect.to === 'battlefield' && previousRuleSearchesForLands ? previousRuleText : ''}`.trim();
+    const previousRuleExilesTopLibraryCard = /\b(?:reveal|exile)\b[\s\S]{0,180}\btop\s+(?:(?:one|two|three|four|five|six|seven|eight|nine|ten|\d+)\s+)?cards?\s+of\s+(?:your|their|that player(?:'s)?|that opponent(?:'s)?|an opponent(?:'s)?|a player(?:'s)?)\s+library\b/i.test(previousRuleText);
+    const currentRulePutsCardInHand = /\b(?:put|place)\s+(?:that card|it)\s+(?:into|to)\s+(?:your|their|that player(?:'s)?|a player(?:'s)?)\s+hand\b/i.test(localRuleContext);
+    // Some abilities split top-library acquisition across adjacent Oracle sentences:
+    // "Exile the top card of your library face down. Put that card into your hand ...".
+    // Import only the immediately preceding sentence when both halves explicitly connect.
+    const delayedTopLibraryAcquisition = a === 'put' && effect.to === 'hand' &&
+        previousRuleExilesTopLibraryCard && currentRulePutsCardInHand;
+    // Verdant Mastery and similar cards split a searched land from the following battlefield put.
+    const includePreviousRuleContext = a === 'put' && (
+        (effect.to === 'battlefield' && previousRuleSearchesForLands) || delayedTopLibraryAcquisition
+    );
+    const ruleContext = [includePreviousRuleContext ? previousRuleText : '', localRuleContext].filter(Boolean).join(' ').trim();
     const lowerRuleContext = ruleContext.toLowerCase();
     const topLibraryPattern = /\btop\s+(?:(?:one|two|three|four|five|six|seven|eight|nine|ten|\d+)\s+)?cards?\s+of\s+(?:your|their|that player(?:'s)?|that opponent(?:'s)?|an opponent(?:'s)?|a player(?:'s)?)\s+library\b/i;
     const directlyExilesTopLibrary = /\bexiles?\s+(?:the\s+)?top\s+(?:(?:one|two|three|four|five|six|seven|eight|nine|ten|\d+)\s+)?cards?\s+of\s+(?:your|their|that player(?:'s)?|that opponent(?:'s)?|an opponent(?:'s)?|a player(?:'s)?)\s+library\b/i.test(ruleContext);
@@ -8526,8 +8696,15 @@ function deriveCanonicalFunction(effect) {
     if (a === "return" || a === "put") {
         const searchesLibrary = /\bsearch(?:es)?\s+(?:your|the|a|target player's|target opponent's)?\s*library\b/i.test(ruleContext);
         const putsIntoHand = /\b(?:put|place)\b[\s\S]{0,140}\b(?:into|to)\s+(?:your|their|the player's|the opponent's)?\s*hand\b/i.test(ruleContext);
+        const topLibraryCardAcquisition = to === "hand" &&
+            /\b(?:reveal|exile)\b[\s\S]{0,180}\btop\s+(?:(?:one|two|three|four|five|six|seven|eight|nine|ten|\d+)\s+)?cards?\s+of\s+(?:your|their|that player(?:'s)?|that opponent(?:'s)?|an opponent(?:'s)?|a player(?:'s)?)\s+library\b[\s\S]{0,260}\b(?:put|place)\s+(?:that card|it)\s+(?:into|to)\s+(?:your|their|that player(?:'s)?|a player(?:'s)?)\s+hand\b/i.test(ruleContext);
         if (from === "graveyard" && to === "battlefield") fn = "reanimate";
         else if (from === "graveyard" && to === "hand") fn = "recursion";
+        // Revealing or exiling the top library card and then putting that card into hand is a
+        // card-acquisition effect, not a tutor. This distinction matters for engines like
+        // Dark Confidant and Necropotence: they produce card advantage without searching a library.
+        // A genuine "search your library ... put it into your hand" remains a tutor below.
+        else if (topLibraryCardAcquisition) fn = "card_draw";
         // Cards fetched from a library and placed into hand are tutors, not bounce. In particular,
         // Fervent Mastery says "Search your library ... put them into your hand" and never returns
         // permanents from the battlefield.
@@ -8919,6 +9096,88 @@ function getCanonicalFunctions(effects) {
         .map(e => e.canonical);
 }
 
+const canonicalFunctionEffectEntriesByEffects = new WeakMap();
+function getCachedCanonicalFunctionEffectEntries(parsedEffects) {
+    if (!Array.isArray(parsedEffects)) return [];
+    if (canonicalFunctionEffectEntriesByEffects.has(parsedEffects)) {
+        return canonicalFunctionEffectEntriesByEffects.get(parsedEffects);
+    }
+    const entries = parsedEffects
+        .filter(effect => effect?.canonical)
+        .slice()
+        .sort((a, b) => (b.importance || 0) - (a.importance || 0))
+        .map(effect => ({
+            function: String(effect.canonical.function || ''),
+            importance: Math.max(0.05, Number(effect.importance) || 0.5),
+            text: canonicalFunctionToText([effect.canonical])
+        }))
+        .filter(entry => entry.function && entry.text);
+    canonicalFunctionEffectEntriesByEffects.set(parsedEffects, entries);
+    return entries;
+}
+
+/**
+ * Match source abilities to distinct candidate abilities using semantic similarity.
+ * Extra candidate abilities are not averaged into a source-effect match; an unrelated rider or
+ * drawback must not dilute a strong match for the highlighted mechanic. The one-to-one assignment
+ * prevents a single candidate ability from satisfying multiple source abilities.
+ *
+ * similarityForPair returns a calibrated 0..1 value, or a non-finite value if an embedding is absent.
+ */
+function calculateEffectAwareFunctionSemanticScore(sourceEntries, candidateEntries, similarityForPair) {
+    const source = Array.isArray(sourceEntries) ? sourceEntries.filter(entry => entry?.function) : [];
+    const candidate = Array.isArray(candidateEntries) ? candidateEntries.filter(entry => entry?.function) : [];
+    if (!source.length || !candidate.length || typeof similarityForPair !== 'function') return null;
+
+    const pairs = [];
+    for (let sourceIndex = 0; sourceIndex < source.length; sourceIndex++) {
+        for (let candidateIndex = 0; candidateIndex < candidate.length; candidateIndex++) {
+            const affinity = Math.max(0, Math.min(1, Number(getFunctionAffinity(
+                source[sourceIndex].function, candidate[candidateIndex].function
+            )) || 0));
+            if (affinity < 0.35) continue;
+            const similarity = Number(similarityForPair(source[sourceIndex], candidate[candidateIndex]));
+            if (!Number.isFinite(similarity)) continue;
+            const score = Math.max(0, Math.min(1, similarity));
+            const importance = Math.max(0.05, Number(source[sourceIndex].importance) || 0.5);
+            pairs.push({
+                sourceIndex,
+                candidateIndex,
+                sourceFunction: source[sourceIndex].function,
+                candidateFunction: candidate[candidateIndex].function,
+                similarity: score,
+                affinity,
+                importance,
+                utility: score * affinity * importance
+            });
+        }
+    }
+
+    if (!pairs.length) return null;
+
+    pairs.sort((a, b) => b.utility - a.utility || b.similarity - a.similarity);
+    const usedSources = new Set();
+    const usedCandidates = new Set();
+    const matches = [];
+    for (const pair of pairs) {
+        if (usedSources.has(pair.sourceIndex) || usedCandidates.has(pair.candidateIndex)) continue;
+        usedSources.add(pair.sourceIndex);
+        usedCandidates.add(pair.candidateIndex);
+        matches.push(pair);
+    }
+
+    const totalImportance = source.reduce((sum, entry) => sum + Math.max(0.05, Number(entry.importance) || 0.5), 0);
+    const weightedScore = matches.reduce((sum, pair) =>
+        sum + pair.similarity * Math.max(0.25, pair.affinity) * pair.importance, 0);
+    return {
+        score: totalImportance > 0 ? Math.max(0, Math.min(1, weightedScore / totalImportance)) : 0,
+        matches: matches.map(({ utility, ...match }) => match),
+        sourceEffectCount: source.length,
+        candidateEffectCount: candidate.length,
+        matchedEffectCount: matches.length
+    };
+}
+
 
 // ---------------------------------------------------------------------------
 // STRATEGIC / ARCHETYPAL ROLE LAYER (V16)
@@ -9111,7 +9370,7 @@ function inferEffectRepeatabilityProfile(card, effect, fullText = '') {
         kind = 'ongoing_static';
         confidence = replacementEffect ? 0.93 : 0.84;
     } else if (/\b(?:when|whenever)\b/i.test(combined) && isPermanent) {
-        const ownEntry = selfReference && /\b(?:enters? the battlefield|comes into play)\b/i.test(combined);
+        const ownEntry = selfReference && /\b(?:enters?(?:\s+(?:the\s+)?battlefield)?|comes into play)\b/i.test(combined);
         const ownOneTimeEvent = selfReference && /\b(?:dies|leaves the battlefield|is sacrificed|is put into a graveyard)\b/i.test(combined);
         const repeatingCombatEvent = /\b(?:attacks|blocks)\b/i.test(combined) && !ownOneTimeEvent;
         if (ownEntry) {
@@ -9366,10 +9625,21 @@ function inferStrategicRoleProfileUncached(card, parsedEffects = [], intentText 
     const topCardAcquisition = /\b(?:reveal|exile)\s+the top card\b[^.]{0,100}\b(?:hand|put it into your hand|cards? exiled)\b/.test(lower);
     const recurringAcquisition = directDraw || handAcquisition || topCardAcquisition;
     const acquisitionText = /\bdraw(?:s)?\s+(?:a|one|two|three|four|five|\d+|x)\s+cards?\b|\b(?:put|puts|return|returns)\b[^.;]{0,100}\b(?:card|cards|it|them)\b[^.;]{0,60}\b(?:into|to) your hand\b|\b(?:reveal|exile)\s+the top card\b/i;
-    const acquisitionIsRepeatable = (parsedEffects || []).some(e =>
-        getEffectRepeatabilityProfile(e)?.group === 'repeatable_engine' &&
-        (e?.canonical?.function === 'card_draw' || acquisitionText.test(String(e?.raw || e?.canonical?.params?.raw || '')))
-    );
+    const acquisitionIsRepeatable = (parsedEffects || []).some(e => {
+        if (getEffectRepeatabilityProfile(e)?.group !== 'repeatable_engine') return false;
+        // Many draw analogues are represented as several atoms from one ability:
+        // "reveal the top card ... and put it into your hand" or "exile the top card ...
+        // put it into your hand". The action atom can contain only "reveal"/"exile";
+        // use its parent clause as the acquisition evidence, while repeatability still
+        // comes from this same effect's annotated trigger/activation profile.
+        const acquisitionContext = [
+            e?.raw,
+            e?.contextClause,
+            e?.parentClauseRaw,
+            e?.canonical?.params?.raw
+        ].filter(Boolean).join(' ');
+        return e?.canonical?.function === 'card_draw' || acquisitionText.test(acquisitionContext);
+    });
     // Investigate grants a reusable Clue token, whose rules-defined {2}, sacrifice it: draw a card
     // ability turns repeatable token production into repeatable card advantage. The derived draw
     // atom is not literally printed on Trail of Evidence, so join it to the matching Clue trigger.
@@ -9557,7 +9827,7 @@ function buildStrategicRoleFingerprintUncached(card, parsedEffects = [], profile
         /\bdraw\s+(?:a|one)\s+card\b/.test(lower) ? 1 : 0,
         0
     );
-    const lifePaid = /\b(?:pay|lose)\s+(?:\d+|a|one)\s+life\b|\bpay\s+life\b|\breveal the top card\b|\bskip your draw step\b/.test(lower);
+    const lifePaid = /\b(?:pay|pays|lose|loses)\s+(?:(?:\d+|a|one)\s+)?life\b|\b(?:pay|pays)\s+life\b|\blose(?:s)?\s+life\s+(?:equal to|based on)\b|\breveal the top card\b|\bskip your draw step\b/.test(lower);
     const lifeLoss = [...lower.matchAll(/\b(?:lose|loses)\s+(\d+)\s+life\b/g)].map(m => Number(m[1])).filter(Number.isFinite);
     const tribeMatch = lower.match(/\b(?:other\s+)?([a-z]+)\s+(?:creatures?|merfolk|elves?|goblins?|zombies?|soldiers?|humans?|spirits?|knights?|wizards?|cats?|dogs?|dragons?|angels?|vampires?|clerics?|warriors?)\s+get\b/i);
     const sourceRole = profile?.find(r => r.role === topRole) || profile?.[0] || null;
@@ -9690,11 +9960,14 @@ function roleFingerprintSimilarity(sourceFingerprint, candidateFingerprint) {
         add(sourceFingerprint.recurring, candidateFingerprint.recurring, 0.07);
         add(sourceFingerprint.activated, candidateFingerprint.activated, 0.03);
     } else if (sourceFingerprint.role === 'card_advantage_engine') {
-        add(sourceFingerprint.recurring, candidateFingerprint.recurring, 0.30);
-        add(sourceFingerprint.lifePaid, candidateFingerprint.lifePaid, 0.20);
-        add(sourceFingerprint.drawAmount || 1, candidateFingerprint.drawAmount || 1, 0.20);
-        add(sourceFingerprint.permanent, candidateFingerprint.permanent, 0.15);
-        add(sourceFingerprint.activated, candidateFingerprint.activated, 0.10);
+        add(sourceFingerprint.recurring, candidateFingerprint.recurring, 0.25);
+        // Whether the engine spends life is a central part of this role, not a minor
+        // side detail. Phyrexian Arena-like effects should prefer Dark Confidant and
+        // Necropotence over otherwise similar recurring draw engines that cost no life.
+        add(sourceFingerprint.lifePaid, candidateFingerprint.lifePaid, 0.38);
+        add(sourceFingerprint.drawAmount || 1, candidateFingerprint.drawAmount || 1, 0.16);
+        add(sourceFingerprint.permanent, candidateFingerprint.permanent, 0.10);
+        add(sourceFingerprint.activated, candidateFingerprint.activated, 0.06);
     } else if (sourceFingerprint.role === 'tribal_anthem') {
         if (sourceFingerprint.tribe || candidateFingerprint.tribe) {
             weight += 0.55;
@@ -14943,7 +15216,7 @@ function runManaSearchRepeatabilityRegressionSuite({ log = true } = {}) {
         {
             id: 'replacement-effect-is-ongoing-static',
             card: { name: 'Token Doubler', type_line: 'Legendary Creature — God', oracle_text: 'If one or more tokens would be created under your control, three times that many of those tokens are created instead.' },
-            fn: 'token_multiplier', expected: 'ongoing_static', engine: false, repeatable: true
+            fn: 'token_multiplier', expected: 'ongoing_static', engine: false, repeatable: true, excludeFunctions: ['token_creation']
         },
         {
             id: 'repeatable-sacrifice-cost-does-not-consume-source',
@@ -15003,6 +15276,9 @@ function runManaSearchRepeatabilityRegressionSuite({ log = true } = {}) {
             const effects = annotateEffectRepeatability(item.card, parseMTGEffect(item.card.oracle_text), item.card.oracle_text);
             const matching = effects.filter(e => e?.canonical?.function === item.fn);
             const profileKind = matching.map(e => getEffectRepeatabilityProfile(e)?.kind).find(Boolean) || 'unknown';
+            const forbiddenFunctionsPass = (item.excludeFunctions || []).every(fn =>
+                !effects.some(effect => effect?.canonical?.function === fn)
+            );
             const roleProfile = inferStrategicRoleProfile(item.card, effects, '');
             const role = item.role || (item.fn === 'card_draw' ? 'card_advantage_engine' : 'token_engine');
             const hasRole = roleProfile.some(r => r.role === role);
@@ -15016,11 +15292,11 @@ function runManaSearchRepeatabilityRegressionSuite({ log = true } = {}) {
             const tokenIdentityPass = tokenTypePass && tokenStatsPass && tokenColorsPass;
             results.push({
                 id: item.id,
-                pass: profileKind === item.expected && hasRole === item.engine && repeatabilityPass && tokenIdentityPass,
+                pass: profileKind === item.expected && hasRole === item.engine && repeatabilityPass && tokenIdentityPass && forbiddenFunctionsPass,
                 profileKind, expected: item.expected, hasRole, expectedRole: item.engine,
                 hasRepeatableEffect, expectedRepeatable: item.repeatable, tokenType: tokenParams.tokenType || null,
                 tokenStats: tokenParams.tokenStats || null, tokenColors: tokenParams.tokenColors || [],
-                tokenIdentityPass
+                tokenIdentityPass, forbiddenFunctionsPass
             });
             parsedCases.push({ item, effects });
         } catch (error) {
@@ -15031,6 +15307,87 @@ function runManaSearchRepeatabilityRegressionSuite({ log = true } = {}) {
         // A recurring draw engine should outrank an ETB cantrip, while the draw condition on
         // Burlfist Oak must not be mistaken for a draw outcome at all.
         const rhystic = { name: 'Rhystic Study', type_line: 'Enchantment', oracle_text: 'Whenever an opponent casts a spell, you may draw a card unless that player pays {1}.' };
+        // Regression: variable output amounts must not erase the invariant tap-to-mana
+        // activation structure. The local text index must retain the tap symbol as a useful token.
+        const solRing = { name: 'Sol Ring', type_line: 'Artifact', oracle_text: '{T}: Add {C}{C}.' };
+        const solRingEffects = parseMTGEffect(solRing.oracle_text);
+        const manaPlans = buildFunctionalRetrievalQueries(solRing, solRingEffects, '-name:"Sol Ring"', 5);
+        const tapManaPlan = manaPlans.find(plan => plan.query.includes('o:"{T}: Add"'));
+        const localTapAlternatives = tapManaPlan ? extractLocalRetrievalAlternativesFromQuery(tapManaPlan.query) : [];
+        results.push({
+            id: 'tap-symbol-normalizes-to-searchable-local-token',
+            pass: normalizeLocalCorpusText('{T}: Add {C}{C}') === 'tap add c c',
+            normalized: normalizeLocalCorpusText('{T}: Add {C}{C}')
+        });
+        results.push({
+            id: 'tap-to-mana-functional-query-is-amount-agnostic',
+            pass: Boolean(tapManaPlan) && localTapAlternatives.some(text => normalizeLocalCorpusText(text).includes('tap') && normalizeLocalCorpusText(text).includes('add')),
+            queries: manaPlans.map(plan => plan.query), alternatives: localTapAlternatives
+        });
+
+        // Regression: the subject of "lose 1 life" is inherited from "you draw a card" in
+        // conjunction-reduced Oracle text. Losing that atom removes the defining cost from the
+        // Phyrexian Arena / Dark Confidant / Necropotence-style card-advantage fingerprint.
+        const phyrexianArena = {
+            name: 'Phyrexian Arena',
+            type_line: 'Enchantment',
+            oracle_text: 'At the beginning of your upkeep, you draw a card and lose 1 life.'
+        };
+        const arenaEffects = parseMTGEffect(phyrexianArena.oracle_text);
+        const arenaFunctions = arenaEffects.map(effect => effect?.canonical?.function).filter(Boolean);
+        const arenaLifeAtom = arenaEffects.find(effect => effect?.canonical?.function === 'lose_life');
+        results.push({
+            id: 'compound-draw-and-life-loss-preserves-both-canonical-effects',
+            pass: arenaFunctions.includes('card_draw') && arenaFunctions.includes('lose_life') &&
+                /you draw a card and lose 1 life/i.test(arenaLifeAtom?.contextClause || ''),
+            functions: arenaFunctions, lifeAtom: arenaLifeAtom?.canonical || null, context: arenaLifeAtom?.contextClause || ''
+        });
+
+        const arenaDrawStart = phyrexianArena.oracle_text.indexOf('draw a card');
+        const arenaLifeStart = phyrexianArena.oracle_text.indexOf('lose 1 life');
+        const arenaTriggerStart = phyrexianArena.oracle_text.indexOf('At the beginning of your upkeep');
+        const arenaHighlights = [
+            { text: 'At the beginning of your upkeep', field: 'oracle', mode: 'variable', origin: 'source', start: arenaTriggerStart, end: arenaTriggerStart + 'At the beginning of your upkeep'.length, colorIndex: 0, attachedTo: null },
+            { text: 'draw a card', field: 'oracle', mode: 'variable', origin: 'source', start: arenaDrawStart, end: arenaDrawStart + 'draw a card'.length, colorIndex: 1, attachedTo: null },
+            { text: 'lose 1 life', field: 'oracle', mode: 'variable', origin: 'source', start: arenaLifeStart, end: arenaLifeStart + 'lose 1 life'.length, colorIndex: 2, attachedTo: null }
+        ];
+        const arenaLiveIntent = getSearchIntent(phyrexianArena, arenaHighlights);
+        const arenaIntentFunctions = arenaLiveIntent.parsedEffects.map(effect => effect?.canonical?.function).filter(Boolean);
+        const arenaModel = buildSearchIntentPresentationModel(phyrexianArena, arenaHighlights);
+        results.push({
+            id: 'live-highlight-intent-retains-life-payment-as-a-scored-effect',
+            pass: arenaIntentFunctions.includes('card_draw') && arenaIntentFunctions.includes('lose_life') &&
+                arenaModel.effectViews.some(view => view.fn === 'lose_life'),
+            functions: arenaIntentFunctions,
+            effects: arenaModel.effectViews.map(view => ({ fn: view.fn, detail: view.detail }))
+        });
+
+        const arenaProfile = inferStrategicRoleProfile(phyrexianArena, arenaLiveIntent.parsedEffects, arenaLiveIntent.targetText);
+        const arenaFingerprint = buildStrategicRoleFingerprint(phyrexianArena, arenaLiveIntent.parsedEffects, arenaProfile);
+        const darkConfidant = {
+            name: 'Dark Confidant', type_line: 'Creature — Human Wizard',
+            oracle_text: 'At the beginning of your upkeep, reveal the top card of your library and put that card into your hand. You lose life equal to its mana value.'
+        };
+        const recurringDrawOnly = {
+            name: 'Recurring Draw Only', type_line: 'Enchantment',
+            oracle_text: 'At the beginning of your upkeep, draw a card.'
+        };
+        const darkEffects = parseMTGEffect(darkConfidant.oracle_text);
+        const drawOnlyEffects = parseMTGEffect(recurringDrawOnly.oracle_text);
+        const darkProfile = inferStrategicRoleProfile(darkConfidant, darkEffects, darkConfidant.oracle_text);
+        const drawOnlyProfile = inferStrategicRoleProfile(recurringDrawOnly, drawOnlyEffects, recurringDrawOnly.oracle_text);
+        const darkFingerprint = buildStrategicRoleFingerprint(darkConfidant, darkEffects, darkProfile);
+        const drawOnlyFingerprint = buildStrategicRoleFingerprint(recurringDrawOnly, drawOnlyEffects, drawOnlyProfile);
+        const darkRoleScore = calculateStrategicRoleScore(arenaProfile, darkProfile, arenaFingerprint, darkFingerprint);
+        const drawOnlyRoleScore = calculateStrategicRoleScore(arenaProfile, drawOnlyProfile, arenaFingerprint, drawOnlyFingerprint);
+        results.push({
+            id: 'life-cost-card-advantage-role-prefers-life-paid-analogues',
+            pass: arenaFingerprint.lifePaid === true && darkFingerprint.lifePaid === true &&
+                drawOnlyFingerprint.lifePaid === false && darkRoleScore > drawOnlyRoleScore,
+            source: arenaFingerprint, darkConfidant: darkFingerprint, drawOnly: drawOnlyFingerprint,
+            darkRoleScore, drawOnlyRoleScore
+        });
+
         const chronicler = { name: 'Chronicler of Heroes', type_line: 'Creature — Centaur Wizard', oracle_text: 'When Chronicler of Heroes enters the battlefield, draw a card if you control a creature with a +1/+1 counter on it.' };
         const oak = { name: 'Burlfist Oak', type_line: 'Creature — Treefolk', oracle_text: 'Whenever you draw a card, Burlfist Oak gets +2/+2 until end of turn.' };
         const rhysticEffects = annotateEffectRepeatability(rhystic, parseMTGEffect(rhystic.oracle_text), rhystic.oracle_text);
@@ -15110,8 +15467,121 @@ function runManaSearchRepeatabilityRegressionSuite({ log = true } = {}) {
             }
             const arenaCard = { name: 'Phyrexian Arena', type_line: 'Enchantment', oracle_text: 'At the beginning of your upkeep, you draw a card and you lose 1 life.' };
             const arenaEffects = annotateEffectRepeatability(arenaCard, parseMTGEffect(arenaCard.oracle_text), arenaCard.oracle_text);
-            const arenaRoles = inferStrategicRoleProfile(arenaCard, arenaEffects, '').map(r => r.role);
+            const arenaRoleProfile = inferStrategicRoleProfile(arenaCard, arenaEffects, '');
+            const arenaRoles = arenaRoleProfile.map(r => r.role);
             results.push({ id: 'arena-combined-draw-and-life-loss-is-still-card-advantage-engine', pass: arenaRoles.includes('card_advantage_engine'), roles: arenaRoles });
+
+            const darkConfidantCard = {
+                name: 'Dark Confidant',
+                type_line: 'Creature — Human Wizard',
+                oracle_text: 'At the beginning of your upkeep, reveal the top card of your library and put that card into your hand. You lose life equal to that card\'s mana value.'
+            };
+            const necropotenceCard = {
+                name: 'Necropotence',
+                type_line: 'Enchantment',
+                oracle_text: 'Skip your draw step. Whenever you discard a card, exile it from your graveyard. Pay 1 life: Exile the top card of your library face down. Put that card into your hand at the beginning of the next end step.'
+            };
+            const mercadianAtlasCard = {
+                name: 'Mercadian Atlas',
+                type_line: 'Artifact',
+                oracle_text: 'At the beginning of your end step, if you have no cards in hand, draw a card.'
+            };
+            const makeCardAdvantageProfile = card => {
+                const effects = annotateEffectRepeatability(card, parseMTGEffect(card.oracle_text, card), card.oracle_text);
+                const roles = inferStrategicRoleProfile(card, effects, '');
+                const fingerprint = buildStrategicRoleFingerprint(card, effects, roles);
+                return { effects, roles, fingerprint };
+            };
+            const darkConfidantProfile = makeCardAdvantageProfile(darkConfidantCard);
+            const necropotenceProfile = makeCardAdvantageProfile(necropotenceCard);
+            const atlasProfile = makeCardAdvantageProfile(mercadianAtlasCard);
+            const functionNames = profile => getCanonicalFunctions(profile.effects).map(fn => fn.function);
+            const arenaFunctionNames = functionNames({ effects: arenaEffects });
+            const darkConfidantFunctionNames = functionNames(darkConfidantProfile);
+            const necropotenceFunctionNames = functionNames(necropotenceProfile);
+            const arenaDrawAtoms = arenaEffects.filter(effect => effect?.canonical?.function === 'card_draw');
+            const arenaLifeLossAtoms = arenaEffects.filter(effect => effect?.canonical?.function === 'lose_life');
+            results.push({
+                id: 'compound-draw-and-life-loss-retains-both-distinct-actions',
+                pass: arenaDrawAtoms.length === 1 && arenaLifeLossAtoms.length === 1,
+                diagnostics: {
+                    drawCount: arenaDrawAtoms.length,
+                    lifeLossCount: arenaLifeLossAtoms.length,
+                    effects: arenaEffects.map(effect => ({ action: effect.action, function: effect.canonical?.function, raw: effect.raw }))
+                }
+            });
+            const cardDrawFunction = getCanonicalFunctions(arenaEffects).find(fn => fn.function === 'card_draw');
+            const darkConfidantDrawFunction = getCanonicalFunctions(darkConfidantProfile.effects).find(fn => fn.function === 'card_draw');
+            const necropotenceDrawFunction = getCanonicalFunctions(necropotenceProfile.effects).find(fn => fn.function === 'card_draw');
+            const semanticPairFor = candidateFunction => calculateEffectAwareFunctionSemanticScore(
+                cardDrawFunction ? [{ ...cardDrawFunction, importance: 1 }] : [],
+                candidateFunction ? [{ ...candidateFunction, importance: 1 }] : [],
+                (source, candidate) => source.function === candidate.function ? 1 : 0.5
+            );
+            const darkConfidantDrawPair = semanticPairFor(darkConfidantDrawFunction);
+            const necropotenceDrawPair = semanticPairFor(necropotenceDrawFunction);
+            const darkConfidantRoleScore = calculateStrategicRoleScore(
+                arenaRoles.map(role => ({ role, group: STRATEGIC_ROLE_GROUPS[role] || role, score: 0.90, anchors: ['card draw', 'repeatable acquisition'] })),
+                darkConfidantProfile.roles, buildStrategicRoleFingerprint(arenaCard, arenaEffects, arenaRoleProfile), darkConfidantProfile.fingerprint
+            );
+            const necropotenceRoleScore = calculateStrategicRoleScore(
+                arenaRoles.map(role => ({ role, group: STRATEGIC_ROLE_GROUPS[role] || role, score: 0.90, anchors: ['card draw', 'repeatable acquisition'] })),
+                necropotenceProfile.roles, buildStrategicRoleFingerprint(arenaCard, arenaEffects, arenaRoles), necropotenceProfile.fingerprint
+            );
+            const atlasRoleScore = calculateStrategicRoleScore(
+                arenaRoles.map(role => ({ role, group: STRATEGIC_ROLE_GROUPS[role] || role, score: 0.90, anchors: ['card draw', 'repeatable acquisition'] })),
+                atlasProfile.roles, buildStrategicRoleFingerprint(arenaCard, arenaEffects, arenaRoles), atlasProfile.fingerprint
+            );
+            results.push({
+                id: 'life-paid-card-advantage-analogs-outscore-no-life-recurring-draw',
+                pass: darkConfidantProfile.roles.some(role => role.role === 'card_advantage_engine') &&
+                    necropotenceProfile.roles.some(role => role.role === 'card_advantage_engine') &&
+                    atlasProfile.roles.some(role => role.role === 'card_advantage_engine') &&
+                    darkConfidantProfile.fingerprint.lifePaid === true &&
+                    necropotenceProfile.fingerprint.lifePaid === true &&
+                    atlasProfile.fingerprint.lifePaid === false &&
+                    darkConfidantRoleScore > atlasRoleScore &&
+                    necropotenceRoleScore > atlasRoleScore,
+                diagnostics: {
+                    darkConfidant: { roles: darkConfidantProfile.roles, fingerprint: darkConfidantProfile.fingerprint, score: darkConfidantRoleScore },
+                    necropotence: { roles: necropotenceProfile.roles, fingerprint: necropotenceProfile.fingerprint, score: necropotenceRoleScore },
+                    mercadianAtlas: { roles: atlasProfile.roles, fingerprint: atlasProfile.fingerprint, score: atlasRoleScore }
+                }
+            });
+
+            results.push({
+                id: 'top-library-card-put-into-hand-is-card-acquisition-not-tutor',
+                pass: arenaFunctionNames.includes('card_draw') &&
+                    darkConfidantFunctionNames.includes('card_draw') &&
+                    !darkConfidantFunctionNames.includes('tutor') &&
+                    necropotenceFunctionNames.includes('card_draw') &&
+                    !necropotenceFunctionNames.includes('tutor'),
+                diagnostics: {
+                    phyrexianArena: arenaFunctionNames,
+                    darkConfidant: darkConfidantFunctionNames,
+                    necropotence: necropotenceFunctionNames,
+                    necropotenceEffects: necropotenceProfile.effects.map(effect => ({
+                        action: effect.action,
+                        from: effect.from ?? null,
+                        to: effect.to ?? null,
+                        function: effect.canonical?.function || null,
+                        raw: effect.raw || '',
+                        parentRuleText: effect.parentRuleText || '',
+                        previousRuleText: effect.previousRuleText || '',
+                        contextClause: effect.contextClause || ''
+                    }))
+                }
+            });
+            results.push({
+                id: 'life-paid-top-library-acquisition-matches-card-draw-semantically',
+                pass: darkConfidantDrawPair?.matches?.[0]?.candidateFunction === 'card_draw' &&
+                    necropotenceDrawPair?.matches?.[0]?.candidateFunction === 'card_draw' &&
+                    darkConfidantDrawPair?.score === 1 && necropotenceDrawPair?.score === 1,
+                diagnostics: {
+                    darkConfidant: darkConfidantDrawPair,
+                    necropotence: necropotenceDrawPair
+                }
+            });
 
             const arenaCompareText = buildCompareExplanation(
                 arenaCard,
@@ -15236,6 +15706,118 @@ function runManaSearchMechanicalRegressionSuite({ log = true } = {}) {
             pass: recursionDetail.explicitContrast?.kind === 'reanimation-vs-graveyard-recursion' && recursionDetail.score <= 0.72,
             score: recursionDetail.score,
             contrast: recursionDetail.explicitContrast
+        });
+
+        // Animate Dead's graveyard zone is declared on the Aura line, while the return action
+        // refers to the same object as "enchanted creature card". The production parser must
+        // preserve that relationship across Oracle sentence boundaries.
+        const animateDeadText = [
+            'Enchant creature card in a graveyard.',
+            'When Animate Dead enters the battlefield, if it is on the battlefield, it loses "enchant creature card in a graveyard" and gains "enchant creature put onto the battlefield with Animate Dead."',
+            'Return enchanted creature card to the battlefield under your control and attach Animate Dead to it.',
+            'When Animate Dead leaves the battlefield, that creature\'s controller sacrifices it.'
+        ].join(' ');
+        const animateDeadEffects = parseMTGEffect(animateDeadText, { name: 'Animate Dead', type_line: 'Enchantment — Aura' });
+        const animateDeadReturn = animateDeadEffects.find(effect => effect.action === 'return' && /enchanted creature card/i.test(effect.raw || ''));
+        results.push({
+            id: 'animate-dead-aura-context-is-recognized-as-graveyard-reanimation',
+            pass: animateDeadReturn?.from === 'graveyard' &&
+                animateDeadReturn?.canonical?.function === 'reanimate' &&
+                animateDeadReturn?.canonical?.params?.from === 'graveyard',
+            from: animateDeadReturn?.from || null,
+            canonicalFunction: animateDeadReturn?.canonical?.function || null,
+            canonicalParams: animateDeadReturn?.canonical?.params || null
+        });
+
+        const animateDeadCardContext = {
+            name: 'Animate Dead',
+            type_line: 'Enchantment — Aura',
+            oracle_text: animateDeadText
+        };
+        const reanimateCardContext = {
+            name: 'Reanimate',
+            type_line: 'Sorcery',
+            oracle_text: 'Put target creature card from a graveyard onto the battlefield under your control. You lose life equal to that card\'s mana value.'
+        };
+        annotateEffectRepeatability(animateDeadCardContext, animateDeadEffects, animateDeadText);
+        const reanimateCadenceEffects = parseMTGEffect(reanimateCardContext.oracle_text, reanimateCardContext);
+        annotateEffectRepeatability(reanimateCardContext, reanimateCadenceEffects, reanimateCardContext.oracle_text);
+        const animateDeadReturnCadence = animateDeadReturn?.repeatabilityProfile || null;
+        const reanimateCadence = reanimateCadenceEffects.find(effect => effect?.canonical?.function === 'reanimate')?.repeatabilityProfile || null;
+        const auraReanimationRepeatabilityMismatch = calculateRepeatabilityMismatchSeverity(
+            reanimateCadenceEffects,
+            animateDeadEffects
+        );
+        results.push({
+            id: 'animate-dead-entry-return-is-not-misclassified-as-a-repeatable-engine',
+            pass: animateDeadReturnCadence?.kind === 'entry_trigger' &&
+                animateDeadReturnCadence?.group === 'single_use' &&
+                reanimateCadence?.kind === 'one_shot' &&
+                auraReanimationRepeatabilityMismatch < 0.42,
+            animateDeadCadence: animateDeadReturnCadence,
+            reanimateCadence,
+            mismatch: auraReanimationRepeatabilityMismatch
+        });
+
+        const handCheat = parseMTGEffect('Put a creature card from your hand onto the battlefield.')
+            .find(effect => effect.action === 'put');
+        results.push({
+            id: 'explicit-hand-to-battlefield-remains-cheat-into-play',
+            pass: handCheat?.from === 'hand' && handCheat?.canonical?.function === 'cheat_into_play',
+            from: handCheat?.from || null,
+            canonicalFunction: handCheat?.canonical?.function || null
+        });
+
+        const unanchoredEnchantedReturn = parseMTGEffect('Enchant creature. Return enchanted creature to the battlefield.')
+            .find(effect => effect.action === 'return');
+        results.push({
+            id: 'ordinary-enchanted-creature-return-does-not-invent-graveyard-source',
+            pass: unanchoredEnchantedReturn?.from !== 'graveyard' &&
+                unanchoredEnchantedReturn?.canonical?.function !== 'reanimate',
+            from: unanchoredEnchantedReturn?.from || null,
+            canonicalFunction: unanchoredEnchantedReturn?.canonical?.function || null
+        });
+
+        const unconditionalCounter = parseMTGEffect('Counter target spell.')
+            .find(effect => effect.action === 'counter');
+        const manaRestrictedCounter = parseMTGEffect('Counter target spell with mana value 4 or greater.')
+            .find(effect => effect.action === 'counter');
+        const poisonedControllerCounter = parseMTGEffect('Counter target spell if its controller is poisoned.')
+            .find(effect => effect.action === 'counter');
+        const unconditionalVsManaRestricted = calculateMechanicalSimilarityDetailed(
+            parseMTGEffect('Counter target spell.'),
+            parseMTGEffect('Counter target spell with mana value 4 or greater.')
+        );
+        const unconditionalVsPoisonRestricted = calculateMechanicalSimilarityDetailed(
+            parseMTGEffect('Counter target spell.'),
+            parseMTGEffect('Counter target spell if its controller is poisoned.')
+        );
+        results.push({
+            id: 'counterspell-trailing-mana-value-restriction-is-preserved',
+            pass: Array.isArray(manaRestrictedCounter?.restriction) &&
+                manaRestrictedCounter.restriction.includes('mana') &&
+                manaRestrictedCounter.restriction.includes('value') &&
+                manaRestrictedCounter.restriction.includes('4') &&
+                manaRestrictedCounter.restriction.includes('greater') &&
+                unconditionalVsManaRestricted.score < 0.99,
+            restriction: manaRestrictedCounter?.restriction || [],
+            score: unconditionalVsManaRestricted.score
+        });
+        results.push({
+            id: 'counterspell-trailing-controller-condition-is-preserved',
+            pass: poisonedControllerCounter?.condition === 'if' &&
+                (poisonedControllerCounter?.conditionDetail || []).includes('poisoned') &&
+                unconditionalVsPoisonRestricted.score < 0.99,
+            condition: poisonedControllerCounter?.condition || null,
+            conditionDetail: poisonedControllerCounter?.conditionDetail || [],
+            score: unconditionalVsPoisonRestricted.score
+        });
+        results.push({
+            id: 'unconditional-counterspell-has-no-invented-restriction',
+            pass: !(unconditionalCounter?.restriction || []).length &&
+                !unconditionalCounter?.condition,
+            restriction: unconditionalCounter?.restriction || [],
+            condition: unconditionalCounter?.condition || null
         });
 
         const oneShotRankFactor = sourceAcquisitionCadenceRankFactor(0.98);
@@ -15965,7 +16547,7 @@ function backgroundAwareDelay(ms) {
     });
 }
 
-function updateProgress(step, total, message) {
+function updateProgress(step, total, message, ownerRequestId = activeMainSearchRequestId) {
     const p = loadingIndicator.querySelector('p');
     if (step && total) {
         // Built via DOM APIs rather than innerHTML, matching the safe-rendering pattern used for
@@ -15999,6 +16581,18 @@ function updateProgress(step, total, message) {
             p.textContent = message;
         }
     }
+    try {
+        window.dispatchEvent(new CustomEvent('manasearch:progress-updated', {
+            detail: {
+                step: step ?? null,
+                total: total ?? null,
+                message: String(message ?? ''),
+                requestId: ownerRequestId,
+                resultView: activeResultView?.mode || null,
+                at: Date.now()
+            }
+        }));
+    } catch (_) {}
 }
 
 /**
@@ -17337,7 +17931,11 @@ function getStaticCardCorpusUrl(retryAttempt = 0) {
 
 function normalizeLocalCorpusText(value) {
     return String(value || '').toLowerCase()
-        .replace(/[^a-z0-9+\-/]+/g, ' ')
+        // Mana symbols carry mechanic meaning. In particular, {T} previously collapsed to the
+        // one-letter token "t", which the local index discards, hiding tap-for-mana analogues.
+        .replace(/\{\s*t\s*\}/gi, ' tap ')
+        .replace(/\{\s*q\s*\}/gi, ' untap ')
+        .replace(/[^a-z0-9+\/-]+/g, ' ')
         .replace(/\s+/g, ' ')
         .trim();
 }
@@ -18966,6 +19564,16 @@ async function calibrateBatchSemanticScores(cards) {
         if (Number.isFinite(raw)) card.oracleSemanticScore = Math.max(0, Math.min(1, (raw - localBaseline) / denom));
         const fnRaw = Number(card?._rawFunctionSemanticSimilarity);
         if (Number.isFinite(fnRaw)) card.functionScore = Math.max(0, Math.min(1, (fnRaw - fnBase) / Math.max(0.05, 1 - fnBase)));
+        const effectAwareFunctionScore = Number(card?._effectAwareFunctionSemanticScore);
+        if (Number.isFinite(effectAwareFunctionScore)) {
+            card.functionScore = Math.max(Number(card.functionScore) || 0, effectAwareFunctionScore);
+            if (card.functionSemanticEvidence) {
+                card.functionSemanticEvidence.aggregateCalibratedScore = Number.isFinite(fnRaw)
+                    ? Math.max(0, Math.min(1, (fnRaw - fnBase) / Math.max(0.05, 1 - fnBase)))
+                    : null;
+                card.functionSemanticEvidence.finalFunctionScore = card.functionScore;
+            }
+        }
         const now = getManaResponsivenessNow();
         if (now - sliceStartedAt >= getManaSearchSliceBudgetMs()) {
             await yieldForManaSearchResponsiveness();
@@ -23881,6 +24489,7 @@ function setupSourceCardPicker() {
 }
 
 function clearSourceCard() {
+    cancelActiveMainSearch('The source card was cleared while a search was running.');
     ++searchRequestId;
     activeMainSearchRequestId = null;
     cancelScheduledProgressiveResultRender();
@@ -23947,8 +24556,11 @@ async function loadSourceCard(query, providedCard = null) {
         }
     }
 
+    cancelActiveMainSearch('The source card changed while a search was running.');
     ++relatedSearchRequestId;
     const requestId = ++searchRequestId;
+    lastSearchDebugContext = null;
+    lastSearchScoredCandidates = [];
     activeMainSearchRequestId = null;
     cancelScheduledProgressiveResultRender();
     cancelDeferredResultRender();
@@ -24889,6 +25501,7 @@ async function scoreCardBatch({
     // whole point when the alternative card is worded completely differently (review Priority 8).
     const sourceFunctionText = structuralOnly ? '' : (getCachedCanonicalFunctionText(parsedSourceCard) ||
         buildUniversalFunctionalText(sourceCard, sourceTextToParse, parsedSourceCard));
+    const sourceFunctionEffectEntries = structuralOnly ? [] : getCachedCanonicalFunctionEffectEntries(parsedSourceCard);
     let sourceFunctionVector = suppliedSourceFunctionVector;
     if (!structuralOnly && !sourceFunctionVector && extractor && extractor.type !== 'fallback' && sourceFunctionText) {
         sourceFunctionVector = await getCachedEmbedding(sourceFunctionText, extractor, embeddingDiagnostics);
@@ -25372,6 +25985,7 @@ async function scoreCardBatch({
     if (hasSemanticEngine || sourceFunctionVector) {
         const __embeddingTextPrepStartedAt = __scoreNow();
         const textsToEmbed = [];
+        if (sourceFunctionVector) sourceFunctionEffectEntries.forEach(entry => textsToEmbed.push(entry.text));
         for (const card of semanticEligible) {
             if (card.contextScore !== undefined) continue;
             const cardText = card.oracle_text || (card.card_faces ? card.card_faces.map(f => f.oracle_text).join(' ') : '');
@@ -25381,6 +25995,14 @@ async function scoreCardBatch({
             if (sourceFunctionVector && card._parsedEffects) {
                 const candidateFunctionText = getCachedCanonicalFunctionText(card._parsedEffects);
                 if (candidateFunctionText) textsToEmbed.push(candidateFunctionText);
+                const candidateEffectEntries = getCachedCanonicalFunctionEffectEntries(card._parsedEffects);
+                if (candidateEffectEntries.length > 1) {
+                    candidateEffectEntries.filter(candidateEffect =>
+                        sourceFunctionEffectEntries.some(sourceEffect =>
+                            getFunctionAffinity(sourceEffect.function, candidateEffect.function) >= 0.35
+                        )
+                    ).forEach(entry => textsToEmbed.push(entry.text));
+                }
             }
         }
         __scoreStageTimings.embeddingTextPreparationMs = __scoreNow() - __embeddingTextPrepStartedAt;
@@ -25390,6 +26012,12 @@ async function scoreCardBatch({
         __scoreStageTimings.embeddingWarmCacheMs = __scoreNow() - __embeddingWarmStartedAt;
     }
 
+    const sourceFunctionEffectVectors = sourceFunctionVector
+        ? sourceFunctionEffectEntries.map(entry => ({
+            ...entry,
+            vector: entry.text === sourceFunctionText ? sourceFunctionVector : getCachedEmbeddingValue(entry.text)
+        })).filter(entry => entry.vector)
+        : [];
     const __semanticPassStartedAt = __scoreNow();
     let semanticYieldStartedAt = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
     for (let i = 0; i < cards.length; i++) {
@@ -25455,6 +26083,37 @@ async function scoreCardBatch({
                     if (fnVector) {
                         functionScore = calibratedCosineSimilarity(sourceFunctionVector, fnVector);
                         card._rawFunctionSemanticSimilarity = cosineSimilarity(sourceFunctionVector, fnVector);
+                    }
+                }
+
+                const candidateEffectEntries = getCachedCanonicalFunctionEffectEntries(card._parsedEffects);
+                if (sourceFunctionEffectVectors.length && candidateEffectEntries.length > 1) {
+                    const relevantCandidateEffects = candidateEffectEntries.filter(candidateEffect =>
+                        sourceFunctionEffectVectors.some(sourceEffect =>
+                            getFunctionAffinity(sourceEffect.function, candidateEffect.function) >= 0.35
+                        )
+                    ).map(entry => ({ ...entry, vector: getCachedEmbeddingValue(entry.text) }))
+                        .filter(entry => entry.vector);
+                    if (relevantCandidateEffects.length) {
+                        const effectAware = calculateEffectAwareFunctionSemanticScore(
+                            sourceFunctionEffectVectors,
+                            relevantCandidateEffects,
+                            (sourceEffect, candidateEffect) => calibratedCosineFromRaw(
+                                cosineSimilarity(sourceEffect.vector, candidateEffect.vector)
+                            )
+                        );
+                        if (effectAware) {
+                            card._effectAwareFunctionSemanticScore = effectAware.score;
+                            card.functionSemanticEvidence = {
+                                aggregateRawSimilarity: Number.isFinite(card._rawFunctionSemanticSimilarity)
+                                    ? card._rawFunctionSemanticSimilarity : null,
+                                effectAwareScore: effectAware.score,
+                                sourceEffectCount: effectAware.sourceEffectCount,
+                                candidateEffectCount: candidateEffectEntries.length,
+                                matchedEffectCount: effectAware.matchedEffectCount,
+                                matches: effectAware.matches
+                            };
+                        }
                     }
                 }
             }
@@ -26721,6 +27380,13 @@ function buildFunctionalRetrievalQueries(sourceCard, parsedEffects, excludeSelf,
         const vocab = FUNCTION_RETRIEVAL_VOCAB[cf.function];
         const p = cf.params || {};
 
+        // The activation structure is invariant while output amount/color may vary. A source such
+        // as Sol Ring should therefore retrieve Mana Vault from the shared "{T}: Add" phrase.
+        // The local index normalizes {T} to "tap", while Scryfall still receives Oracle syntax.
+        if (cf.function === 'mana_ability' && /\{\s*t\s*\}\s*:\s*add\b/i.test(sourceText)) {
+            addQuery(['o:"{T}: Add"'], true, functionIndex);
+        }
+
         // Formulation 0 - targeted phrase lanes. They run before broad parameter/tag fallbacks so
         // result caps don't starve a less common but genuinely equivalent wording variant.
         if (Array.isArray(vocab?.targetedQueries)) {
@@ -27268,6 +27934,98 @@ function installManaSearchIntentPanel() {
     refreshManaSearchIntentPanel();
 }
 
+async function runManaSearchLiveRetrievalRegressionSuite({ log = true } = {}) {
+    const report = { pass: false, checks: [], scenario: 'Sol Ring → Mana Vault', error: '' };
+    const check = (id, pass, detail = {}) => report.checks.push({ id, pass: Boolean(pass), detail });
+    const previousSource = currentSourceCard;
+    const previousHighlights = manualHighlights;
+    const previousBatchContext = activeLocalCorpusBatchContext;
+    try {
+        const corpus = staticCardCorpusMemory || await loadStaticCardCorpus();
+        if (!corpus?.cards?.length) throw new Error('The bundled local card corpus is unavailable.');
+        const source = findBenchmarkSourceCard('Sol Ring') || corpus.byName?.get(normalizeCardNameForIdentity('Sol Ring'));
+        const candidate = corpus.byName?.get(normalizeCardNameForIdentity('Mana Vault'));
+        if (!source) throw new Error('Sol Ring was not found in the benchmark source catalog.');
+        if (!candidate) throw new Error('Mana Vault was not found in cards.bin.');
+        const testCase = BENCHMARK_SUITE.find(item => item.id === 8);
+        if (!testCase) throw new Error('Fast-mana benchmark scenario #8 is missing.');
+        currentSourceCard = source;
+        const highlights = buildBenchmarkHighlightState(testCase, source);
+        manualHighlights = highlights;
+        const plans = buildFunctionalRetrievalQueries(source, parseMTGEffect(source.oracle_text || ''), '-name:"' + source.name + '"', 5);
+        const tapPlan = plans.find(plan => plan.query.includes('o:"{T}: Add"'));
+        const localQueries = tapPlan ? extractLocalRetrievalAlternativesFromQuery(tapPlan.query) : [];
+        const descriptor = localCorpusScoreDescriptor('{T}: Add', corpus);
+        const normalizedText = String(candidate._localSearchText || '');
+        const phrase = normalizeLocalCorpusText('{T}: Add');
+        const indexTerms = descriptor.tokens.map(token => ({
+            token,
+            inCandidate: normalizedText.split(/\s+/).includes(token),
+            postingCount: Number(corpus.tokenIndex?.get(token)?.length) || 0
+        }));
+        const exactFilterPass = matchesExactHighlightConstraints(candidate, highlights);
+        const candidateScore = scoreLocalCorpusCardForDescriptor(candidate, descriptor);
+        // Run the same shared local retrieval broker used by Find Similar Cards with the actual
+        // benchmark highlight selections. 1,200 is the broker's maximum request cap; the normal
+        // functional stream receives a depth-scaled cap (880 at 100% depth).
+        activeLocalCorpusBatchContext = null;
+        const localResults = await searchStaticCardCorpusAlternatives(localQueries, {
+            limit: 1200,
+            excludeName: source.name,
+            highlights,
+            filters: {},
+            label: 'Fast mana regression diagnostic'
+        });
+        const candidateKey = normalizeCardNameForIdentity(candidate.name);
+        const candidateRank = localResults.findIndex(card => normalizeCardNameForIdentity(card.name) === candidateKey);
+        const normalCap = getDepthScaledLocalLimit(220, 100);
+        const withinNormalFunctionalCap = candidateRank >= 0 && candidateRank < normalCap;
+        const reportData = {
+            source: { name: source.name, oracleText: source.oracle_text || '' },
+            expectedCandidate: {
+                name: candidate.name,
+                typeLine: candidate.type_line || '',
+                oracleText: candidate.oracle_text || '',
+                normalizedText: normalizedText.slice(0, 1800),
+                normalizedPhrasePresent: phrase.length >= 3 && normalizedText.includes(phrase),
+                indexTerms,
+                localDescriptorScore: candidateScore,
+                exactHighlightFilterPass: exactFilterPass
+            },
+            query: {
+                functionalPlan: tapPlan?.query || null,
+                localAlternatives: localQueries,
+                normalizedPhrase: phrase,
+                tokens: descriptor.tokens,
+                retrievalResultCount: localResults.length,
+                candidateRank: candidateRank >= 0 ? candidateRank + 1 : null,
+                normalFunctionalStreamCap: normalCap,
+                withinNormalFunctionalCap,
+                topCandidates: localResults.slice(0, 15).map(card => card.name)
+            }
+        };
+        check('amount-independent-tap-mana-query-is-generated', Boolean(tapPlan), { functionalQueries: plans.map(plan => plan.query) });
+        check('tap-and-add-are-indexed-and-present-on-mana-vault', indexTerms.length >= 2 && indexTerms.every(item => item.inCandidate && item.postingCount > 0), { phrase, indexTerms, normalizedText: normalizedText.slice(0, 1000) });
+        check('mana-vault-receives-nonzero-local-query-score', candidateScore >= 0.18, { candidateScore, descriptorTokens: descriptor.tokens });
+        check('exact-highlight-filter-allows-mana-vault', exactFilterPass, { highlights, failures: explainExactHighlightFailures(candidate, highlights) });
+        check('mana-vault-fits-inside-normal-functional-retrieval-cap', withinNormalFunctionalCap, reportData.query);
+        report.pass = report.checks.every(item => item.pass);
+        report.data = reportData;
+    } catch (error) {
+        report.error = error?.message || String(error);
+        report.checks.push({ id: 'live-retrieval-suite-executes', pass: false, detail: report.error });
+    } finally {
+        currentSourceCard = previousSource;
+        manualHighlights = previousHighlights;
+        activeLocalCorpusBatchContext = previousBatchContext;
+    }
+    if (log) {
+        console.table(report.checks.map(({ id, pass, detail }) => ({ id, pass, detail: JSON.stringify(detail).slice(0, 500) })));
+        console.info('[ManaSearch] Live retrieval regression suite: ' + report.checks.filter(item => item.pass).length + '/' + report.checks.length, report);
+    }
+    return report;
+}
+
 function runManaSearchIntentRegressionSuite() {
     const checks = [];
     const check = (id, pass, detail = '') => checks.push({ id, pass: Boolean(pass), detail });
@@ -27438,6 +28196,7 @@ function runManaSearchIntentRegressionSuite() {
 
 if (typeof window !== 'undefined') {
     window.runManaSearchIntentRegressionSuite = runManaSearchIntentRegressionSuite;
+    window.runManaSearchLiveRetrievalRegressionSuite = runManaSearchLiveRetrievalRegressionSuite;
     window.refreshManaSearchIntentPanel = refreshManaSearchIntentPanel;
 }
 
@@ -27548,6 +28307,12 @@ function throwIfSearchCancelled(isCancelled) {
     if (typeof isCancelled === 'function' && isCancelled()) throw createSearchCancellationError();
 }
 
+function normalizeRetrievalStreamDisplayLabel(label) {
+    const value = String(label || 'Unknown retrieval stream');
+    return /^Search F #\d+ \(Functional Match\)$/.test(value)
+        ? 'Functional Match'
+        : value;
+}
 async function findSimilarCards() {
     if (!currentSourceCard) return;
     if (!staticSearchResourcesReady()) {
@@ -27568,7 +28333,11 @@ async function findSimilarCards() {
     const searchHighlightsSnapshot = Array.isArray(manualHighlights)
         ? manualHighlights.map(h => ({ ...h, editedFrom: h?.editedFrom ? { ...h.editedFrom } : undefined }))
         : [];
+    cancelActiveMainSearch('A newer Find Similar Cards search replaced this search.');
     const requestId = ++searchRequestId;
+    lastSearchDiagnostics = null;
+    lastSearchDebugContext = null;
+    lastSearchScoredCandidates = [];
     cancelScheduledProgressiveResultRender();
     activeResultView = { mode: 'main', requestId };
     activeMainSearchRequestId = requestId;
@@ -27584,10 +28353,27 @@ async function findSimilarCards() {
     // single opaque total (review Priority 10, "Per-Test Timing Breakdown").
     const searchStartedAt = Date.now();
     const timings = {};
+    let searchOutcome = 'completed';
+    let searchErrorMessage = '';
+    let searchHasFinalRanking = false;
+    lastMainSearchOutcome = {
+        requestId,
+        status: 'running',
+        sourceName: currentSourceCard?.name || '',
+        startedAt: new Date(searchStartedAt).toISOString(),
+        finishedAt: null,
+        durationMs: null,
+        errorMessage: ''
+    };
 
     showLoading(true);
     window.dispatchEvent(new CustomEvent('manasearch:search-started', {
-        detail: { sourceName: currentSourceCard?.name || '', highlightCount: searchHighlightsSnapshot.length }
+        detail: {
+            requestId,
+            sourceName: currentSourceCard?.name || '',
+            highlightCount: searchHighlightsSnapshot.length,
+            startedAt: new Date(searchStartedAt).toISOString()
+        }
     }));
     // Keep the Results area visible during the search. The user should be able to see the
     // first-pass candidates as soon as they arrive instead of waiting for the entire pipeline.
@@ -27840,6 +28626,44 @@ async function findSimilarCards() {
     if (activeSearchMethodFlags.alternate && methodQueries.alternate) plannedStreamLabels.push('Alternative Search');
     if (activeSearchMethodFlags.synergy && methodQueries.synergy) plannedStreamLabels.push('Synergy Search');
 
+    // Capture the effective search request as it enters retrieval. This is a diagnostic copy only.
+    lastSearchDebugContext = {
+        requestId,
+        sourceCard: { name: currentSourceCard?.name || '', type_line: currentSourceCard?.type_line || '', mana_cost: currentSourceCard?.mana_cost || '', oracle_text: currentSourceCard?.oracle_text || '', color_identity: currentSourceCard?.color_identity || [], cmc: currentSourceCard?.cmc ?? null },
+        highlights: searchHighlightsSnapshot.map(h => ({ text: h?.text || '', field: h?.field || 'oracle', mode: h?.mode || 'exact', origin: h?.origin || 'selection', mechanicGroupId: h?.mechanicGroupId || null, relationship: h?.mechanicGroupRelationship || null, aspects: h?.aspects || null })),
+        intent: { sourceText: searchIntent.sourceText || '', targetText: targetTextForScoring || '', semanticText: semanticIntentTextForScoring || '', exactnessText: exactnessTextForScoring || '' },
+        constraints: filters,
+        methods: { ...activeSearchMethodFlags },
+        ordering: priorityValue,
+        // These settings alter candidate recall or ranking even when the source/highlights stay unchanged.
+        // Capture them as user-controlled inputs so later comparisons cannot mistake a settings change
+        // for an algorithm change.
+        inputSnapshotVersion: 2,
+        searchDepthPercent: getCurrentSearchDepthPercent(),
+        orderingFeatures: { ...activeOrderFeatureFlags },
+        rankingWeights: Object.fromEntries([
+            ['mechanical', 'weight-mechanical'],
+            ['synergy', 'weight-synergy'],
+            ['context', 'weight-context'],
+            ['exactness', 'weight-exactness'],
+            ['category', 'weight-category']
+        ].map(([key, id]) => {
+            const raw = document.getElementById(id)?.value;
+            const value = Number(raw);
+            return [key, raw !== null && raw !== undefined && raw !== '' && Number.isFinite(value) ? value : null];
+        })),
+        broad: isBroadSearch,
+        divergent: isDivergent,
+        plannedStreams: plannedStreamLabels.slice(),
+        queryPlans: {
+            exactPhrase: searchA_Query || '', oracleTerms: searchB_Query || '', mechanicsTags: searchC_Query || '',
+            localCorpus: searchE_Query || '', functional: uniqueFunctionalQueries.map(q => ({ source: q.source || '', query: q.query, narrow: Boolean(q.narrow) })),
+            exactHighlights: exactHighlightQueries.map(q => ({ source: q.source, query: q.query })),
+            methods: Object.fromEntries(Object.entries(methodQueries).map(([key, value]) => [key, value || '']))
+        },
+        startedAt: new Date().toISOString()
+    };
+
     // Confidence-aware retrieval depth for Search B specifically: known synchronously, before any
     // network call, from how cleanly the source card's own text parsed - no need to wait on
     // another stream's live results (which would serialize what's currently launched in
@@ -27861,18 +28685,61 @@ async function findSimilarCards() {
     // without changing what it resolves to.
     const totalTrackedStreams = plannedStreamLabels.length;
     let streamsSettled = 0;
-    const streamChecklistState = new Map(); // label -> done (boolean)
+    const streamChecklistState = new Map(); // label -> clean completion (boolean)
     const streamChecklistDetail = new Map(); // label -> current page/status detail
+    const streamChecklistStatus = new Map(); // waiting | running | completed | failed | completed_with_warnings
+    const streamFailureRecords = [];
+    const failedStreamLabels = new Set();
     plannedStreamLabels.forEach(label => {
         streamChecklistState.set(label, false);
+        streamChecklistStatus.set(label, 'waiting');
         streamChecklistDetail.set(label, 'Waiting to start');
     });
+    const recordRetrievalStreamFailure = (label, error) => {
+        if (requestId !== searchRequestId) return;
+        const safeLabel = String(label || 'Unknown retrieval stream');
+        const message = String(error?.message || error || 'Unknown retrieval error').slice(0, 420);
+        failedStreamLabels.add(safeLabel);
+        streamFailureRecords.push({ label: safeLabel, message, at: new Date().toISOString() });
+        const displayLabel = normalizeRetrievalStreamDisplayLabel(safeLabel);
+        if (streamChecklistState.has(displayLabel)) {
+            streamChecklistState.set(displayLabel, false);
+            streamChecklistStatus.set(displayLabel, 'failed');
+            streamChecklistDetail.set(displayLabel, `Failed — ${message}`);
+        }
+        renderStreamChecklist();
+    };
     function renderStreamChecklist() {
+        const streams = [...streamChecklistState.entries()].map(([label, done]) => {
+            const streamStatus = streamChecklistStatus.get(label) || (done ? 'completed' : 'waiting');
+            return {
+                label,
+                done: Boolean(done),
+                status: streamStatus,
+                failed: streamStatus === 'failed' || streamStatus === 'completed_with_warnings',
+                detail: streamChecklistDetail.get(label) || (done ? 'Done' : 'Waiting')
+            };
+        });
+        try {
+            window.dispatchEvent(new CustomEvent('manasearch:search-streams-updated', {
+                detail: {
+                    requestId,
+                    sourceName: currentSourceCard?.name || '',
+                    completedStreams: streams.filter(stream => stream.status === 'completed').length,
+                    failedStreams: streams.filter(stream => ['failed', 'completed_with_warnings'].includes(stream.status)).length,
+                    settledStreams: streams.filter(stream => ['completed', 'failed', 'completed_with_warnings'].includes(stream.status)).length,
+                    totalStreams: streams.length,
+                    streams,
+                    at: Date.now()
+                }
+            }));
+        } catch (_) {}
         if (!streamChecklistEl) return;
         streamChecklistEl.innerHTML = '';
         streamChecklistState.forEach((done, label) => {
             const chip = document.createElement('span');
-            chip.className = `stream-chip${done ? ' stream-done' : ''}`;
+            const streamStatus = streamChecklistStatus.get(label) || (done ? 'completed' : 'waiting');
+            chip.className = `stream-chip${done ? ' stream-done' : ''}${streamStatus === 'failed' ? ' stream-failed' : streamStatus === 'completed_with_warnings' ? ' stream-warning' : ''}`;
             const labelSpan = document.createElement('span');
             labelSpan.className = 'stream-chip-label';
             labelSpan.textContent = label;
@@ -27895,16 +28762,19 @@ async function findSimilarCards() {
         // originating request and the view that currently owns the result area.
         if (requestId !== searchRequestId || ownerRequestId !== requestId ||
             activeResultView.mode !== 'main' || activeResultView.requestId !== requestId || !label) return;
-        const displayLabel = /^Search F #\d+ \(Functional Match\)$/.test(label)
-            ? 'Functional Match'
-            : label;
-        if (!streamChecklistState.has(displayLabel)) streamChecklistState.set(displayLabel, false);
+        const displayLabel = normalizeRetrievalStreamDisplayLabel(label);
+        if (!streamChecklistState.has(displayLabel)) {
+            streamChecklistState.set(displayLabel, false);
+            streamChecklistStatus.set(displayLabel, 'waiting');
+        }
+        if (streamChecklistStatus.get(displayLabel) !== 'failed') streamChecklistStatus.set(displayLabel, 'running');
         streamChecklistDetail.set(displayLabel, message || (kind === 'done' ? 'Done' : 'Working'));
         renderStreamChecklist();
     };
 
     const trackStream = (promise, label) => {
         streamChecklistState.set(label, false);
+        streamChecklistStatus.set(label, 'running');
         streamChecklistDetail.set(label, 'Starting');
         renderStreamChecklist();
         return promise.then(r => {
@@ -27913,18 +28783,21 @@ async function findSimilarCards() {
             // search's chips or make its aggregate progress counter inaccurate.
             if (requestId !== searchRequestId) return r;
             streamsSettled++;
-            streamChecklistState.set(label, true);
+            const alreadyFailed = failedStreamLabels.has(label) || streamChecklistStatus.get(label) === 'failed';
+            streamChecklistState.set(label, !alreadyFailed);
+            streamChecklistStatus.set(label, alreadyFailed ? 'failed' : 'completed');
             const coverage = r?.coverage;
             const detail = coverage
                 ? `Done • ${coverage.pagesFetched}/${coverage.maxPages} pages • ${coverage.retrievedCount} cards`
                 : 'Done';
-            streamChecklistDetail.set(label, detail);
+            if (!alreadyFailed) streamChecklistDetail.set(label, detail);
             // Stream completions can arrive while a Related Search owns the result view. Update
             // the hidden main-search bookkeeping, but don't repaint or replace the active view's
             // progress text for a background request.
             if (activeResultView.mode === 'main' && activeResultView.requestId === requestId) {
                 renderStreamChecklist();
-                updateProgress(1, totalSteps, `Retrieval in progress — ${streamsSettled}/${totalTrackedStreams} search streams finished; ${label} finished.`);
+                const warningLaneCount = [...streamChecklistStatus.values()].filter(value => ['failed', 'completed_with_warnings'].includes(value)).length;
+                updateProgress(1, totalSteps, `Retrieval in progress — ${streamsSettled}/${totalTrackedStreams} streams settled${warningLaneCount ? `; ${warningLaneCount} lane(s) with warnings` : ''}; ${label} finished.`);
             }
             return r;
         });
@@ -27960,7 +28833,7 @@ async function findSimilarCards() {
                 ? retrieveLocalFirst(localExactQueries, searchA_Query, {
                     label: 'Exact Phrase', fallbackMaxPages: benchmarkPageCap, limit: isBroadSearch ? 320 : 220,
                     excludeName: currentSourceCard.name, filters, broadFallbackFilters, highlights: searchHighlightsSnapshot
-                }).catch(() => [])
+                }).catch(error => { recordRetrievalStreamFailure('Exact Phrase', error); return []; })
                 : Promise.resolve([])),
             "Exact Phrase"
         );
@@ -28197,6 +29070,19 @@ async function findSimilarCards() {
                 updateProgress(1, totalSteps, `First look: ${sorted.length} match${sorted.length === 1 ? '' : 'es'} found so far (just updated by ${renderLabel || 'another search stage'}) - still searching further sources...`);
                 document.getElementById('provisional-results-banner')?.classList.remove('hidden');
                 renderResults(sorted);
+                try {
+                    window.dispatchEvent(new CustomEvent('manasearch:search-preview-updated', {
+                        detail: {
+                            requestId,
+                            phase: 'progressive-preview',
+                            sourceLabel: renderLabel || 'retrieval update',
+                            provisional: true,
+                            resultCount: sorted.length,
+                            topNames: sorted.slice(0, 10).map(card => card?.name || '').filter(Boolean),
+                            at: Date.now()
+                        }
+                    }));
+                } catch (_) {}
                 if (typeof requestProgressiveRanking === 'function') requestProgressiveRanking();
             } finally {
                 previewRenderFlushing = false;
@@ -28272,6 +29158,19 @@ async function findSimilarCards() {
                 updateProgress(1, totalSteps, `Still searching - this one's taking a while. Showing ${partial.length} match${partial.length === 1 ? '' : 'es'} found so far while the rest of the search keeps running...`);
                 document.getElementById('provisional-results-banner')?.classList.remove('hidden');
                 renderResults(partial);
+                try {
+                    window.dispatchEvent(new CustomEvent('manasearch:search-preview-updated', {
+                        detail: {
+                            requestId,
+                            phase: 'slow-search-preview',
+                            sourceLabel: '20-second search timeout',
+                            provisional: true,
+                            resultCount: partial.length,
+                            topNames: partial.slice(0, 10).map(card => card?.name || '').filter(Boolean),
+                            at: Date.now()
+                        }
+                    }));
+                } catch (_) {}
             } else {
                 updateProgress(1, totalSteps, `Still searching - this one's taking a while, no matches found yet. Hang tight...`);
             }
@@ -28283,7 +29182,7 @@ async function findSimilarCards() {
                 ? retrieveLocalFirst([cleanKeywords.join(' ')], searchB_Query, {
                     label: 'Oracle Terms', fallbackMaxPages: searchBMaxPages, limit: isBroadSearch ? 360 : 240,
                     excludeName: currentSourceCard.name, filters, broadFallbackFilters, highlights: searchHighlightsSnapshot
-                }).catch(() => [])
+                }).catch(error => { recordRetrievalStreamFailure('Oracle Terms', error); return []; })
                 : Promise.resolve([])),
             "Oracle Terms"
         );
@@ -28294,7 +29193,7 @@ async function findSimilarCards() {
                 ? retrieveLocalFirst(activeTags, searchC_Query, {
                     label: 'Mechanics/Tags', fallbackMaxPages: benchmarkPageCap, limit: isBroadSearch ? 360 : 240,
                     excludeName: currentSourceCard.name, filters, broadFallbackFilters, highlights: searchHighlightsSnapshot
-                }).catch(() => [])
+                }).catch(error => { recordRetrievalStreamFailure('Mechanics/Tags', error); return []; })
                 : Promise.resolve([])),
             "Mechanics/Tags"
         );
@@ -28322,7 +29221,7 @@ async function findSimilarCards() {
                 ? retrieveLocalFirst([primaryType || '', sourceRoleProfileForFloor?.kind || '', ...activeTags], searchE_Query, {
                     label: 'Broader Mechanical', fallbackMaxPages: benchmarkPageCap, limit: isBroadSearch ? 320 : 220,
                     excludeName: currentSourceCard.name, filters, broadFallbackFilters, highlights: searchHighlightsSnapshot
-                }).catch(() => [])
+                }).catch(error => { recordRetrievalStreamFailure('Broader Mechanical', error); return []; })
                 : Promise.resolve([])),
             "Broader Mechanical"
         );
@@ -28338,7 +29237,7 @@ async function findSimilarCards() {
                     ? retrieveLocalFirst([broadSourceText], broadOracleQuery, {
                         label: 'Broad Retrieval', fallbackMaxPages: broadSearchMaxPages, limit: 520,
                         excludeName: currentSourceCard.name, filters, broadFallbackFilters, highlights: searchHighlightsSnapshot
-                    }).catch(() => [])
+                    }).catch(error => { recordRetrievalStreamFailure('Broad Retrieval', error); return []; })
                     : Promise.resolve([])),
                 "Broad Retrieval"
             )
@@ -28351,7 +29250,7 @@ async function findSimilarCards() {
                 retrieveLocalFirst(sharedLocalQueries, sharedSourceTextQuery, {
                     label: 'Shared Source Text', fallbackMaxPages: benchmarkPageCap, limit: 420,
                     excludeName: currentSourceCard.name, filters, broadFallbackFilters, highlights: searchHighlightsSnapshot
-                }).catch(() => []),
+                }).catch(error => { recordRetrievalStreamFailure('Shared Source Text', error); return []; }),
                 "Shared Source Text"
             )
             : Promise.resolve([]);
@@ -28379,7 +29278,7 @@ async function findSimilarCards() {
             const p = retrieveLocalFirst(localQueries, q.query, {
                 label: streamLabel, fallbackMaxPages: benchmarkPageCap, limit: isBroadSearch ? 320 : 220,
                 excludeName: currentSourceCard.name, filters, broadFallbackFilters, highlights: searchHighlightsSnapshot
-            }).catch(() => []);
+            }).catch(error => { recordRetrievalStreamFailure(streamLabel, error); return []; });
             trackPreviewMerge(p, `functional match ${idx + 1}`);
             return p;
         });
@@ -28391,13 +29290,16 @@ async function findSimilarCards() {
                 const totalPages = sets.reduce((sum, r) => sum + (r?.coverage?.pagesFetched || 0), 0);
                 const maxPages = sets.reduce((sum, r) => sum + (r?.coverage?.maxPages || 0), 0);
                 const totalCards = sets.reduce((sum, r) => sum + (r?.length || 0), 0);
-                streamChecklistState.set('Functional Match', true);
+                const failedFunctionalQueries = streamFailureRecords.filter(item => normalizeRetrievalStreamDisplayLabel(item.label) === 'Functional Match').length;
+                streamChecklistState.set('Functional Match', failedFunctionalQueries === 0);
+                streamChecklistStatus.set('Functional Match', failedFunctionalQueries ? 'completed_with_warnings' : 'completed');
                 streamChecklistDetail.set(
                     'Functional Match',
-                    `Done • ${totalQueries} queries • ${totalPages}/${maxPages || totalPages} pages • ${totalCards} cards`
+                    `Done • ${totalQueries} queries • ${totalPages}/${maxPages || totalPages} pages • ${totalCards} cards${failedFunctionalQueries ? ` • ${failedFunctionalQueries} query failure(s)` : ''}`
                 );
                 renderStreamChecklist();
-                updateProgress(1, totalSteps, `Retrieval in progress — ${streamsSettled}/${totalTrackedStreams} search streams finished; Functional Match finished.`);
+                const warningLaneCount = [...streamChecklistStatus.values()].filter(value => ['failed', 'completed_with_warnings'].includes(value)).length;
+                updateProgress(1, totalSteps, `Retrieval in progress — ${streamsSettled}/${totalTrackedStreams} streams settled${warningLaneCount ? `; ${warningLaneCount} lane(s) with warnings` : ''}; Functional Match finished.`);
             }
             return sets;
         })();
@@ -28407,7 +29309,7 @@ async function findSimilarCards() {
                 retrieveLocalFirst([q.query.match(/\"([^\"]+)\"/)?.[1] || q.query], q.query, {
                     label: streamLabel, fallbackMaxPages: benchmarkPageCap, limit: 260,
                     excludeName: currentSourceCard.name, filters, broadFallbackFilters, highlights: searchHighlightsSnapshot
-                }).catch(() => []),
+                }).catch(error => { recordRetrievalStreamFailure(streamLabel, error); return []; }),
                 streamLabel
             );
             trackPreviewMerge(p, `exact highlight ${idx + 1}`);
@@ -28421,7 +29323,7 @@ async function findSimilarCards() {
                 retrieveLocalFirst(extractLocalRetrievalAlternativesFromQuery(query), query, {
                     label, fallbackMaxPages: benchmarkPageCap, limit: isBroadSearch ? 320 : 220,
                     excludeName: currentSourceCard.name, filters, broadFallbackFilters, highlights: searchHighlightsSnapshot
-                }).catch(() => []),
+                }).catch(error => { recordRetrievalStreamFailure(label, error); return []; }),
                 label
             );
             trackPreviewMerge(promise, key);
@@ -28597,6 +29499,7 @@ async function findSimilarCards() {
                     hydrated
                 };
             } catch (error) {
+                recordRetrievalStreamFailure('Semantic Index', error);
                 console.info('Search G semantic retrieval unavailable; continuing with non-semantic retrieval:', error?.message || error);
                 return { index: null, queryVector: null, semanticRetrievalVector: null, oracleVectors: [], semanticRetrievalVectors: [], matches: [], hydrated: [] };
             }
@@ -29038,6 +29941,68 @@ if (candidates.length > 0) {
     candidates = await sortManaArrayResponsively(candidates, (a, b) => (b[scoreKey] || 0) - (a[scoreKey] || 0));
     if (requestId !== searchRequestId) return;
 
+    // Preserve the top 300 from the real scored pool after its existing score sort, before the
+    // relevance floor removes weaker candidates. This adds no second scoring pass or new sort.
+    lastSearchScoredCandidates = candidates.slice(0, 300).map((card, index) => {
+        const scoreFields = ['similarityScore','unclampedSimilarityScore','similarityBeforeCadenceAdjustment','mechanicalScore','contextScore','oracleSemanticScore','functionScore','effectAwareFunctionSemanticScore','functionalSimilarityScore','synergyScore','exactnessScore','categoryScore','roleScore','highlightIntentScore','effectCoverageScore','primaryEffectMatchScore','modalModeSimilarityScore','rankingRefinementSignal','calibratedBlendScore','mechanicalConfidence','parseConfidence','quantitySimilarityScore','balancedEffectCoverage','proximityScore','constraintPreferenceScore','acquisitionCadenceRankFactor','quantitativeConflictPenalty'];
+        const scores = {};
+        for (const key of scoreFields) if (card?.[key] !== undefined) scores[key] = card[key];
+        const evidence = card?.rankingEvidence || {};
+        return {
+            name: card?.name || '', type_line: card?.type_line || '',
+            oracle_text: String(card?.oracle_text || '').slice(0, 2200),
+            scores, preFloorRank: index + 1,
+            functionSemanticEvidence: card?.functionSemanticEvidence || null,
+            retrievalEvidence: Array.isArray(card?.retrievalEvidence) ? card.retrievalEvidence.slice() : [],
+            rankingEvidence: {
+                mechanical: evidence.mechanical ?? null, mechanicalTrusted: evidence.mechanicalTrusted ?? null,
+                mechanicalConfidence: evidence.mechanicalConfidence ?? null, rawSemantic: evidence.rawSemantic ?? null,
+                functionSemantic: evidence.functionSemantic ?? null, roleSemantic: evidence.roleSemantic ?? null,
+                highlightIntent: evidence.highlightIntent ?? null, baseChannelScore: evidence.baseChannelScore ?? null,
+                effectCoverage: evidence.effectCoverage ?? null, balancedCoverage: evidence.balancedCoverage ?? null,
+                primaryEffectMatch: evidence.primaryEffectMatch ?? null, evidenceAgreement: evidence.evidenceAgreement ?? null,
+                retrievalSimilarity: evidence.retrievalSimilarity ?? null, rankingIntent: evidence.rankingIntent ?? null,
+                deterministicFunctionalAnchor: evidence.deterministicFunctionalAnchor ?? null,
+                primaryEffectRankingBoost: evidence.primaryEffectRankingBoost ?? null,
+                relationshipMismatch: evidence.relationshipMismatch ?? null, evidenceGate: evidence.evidenceGate ?? null,
+                channelScore: evidence.channelScore ?? null
+            },
+            mechanicalBreakdown: card?.mechanicalBreakdown ? {
+                rawScore: card.mechanicalBreakdown.rawScore ?? null,
+                structuralScore: card.mechanicalBreakdown.structuralScore ?? null,
+                graphScore: card.mechanicalBreakdown.graphScore ?? null,
+                universalScore: card.mechanicalBreakdown.universalScore ?? null,
+                relationshipMismatch: card.mechanicalBreakdown.relationshipMismatch ?? null,
+                repeatabilityMismatch: card.mechanicalBreakdown.repeatabilityMismatch ?? null,
+                relationshipFactor: card.mechanicalBreakdown.relationshipFactor ?? null,
+                repeatabilityFactor: card.mechanicalBreakdown.repeatabilityFactor ?? null,
+                graphSourceCoverage: card.mechanicalBreakdown.graphSourceCoverage ?? null,
+                graphCandidateCoverage: card.mechanicalBreakdown.graphCandidateCoverage ?? null,
+                graphBalancedCoverage: card.mechanicalBreakdown.graphBalancedCoverage ?? null,
+                graphOrderScore: card.mechanicalBreakdown.graphOrderScore ?? null,
+                graphContradiction: card.mechanicalBreakdown.graphContradiction ?? null,
+                graphMatches: Array.isArray(card.mechanicalBreakdown.graphMatches) ? card.mechanicalBreakdown.graphMatches.slice(0, 12) : [],
+                graphEvidence: Array.isArray(card.mechanicalBreakdown.graphEvidence) ? card.mechanicalBreakdown.graphEvidence.slice(0, 12) : [],
+                explicitContrast: card.mechanicalBreakdown.explicitContrast ?? null
+            } : null,
+            mechanicalEvidence: card?.mechanicalEvidence ? {
+                universal: card.mechanicalEvidence.universal ?? null,
+                graph: card.mechanicalEvidence.graph ?? null,
+                evidence: Array.isArray(card.mechanicalEvidence.evidence) ? card.mechanicalEvidence.evidence.slice(0, 12) : [],
+                consensus: Boolean(card.mechanicalEvidence.consensus),
+                referenceName: card.mechanicalEvidence.referenceName || ''
+            } : null,
+            effectCoverage: card?.effectCoverageProfile ? {
+                sourceCoverage: card.effectCoverageProfile.sourceCoverage ?? null,
+                balancedCoverage: card.effectCoverageProfile.balancedCoverage ?? null,
+                primaryMatch: card.effectCoverageProfile.primaryMatch ?? null
+            } : null,
+            parse: { confidence: card?.parseConfidence ?? null, fieldConfidence: card?.fieldConfidence?.overall ?? null, meaningful: Number(card?.parseConfidence) > 0 },
+            rankingIntent: card?.rankingIntent ?? card?._rankingIntent?.kind ?? null,
+            flags: { weakBackfill: Boolean(card?._weakBackfillMatch), strategicRoleAnchored: Boolean(card?.strategicRoleAnchored ?? evidence.strategicRoleAnchored) }
+        };
+    });
+
     // Stage 5: Relevance Floor.
     //
     // The floor has two jobs: (1) keep the final result set focused, and (2) avoid treating a
@@ -29331,6 +30296,7 @@ if (candidates.length > 0) {
         finalResults: candidates.length,
         streams: streamDiagnostics,
         streamCoverage,
+        streamFailures: streamFailureRecords.slice(),
         searchFQueryDetail,
         exactHighlightQueryDetail,
         timings,
@@ -29394,6 +30360,7 @@ if (candidates.length > 0) {
         finalResults: 0,
         streams: streamDiagnostics,
         streamCoverage,
+        streamFailures: streamFailureRecords.slice(),
         searchFQueryDetail,
         exactHighlightQueryDetail,
         timings,
@@ -29427,6 +30394,11 @@ if (candidates.length > 0) {
         pipelineCompleted = true;
         activeSearchStreamProgressReporter = null;
         updateProgress(3, totalSteps, `Finalizing results — ranking complete; found ${Array.isArray(lastSearchResults) ? lastSearchResults.length : 0} final matches.`);
+        if (streamFailureRecords.length && searchOutcome === 'completed') {
+            searchOutcome = 'completed_with_warnings';
+            const examples = streamFailureRecords.slice(0, 4).map(item => `${item.label}: ${item.message}`);
+            searchErrorMessage = `${streamFailureRecords.length} retrieval lane(s) failed and used fallback results. ${examples.join(' | ')}`;
+        }
         clearTimeout(searchTimeoutId);
         if (previewRenderTimer) { clearTimeout(previewRenderTimer); previewRenderTimer = null; }
         previewRenderDirty = false;
@@ -29434,6 +30406,20 @@ if (candidates.length > 0) {
         const renderStartedAt = Date.now();
         renderResults(lastSearchResults);
         updateResultsSummary();
+        searchHasFinalRanking = true;
+        try {
+            window.dispatchEvent(new CustomEvent('manasearch:search-preview-updated', {
+                detail: {
+                    requestId,
+                    phase: 'final-ranking',
+                    sourceLabel: 'Authoritative final ranking',
+                    provisional: false,
+                    resultCount: Array.isArray(lastSearchResults) ? lastSearchResults.length : 0,
+                    topNames: (lastSearchResults || []).slice(0, 10).map(card => card?.name || '').filter(Boolean),
+                    at: Date.now()
+                }
+            }));
+        } catch (_) {}
 
         // Search G has already been executed as part of the main candidate pool. The old
         // post-render scan of the same static index was removed because it duplicated work and
@@ -29452,15 +30438,30 @@ if (candidates.length > 0) {
         if (requestId !== searchRequestId) return;
         pipelineCompleted = true;
         clearTimeout(searchTimeoutId);
-        document.getElementById('provisional-results-banner')?.classList.add('hidden');
         if (isRuntimeCardApiRateLimitError(error) || error?.isRuntimeCardApiRateLimit) {
+            searchOutcome = 'completed_with_warnings';
+            searchErrorMessage = error?.message || 'A local retrieval stream stopped; completed results were retained.';
             if (!error?.isLocalCooldownRejection) {
                 console.warn('Local retrieval stream stopped:', error?.message || error);
             }
             showLocalDataIssueNotice('A local retrieval stream stopped; any completed local results were retained.');
         } else {
+            searchOutcome = 'error';
+            searchErrorMessage = error?.message || String(error);
             console.error("Error in findSimilarCards:", error);
-            if (typeof alert === 'function') alert(error.message);
+            if (typeof alert === 'function') alert(searchErrorMessage);
+        }
+        const provisionalBanner = document.getElementById('provisional-results-banner');
+        const provisionalCount = Array.isArray(currentRenderedResultsCards) ? currentRenderedResultsCards.length : 0;
+        if (!searchHasFinalRanking && provisionalCount > 0) {
+            if (provisionalBanner) {
+                provisionalBanner.textContent = searchOutcome === 'error'
+                    ? 'Search stopped before the final ranking. Cards shown below are provisional and may be incomplete.'
+                    : 'Search finished with retrieval warnings. Cards shown below may omit candidates from interrupted search lanes.';
+                provisionalBanner.classList.remove('hidden');
+            }
+        } else if (provisionalBanner) {
+            provisionalBanner.classList.add('hidden');
         }
     } finally {
         activeLocalCorpusBatchContext = previousLocalCorpusBatchContext;
@@ -29468,12 +30469,55 @@ if (candidates.length > 0) {
         if (requestId === searchRequestId) activeSearchStreamProgressReporter = null;
         clearTimeout(searchTimeoutId);
         if (requestId === searchRequestId && activeResultView.mode === 'main' && activeResultView.requestId === requestId) {
-            updateProgress(null, null, "All done! Candidates retrieved and ranked purely by similarity.");
+            const resolvedOutcome = resolveMainSearchOutcome(
+                searchOutcome,
+                searchErrorMessage,
+                [...streamChecklistStatus.entries()],
+                streamFailureRecords
+            );
+            searchOutcome = resolvedOutcome.status;
+            searchErrorMessage = resolvedOutcome.errorMessage;
+            const resultCount = Array.isArray(lastSearchResults) ? lastSearchResults.length : 0;
+            const provisionalResultCount = !searchHasFinalRanking && Array.isArray(currentRenderedResultsCards)
+                ? currentRenderedResultsCards.length : 0;
+            const finishedAt = new Date();
+            const durationMs = Date.now() - searchStartedAt;
+            const outcomeMessage = searchOutcome === 'error'
+                ? `Search failed: ${searchErrorMessage}. This run did not produce a completed ranking.`
+                : searchOutcome === 'completed_with_warnings'
+                    ? `Search completed with warnings: ${searchErrorMessage}. Showing any results retained from completed stages.`
+                    : `Search complete. ${resultCount} final matches were ranked.`;
+            lastMainSearchOutcome = {
+                requestId,
+                status: searchOutcome,
+                sourceName: currentSourceCard?.name || '',
+                startedAt: new Date(searchStartedAt).toISOString(),
+                finishedAt: finishedAt.toISOString(),
+                durationMs,
+                resultCount,
+                provisionalResultCount,
+                errorMessage: searchErrorMessage
+            };
+            updateProgress(null, null, outcomeMessage, requestId);
+            const resultSummary = document.getElementById('results-summary');
+            if (resultSummary && (searchOutcome === 'error' || searchOutcome === 'completed_with_warnings')) {
+                resultSummary.textContent = outcomeMessage;
+                resultSummary.classList.remove('hidden');
+            }
             showLoading(false);
             window.dispatchEvent(new CustomEvent('manasearch:search-finished', {
                 detail: {
+                    requestId,
+                    status: searchOutcome,
+                    success: searchOutcome === 'completed',
+                    partial: searchOutcome === 'completed_with_warnings',
+                    errorMessage: searchErrorMessage,
+                    startedAt: new Date(searchStartedAt).toISOString(),
+                    finishedAt: finishedAt.toISOString(),
+                    durationMs,
                     sourceName: currentSourceCard?.name || '',
-                    resultCount: Array.isArray(lastSearchResults) ? lastSearchResults.length : 0,
+                    resultCount,
+                    provisionalResultCount,
                     diagnostics: lastSearchDiagnostics || null
                 }
             }));
@@ -32561,7 +33605,7 @@ function runManaSearchRankingScoringRegressionSuite({ log = true } = {}) {
             tierNode('Destroy target creature.', 'creature_destroy', 'destroy'),
             tierNode('Destroy all creatures.', 'creature_destroy', 'destroy', { targetKind: 'all', targetObject: 'creature' })
         );
-        check('mechanic-tier-same-mechanic-same-wording-first', sameWordTier === MANASEARCH_MECHANIC_RANKING_TIER.SAME_MECHANIC_SAME_WORDING, `tier=${sameWordTier}`);
+        check('mechanic-tier-same-wording-target-mass-conflict-is-contradiction', sameWordTier === MANASEARCH_MECHANIC_RANKING_TIER.CONTRADICTION_SAME_WORDING, `tier=${sameWordTier}`);
         const sourceSolRingEffect = {
             raw: '{T}: Add {C}{C}.', action: 'add_mana', quantity: 2, amount: 2,
             manaNetAmount: 2, manaOutputAmount: 2,
@@ -32661,6 +33705,43 @@ function runManaSearchRankingScoringRegressionSuite({ log = true } = {}) {
         check('nonmodal-candidate-does-not-invent-modal-group', calculateModalModeSimilarity(mysticParsed, nonModalParsed) === null, 'non-modal candidate');
         const modalIntent = inferRankingIntent({ oracle_text: mysticText }, mysticParsed, 'Choose three Draw a card', [], [{ text: 'Choose three', mode: 'variable' }, { text: 'Draw a card', mode: 'variable' }]);
         check('modal-highlight-does-not-collapse-to-one-strategic-role', modalIntent.kind === 'hybrid_effect' && !modalIntent.role && modalIntent.hasModalModes, JSON.stringify(modalIntent));
+
+        const sourceCounterEntry = [{ function: 'counter', importance: 1 }];
+        const multiAbilityCandidateEntries = [
+            { function: 'bounce', importance: 0.65 },
+            { function: 'counter', importance: 1 }
+        ];
+        const effectAwareCounter = calculateEffectAwareFunctionSemanticScore(
+            sourceCounterEntry, multiAbilityCandidateEntries,
+            (sourceEffect, candidateEffect) => candidateEffect.function === 'counter' ? 0.96 : 0.08
+        );
+        check('effect-aware-function-score-uses-counter-ability-without-dilution-from-land-bounce-rider',
+            effectAwareCounter?.score === 0.96 && effectAwareCounter.matches[0]?.candidateFunction === 'counter' &&
+            effectAwareCounter.matches[0]?.candidateIndex === 1,
+            JSON.stringify(effectAwareCounter));
+        const unrelatedFunction = calculateEffectAwareFunctionSemanticScore(
+            sourceCounterEntry, [{ function: 'token_creation', importance: 0.7 }],
+            () => 0.99
+        );
+        check('effect-aware-function-score-does-not-promote-unrelated-candidate-abilities',
+            unrelatedFunction === null,
+            JSON.stringify(unrelatedFunction));
+        const twoSourceEffects = [
+            { function: 'counter', importance: 1 },
+            { function: 'card_draw', importance: 0.8 }
+        ];
+        const oneCandidateEffect = calculateEffectAwareFunctionSemanticScore(
+            twoSourceEffects, [{ function: 'counter', importance: 1 }],
+            () => 0.95
+        );
+        const bothCandidateEffects = calculateEffectAwareFunctionSemanticScore(
+            twoSourceEffects, [{ function: 'counter', importance: 1 }, { function: 'card_draw', importance: 0.8 }],
+            (sourceEffect, candidateEffect) => sourceEffect.function === candidateEffect.function ? 0.95 : 0.1
+        );
+        check('effect-aware-function-matching-is-one-to-one-across-compound-source-intent',
+            oneCandidateEffect?.matchedEffectCount === 1 && bothCandidateEffects?.matchedEffectCount === 2 &&
+            bothCandidateEffects.score > oneCandidateEffect.score,
+            JSON.stringify({ one: oneCandidateEffect, both: bothCandidateEffects }));
 
         const source = parseMTGEffect('Counter target spell.');
         const deprive = parseMTGEffect('Counter target spell. Return target land you control to its owner’s hand.');
@@ -33013,6 +34094,99 @@ function cloneCardForMinigame(card) {
         card_faces: Array.isArray(card.card_faces) ? card.card_faces.map(cloneFace) : undefined
     };
 }
+window.ManaSearchDebug = Object.freeze({
+    resolveSearchOutcome: resolveMainSearchOutcome,
+    // Read the same intent model used by Find Similar Cards, even when the optional on-page
+    // Search Intent panel is hidden. This is a live read-only view of the current source/highlights.
+    normalizeRetrievalStreamDisplayLabel,
+    getLiveIntent() {
+        if (!currentSourceCard) return null;
+        const highlights = (Array.isArray(manualHighlights) ? manualHighlights : []).map(h => ({
+            text: h?.text || '', field: h?.field || 'oracle', mode: h?.mode || 'exact',
+            origin: h?.origin || 'selection', mechanicGroupId: h?.mechanicGroupId || null,
+            relationship: h?.mechanicGroupRelationship || null, aspects: h?.aspects || null
+        }));
+        const intent = getSearchIntent(currentSourceCard, manualHighlights);
+        const enabled = id => Boolean(document.getElementById(id)?.checked);
+        return {
+            sourceCard: { name: currentSourceCard.name || '', type_line: currentSourceCard.type_line || '', oracle_text: currentSourceCard.oracle_text || '' },
+            highlights,
+            intent: { sourceText: intent.sourceText || '', targetText: intent.targetText || '', semanticText: intent.semanticText || '' },
+            constraints: readConstraintFilters(),
+            methods: {
+                broad: enabled('broad-search'), divergent: enabled('divergent-search'),
+                wording: enabled('wording-search'), functional: enabled('functional-search'),
+                target: enabled('target-search'), role: enabled('role-search'),
+                alternate: enabled('alternate-search'), synergy: enabled('synergy-search')
+            },
+            ordering: document.getElementById('sort-results')?.value || 'overall',
+            searchDepthPercent: activeSearchDepthPercent,
+            orderingFeatures: { ...activeOrderFeatureFlags },
+            rankingWeights: Object.fromEntries([
+                ['mechanical', 'weight-mechanical'],
+                ['synergy', 'weight-synergy'],
+                ['context', 'weight-context'],
+                ['exactness', 'weight-exactness'],
+                ['category', 'weight-category']
+            ].map(([key, id]) => {
+                const raw = document.getElementById(id)?.value;
+                const value = Number(raw);
+                return [key, raw !== null && raw !== undefined && raw !== '' && Number.isFinite(value) ? value : null];
+            }))
+        };
+    },
+    getSnapshot() {
+        const diagnostics = lastSearchDiagnostics;
+        const context = lastSearchDebugContext;
+        const asNames = value => value instanceof Set ? [...value] : [];
+        const candidates = (lastSearchScoredCandidates || []).slice();
+        const streams = {};
+        if (diagnostics?.streams) for (const [name, names] of Object.entries(diagnostics.streams)) streams[name] = asNames(names);
+        const funnel = diagnostics ? {
+            retrieved: diagnostics.retrieved ?? 0, passedHardFilters: diagnostics.passedFiltersRaw ?? 0,
+            afterHardFiltersUnique: diagnostics.afterHardFilters ?? 0, scored: asNames(diagnostics.scoredNames).length,
+            meaningfulParse: asNames(diagnostics.meaningfulParseNames).length,
+            passedRelevanceFloor: diagnostics.afterRelevanceFloor ?? 0, finalResults: diagnostics.finalResults ?? 0,
+            stages: {
+                retrieved: asNames(diagnostics.rawCandidateNames), passedFilters: asNames(diagnostics.passedFilterNames),
+                deduplicated: asNames(diagnostics.dedupedNames), meaningfulParse: asNames(diagnostics.meaningfulParseNames),
+                scored: asNames(diagnostics.scoredNames), passedRelevanceFloor: asNames(diagnostics.passedRelevanceFloorNames),
+                finalRanked: asNames(diagnostics.finalRankedNames)
+            }
+        } : null;
+        const failures = diagnostics?.filterFailureReasons instanceof Map
+            ? [...diagnostics.filterFailureReasons.entries()].slice(0, 500).map(([name, reasons]) => ({ name, reasons }))
+            : [];
+        const candidateByName = new Map(candidates.map(candidate => [String(candidate.name || '').toLowerCase(), candidate]));
+        const finalResults = (lastSearchResults || []).slice(0, 100).map((card, index) => ({
+            rank: index + 1, name: card?.name || '', similarityScore: card?.similarityScore ?? null,
+            preFloorScores: candidateByName.get(String(card?.name || '').toLowerCase())?.scores || null,
+            constraintPreferenceScore: card?.constraintPreferenceScore ?? null,
+            flags: { weakBackfill: Boolean(card?._weakBackfillMatch), relevanceFloorRescue: Boolean(card?._catastrophicEmptyRescue) }
+        }));
+        return {
+            capturedAt: new Date().toISOString(),
+            appBuild: MANASEARCH_APP_BUILD,
+            dataBuildId: staticDataBuildId || null,
+            outcome: lastMainSearchOutcome ? { ...lastMainSearchOutcome } : null,
+            request: context, funnel, streams,
+            streamCoverage: diagnostics?.streamCoverage || null,
+            streamFailures: diagnostics?.streamFailures || [],
+            functionalQueryResults: diagnostics?.searchFQueryDetail || [],
+            exactHighlightQueryResults: diagnostics?.exactHighlightQueryDetail || [],
+            filterRejections: failures,
+            scoring: {
+                timings: diagnostics?.timings || null, embedding: diagnostics?.embeddingDiagnostics || null,
+                semanticCalibration: diagnostics?.semanticCalibration || null, previewOptimization: diagnostics?.previewOptimization || null,
+                relevanceFloor: { bestScore: diagnostics?.relevanceFloorBestScore ?? null, relativeThreshold: diagnostics?.relevanceFloorRelativeThreshold ?? null, rescued: diagnostics?.relevanceFloorRescued ?? 0, strictCount: diagnostics?.relevanceFloorStrictCount ?? null }
+            },
+            candidates, finalResults, rankingEvidenceTop: diagnostics?.rankingEvidenceTop || [],
+            benchmarkSignals: diagnostics?.benchmarkSignals || null,
+            highlightIntentDiagnostics: diagnostics?.highlightIntentDiagnostics || []
+        };
+    }
+});
+
 window.ManaSearchApi = Object.freeze({
     async ready() {
         const corpus = await loadStaticCardCorpus();
