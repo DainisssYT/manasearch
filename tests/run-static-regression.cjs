@@ -445,6 +445,7 @@ check('developer inspector observes the production pipeline without changing sco
   assert.match(app, /const nextVerbIndex = verbMatches\[verbIndex \+ 1\]/);
   assert.match(app, /previousRuleExilesTopLibraryCard/);
   assert.match(app, /delayedTopLibraryAcquisition/);
+  assert.match(app, /ruleContext = \[includePreviousRuleContext \? previousRuleText : '', localRuleContext\]/);
   assert.match(app, /compound-draw-and-life-loss-retains-both-distinct-actions/);
   assert.match(app, /isReplacementCreatePrecursor/);
   assert.match(app, /excludeFunctions: \['token_creation'\]/);
