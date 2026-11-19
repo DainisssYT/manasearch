@@ -66,14 +66,14 @@ A comparison is only valid when the source card, selected highlights, interprete
 
 ## Reading live-search status
 
-The live inspector follows the same request ID as the production search:
+The live inspector follows the same request ID as the production search and listens to progress events emitted by the actual search pipeline:
 
 - **Running** — current phase/progress text, stream states, and provisional top cards are captured as the search runs.
 - **Completed** — the final pipeline and ranked results were produced normally.
 - **Completed with warnings** — one or more retrieval lanes were interrupted, but completed stages/results were retained. Inspect the stream checklist before comparing rankings.
 - **Error** — the main search failed before producing a valid final ranking. Compare Runs shows the error and marks ranking comparison invalid; a failed run must never be interpreted as a true zero-result search.
 
-A new search replaces the active live trace. Late progress from older request IDs is ignored. Completed runs retain their live progress/stream/preview trace alongside the final diagnostic pipeline.
+A new search replaces the active live trace. Late progress from older request IDs is ignored. Completed runs retain their live progress/stream/preview trace alongside the final diagnostic pipeline. The browser regression runner also executes the 12-scenario `runLocalBenchmarkInApp()` end-to-end suite against the bundled local card corpus and semantic index, then checks that the inspector captured real finished runs and can compare them.
 
 ## Reading a diagnostic
 
