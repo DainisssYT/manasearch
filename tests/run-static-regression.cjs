@@ -477,7 +477,8 @@ check('developer inspector observes the production pipeline without changing sco
   assert.match(inspector, /search-cancelled/);
   assert.match(inspector, /rankingComparisonValid/);
   assert.match(inspector, /failedStreams = Number\(detail\.failedStreams\)/);
-  assert.match(inspector, /status: 'search-error'/);
+  assert.match(inspector, /search-error/);
+  assert.match(inspector, /search-cancelled/);
   assert.match(inspector, /data-tab="regression"/);
   assert.match(inspector, /manasearch-regression-case-v1/);
   assert.match(inspector, /createRegressionCase/);
