@@ -183,8 +183,10 @@
   const runLabel = run => {
     const source = run?.pipeline?.request?.sourceCard?.name || run?.summary?.sourceName || 'Unknown source';
     const resultCount = run?.summary?.resultCount ?? run?.pipeline?.finalResults?.length ?? 0;
-    const outcome = run?.status || run?.summary?.status || 'completed';
-    const outcomeLabel = outcome === 'error' ? 'ERROR' : outcome === 'completed_with_warnings' ? 'PARTIAL' : 'OK';
+    const outcome = run?.status || run?.summary?.status || run?.pipeline?.outcome?.status || 'completed';
+    const outcomeLabel = outcome === 'error' ? 'ERROR'
+      : outcome === 'completed_with_warnings' ? 'PARTIAL'
+        : outcome === 'running' ? 'RUNNING' : 'OK';
     return '#' + (run?.number ?? '?') + ' [' + outcomeLabel + '] ' + source + ' — ' + resultCount + ' results — ' + new Date(run?.completedAt || 0).toLocaleTimeString();
   };
   const compareRuns = (earlier, later) => {
@@ -238,6 +240,54 @@
       const union = new Set([...left, ...right]).size;
       return { stream: name, earlierCount: left.size, laterCount: right.size, sharedCount: intersection, jaccard: union ? Number((intersection / union).toFixed(4)) : 1 };
     });
+    const stageOrder = [
+      ['retrieved', 'Raw retrieval'],
+      ['passedFilters', 'Passed hard filters'],
+      ['deduplicated', 'Survived deduplication'],
+      ['meaningfulParse', 'Passed meaningful-parse threshold'],
+      ['scored', 'Reached scoring'],
+      ['passedRelevanceFloor', 'Passed relevance floor'],
+      ['finalRanked', 'Final ranked results']
+    ];
+    const toNameMap = values => {
+      const map = new Map();
+      (Array.isArray(values) ? values : []).forEach(value => {
+        const raw = typeof value === 'string' ? value : value?.name;
+        const key = normalizeCandidateName(raw);
+        if (key && !map.has(key)) map.set(key, String(raw));
+      });
+      return map;
+    };
+    const stageProgression = stageOrder.map(([field, label]) => {
+      const left = toNameMap(a.funnel?.stages?.[field]);
+      const right = toNameMap(b.funnel?.stages?.[field]);
+      const shared = [...left.keys()].filter(key => right.has(key));
+      const added = [...right.keys()].filter(key => !left.has(key));
+      const removed = [...left.keys()].filter(key => !right.has(key));
+      const union = new Set([...left.keys(), ...right.keys()]).size;
+      return {
+        stage: field, label,
+        earlierCount: left.size, laterCount: right.size,
+        sharedCount: shared.length,
+        addedInLater: added.slice(0, 40).map(key => right.get(key)),
+        missingFromLater: removed.slice(0, 40).map(key => left.get(key)),
+        jaccard: union ? Number((shared.length / union).toFixed(4)) : 1
+      };
+    });
+    const earlierScored = toNameMap((a.candidates || []).map(item => item.name));
+    const laterScored = toNameMap((b.candidates || []).map(item => item.name));
+    const newlyScoredInSample = [...laterScored.keys()].filter(key => !earlierScored.has(key)).map(key => laterScored.get(key));
+    const noLongerScoredInSample = [...earlierScored.keys()].filter(key => !laterScored.has(key)).map(key => earlierScored.get(key));
+    const topKOverlap = [10, 20, 50].map(k => {
+      const left = new Set(aFinal.slice(0, k).map(item => normalizeCandidateName(item.name)).filter(Boolean));
+      const right = new Set(bFinal.slice(0, k).map(item => normalizeCandidateName(item.name)).filter(Boolean));
+      const shared = [...left].filter(name => right.has(name)).length;
+      return { k, earlierCaptured: left.size, laterCaptured: right.size, sharedCount: shared, overlap: Number((shared / k).toFixed(4)) };
+    });
+    const rankMovementValues = common.map(name => Math.abs((aRanks.get(name) || 0) - (bRanks.get(name) || 0)));
+    const meanAbsoluteRankMovement = rankMovementValues.length
+      ? Number((rankMovementValues.reduce((sum, value) => sum + value, 0) / rankMovementValues.length).toFixed(3))
+      : null;
     const requestChanges = {
       sourceCard: stableJson(a.request?.sourceCard) !== stableJson(b.request?.sourceCard),
       highlights: stableJson(a.request?.highlights) !== stableJson(b.request?.highlights),
@@ -276,11 +326,18 @@
         laterResultCount: later.summary?.resultCount ?? bFinal.length,
         earlierError: aError,
         laterError: bError,
-        rankingComparisonValid: aStatus !== 'error' && bStatus !== 'error',
+        rankingComparisonValid: aStatus === 'completed' && bStatus === 'completed',
+        rankingComparisonAvailable: ['completed', 'completed_with_warnings'].includes(aStatus) && ['completed', 'completed_with_warnings'].includes(bStatus),
         rankingComparisonComplete: aStatus === 'completed' && bStatus === 'completed',
+        sameUserInputs: changedInputFields.length === 0,
+        comparableForAlgorithmRegression: aStatus === 'completed' && bStatus === 'completed' && changedInputFields.length === 0,
         note: aStatus === 'error' || bStatus === 'error'
           ? 'At least one search failed. Treat its empty or partial result list as a failed run, not as a valid zero-result ranking.'
-          : 'Both searches returned a ranking. A partial run may still have missing retrieval streams; inspect its warning and stream completion details.'
+          : aStatus !== 'completed' || bStatus !== 'completed'
+            ? 'At least one run completed with warnings or is incomplete. Inspect failed retrieval lanes before treating missing cards as true misses.'
+            : changedInputFields.length
+              ? 'The two searches used different user-controlled inputs. This is useful for exploring the effect of those changes, but it is not a controlled algorithm comparison.'
+              : 'Both searches completed with the same user-controlled inputs; this is a controlled comparison of retrieval and ranking changes.'
       },
       changes: {
         sourceCardChanged: requestChanges.sourceCard,
@@ -299,18 +356,38 @@
         changedDerivedFields
       },
       retrieval: streamComparison,
+      stageProgression,
+      scoredCandidateEvolution: {
+        earlierSampleCount: earlierScored.size,
+        laterSampleCount: laterScored.size,
+        sharedSampleCount: [...earlierScored.keys()].filter(key => laterScored.has(key)).length,
+        newlyPresentInSample: newlyScoredInSample.slice(0, 50),
+        noLongerPresentInSample: noLongerScoredInSample.slice(0, 50),
+        sampleLimit: 300,
+        interpretation: 'The per-run scored-candidate diagnostics retain at most 300 candidates. Entry/exit from this sample is not proof that a card was or was not scored outside the retained sample.'
+      },
       finalRanking: {
         earlierCount: aFinal.length,
         laterCount: bFinal.length,
+        earlierReportedCount: earlier.summary?.resultCount ?? a.funnel?.finalResults ?? aFinal.length,
+        laterReportedCount: later.summary?.resultCount ?? b.funnel?.finalResults ?? bFinal.length,
+        capturedLimit: 100,
         sharedCount: common.length,
+        topKOverlap,
+        meanAbsoluteRankMovement,
         addedInLater: added.slice(0, 50),
         missingFromLater: removed.slice(0, 50),
-        rankChanges: moved
+        rankChanges: moved,
+        interpretation: 'Rank comparison uses the first 100 final-result entries retained in each snapshot. Full reported counts are shown separately.'
       },
       sharedCandidateScoreChanges: scoreChanges,
       interpretation: aStatus === 'error' || bStatus === 'error'
         ? 'Resolve the failed search before interpreting ranking changes. A failed run is not evidence that the search engine returned zero relevant cards.'
-        : 'Rank movement can result from changed inputs, candidate-pool membership, score changes, relevance pruning, or the selected ordering mode. Compare the request, stream overlap, score deltas, and rank changes together.'
+        : aStatus !== 'completed' || bStatus !== 'completed'
+          ? 'At least one run is warning-bearing or incomplete. Do not count absent candidates as reliable retrieval misses until its failed lanes are understood.'
+          : changedInputFields.length
+            ? 'User-controlled inputs changed. The diff is descriptive, not a controlled test of algorithm quality. Use the same source, highlights, constraints, methods, and ordering to evaluate code changes.'
+            : 'The user-controlled inputs match. Stage membership isolates recall changes; score-channel deltas show ranking changes among shared scored candidates; top-K overlap and rank movement show the user-visible effect.'
     };
   };
   const normalizeCandidateName = value => String(value || '').normalize('NFKD').replace(/[\u0300-\u036f]/g, '').trim().toLocaleLowerCase().replace(/\s+/g, ' ');
@@ -738,9 +815,11 @@
   const render = () => {
     traceControls.hidden = activeTab !== 'trace';
     regressionControls.hidden = activeTab !== 'regression';
-    status.textContent = state.searchRuns.length
-      ? `${state.searchRuns.length} completed search run(s) retained in this session`
-      : state.searchCount ? `${state.searchCount} search action(s) observed` : 'Waiting for search activity';
+    status.textContent = state.activeSearch?.status === 'running'
+      ? `Searching ${state.activeSearch.sourceName || 'source card'} — ${state.activeSearch.settledStreams || 0}/${state.activeSearch.totalStreams || 0} streams settled`
+      : state.searchRuns.length
+        ? `${state.searchRuns.length} search run(s) retained — latest: ${state.searchRuns[state.searchRuns.length - 1].status || 'completed'}`
+        : state.searchCount ? `${state.searchCount} search action(s) observed` : 'Waiting for search activity';
     if (activeTab === 'live') {
       state.lastSnapshot = snapshot();
       content.textContent = JSON.stringify(state.lastSnapshot, null, 2);
@@ -939,6 +1018,8 @@
     if (!activeRequestMatches(detail)) return;
     state.activeSearch.streams = cloneJson(detail.streams || []);
     state.activeSearch.completedStreams = Number(detail.completedStreams) || 0;
+    state.activeSearch.failedStreams = Number(detail.failedStreams) || 0;
+    state.activeSearch.settledStreams = Number(detail.settledStreams) || (state.activeSearch.completedStreams + state.activeSearch.failedStreams);
     state.activeSearch.totalStreams = Number(detail.totalStreams) || state.activeSearch.streams.length;
     const streamKey = state.activeSearch.streams.map(stream => String(stream.label) + ':' + Boolean(stream.done) + ':' + String(stream.detail)).join('|');
     if (state.activeSearch.lastStreamKey === streamKey) return;
