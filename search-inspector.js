@@ -780,6 +780,7 @@
       const live = comparison.liveSearchComparison;
       const fmtMs = value => value == null ? 'n/a' : (Number(value) / 1000).toFixed(2) + 's';
       const fmtDelta = value => value == null ? 'n/a' : (value > 0 ? '+' : '') + (Number(value) / 1000).toFixed(2) + 's';
+      const fmtCountDelta = value => value == null ? 'n/a' : (value > 0 ? '+' : '') + String(value);
       const fmtPercent = value => value == null ? 'n/a' : Math.round(value * 100) + '%';
       lines.push('Live-search experience (earlier → later):');
       lines.push('  Time to first preview: ' + fmtMs(live.earlier.firstPreviewLatencyMs) + ' → ' +
@@ -787,7 +788,7 @@
       lines.push('  Full search duration: ' + fmtMs(live.earlier.durationMs) + ' → ' +
         fmtMs(live.later.durationMs) + ' (' + fmtDelta(live.deltas.durationMs) + ')');
       lines.push('  Preview updates: ' + live.earlier.previewUpdateCount + ' → ' + live.later.previewUpdateCount +
-        ' (' + (live.deltas.previewUpdateCount > 0 ? '+' : '') + (live.deltas.previewUpdateCount ?? 'n/a') + ')');
+        ' (' + fmtCountDelta(live.deltas.previewUpdateCount) + ')');
       lines.push('  Retrieval lanes settled/failed: ' + live.earlier.settledStreams + '/' + live.earlier.totalStreams +
         ' settled, ' + live.earlier.failedStreams + ' failed → ' + live.later.settledStreams + '/' +
         live.later.totalStreams + ' settled, ' + live.later.failedStreams + ' failed');
