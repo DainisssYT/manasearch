@@ -692,8 +692,8 @@
     const lines = [
       'COMPARE RUNS SUMMARY',
       'Comparison type: ' + comparisonLabel,
-      'Earlier run: #' + (comparison.earlier?.number ?? '?') + ' — ' + (outcome.earlierStatus || comparison.earlier?.status || 'unknown') + ' — ' + (outcome.earlierResultCount ?? 0) + ' results',
-      'Later run:   #' + (comparison.later?.number ?? '?') + ' — ' + (outcome.laterStatus || comparison.later?.status || 'unknown') + ' — ' + (outcome.laterResultCount ?? 0) + ' results'
+      'Earlier run: #' + (comparison.earlier?.number ?? '?') + ' — ' + String(outcome.earlierStatus || comparison.earlier?.status || 'unknown').toUpperCase().replace(/_/g, ' ') + ' — ' + (outcome.earlierResultCount ?? 0) + ' results',
+      'Later run:   #' + (comparison.later?.number ?? '?') + ' — ' + String(outcome.laterStatus || comparison.later?.status || 'unknown').toUpperCase().replace(/_/g, ' ') + ' — ' + (outcome.laterResultCount ?? 0) + ' results'
     ];
     if (outcome.earlierBuild || outcome.laterBuild) {
       lines.push('App builds: ' + (outcome.earlierBuild || 'unknown') + ' → ' + (outcome.laterBuild || 'unknown') +
@@ -1404,7 +1404,12 @@
       const run = selectedRegressionRun(regressionCompareRun);
       const report = compareRegressionCase(fixture, run);
       content.textContent = JSON.stringify(report, null, 2);
-      status.textContent = report.pass ? 'Regression case passed' : report.comparable ? 'Regression case failed' : 'Inputs differ — comparison is not valid yet';
+      status.textContent = report.pass ? 'Regression case passed'
+        : report.status === 'dataset-changed' ? 'Dataset changed — no pass/fail verdict'
+          : report.status === 'revision-unknown' ? 'Dataset provenance missing — no controlled verdict'
+            : report.status === 'partial-run' ? 'Search incomplete — no pass/fail verdict'
+              : report.status === 'input-mismatch' ? 'Inputs differ — repeat the original search settings'
+                : report.comparable ? 'Regression case failed' : 'Comparison is not valid yet';
     } catch (error) { content.textContent = JSON.stringify({ error: error.message }, null, 2); }
   });
   panel.querySelector('[data-regression-import]').addEventListener('click', () => regressionFile.click());
