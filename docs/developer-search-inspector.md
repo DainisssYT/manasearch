@@ -16,6 +16,7 @@ The floating **Developer inspector** is an opt-in, read-only view of the real ap
 - **Live state** — source card, current visible intent, controls, result cards, and recent worker traffic.
 - **Pipeline** — the actual search request, retrieval stream membership, stream coverage, functional/exact-highlight query results, candidate funnel counts, timing, semantic calibration, and relevance-floor settings.
 - **Candidates** — up to 300 highest-scoring candidates from the actual scoring pass, including candidates subsequently removed by the relevance floor. Each candidate includes score channels, ranking evidence, parse confidence, retrieval provenance, and relevant ranking flags.
+- **Trace card** — select one card and follow its recorded membership through every pipeline stage, see which retrieval streams found it, inspect hard-filter rejection evidence, review its score channels and ranking evidence, and confirm its final rank.
 - **Exclusions** — candidates removed between pipeline stages and the recorded hard-filter / exact-highlight rejection explanations.
 - **Compare runs** — compare two retained searches, including changed inputs, retrieval-stream overlap, final cards added or removed, rank movement, and score deltas for shared candidates.
 - **Timeline** — search start/finish, configuration changes, and worker activity.
@@ -23,7 +24,7 @@ The floating **Developer inspector** is an opt-in, read-only view of the real ap
 
 ## Reading a diagnostic
 
-Start with a specific candidate that should or should not have appeared:
+Start with a specific candidate that should or should not have appeared. **Trace card** is the quickest way to see one candidate's recorded path; use **Pipeline**, **Candidates**, and **Exclusions** for the broader context:
 
 1. Check its name in **Pipeline → retrieval streams**. If absent everywhere, the problem is retrieval/query formulation.
 2. If retrieved, check **Exclusions → stageLosses** and **hardFilterRejections**. This distinguishes exact-highlight and constraint exclusions from later stages.
@@ -45,7 +46,7 @@ The `retrievalEvidence` field is provenance only: it records which streams found
 
 ## Known interpretation limits
 
-- The candidate list is bounded to the top 300 by pre-floor similarity score; very large searches may have more scored candidates.
+- The candidate list is bounded to the top 300 by pre-floor similarity score; very large searches may have more scored candidates. The Trace card selector is built from captured streams, stage membership, the scored sample, rejection sample, and final results; candidates outside all retained samples cannot be individually traced.
 - `preFloorRank` is the candidate's position after score sorting but before relevance-floor pruning. Use `finalResults` for the final displayed rank. Final result rows also include `preFloorScores` alongside the final post-preference similarity score.
 - Filter rejection reasons are recorded per card name at the first failing hard-filter check; a card can have more than one underlying issue that is not represented by that first reason.
 - Search Deeper and Related Search are separate workflows. This snapshot currently describes the primary Find Similar Cards run.
