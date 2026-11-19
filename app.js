@@ -29047,9 +29047,6 @@ if (candidates.length > 0) {
     // the true "scored" population - captured *before* the relevance floor prunes anything, so it
     // doesn't just duplicate the final-rank stage (project spec 2.11).
     const scoredNames = new Set(candidates.map(c => (c.name || '').toLowerCase()));
-    // Preserve a bounded sample of the exact objects scored by the production scorer, including
-    // candidates later removed by the relevance floor. No candidate or score is modified here.
-    lastSearchScoredCandidates = candidates.slice(0, 300);
     const benchmarkScoreByName = benchmarkRunInProgress
         ? new Map(candidates.map(card => [(card.name || '').toLowerCase(), createBenchmarkScoreSnapshot(card)]).filter(([name]) => Boolean(name)))
         : null;
@@ -29069,6 +29066,10 @@ if (candidates.length > 0) {
     // may reorder eligible results, but must never rescue an otherwise irrelevant candidate.
     candidates = await sortManaArrayResponsively(candidates, (a, b) => (b[scoreKey] || 0) - (a[scoreKey] || 0));
     if (requestId !== searchRequestId) return;
+
+    // Preserve the top 300 from the real scored pool after its existing score sort, before the
+    // relevance floor removes weaker candidates. This adds no second scoring pass or new sort.
+    lastSearchScoredCandidates = candidates.slice(0, 300);
 
     // Stage 5: Relevance Floor.
     //
@@ -33057,7 +33058,7 @@ window.ManaSearchDebug = Object.freeze({
             const evidence = card?.rankingEvidence || {};
             return {
                 name: card?.name || '', type_line: card?.type_line || '', oracle_text: String(card?.oracle_text || '').slice(0, 2200),
-                scores, candidateIndex: index,
+                scores, preFloorRank: index + 1,
                 retrievalEvidence: Array.isArray(card?.retrievalEvidence) ? card.retrievalEvidence.slice() : [],
                 rankingEvidence: {
                     mechanical: evidence.mechanical ?? null, mechanicalTrusted: evidence.mechanicalTrusted ?? null,
