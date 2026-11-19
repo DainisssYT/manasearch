@@ -16375,7 +16375,7 @@ function backgroundAwareDelay(ms) {
     });
 }
 
-function updateProgress(step, total, message) {
+function updateProgress(step, total, message, ownerRequestId = activeMainSearchRequestId) {
     const p = loadingIndicator.querySelector('p');
     if (step && total) {
         // Built via DOM APIs rather than innerHTML, matching the safe-rendering pattern used for
@@ -16415,7 +16415,7 @@ function updateProgress(step, total, message) {
                 step: step ?? null,
                 total: total ?? null,
                 message: String(message ?? ''),
-                requestId: activeMainSearchRequestId,
+                requestId: ownerRequestId,
                 resultView: activeResultView?.mode || null,
                 at: Date.now()
             }
@@ -30219,7 +30219,7 @@ if (candidates.length > 0) {
                 provisionalResultCount,
                 errorMessage: searchErrorMessage
             };
-            updateProgress(null, null, outcomeMessage);
+            updateProgress(null, null, outcomeMessage, requestId);
             const resultSummary = document.getElementById('results-summary');
             if (resultSummary && (searchOutcome === 'error' || searchOutcome === 'completed_with_warnings')) {
                 resultSummary.textContent = outcomeMessage;
