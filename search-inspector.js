@@ -89,7 +89,7 @@
   const panel = document.createElement('aside');
   panel.id = 'mana-search-inspector';
   panel.className = 'ms-inspector';
-  panel.innerHTML = '<button type="button" class="ms-inspector-launch" aria-expanded="false">Developer inspector</button><section class="ms-inspector-window" hidden aria-label="ManaSearch developer inspector"><header><div><strong>Search inspector</strong><small>Passive view of the live production search</small></div><button type="button" class="ms-inspector-close" aria-label="Close inspector">×</button></header><nav><button type="button" data-tab="live" class="is-active">Live state</button><button type="button" data-tab="pipeline">Pipeline</button><button type="button" data-tab="candidates">Candidates</button><button type="button" data-tab="exclusions">Exclusions</button><button type="button" data-tab="compare">Compare runs</button><button type="button" data-tab="timeline">Timeline</button><button type="button" data-tab="worker">Worker</button></nav><div class="ms-inspector-toolbar"><span class="ms-inspector-state">Waiting for search activity</span><button type="button" data-action="refresh">Refresh</button><button type="button" data-action="copy">Copy JSON</button><button type="button" data-action="download">Download JSON</button></div><div class="ms-inspector-compare-controls" hidden><label>Earlier run <select data-run-side="a"></select></label><label>Later run <select data-run-side="b"></select></label></div><pre class="ms-inspector-content" aria-live="polite"></pre></section>';
+  panel.innerHTML = '<button type="button" class="ms-inspector-launch" aria-expanded="false">Developer inspector</button><section class="ms-inspector-window" hidden aria-label="ManaSearch developer inspector"><header><div><strong>Search inspector</strong><small>Passive view of the live production search</small></div><button type="button" class="ms-inspector-close" aria-label="Close inspector">×</button></header><nav><button type="button" data-tab="live" class="is-active">Live state</button><button type="button" data-tab="pipeline">Pipeline</button><button type="button" data-tab="candidates">Candidates</button><button type="button" data-tab="trace">Trace card</button><button type="button" data-tab="exclusions">Exclusions</button><button type="button" data-tab="compare">Compare runs</button><button type="button" data-tab="timeline">Timeline</button><button type="button" data-tab="worker">Worker</button></nav><div class="ms-inspector-toolbar"><span class="ms-inspector-state">Waiting for search activity</span><button type="button" data-action="refresh">Refresh</button><button type="button" data-action="copy">Copy JSON</button><button type="button" data-action="download">Download JSON</button></div><div class="ms-inspector-compare-controls" hidden><label>Earlier run <select data-run-side="a"></select></label><label>Later run <select data-run-side="b"></select></label></div><div class="ms-inspector-trace-controls" hidden><label>Candidate <select data-trace-candidate></select></label></div><pre class="ms-inspector-content" aria-live="polite"></pre></section>';
   document.body.append(panel);
   const launch = panel.querySelector('.ms-inspector-launch');
   const windowEl = panel.querySelector('.ms-inspector-window');
@@ -98,6 +98,8 @@
   const compareControls = panel.querySelector('.ms-inspector-compare-controls');
   const runSelectA = panel.querySelector('[data-run-side="a"]');
   const runSelectB = panel.querySelector('[data-run-side="b"]');
+  const traceControls = panel.querySelector('.ms-inspector-trace-controls');
+  const traceSelect = panel.querySelector('[data-trace-candidate]');
   let activeTab = 'live';
   let lastPipelineSnapshot = null;
   const getPipelineSnapshot = () => {
@@ -206,6 +208,96 @@
       interpretation: 'Rank movement can result from changed inputs, candidate-pool membership, score changes, relevance pruning, or the selected ordering mode. Compare the request, stream overlap, score deltas, and rank changes together.'
     };
   };
+  const normalizeCandidateName = value => String(value || '').normalize('NFKC').trim().toLocaleLowerCase();
+  const traceCandidate = (pipeline, candidateName) => {
+    if (!pipeline || !candidateName) return { found: false, candidateName: candidateName || '', message: 'Select a candidate and a completed search.' };
+    const key = normalizeCandidateName(candidateName);
+    const stages = pipeline.funnel?.stages || {};
+    const stageOrder = [
+      ['retrieved', 'Retrieved'],
+      ['passedFilters', 'Passed hard filters'],
+      ['deduplicated', 'Survived deduplication'],
+      ['meaningfulParse', 'Passed meaningful-parse threshold'],
+      ['scored', 'Reached mechanical/semantic scoring'],
+      ['passedRelevanceFloor', 'Passed relevance floor'],
+      ['finalRanked', 'Included in final ranked results']
+    ];
+    const hasName = values => Array.isArray(values) && values.some(value => normalizeCandidateName(value) === key);
+    const stageMembership = stageOrder.map(([field, label]) => ({
+      stage: field, label, present: hasName(stages[field])
+    }));
+    const retrievalSources = Object.entries(pipeline.streams || {})
+      .filter(([, names]) => hasName(names)).map(([stream]) => stream);
+    const candidate = (pipeline.candidates || []).find(item => normalizeCandidateName(item.name) === key) || null;
+    const rejection = (pipeline.filterRejections || []).find(item => normalizeCandidateName(item.name) === key) || null;
+    const finalResult = (pipeline.finalResults || []).find(item => normalizeCandidateName(item.name) === key) || null;
+    const rankingEvidence = (pipeline.rankingEvidenceTop || []).find(item => normalizeCandidateName(item.name) === key) || null;
+    const stageLossesForCandidate = [];
+    for (let i = 1; i < stageMembership.length; i++) {
+      if (stageMembership[i - 1].present && !stageMembership[i].present) {
+        stageLossesForCandidate.push({
+          after: stageMembership[i - 1].label,
+          before: stageMembership[i].label
+        });
+      }
+    }
+    const found = retrievalSources.length > 0 || stageMembership.some(stage => stage.present) || !!candidate || !!rejection || !!finalResult;
+    return {
+      found, candidateName,
+      sourceCard: pipeline.request?.sourceCard?.name || '',
+      retrieval: { foundInStreams: retrievalSources.length > 0, streams: retrievalSources },
+      stages: stageMembership,
+      firstObservedLoss: stageLossesForCandidate[0] || null,
+      possibleHardFilterRejection: rejection,
+      scoring: candidate ? {
+        preFloorRank: candidate.preFloorRank ?? null,
+        scores: candidate.scores || {},
+        rankingEvidence: candidate.rankingEvidence || null,
+        parse: candidate.parse || candidate.parseDiagnostics || null,
+        retrievalEvidence: candidate.retrievalEvidence || []
+      } : null,
+      finalRanking: finalResult ? {
+        rank: finalResult.rank ?? null,
+        similarityScore: finalResult.similarityScore ?? null,
+        preFloorScores: finalResult.preFloorScores || null,
+        constraintPreferenceScore: finalResult.constraintPreferenceScore ?? null,
+        flags: finalResult.flags || {}
+      } : null,
+      rankingEvidenceTop: rankingEvidence,
+      interpretation: found
+        ? 'Absence from a later stage means this snapshot does not record the candidate there. Use the first missing transition together with any hard-filter rejection and score evidence; a missing record is not proof of the exact internal cause.'
+        : 'This candidate is not present in the captured retrieval streams, stage membership, scored-candidate sample, rejection sample, or final results. It may not have been retrieved, or it may fall outside the snapshot limits.'
+    };
+  };
+  const renderTrace = () => {
+    compareControls.hidden = true;
+    traceControls.hidden = activeTab !== 'trace';
+    const pipeline = getPipelineSnapshot();
+    if (!pipeline) {
+      content.textContent = JSON.stringify({ message: 'Run Find Similar Cards to capture a production pipeline before tracing a candidate.' }, null, 2);
+      return;
+    }
+    const names = new Map();
+    const addName = value => {
+      const label = String(value || '').trim();
+      if (label && !names.has(normalizeCandidateName(label))) names.set(normalizeCandidateName(label), label);
+    };
+    for (const values of Object.values(pipeline.streams || {})) (values || []).forEach(addName);
+    for (const values of Object.values(pipeline.funnel?.stages || {})) (values || []).forEach(addName);
+    (pipeline.candidates || []).forEach(item => addName(item.name));
+    (pipeline.filterRejections || []).forEach(item => addName(item.name));
+    (pipeline.finalResults || []).forEach(item => addName(item.name));
+    const previous = traceSelect.value;
+    traceSelect.innerHTML = [...names.values()].sort((a, b) => a.localeCompare(b)).map(name =>
+      '<option value="' + htmlEscape(name) + '">' + htmlEscape(name) + '</option>'
+    ).join('');
+    if ([...names.values()].some(name => normalizeCandidateName(name) === normalizeCandidateName(previous))) traceSelect.value = previous;
+    else traceSelect.selectedIndex = 0;
+    const selected = traceSelect.value;
+    content.textContent = selected
+      ? JSON.stringify(traceCandidate(pipeline, selected), null, 2)
+      : JSON.stringify({ message: 'No candidate names were captured in this snapshot.' }, null, 2);
+  };
   const selectedRuns = () => {
     const runs = state.searchRuns;
     if (runs.length < 2) return [null, null];
@@ -255,7 +347,8 @@
       const p = getPipelineSnapshot();
       content.textContent = JSON.stringify(p ? { explanation: 'Compare stage membership to find where a candidate disappeared. Hard-filter rejection reasons are recorded separately.', stageLosses: stageLosses(p), hardFilterRejections: p.filterRejections, stageMembership: p.funnel?.stages } : { message: 'No exclusion diagnostics yet.' }, null, 2);
       compareControls.hidden = true;
-    } else if (activeTab === 'compare') renderCompare();
+    } else if (activeTab === 'trace') renderTrace();
+    else if (activeTab === 'compare') renderCompare();
     else if (activeTab === 'timeline') { compareControls.hidden = true; renderTimeline(); }
     else { compareControls.hidden = true; renderWorker(); }
   };
@@ -274,6 +367,7 @@
   }));
   runSelectA.addEventListener('change', renderCompare);
   runSelectB.addEventListener('change', renderCompare);
+  traceSelect.addEventListener('change', renderTrace);
   panel.querySelector('[data-action="refresh"]').addEventListener('click', render);
   panel.querySelector('[data-action="copy"]').addEventListener('click', async () => {
     const data = JSON.stringify(buildExport(), null, 2);
@@ -381,7 +475,8 @@
   window.ManaSearchInspector = Object.freeze({
     getRunHistory: () => cloneJson(state.searchRuns),
     getExport: () => cloneJson(buildExport()),
-    compareRuns
+    compareRuns,
+    traceCandidate
   });
   addEvent('inspector:ready', { note: 'Diagnostics are read-only; ranking and retrieval are not modified.' });
 })();
