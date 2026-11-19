@@ -68,6 +68,7 @@ async function main() {
       typeof window.runManaSearchRealCardBenchmarkSuite === 'function' &&
       typeof window.runManaSearchRealCardBenchmark === 'function' &&
       typeof window.runManaSearchIntentRegressionSuite === 'function' &&
+      typeof window.runManaSearchLiveRetrievalRegressionSuite === 'function' &&
       typeof window.runLocalBenchmarkInApp === 'function' &&
       typeof window.ManaSearchDebug?.getSnapshot === 'function' &&
       typeof window.ManaSearchDebug?.getLiveIntent === 'function' &&
@@ -101,6 +102,7 @@ async function main() {
       realCardBenchmark: await window.runManaSearchRealCardBenchmark({ log: false }),
       // Also exercise the suite-named public console entry point with no fixture argument.
       realCardBenchmarkSuiteNoArgs: await window.runManaSearchRealCardBenchmarkSuite({ log: false }),
+      liveRetrieval: await window.runManaSearchLiveRetrievalRegressionSuite({ log: false }),
       developerInspectorRegression: (() => {
         const earlier = {
           number: 1,
@@ -976,6 +978,7 @@ async function main() {
       summarize('Deterministic ranking/scoring regressions', report.rankingScoring),
       summarize('Repeatability regression suite', report.repeatability),
       summarize('Highlight-isolation suite', report.highlights),
+      summarize('Live local-corpus retrieval regressions', { pass: report.liveRetrieval?.pass, checks: report.liveRetrieval?.checks || [] }),
       summarize('Live Search intent model/highlight suite', {
         pass: report.searchIntent?.pass,
         passed: report.searchIntent?.passed,
