@@ -27574,6 +27574,9 @@ async function findSimilarCards() {
         ? manualHighlights.map(h => ({ ...h, editedFrom: h?.editedFrom ? { ...h.editedFrom } : undefined }))
         : [];
     const requestId = ++searchRequestId;
+    lastSearchDiagnostics = null;
+    lastSearchDebugContext = null;
+    lastSearchScoredCandidates = [];
     cancelScheduledProgressiveResultRender();
     activeResultView = { mode: 'main', requestId };
     activeMainSearchRequestId = requestId;
