@@ -129,7 +129,8 @@ async function main() {
             finalResults: [{ rank: 1, name: 'Shared Card' }, { rank: 2, name: 'Removed Card' }],
             candidates: [
               { name: 'Shared Card', preFloorRank: 1, scores: { similarityScore: 0.65, mechanicalScore: 0.7, effectAwareFunctionSemanticScore: 0.4 }, functionSemanticEvidence: { effectAwareScore: 0.4, matches: [{ sourceFunction: 'counter', candidateFunction: 'counter', sourceIndex: 0, candidateIndex: 0 }] }, mechanicalBreakdown: { graphScore: 0.7 } },
-              { name: 'Removed Card', scores: { similarityScore: 0.42 } }
+              { name: 'Removed Card', scores: { similarityScore: 0.42 } },
+              { name: 'ChannelOnly Card', scores: { similarityScore: 0.60, mechanicalScore: 0.10 }, mechanicalBreakdown: { graphScore: 0.10 } }
             ]
           }
         };
@@ -158,7 +159,8 @@ async function main() {
             finalResults: [{ rank: 1, name: 'Added Card' }, { rank: 2, name: 'Shared Card' }],
             candidates: [
               { name: 'Shared Card', scores: { similarityScore: 0.75, mechanicalScore: 0.8, effectAwareFunctionSemanticScore: 0.9 }, mechanicalBreakdown: { graphScore: 0.85 }, functionSemanticEvidence: { effectAwareScore: 0.9, matches: [{ sourceFunction: 'counter', candidateFunction: 'counter', sourceIndex: 0, candidateIndex: 1 }] } },
-              { name: 'Added Card', scores: { similarityScore: 0.81 } }
+              { name: 'Added Card', scores: { similarityScore: 0.81 } },
+              { name: 'ChannelOnly Card', scores: { similarityScore: 0.60, mechanicalScore: 0.90 }, mechanicalBreakdown: { graphScore: 0.90 } }
             ]
           }
         };
@@ -478,6 +480,7 @@ async function main() {
           detectsAddedAndRemovedCards: comparison.finalRanking.addedInLater.includes('Added Card') && comparison.finalRanking.missingFromLater.includes('Removed Card'),
           detectsRankMovement: comparison.finalRanking.rankChanges.some(item => item.name === 'Shared Card' && item.earlierRank === 1 && item.laterRank === 2),
           detectsScoreDelta: !!sharedScore && Math.abs(sharedScore.delta - 0.10) < 1e-9,
+          comparePrioritizesMaterialFactorOnlyChanges: comparison.sharedCandidateScoreChanges[0]?.name === 'ChannelOnly Card' && comparison.sharedCandidateScoreChanges[0]?.delta === 0 && comparison.sharedCandidateScoreChanges[0]?.largestFactorDelta > 0.7,
           compareRunsSurfacesAbilityAwareFunctionScoreDelta: !!sharedScore?.scoreChannelChanges?.some(change => change.field === 'effectAwareFunctionSemanticScore' && Math.abs(change.delta - 0.5) < 1e-9),
           compareRunsSurfacesAbilityEvidenceScoreDelta: !!sharedScore?.scoreChannelChanges?.some(change => change.field === 'functionSemanticEvidence.effectAwareScore' && Math.abs(change.delta - 0.5) < 1e-9),
           compareRunsDetectsAbilityMatchIdentityChange: sharedScore?.functionSemanticEvidence?.abilityMatchesChanged === true && sharedScore.functionSemanticEvidence.laterMatches?.[0]?.candidateIndex === 1,
