@@ -109,6 +109,20 @@ candidate-pool recall, and semantic ability coverage/query-view provenance. Use 
 to tell whether an expected card was missed by retrieval or found and then ranked too low. This
 benchmark is separate from the offline 31-card/22-pair mechanical scorer benchmark above.
 
+### Running the full live-search benchmark in Chromium
+
+Run from the repository root after installing Playwright and Chromium:
+
+```sh
+npm install --no-save playwright@1.55.0
+npx playwright install chromium
+node tests/run-live-search-benchmark.cjs
+```
+
+This opens ManaSearch in headless Chromium and calls the production `runLocalBenchmarkInApp()` entry point. It runs the 12 configured end-to-end search scenarios against the bundled `cards.bin` and `semantic-index.bin` assets, without runtime Scryfall/card API requests. It writes `search-quality-benchmark.json` with per-scenario Recall@K, retrieval/filter/scoring/pruning recall, MRR, NDCG, precision, expected-card ranks, semantic-retrieval provenance, and retrieval-stream coverage.
+
+GitHub Actions runs the same benchmark on pushes to `feature/search-debug-inspector` and pull requests to `main`. Download the `manasearch-live-search-quality-<commit>` artifact to compare scenario-level results across algorithm builds. An incomplete, blocked, errored, or runtime-card-API-backed run fails the workflow; low relevance metrics remain visible in the report rather than being hidden behind a simple pass/fail threshold.
+
 The semantic unit tests use a deterministic fake tokenizer to verify that the builder's guard
 splits oversized documents without truncating the final ability text. GitHub Actions also runs the
 browser regression, where the local test server must serve `.mjs` files with a JavaScript MIME type
