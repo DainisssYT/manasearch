@@ -34,7 +34,7 @@ Use **Regression cases** when you find a search that behaves incorrectly and wan
    - **Must not appear** — the focus card must be absent from the final displayed result list.
    - **Must rank within top N** — the card must appear no lower than the maximum rank you enter.
    - **No focus assertion** — use only the ordered ranking check.
-4. Edit **Expected top ranking** to the correct card names, one per line, best match first. The captured order is only a starting point; change it when the observed results are wrong. The comparison checks exact order for the listed top K, and reports overlap, missing cards, unexpected cards, and rank changes. It also compares shared candidates' numeric score channels and mechanical-breakdown fields, reports candidates newly scored or no longer scored, and shows the focus card's before/after trace.
+4. Edit **Expected top ranking** to the correct card names, one per line, best match first. The captured order is only a starting point; change it when the observed results are wrong. The comparison checks exact order for the listed top K, and reports overlap, missing cards, unexpected cards, and rank changes. It also compares shared candidates' numeric score channels and mechanical-breakdown fields, reports candidates newly appearing or no longer appearing in the bounded scored-candidate sample, and shows the focus card's before/after trace.
 5. Choose **Download case** (or **Copy case JSON**) and keep the JSON file with the issue or code change. The case is portable and can be reviewed by another developer.
 6. After updating ManaSearch, open the new build, import the case, and repeat the original search in the normal UI. Select that new completed run under **Compare against** and choose **Compare with run**.
 
