@@ -356,6 +356,8 @@ check('developer inspector observes the production pipeline without changing sco
   assert.match(inspector, /manasearch:search-finished/);
   assert.match(inspector, /productionPipeline: getPipelineSnapshot\(\)/);
   assert.match(inspectorCss, /overflow-x:auto/);
+  assert.match(deployWorkflow, /search-inspector\.js search-inspector\.css/);
+  assert.match(deployWorkflow, /Publish artifact missing/);
 });
 
 check('semantic worker response envelopes are normalized before array-based result merging', () => {
