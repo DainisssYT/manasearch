@@ -1,6 +1,6 @@
-/* ManaSearch build 20261119-154 */
+/* ManaSearch build 20261122-165 */
 // ManaSearch deployment build marker. Bump this whenever app.js changes so cached-module issues are easy to diagnose.
-const MANASEARCH_APP_BUILD = '20261119-159';;;
+const MANASEARCH_APP_BUILD = '20261122-165';;;
 console.info(`[ManaSearch] app.js build ${MANASEARCH_APP_BUILD}`);
 
 // The source-query and static-index builders share one representation so both sides
@@ -201,6 +201,7 @@ const MECHANICAL_PROFILE_CACHE_MAX = MANASEARCH_LOW_MEMORY_DEVICE ? 10000 : 2000
 // entirely. Recall compounds across a session instead of resetting to zero every search.
 const sessionSemanticCorpus = new Map();
 const SESSION_SEMANTIC_CORPUS_LIMIT = 4000;
+let sessionSemanticCorpusEpoch = 0;
 // Each entry: { text: string, mode: 'exact' | 'variable' }. 'exact' means this highlighted span
 // must be literally present on a matching card (feeds the exactness/literal-match channel);
 // 'variable' means it marks a structural slot (e.g. "deals 3 damage") where the SHAPE matters but
@@ -2117,6 +2118,8 @@ function createBenchmarkScoreSnapshot(card) {
         rankingRefinementSignal: card.rankingRefinementSignal ?? null,
         deterministicFunctionalAnchor: card.deterministicFunctionalAnchor ?? card.rankingEvidence?.deterministicFunctionalAnchor ?? null,
         primaryEffectRankingBoost: card.primaryEffectRankingBoost ?? card.rankingEvidence?.primaryEffectRankingBoost ?? null,
+        manaValueSimilarityScore: card.manaValueSimilarityScore ?? null,
+        manaValueRankingBonus: card.manaValueRankingBonus ?? null,
         similarityBeforeCadenceAdjustment: card.similarityBeforeCadenceAdjustment ?? card.preCadenceSimilarityScore ?? null,
         calibratedBlendScore: card.calibratedBlendScore ?? null,
         mechanicalConfidence: card.mechanicalConfidence ?? null,
@@ -2425,6 +2428,7 @@ function resetBenchmarkColdState({ keepSourceCard = false, keepImmutableEmbeddin
         staticSemanticQueryStats.fallbackQueries = 0;
         staticSemanticQueryStats.fallbackElapsedMs = 0;
     }
+    sessionSemanticCorpusEpoch++;
     sessionSemanticCorpus.clear();
     pendingDeeperSearch = null;
     lastSearchResults = [];
@@ -9328,6 +9332,8 @@ function inferEffectRepeatabilityProfile(card, effect, fullText = '') {
         Boolean(escapedName && new RegExp(`\\b(?:sacrifice|discard|exile)\\s+${escapedName}\\b`, 'i').test(context));
     const spellReuse = /\b(?:flashback|buyback|retrace|escape|jump-start|rebound|aftermath|disturb|adventure)\b/i.test(strategicRoleCardText(card) || fullText || '');
     const indefiniteCastReuse = /\b(?:buyback|retrace|escape)\b/i.test(strategicRoleCardText(card) || fullText || '');
+    const ownEntryTrigger = isPermanent && /\bwhen\b/i.test(combined) && selfReference &&
+        /\b(?:enters?(?:\s+(?:the\s+)?battlefield)?|comes into play)\b/i.test(combined);
 
     let kind = 'one_shot', confidence = 0.82, eventText = '';
     const clueInvestigateTrigger = isPermanent &&
@@ -9346,9 +9352,23 @@ function inferEffectRepeatabilityProfile(card, effect, fullText = '') {
         kind = 'self_event';
         confidence = 0.96;
         eventText = 'this permanent is sacrificed once at the end step';
+    } else if (/\bwhen you cast this spell\b/i.test(combined)) {
+        // A spell can only be cast once per resolution. Keep its own cast trigger
+        // one-shot even when a partial card record has a permanent-like type line;
+        // this is distinct from "Whenever you cast a spell", which can recur.
+        kind = 'one_shot';
+        confidence = 0.97;
+        eventText = 'this spell is cast once';
     } else if (isInstantSorceryOnly) {
         kind = indefiniteCastReuse ? 'repeatable_spell' : (spellReuse ? 'recastable_spell' : 'one_shot');
         confidence = spellReuse ? 0.76 : 0.88;
+    } else if (ownEntryTrigger) {
+        // The entry event is the cadence anchor for this ability. Do this before
+        // generic periodic timing so an unrelated upkeep clause on the same card
+        // cannot turn its ETB effect into a repeatable engine.
+        kind = 'entry_trigger';
+        confidence = 0.94;
+        eventText = 'this permanent enters the battlefield';
     } else if (periodicTiming && (isPermanent || !typeLine)) {
         // Some benchmark/highlight-only card records omit type_line. Explicit recurring
         // turn timing is still strong evidence of cadence in that case; do not downgrade it
@@ -9362,10 +9382,6 @@ function inferEffectRepeatabilityProfile(card, effect, fullText = '') {
     } else if (activation && isPermanent) {
         kind = consumesSource ? 'single_use_activation' : 'repeatable_activation';
         confidence = 0.88;
-    } else if (isPermanent && /\bwhen\b/i.test(combined) && selfReference && /\benters? (?:the )?battlefield\b/i.test(combined) && /\buntil end of turn\b/i.test(combined)) {
-        kind = 'entry_trigger';
-        confidence = 0.94;
-        eventText = 'this permanent enters the battlefield and grants a temporary team buff';
     } else if (isPermanent && (replacementEffect || staticAbilityText || /\b(?:as long as|while)\b/i.test(combined) || effect.isStatic === true) && !/\buntil end of turn\b/i.test(combined)) {
         kind = 'ongoing_static';
         confidence = replacementEffect ? 0.93 : 0.84;
@@ -15181,9 +15197,19 @@ function runManaSearchRepeatabilityRegressionSuite({ log = true } = {}) {
             fn: 'card_draw', expected: 'one_shot', engine: false
         },
         {
+            id: 'this-spell-cast-trigger-is-one-shot',
+            card: { name: 'Cast Trigger Spell', type_line: 'Sorcery', oracle_text: 'When you cast this spell, draw a card.' },
+            fn: 'card_draw', expected: 'one_shot', engine: false
+        },
+        {
             id: 'repeatable-token-trigger-is-engine',
             card: { name: 'Token Trigger', type_line: 'Creature — Shaman', oracle_text: 'Whenever you cast an instant or sorcery spell, create a 1/1 red Elemental creature token.' },
             fn: 'token_creation', expected: 'repeatable_trigger', engine: true
+        },
+        {
+            id: 'whenever-you-cast-a-spell-remains-repeatable',
+            card: { name: 'Spellcast Engine', type_line: 'Enchantment', oracle_text: 'Whenever you cast a spell, draw a card.' },
+            fn: 'card_draw', expected: 'repeatable_trigger', engine: true
         },
         {
             id: 'one-shot-token-spell-is-not-engine',
@@ -15313,7 +15339,9 @@ function runManaSearchRepeatabilityRegressionSuite({ log = true } = {}) {
         const solRingEffects = parseMTGEffect(solRing.oracle_text);
         const manaPlans = buildFunctionalRetrievalQueries(solRing, solRingEffects, '-name:"Sol Ring"', 5);
         const tapManaPlan = manaPlans.find(plan => plan.query.includes('o:"{T}: Add"'));
+        const typedTapManaPlan = manaPlans.find(plan => plan.query.includes('t:artifact') && plan.query.includes('o:"{T}: Add"'));
         const localTapAlternatives = tapManaPlan ? extractLocalRetrievalAlternativesFromQuery(tapManaPlan.query) : [];
+        const typedLocalTapAlternatives = typedTapManaPlan ? extractLocalRetrievalAlternativesFromQuery(typedTapManaPlan.query) : [];
         results.push({
             id: 'tap-symbol-normalizes-to-searchable-local-token',
             pass: normalizeLocalCorpusText('{T}: Add {C}{C}') === 'tap add c c',
@@ -15323,6 +15351,11 @@ function runManaSearchRepeatabilityRegressionSuite({ log = true } = {}) {
             id: 'tap-to-mana-functional-query-is-amount-agnostic',
             pass: Boolean(tapManaPlan) && localTapAlternatives.some(text => normalizeLocalCorpusText(text).includes('tap') && normalizeLocalCorpusText(text).includes('add')),
             queries: manaPlans.map(plan => plan.query), alternatives: localTapAlternatives
+        });
+        results.push({
+            id: 'artifact-tap-mana-query-keeps-type-context-in-local-search',
+            pass: Boolean(typedTapManaPlan) && typedLocalTapAlternatives.some(text => normalizeLocalCorpusText(text).includes('artifact') && normalizeLocalCorpusText(text).includes('tap') && normalizeLocalCorpusText(text).includes('add')),
+            query: typedTapManaPlan?.query || null, alternatives: typedLocalTapAlternatives
         });
 
         // Regression: the subject of "lose 1 life" is inherited from "you draw a card" in
@@ -18407,7 +18440,15 @@ function extractLocalRetrievalAlternativesFromQuery(query) {
         if (!String(match[1] || '').startsWith('\"')) push(match[1]);
     }
 
-    if (alternatives.length) return alternatives.slice(0, 12);
+    // Preserve a positive card-type constraint when turning compound Scryfall
+    // requests into local alternatives. Pair it with each Oracle phrase so a
+    // broad phrase such as "{T}: Add" stays specific enough for the local cap.
+    const typeMatch = input.match(/\b(?:t|type):\s*"?(artifact|creature|enchantment|instant|land|planeswalker|sorcery|battle)"?/i);
+    const typeAwareAlternatives = typeMatch
+        ? alternatives.map(oraclePhrase => `${typeMatch[1]} ${oraclePhrase}`)
+        : [];
+
+    if (alternatives.length) return [...new Set([...typeAwareAlternatives, ...alternatives])].slice(0, 12);
 
     // Last-resort local interpretation for any future Scryfall query builder that does not use
     // oracle:/otag: fields. Strip query operators/field names and keep meaningful lexical terms.
@@ -18532,7 +18573,11 @@ function scoreLocalCorpusCardForDescriptor(card, descriptor) {
         const phraseBonus = descriptor.phrase.length >= 8 && haystack.includes(descriptor.phrase) ? 0.24 : 0;
         const keywordBonus = Array.isArray(card._localKeywordTokens) &&
             card._localKeywordTokens.some(k => descriptor.tokenSet?.has(k) || descriptor.tokens.includes(k)) ? 0.08 : 0;
-        const rawScore = Math.min(1, coverage * 0.68 + phraseBonus + keywordBonus);
+        const typedManaSource = descriptor.tokenSet?.has('tap') && descriptor.tokenSet?.has('add')
+            ? ['artifact', 'land'].find(type => descriptor.tokenSet.has(type) && new RegExp(`\\b${type}\\b`, 'i').test(String(card.type_line || '')))
+            : null;
+        const typedTapManaBonus = typedManaSource && /\btap\s+add\b/.test(haystack) ? 0.24 : 0;
+        const rawScore = Math.min(1, coverage * 0.68 + phraseBonus + keywordBonus + typedTapManaBonus);
         score = rawScore >= 0.18 ? rawScore : 0;
     }
     if (!perCardCache) {
@@ -19478,6 +19523,42 @@ function recordInSessionSemanticCorpus(card, functionVector, oracleVector) {
         const oldestKey = sessionSemanticCorpus.keys().next().value;
         sessionSemanticCorpus.delete(oldestKey);
     }
+}
+
+function scheduleSessionSemanticCorpusIndex(sourceCard, sourceFunctionVector, sourceOracleVector, cards) {
+    if (!sourceCard || (!sourceFunctionVector && !sourceOracleVector) || !Array.isArray(cards) || !cards.length) return;
+    const epoch = sessionSemanticCorpusEpoch;
+    const pendingCards = cards.slice();
+    let index = 0;
+    let sourceRecorded = false;
+    const schedule = () => {
+        if (typeof window !== 'undefined' && typeof window.requestIdleCallback === 'function') {
+            window.requestIdleCallback(processIdleBatch, { timeout: 2500 });
+        } else {
+            setTimeout(() => processIdleBatch(null), 0);
+        }
+    };
+    const processIdleBatch = deadline => {
+        if (epoch !== sessionSemanticCorpusEpoch) return;
+        if (!sourceRecorded) {
+            recordInSessionSemanticCorpus(sourceCard, sourceFunctionVector, sourceOracleVector);
+            sourceRecorded = true;
+        }
+        let processed = 0;
+        const batchLimit = deadline ? 64 : 32;
+        while (index < pendingCards.length && processed < batchLimit &&
+            (!deadline || processed < 8 || deadline.timeRemaining() > 2)) {
+            const card = pendingCards[index++];
+            processed++;
+            const cardText = card.oracle_text || (card.card_faces ? card.card_faces.map(face => face.oracle_text || '').join(' ') : '');
+            const functionText = card._parsedEffects ? getCachedCanonicalFunctionText(card._parsedEffects) : null;
+            const functionVector = functionText ? (embeddingCache.get(functionText) || null) : null;
+            const oracleVector = cardText ? (embeddingCache.get(getCachedOracleEmbeddingText(card, cardText)) || null) : null;
+            if (functionVector || oracleVector) recordInSessionSemanticCorpus(card, functionVector, oracleVector);
+        }
+        if (index < pendingCards.length) schedule();
+    };
+    schedule();
 }
 
 /**
@@ -26398,7 +26479,20 @@ async function scoreCardBatch({
         });
         card.primaryEffectRankingBoost = primaryEffectRankingBoost;
         if (card.rankingEvidence) card.rankingEvidence.primaryEffectRankingBoost = primaryEffectRankingBoost;
-        const preCadenceSimilarityScore = Math.max(0, calibratedBlendScore + primaryEffectRankingBoost);
+        const sourceManaValueRaw = sourceCard?.mana_value ?? sourceCard?.cmc;
+        const candidateManaValueRaw = card?.mana_value ?? card?.cmc;
+        const sourceManaValue = sourceManaValueRaw === null || sourceManaValueRaw === undefined || sourceManaValueRaw === '' ? null : Number(sourceManaValueRaw);
+        const candidateManaValue = candidateManaValueRaw === null || candidateManaValueRaw === undefined || candidateManaValueRaw === '' ? null : Number(candidateManaValueRaw);
+        const hasVariableManaCost = /\{x\}/i.test(String(sourceCard?.mana_cost || '')) || /\{x\}/i.test(String(card?.mana_cost || ''));
+        const hasComparableManaValue = !hasVariableManaCost && Number.isFinite(sourceManaValue) && Number.isFinite(candidateManaValue);
+        card.manaValueSimilarityScore = hasComparableManaValue
+            ? Math.max(0, 1 - Math.abs(sourceManaValue - candidateManaValue) / 4)
+            : null;
+        const hasCloseFunctionalMatch = (Number(card.functionScore) || 0) >= 0.65 || (Number(card.mechanicalScore) || 0) >= 0.65;
+        card.manaValueRankingBonus = hasComparableManaValue && hasCloseFunctionalMatch
+            ? card.manaValueSimilarityScore * 0.08
+            : 0;
+        const preCadenceSimilarityScore = Math.max(0, calibratedBlendScore + primaryEffectRankingBoost + card.manaValueRankingBonus);
         card.preCadenceSimilarityScore = preCadenceSimilarityScore;
         const acquisitionCadenceMismatch = calculateSourceAcquisitionCadenceMismatch(
             sourceAcquisitionCadence, card, candidateParsedEffects
@@ -27384,6 +27478,10 @@ function buildFunctionalRetrievalQueries(sourceCard, parsedEffects, excludeSelf,
         // as Sol Ring should therefore retrieve Mana Vault from the shared "{T}: Add" phrase.
         // The local index normalizes {T} to "tap", while Scryfall still receives Oracle syntax.
         if (cf.function === 'mana_ability' && /\{\s*t\s*\}\s*:\s*add\b/i.test(sourceText)) {
+            const sourceTypeLine = String(sourceCard?.type_line || '').toLowerCase();
+            const sourceCardType = /\bartifact\b/.test(sourceTypeLine) ? 'artifact'
+                : (/\bland\b/.test(sourceTypeLine) ? 'land' : '');
+            if (sourceCardType) addQuery([`t:${sourceCardType} o:"{T}: Add"`], true, functionIndex);
             addQuery(['o:"{T}: Add"'], true, functionIndex);
         }
 
@@ -29888,33 +29986,6 @@ if (candidates.length > 0) {
     timings.scoringMs = Date.now() - scoringStartedAt;
     if (requestId !== searchRequestId) return;
 
-    // Feed this search's results (and its source card) into the session semantic corpus so a
-    // LATER search - on this or any other source card, this session - can find them via Search G
-    // purely by meaning, even if that later search's own lexical streams would have missed them.
-    // Every candidate here already has its embeddings sitting in embeddingCache from scoring
-    // above (keyed by the exact text that was embedded), so this is a cache read, not new work.
-    if (extractor && extractor.type !== 'fallback') {
-        recordInSessionSemanticCorpus(currentSourceCard, sourceFunctionVector, sourceOracleVector);
-        let semanticCorpusSliceStartedAt = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
-        for (let candidateIndex = 0; candidateIndex < candidates.length; candidateIndex++) {
-            if (requestId !== searchRequestId) return;
-            const card = candidates[candidateIndex];
-            const cardText = card.oracle_text || (card.card_faces ? card.card_faces.map(f => f.oracle_text || '').join(' ') : '');
-            const candidateFunctionText = card._parsedEffects ? getCachedCanonicalFunctionText(card._parsedEffects) : null;
-            const functionVector = candidateFunctionText ? (embeddingCache.get(candidateFunctionText) || null) : null;
-            const oracleVector = cardText ? (embeddingCache.get(getCachedOracleEmbeddingText(card, cardText)) || null) : null;
-            if (functionVector || oracleVector) recordInSessionSemanticCorpus(card, functionVector, oracleVector);
-            if ((candidateIndex & 63) === 63) {
-                const now = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
-                if (now - semanticCorpusSliceStartedAt >= getManaSearchSliceBudgetMs()) {
-                    await yieldForManaSearchResponsiveness();
-                    if (requestId !== searchRequestId) return;
-                    semanticCorpusSliceStartedAt = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
-                }
-            }
-        }
-    }
-
     const rankingStartedAt = Date.now();
 
     // Stage 4 (benchmark): every candidate above was actually run through the scorer, so this is
@@ -29944,7 +30015,7 @@ if (candidates.length > 0) {
     // Preserve the top 300 from the real scored pool after its existing score sort, before the
     // relevance floor removes weaker candidates. This adds no second scoring pass or new sort.
     lastSearchScoredCandidates = candidates.slice(0, 300).map((card, index) => {
-        const scoreFields = ['similarityScore','unclampedSimilarityScore','similarityBeforeCadenceAdjustment','mechanicalScore','contextScore','oracleSemanticScore','functionScore','effectAwareFunctionSemanticScore','functionalSimilarityScore','synergyScore','exactnessScore','categoryScore','roleScore','highlightIntentScore','effectCoverageScore','primaryEffectMatchScore','modalModeSimilarityScore','rankingRefinementSignal','calibratedBlendScore','mechanicalConfidence','parseConfidence','quantitySimilarityScore','balancedEffectCoverage','proximityScore','constraintPreferenceScore','acquisitionCadenceRankFactor','quantitativeConflictPenalty'];
+        const scoreFields = ['similarityScore','unclampedSimilarityScore','similarityBeforeCadenceAdjustment','mechanicalScore','contextScore','oracleSemanticScore','functionScore','effectAwareFunctionSemanticScore','functionalSimilarityScore','synergyScore','exactnessScore','categoryScore','roleScore','highlightIntentScore','effectCoverageScore','primaryEffectMatchScore','modalModeSimilarityScore','rankingRefinementSignal','calibratedBlendScore','mechanicalConfidence','parseConfidence','quantitySimilarityScore','balancedEffectCoverage','proximityScore','constraintPreferenceScore','acquisitionCadenceRankFactor','manaValueSimilarityScore','manaValueRankingBonus','quantitativeConflictPenalty'];
         const scores = {};
         for (const key of scoreFields) if (card?.[key] !== undefined) scores[key] = card[key];
         const evidence = card?.rankingEvidence || {};
@@ -30406,6 +30477,12 @@ if (candidates.length > 0) {
         const renderStartedAt = Date.now();
         renderResults(lastSearchResults);
         updateResultsSummary();
+        // These cached-vector insertions only help a later search. Start them after
+        // the authoritative result list is painted so session indexing doesn't hold
+        // up this search's final ranking and result-time telemetry.
+        if (extractor && extractor.type !== 'fallback') {
+            scheduleSessionSemanticCorpusIndex(currentSourceCard, sourceFunctionVector, sourceOracleVector, candidates);
+        }
         searchHasFinalRanking = true;
         try {
             window.dispatchEvent(new CustomEvent('manasearch:search-preview-updated', {

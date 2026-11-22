@@ -54,6 +54,7 @@ function compactReport(report, runtime) {
       status: strict.testStatus || 'unknown',
       errorMessage: strict.errorMessage || '',
       durationMs: item.durationMs ?? null,
+      timings: item.timings || null,
       metrics: {
         recall5: strict.recall5 ?? null, recall10: strict.recall10 ?? null,
         recall20: strict.recall20 ?? null, recall50: strict.recall50 ?? null,
@@ -231,7 +232,8 @@ async function main() {
                 semanticRetrievalProvenanceAt20: strict.semanticRetrievalProvenanceAt20 || [],
                 diagnostics: {
                   streamCoverage,
-                  benchmarkSignals: diagnostics.benchmarkSignals || null
+                  benchmarkSignals: diagnostics.benchmarkSignals || null,
+                  timings: diagnostics.timings || null
                 }
               },
               semantic: semantic ? {
@@ -249,6 +251,7 @@ async function main() {
                 passedRelevanceFloor: diagnostics.passedRelevanceFloorNames?.size ?? diagnostics.passedRelevanceFloorNames?.length ?? 0,
                 finalRanked: diagnostics.finalRankedNames?.size ?? diagnostics.finalRankedNames?.length ?? 0
               },
+              timings: diagnostics.timings || null,
               topRankedCandidates: (strict.rankedResults || []).slice(0, 25).map((rawName, index) => {
                 const name = typeof rawName === 'string' ? rawName : rawName?.name || '';
                 const key = String(name).trim().toLowerCase();
