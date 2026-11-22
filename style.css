@@ -7140,6 +7140,57 @@ body.light-theme .card-actions .edhrec-link-btn:hover {
     margin: 0 0 10px;
 }
 
+/* Secondary source metadata stays one click away from the core card and search controls. */
+#source-card-loaded .source-advanced-card-details {
+    margin: 2px 0 4px;
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    background: var(--bg-primary);
+}
+#source-card-loaded .source-advanced-card-details > summary {
+    display: flex;
+    align-items: baseline;
+    flex-wrap: wrap;
+    gap: 4px 10px;
+    padding: 9px 11px;
+    color: var(--text-main);
+    cursor: pointer;
+    list-style-position: inside;
+}
+#source-card-loaded .source-advanced-card-details > summary strong { font-size: 12px; }
+#source-card-loaded .source-advanced-card-details > summary span {
+    color: var(--text-muted);
+    font-size: 11px;
+}
+#source-card-loaded .source-advanced-card-details[open] > summary {
+    border-bottom: 1px solid var(--border-color);
+}
+#source-card-loaded .source-advanced-card-details-body {
+    display: grid;
+    gap: 4px;
+    padding: 9px;
+}
+#source-card-loaded .source-more-constraints-btn {
+    justify-self: start;
+    min-height: 34px;
+    padding: 6px 10px;
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    background: var(--bg-primary);
+    color: var(--text-main);
+    font-size: 12px;
+    font-weight: 650;
+}
+#source-card-loaded .source-more-constraints-btn:hover:not(:disabled) {
+    border-color: var(--accent-color);
+    background: var(--bg-accent);
+}
+#source-card-loaded .source-more-constraints-btn .badge { margin-left: 5px; }
+@media (max-width: 700px) {
+    #source-card-loaded .source-more-constraints-btn { width: 100%; }
+    #source-card-loaded .source-advanced-card-details > summary { padding: 10px; }
+}
+
 @media (max-width: 980px) {
     #source-card-loaded .source-quick-constraints {
         grid-template-columns: minmax(0, 1fr);

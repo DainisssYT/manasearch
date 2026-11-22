@@ -5,7 +5,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>ManaSearch</title>
-    <link rel="stylesheet" href="style.css?v=20261122-1838">
+    <link rel="stylesheet" href="style.css?v=20261122-1840">
     <link rel="stylesheet" href="search-inspector.css?v=20261119-140">
 </head>
 <body>
@@ -64,9 +64,9 @@
                         <h2 id="quick-start-title">Your first search, without the tour</h2>
                         <p id="quick-start-summary" aria-live="polite">Choose a card, optionally highlight an ability, then search. You can leave the advanced settings as they are.</p>
                     </div>
-                    <button type="button" id="quick-start-toggle" class="quick-start-toggle" aria-expanded="true" aria-controls="quick-start-steps">Hide guide</button>
+                    <button type="button" id="quick-start-toggle" class="quick-start-toggle" aria-expanded="false" aria-controls="quick-start-steps">Show guide</button>
                 </div>
-                <div id="quick-start-steps" class="quick-start-steps">
+                <div id="quick-start-steps" class="quick-start-steps hidden">
                     <div id="quick-start-step-source" class="quick-start-step" data-step="source">
                         <span class="quick-start-step-number" aria-hidden="true">1</span>
                         <div class="quick-start-step-copy">
@@ -87,7 +87,7 @@
                         <span class="quick-start-step-number" aria-hidden="true">3</span>
                         <div class="quick-start-step-copy">
                             <strong>Find similar cards</strong>
-                            <span id="quick-start-search-detail">Start with the default settings. Explore Methods, Order, and Constraints later if needed.</span>
+                            <span id="quick-start-search-detail">Start with the default settings. Methods and Order are optional; card filters live with the source card.</span>
                         </div>
                         <button type="button" id="quick-start-search" class="quick-start-action quick-start-action-primary" disabled>Find Similar Cards</button>
                     </div>
@@ -102,7 +102,7 @@
                         <span class="section-kicker">SOURCE</span>
                         <h2>Source Card</h2>
                     </div>
-                    <span class="section-note">Choose any card. Highlight a type line or rules phrase only when you want to focus the search.</span>
+                    <span class="section-note">Use one or more source cards. Highlight a type line or rules phrase only when you want to focus the search.</span>
                 </div>
 
                 <div id="source-card-empty" class="source-card-empty-state">
@@ -146,6 +146,9 @@
                                         </div>
                                     </div>
                                 </div>
+                                <details class="source-advanced-card-details">
+                                    <summary><strong>More card attributes</strong><span>Type · rarity · stats · set · legality</span></summary>
+                                    <div class="source-advanced-card-details-body">
                                 <div class="source-card-meta-row source-card-type-components-row">
                                     <div class="source-meta-field">
                                         <p class="source-card-meta-line"><strong>Supertype:</strong> <span id="source-card-supertype">None</span> <button type="button" id="edit-source-supertype-btn" class="source-type-edit-btn" aria-expanded="false" aria-controls="source-supertype-editor">Edit</button></p>
@@ -244,9 +247,12 @@
                                         </div>
                                     </div>
                                 </div>
+                                <p class="source-card-meta-line source-card-price-row"><strong>Price:</strong> <span id="source-card-price">Unavailable</span></p>
+                                    </div>
+                                </details>
                             </div>
                             <section class="source-quick-constraints" aria-labelledby="source-quick-constraints-title">
-                                <div class="source-quick-constraints-heading"><strong id="source-quick-constraints-title">Quick constraints</strong><span>Color filters for this search</span></div>
+                                <div class="source-quick-constraints-heading"><strong id="source-quick-constraints-title">Card filters</strong><span>Optional limits for this search</span></div>
                                 <div class="source-quick-constraint-row">
                                     <div class="source-quick-constraint-label"><strong>Color identity</strong><span>Colors allowed in a deck</span></div>
                                     <div class="color-pip-group source-inline-color-pips" data-target="filter-identity" aria-label="Preferred color identity">
@@ -261,13 +267,14 @@
                                     </div>
                                     <label class="source-quick-mode-label" for="constraint-mode-colors">Apply as</label><select id="constraint-mode-colors" class="source-quick-mode" data-constraint-mode="colors"><option value="hard">Hard filter</option><option value="prefer">Prefer in ranking</option></select>
                                 </div>
+                                <button type="button" id="toggle-card-constraints-btn" class="source-more-constraints-btn" data-feature-tip="Set additional card attributes and format legality for this search." data-feature-preview="Type · Color · Format · Mana Value">
+                                    More card filters <span id="card-constraints-badge" class="badge">Any</span> ▾
+                                </button>
                             </section>
-                            <p class="source-card-meta-line source-card-price-row"><strong>Price:</strong> <span id="source-card-price">Unavailable</span></p>
-                        
-                            
                         </div>
                         
                     </div>
+                    <div id="additional-source-cards" class="additional-source-cards hidden"></div>
                     <div class="oracle-container">
                                 <strong>Oracle Text</strong>
                                 <span class="oracle-help">Select text in either the type line or rules text to highlight it. Select an existing highlight again to remove it.</span>
@@ -307,7 +314,6 @@
                             <p class="search-intent-placeholder">Choose a source card to see the current search intent.</p>
                         </div>
                     </div>
-                    <div id="additional-source-cards" class="additional-source-cards hidden"></div>
                 </div>
             </section>
 
@@ -337,7 +343,7 @@
                             <span class="section-kicker">SEARCH WORKSPACE</span>
                             <h2>Search Options</h2>
                         </div>
-                        <p class="section-description">The defaults are a good place to start. Methods changes discovery, Order changes ranking, and Constraints limits which cards can appear.</p>
+                        <p class="section-description">Start with the defaults. Methods changes discovery; Order changes ranking. Card filters are next to the source card.</p>
                     </div>
                     <div class="trigger-buttons-group">
                         <button type="button" id="toggle-search-methods-btn" class="methods-trigger-btn" data-feature-tip="Choose how ManaSearch discovers candidates." data-feature-preview="Search streams widen the candidate pool">
@@ -362,9 +368,6 @@
                             <option value="matrix">Matrix Sweep</option>
                             <option value="diverse">Diverse Spread</option>
                         </select>
-                        <button type="button" id="toggle-card-constraints-btn" class="methods-trigger-btn" data-feature-tip="Limit results with hard card attributes and format legality." data-feature-preview="Type · Colors · Format · Mana Value">
-                            Constraints <span id="card-constraints-badge" class="badge">Any</span> ▾
-                        </button>
                     </div>
                 </div>
 
@@ -1129,9 +1132,9 @@
             dialog.addEventListener('click', event => { if (event.target === dialog && dialog.open) dialog.close(); });
         })();
     </script>
-    <script src="pako.min.js?v=20261122-1838"></script>
+    <script src="pako.min.js?v=20261122-1840"></script>
     <script src="search-inspector.js?v=20261119-167"></script>
-    <script type="module" src="app.js?v=20261122-1838"></script>
+    <script type="module" src="app.js?v=20261122-1840"></script>
     <style id="minigames-inline-styles">
 /* v119 — self-contained Guess the Source minigame UI and aligned header launcher. */
 .minigames-launch-btn {
