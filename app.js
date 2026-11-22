@@ -1,6 +1,6 @@
-/* ManaSearch build 20261122-1838 */
+/* ManaSearch build 20261122-1840 */
 // ManaSearch deployment build marker. Bump this whenever app.js changes so cached-module issues are easy to diagnose.
-const MANASEARCH_APP_BUILD = '20261122-1838';
+const MANASEARCH_APP_BUILD = '20261122-1840';
 console.info(`[ManaSearch] app.js build ${MANASEARCH_APP_BUILD}`);
 
 // The source-query and static-index builders share one representation so both sides
@@ -22375,7 +22375,7 @@ function installManaSearchQuickStart() {
     let isSearching = false;
     let hasCompletedSearch = false;
     let lastResultCount = null;
-    let isCollapsed = false;
+    let isCollapsed = true;
     const hasSource = () => Boolean(sourceLoaded && !sourceLoaded.classList.contains('hidden') && sourceName?.textContent.trim());
     const hasOracleRules = () => {
         const text = String(oracle?.textContent || '').trim();
@@ -22405,11 +22405,11 @@ function installManaSearchQuickStart() {
 
     try {
         const savedGuideState = localStorage.getItem('manaSearchQuickStartCollapsedV61');
-        // Keep the guide expanded for the first session, then start compact on later visits
-        // unless the user explicitly chose to keep it expanded.
+        // Keep first-use guidance one click away so it does not compete with source selection
+        // and search controls on the initial screen.
         isCollapsed = savedGuideState !== null
             ? savedGuideState === 'collapsed'
-            : localStorage.getItem('manaSearchQuickStartCompletedV61') === 'completed';
+            : true;
     } catch (_) {}
     applyCollapsed(isCollapsed);
 
@@ -22452,17 +22452,17 @@ function installManaSearchQuickStart() {
         }
         if (searchDetail) {
             if (!selected) {
-                searchDetail.textContent = 'Start with the default settings. Methods, Order, and Constraints can be explored later.';
+                searchDetail.textContent = 'Start with the defaults. Methods and Order are optional; card filters are beside the source card.';
             } else if (busy) {
                 searchDetail.textContent = 'Your search is running. Initial results appear as they are found.';
             } else if (hasCompletedSearch && lastResultCount === 0) {
-                searchDetail.textContent = 'No results passed the current criteria. Consider clearing Constraints or adjusting a highlight.';
+                searchDetail.textContent = 'No results passed the current filters. Review the card filters beside the source card or adjust a highlight.';
             } else if (hasCompletedSearch && Number.isFinite(lastResultCount)) {
                 searchDetail.textContent = `Search complete: ${lastResultCount.toLocaleString()} result${lastResultCount === 1 ? '' : 's'}. Open a result to inspect its similarity details.`;
             } else if (!mainReady && staticStatusText?.textContent.trim()) {
                 searchDetail.textContent = staticStatusText.textContent.trim();
             } else {
-                searchDetail.textContent = 'Run with the defaults first. Methods changes discovery, Order changes ranking, and Constraints limits results.';
+                searchDetail.textContent = 'Run with the defaults first. Methods changes discovery and Order changes ranking.';
             }
         }
 
@@ -22472,7 +22472,7 @@ function installManaSearchQuickStart() {
         } else if (!selected) {
             message = 'No tour needed: choose a source card, optionally highlight an ability, and search with the defaults.';
         } else if (hasCompletedSearch && lastResultCount === 0) {
-            message = 'Search finished, but no cards matched the current criteria. Try clearing constraints or changing a highlight; you can keep all other features.';
+            message = 'Search finished, but no cards matched the current filters. Review the card filters or change a highlight; the other search features can stay as they are.';
         } else if (hasCompletedSearch && Number.isFinite(lastResultCount)) {
             message = `Search complete: ${lastResultCount.toLocaleString()} result${lastResultCount === 1 ? '' : 's'}. The quick guide will stay here if you need it again.`;
         } else {
@@ -23272,7 +23272,7 @@ function installFeatureHelpPopovers() {
     // Main workspace controls: hover on desktop, open their related modal normally when tapped.
     setHelp(document.getElementById('toggle-search-methods-btn'), 'Search Methods', examples.methods.description, 'methods', examples.methods.howTo);
     setHelp(document.getElementById('toggle-order-btn'), 'Order Results', examples.order.description, 'order', examples.order.howTo);
-    setHelp(document.getElementById('toggle-card-constraints-btn'), 'Constraints', examples.constraints.description, 'constraints', examples.constraints.howTo);
+    setHelp(document.getElementById('toggle-card-constraints-btn'), 'More card filters', examples.constraints.description, 'constraints', examples.constraints.howTo);
     setHelp(document.getElementById('source-card-add-btn'), 'Choose a source card', 'Choose the card whose mechanics or text you want to search from.', 'highlight', 'After choosing a card, select an important phrase in its type line or rules text.');
     setHelp(document.getElementById('find-similar-btn'), 'Find Similar Cards', 'Starts the search using the selected source card, highlights, retrieval settings, and constraints.', 'highlight', 'Choose a source card, optionally highlight an important phrase, then press Find Similar Cards.');
     setHelp(document.getElementById('autofill-source-constraints-btn'), 'Fill Empty From Source', 'Copies reliable properties from the selected source card into empty constraint fields only.', 'constraints', 'Review the filled fields; they become hard filters.');
@@ -23293,7 +23293,7 @@ function installFeatureHelpPopovers() {
     };
     addActionHelpMarker(document.getElementById('toggle-search-methods-btn'), 'Search Methods', examples.methods.description, 'methods', examples.methods.howTo);
     addActionHelpMarker(document.getElementById('toggle-order-btn'), 'Order Results', examples.order.description, 'order', examples.order.howTo);
-    addActionHelpMarker(document.getElementById('toggle-card-constraints-btn'), 'Constraints', examples.constraints.description, 'constraints', examples.constraints.howTo);
+    addActionHelpMarker(document.getElementById('toggle-card-constraints-btn'), 'More card filters', examples.constraints.description, 'constraints', examples.constraints.howTo);
     addActionHelpMarker(document.getElementById('source-card-add-btn'), 'Choose a source card', 'Choose the card whose mechanics or text you want to search from.', 'highlight', 'After choosing a card, select an important phrase in its type line or rules text.');
     addActionHelpMarker(document.getElementById('find-similar-btn'), 'Find Similar Cards', 'Starts the search using the selected source card, highlights, retrieval settings, and constraints.', 'highlight', 'Choose a source card, optionally highlight an important phrase, then press Find Similar Cards.');
 
