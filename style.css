@@ -279,6 +279,21 @@ section {
     content: "\2713 ";
 }
 
+.stream-checklist .stream-chip.stream-failed {
+    color: var(--danger-color, #d96b6b);
+    border-color: var(--danger-color, #d96b6b);
+    background-color: color-mix(in srgb, var(--danger-color, #d96b6b) 12%, transparent);
+}
+.stream-checklist .stream-chip.stream-failed::before {
+    content: "! ";
+    font-weight: 800;
+}
+.stream-checklist .stream-chip.stream-warning {
+    color: var(--warning-color, #d6a64d);
+    border-color: var(--warning-color, #d6a64d);
+    background-color: color-mix(in srgb, var(--warning-color, #d6a64d) 12%, transparent);
+}
+
 /* Progressive search status: keep the process readable while streams resolve instead of
    presenting a fake fraction such as "1/2 search stuff done" that does not correspond to the
    actual retrieval workload. */

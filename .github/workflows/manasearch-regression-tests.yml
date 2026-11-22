@@ -2,10 +2,14 @@ name: ManaSearch Regression Tests
 
 on:
   push:
-    branches: [main]
+    branches: [main, feature/search-debug-inspector]
   pull_request:
     branches: [main]
   workflow_dispatch:
+
+concurrency:
+  group: manasearch-regression-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
@@ -13,7 +17,7 @@ permissions:
 jobs:
   regression:
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - name: Check out repository
         uses: actions/checkout@v6
@@ -37,8 +41,21 @@ jobs:
       - name: Install Playwright
         run: npm install --no-save playwright@1.55.0
 
-      - name: Install Chromium
-        run: npx playwright install --with-deps chromium
+      - name: Install Chromium (retry transient package mirror failures)
+        shell: bash
+        run: |
+          for attempt in 1 2 3; do
+            echo "Chromium install attempt ${attempt}/3"
+            if npx playwright install --with-deps chromium; then
+              exit 0
+            fi
+            if [ "$attempt" -lt 3 ]; then
+              echo "Browser dependency installation failed; retrying after a short delay."
+              sleep 20
+            fi
+          done
+          echo "Chromium installation failed after 3 attempts."
+          exit 1
 
       - name: Run production mechanical regression and performance suites
         run: node tests/run-browser-regression.cjs
