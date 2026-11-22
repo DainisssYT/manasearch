@@ -1,6 +1,6 @@
-/* ManaSearch build 20261122-1834 */
+/* ManaSearch build 20261122-1838 */
 // ManaSearch deployment build marker. Bump this whenever app.js changes so cached-module issues are easy to diagnose.
-const MANASEARCH_APP_BUILD = '20261122-1834';
+const MANASEARCH_APP_BUILD = '20261122-1838';
 console.info(`[ManaSearch] app.js build ${MANASEARCH_APP_BUILD}`);
 
 // The source-query and static-index builders share one representation so both sides
@@ -6128,6 +6128,132 @@ function extractMTGRestrictions(text) {
  * @param {string} clauseText
  * @returns {{costText: string|null, effectText: string}}
  */
+function normalizeParenthesizedOracleRuleFormatting(ruleText) {
+    let normalized = String(ruleText || '').trim();
+    while (normalized.startsWith('(') && normalized.endsWith(')')) {
+        let depth = 0;
+        let outerClose = -1;
+        for (let i = 0; i < normalized.length; i++) {
+            const char = normalized[i];
+            if (char === '(') depth++;
+            else if (char === ')') {
+                depth--;
+                if (depth === 0) {
+                    outerClose = i;
+                    break;
+                }
+                if (depth < 0) break;
+            }
+        }
+        if (depth !== 0 || outerClose !== normalized.length - 1) break;
+        normalized = normalized.slice(1, -1).trim();
+    }
+    return normalized;
+}
+
+
+function isParenthesizedOracleAbilityRule(ruleText) {
+    const candidate = String(ruleText || '').trim();
+    if (!candidate || /["“”]/.test(candidate)) return false;
+    const split = splitActivationCost(candidate);
+    if (!split.costText) return false;
+    return /^(?:add|draw|create|put|return|exile|search|destroy|tap|untap|gain|deal|discard|mill|counter|scry|surveil|proliferate|transform|fight|attach|detach|regenerate)\b/i.test(split.effectText);
+}
+
+function splitOracleRulesPreservingReminderText(oracleText) {
+    const text = String(oracleText || '').replace(/\r\n?/g, '\n');
+    const groups = [];
+    let current = '', currentReminders = [], quote = null;
+    const flush = () => {
+        const rule = current.trim();
+        if (rule) groups.push({ text: rule, reminderTexts: currentReminders.slice(), isParenthesizedAbility: false });
+        else if (currentReminders.length && groups.length) groups[groups.length - 1].reminderTexts.push(...currentReminders);
+        current = ''; currentReminders = [];
+    };
+    const attachReminder = value => {
+        const reminder = String(value || '').trim();
+        if (!reminder) return;
+        if (current.trim()) currentReminders.push(reminder);
+        else if (groups.length) groups[groups.length - 1].reminderTexts.push(reminder);
+        else currentReminders.push(reminder);
+    };
+    const readParenthetical = start => {
+        let depth = 1, innerQuote = null;
+        for (let i = start + 1; i < text.length; i++) {
+            const ch = text[i];
+            if (innerQuote) {
+                if ((innerQuote === '"' && ch === '"') || (innerQuote === '“' && ch === '”')) innerQuote = null;
+                continue;
+            }
+            if (ch === '"' || ch === '“') { innerQuote = ch; continue; }
+            if (ch === '(') depth++;
+            else if (ch === ')') { if (--depth === 0) return { text: text.slice(start + 1, i), endIndex: i }; }
+        }
+        return null;
+    };
+    for (let i = 0; i < text.length; i++) {
+        const ch = text[i];
+        if (quote) {
+            current += ch;
+            if ((quote === '"' && ch === '"') || (quote === '“' && ch === '”')) quote = null;
+            continue;
+        }
+        if (ch === '"' || ch === '“') { quote = ch; current += ch; continue; }
+        if (ch === '(') {
+            const block = readParenthetical(i);
+            if (block) {
+                if (isParenthesizedOracleAbilityRule(block.text)) {
+                    flush();
+                    const ability = normalizeParenthesizedOracleRuleFormatting(block.text);
+                    if (ability) groups.push({ text: ability, reminderTexts: [], isParenthesizedAbility: true });
+                } else attachReminder(block.text);
+                i = block.endIndex;
+                continue;
+            }
+        }
+        if (ch === '\n') { flush(); continue; }
+        if (/[.!?;]/.test(ch)) {
+            current += ch; flush();
+            while (i + 1 < text.length && (text[i + 1] === ' ' || text[i + 1] === '\t')) i++;
+            continue;
+        }
+        current += ch;
+    }
+    flush();
+    return groups;
+}
+
+function parseClueTokenAbilityFromReminderText(reminderTexts) {
+    const reminder = (Array.isArray(reminderTexts) ? reminderTexts : [reminderTexts]).filter(Boolean).join(' ');
+    const quotePattern = /"([^"]+)"|“([^”]+)”/g;
+    for (const match of reminder.matchAll(quotePattern)) {
+        const ability = String(match[1] || match[2] || '').trim();
+        const split = splitActivationCost(ability);
+        if (!split.costText || !/\bdraw\s+(?:a|one)\s+card\b/i.test(split.effectText)) continue;
+        if (!/\bsacrifice\s+(?:this\s+(?:token|artifact)|a\s+clue\s+token)\b/i.test(split.costText)) continue;
+        const payment = classifyActivationCost(split.costText);
+        const symbols = split.costText.match(/\{[^}]+\}/g) || [];
+        const payable = symbols.filter(symbol => !/^\{t\}$/i.test(symbol));
+        const parts = [];
+        if (payable.length) parts.push('pay ' + payable.join(''));
+        parts.push('sacrifice this Clue token');
+        return {
+            text: ability, costText: split.costText, effectText: split.effectText,
+            activationCost: { ...payment, type: 'clue_sacrifice_draw', parts, resourceScope: 'per_token' },
+            resourceScope: 'per_token'
+        };
+    }
+    return null;
+}
+
+function parseManaEntryState(oracleText) {
+    const text = String(oracleText || '').replace(/[’]/g, "'");
+    const entersTapped = /\benters(?:\s+the battlefield)?\s+tapped\b/i.test(text);
+    const entersUntapped = /\benters(?:\s+the battlefield)?\s+untapped\b/i.test(text);
+    if (!entersTapped && !entersUntapped) return null;
+    return { entersTapped, entersUntapped, timing: 'entry_only' };
+}
+
 function splitActivationCost(clauseText) {
     const match = clauseText.match(/^\s*([^:]{1,60}):\s*(.+)$/s);
     if (!match) return { costText: null, effectText: clauseText };
@@ -6238,12 +6364,16 @@ function analyzeManaOutput(text, amount) {
     // A list such as "Add {W}, {U}, or {B}" describes ONE mana with a choice of color,
     // not three mana. Detect the common one-symbol choice form explicitly. The previous parser
     // counted all symbols and therefore treated every Obelisk-style filter as a three-mana rock.
-    const afterAdd = lower.match(/\badd\s+(.+?)(?:\s+to\s+(?:your|the)\s+mana\s+pool)?\s*\.?$/i)?.[1] || '';
+    const afterAddRaw = lower.match(/\badd\s+(.+?)(?:\s+to\s+(?:your|the)\s+mana\s+pool)?\s*$/i)?.[1] || '';
+    const afterAdd = afterAddRaw
+        .replace(/^[\s(]+|[\s)]+$/g, '')
+        .replace(/[.!?;]+$/g, '')
+        .trim();
+    const choiceParts = afterAdd.split(/\s*(?:,|\bor\b)\s*/i).map(part => part.trim()).filter(Boolean);
     const choiceSymbols = afterAdd.match(/\{(?:[wubrgcs])\}/gi) || [];
-    const isSimpleSingleManaChoice = /\bor\b/.test(afterAdd)
-        && choiceSymbols.length >= 2
-        && /^[\s,{}wubrgcsor]+$/i.test(afterAdd)
-        && choiceSymbols.every(() => true);
+    const isSimpleSingleManaChoice = /\bor\b/i.test(afterAdd)
+        && choiceParts.length >= 2
+        && choiceParts.every(part => /^\{[wubrgcs]\}$/i.test(part));
 
     let mode = 'unknown';
     let semanticAmount = amount != null && Number.isFinite(Number(amount)) ? Number(amount) : null;
@@ -6387,6 +6517,7 @@ function manaColorProfileSimilarity(a, b) {
     if ((modeA === 'choice_single_fixed_color' && modeB === 'any_one') || (modeB === 'choice_single_fixed_color' && modeA === 'any_one')) return 0.90;
     if ((modeA === 'choice_single_fixed_color' && modeB === 'fixed_single_color') || (modeB === 'choice_single_fixed_color' && modeA === 'fixed_single_color')) return 0.82;
     if ((modeA === 'choice_single_fixed_color' && modeB === 'fixed_multi_color') || (modeB === 'choice_single_fixed_color' && modeA === 'fixed_multi_color')) return 0.20;
+    if ((modeA === 'choice_single_fixed_color' && modeB === 'fixed_colorless') || (modeB === 'choice_single_fixed_color' && modeA === 'fixed_colorless')) return 0.05;
     if (modeA === 'fixed_colorless' && modeB === 'any_one') return 0.62;
     if (modeB === 'fixed_colorless' && modeA === 'any_one') return 0.62;
     if (modeA === 'fixed_single_color' && modeB === 'any_one') return 0.70;
@@ -6398,16 +6529,47 @@ function manaColorProfileSimilarity(a, b) {
     return 0.25;
 }
 function manaActivationSimilarity(a, b) {
-    if (!a || !b) return null;
-    const amin = Number.isFinite(Number(a.manaMin)) ? Number(a.manaMin) : 0;
-    const bmin = Number.isFinite(Number(b.manaMin)) ? Number(b.manaMin) : 0;
-    const amax = a.manaMax == null ? null : Number(a.manaMax);
-    const bmax = b.manaMax == null ? null : Number(b.manaMax);
-    if (amax == null || bmax == null) return 0.55;
+    const costA = a || { manaMin: 0, manaMax: 0, parts: [] };
+    const costB = b || { manaMin: 0, manaMax: 0, parts: [] };
+    const amin = Number.isFinite(Number(costA.manaMin)) ? Number(costA.manaMin) : 0;
+    const bmin = Number.isFinite(Number(costB.manaMin)) ? Number(costB.manaMin) : 0;
+    const amax = costA.manaMax == null ? null : Number(costA.manaMax);
+    const bmax = costB.manaMax == null ? null : Number(costB.manaMax);
     const minSim = manaNumericSimilarity(amin, bmin);
-    const maxSim = manaNumericSimilarity(amax, bmax);
-    return minSim == null || maxSim == null ? 0.55 : (0.55 * minSim + 0.45 * maxSim);
+    const maxSim = amax == null || bmax == null ? 0.55 : manaNumericSimilarity(amax, bmax);
+    const manaCostSim = minSim == null || maxSim == null ? 0.55 : (0.55 * minSim + 0.45 * maxSim);
+    const partsA = new Set((Array.isArray(costA.parts) ? costA.parts : []).map(part => String(part).toLowerCase()));
+    const partsB = new Set((Array.isArray(costB.parts) ? costB.parts : []).map(part => String(part).toLowerCase()));
+    const union = new Set([...partsA, ...partsB]);
+    const intersection = [...partsA].filter(part => partsB.has(part)).length;
+    const activationPartsSim = union.size ? intersection / union.size : 1;
+    return 0.35 * manaCostSim + 0.65 * activationPartsSim;
 }
+
+function calculateManaAbilityProfileSimilarity(a, b) {
+    if (!a || !b) return null;
+    const netA = a.manaNetAmount != null ? a.manaNetAmount : a.manaAdvantageAmount;
+    const netB = b.manaNetAmount != null ? b.manaNetAmount : b.manaAdvantageAmount;
+    const outputA = a.manaOutputAmount != null ? a.manaOutputAmount : a.manaOutputAdvantageAmount;
+    const outputB = b.manaOutputAmount != null ? b.manaOutputAmount : b.manaOutputAdvantageAmount;
+    const advantageA = a.manaAdvantageAmount != null ? a.manaAdvantageAmount : a.manaNetAmount;
+    const advantageB = b.manaAdvantageAmount != null ? b.manaAdvantageAmount : b.manaNetAmount;
+    const dimensions = [
+        { weight: 0.25, value: manaNumericSimilarity(netA, netB) },
+        { weight: 0.08, value: manaNumericSimilarity(outputA, outputB) },
+        { weight: 0.30, value: manaNumericSimilarity(advantageA, advantageB) },
+        { weight: 0.23, value: manaColorProfileSimilarity(
+            { mode: a.manaOutputMode, colors: a.manaOutputColors || [] },
+            { mode: b.manaOutputMode, colors: b.manaOutputColors || [] }
+        ) },
+        { weight: 0.14, value: manaActivationSimilarity(a.activationCost, b.activationCost) }
+    ].filter(dimension => dimension.value != null);
+    const totalWeight = dimensions.reduce((sum, dimension) => sum + dimension.weight, 0);
+    return totalWeight
+        ? dimensions.reduce((sum, dimension) => sum + dimension.value * dimension.weight, 0) / totalWeight
+        : null;
+}
+
 
 /**
  * Extracts conditions, payment/activation costs, and secondary ("additional") effects that
@@ -8276,6 +8438,8 @@ function parseGameStateConditionProfile(value) {
 function parseMTGEffect(oracleText, cardContext = null) {
     if (!oracleText) return [];
 
+    const entryState = parseManaEntryState([String(oracleText), String(cardContext?.oracle_text || '')].filter(Boolean).join('\n'));
+
     // Split on sentences, semicolons, bullet points, and rule keywords. Newlines are always a
     // hard boundary (not just when preceded by sentence punctuation) - otherwise a modal header
     // ending in an em dash ("Choose one —") never separates from its first bullet line, since
@@ -8283,13 +8447,13 @@ function parseMTGEffect(oracleText, cardContext = null) {
     // Keep the printed rule/sentence that owns each split clause. Splitting on "then" is useful
     // for extracting separate actions, but those actions still share semantic context: for example,
     // "look at the top card of that player's library, then exile it" is library access, not removal.
-    const ruleGroups = String(oracleText)
-        .split(/\n+|(?<=[.!?;])\s+/)
-        .map(s => s.trim())
-        .filter(Boolean);
+    const parsedRuleGroups = splitOracleRulesPreservingReminderText(oracleText);
+    const ruleGroups = parsedRuleGroups.map(group => group.text).filter(Boolean);
+    const reminderTextsByRuleGroup = parsedRuleGroups.map(group => group.reminderTexts || []);
     const clauses = [];
     const parentRuleTexts = [];
     const previousRuleTexts = [];
+    const reminderTextsByClause = [];
     let mostRecentLandSearch = '';
     let mostRecentLandSearchIndex = -100;
     for (let ruleGroupIndex = 0; ruleGroupIndex < ruleGroups.length; ruleGroupIndex++) {
@@ -8304,6 +8468,7 @@ function parseMTGEffect(oracleText, cardContext = null) {
             clauses.push(ruleClause);
             parentRuleTexts.push(ruleGroupText);
             previousRuleTexts.push(relatedLandSearchContext);
+            reminderTextsByClause.push(reminderTextsByRuleGroup[ruleGroupIndex] || []);
         }
         if (isSearchForLandGroup) {
             mostRecentLandSearch = ruleGroupText;
@@ -8326,6 +8491,7 @@ function parseMTGEffect(oracleText, cardContext = null) {
         const rawClause = clauses[clauseIndex];
         const parentRuleText = parentRuleTexts[clauseIndex] || rawClause;
         const previousRuleText = previousRuleTexts[clauseIndex] || '';
+        const reminderTexts = reminderTextsByClause[clauseIndex] || [];
         const modalHeaderMatch = rawClause.match(modalHeaderRegex);
         if (modalHeaderMatch) {
             modeGroupCounter++;
@@ -8369,6 +8535,11 @@ function parseMTGEffect(oracleText, cardContext = null) {
         parsed.raw = parsed.raw || clause;
         parsed.parentRuleText = parsed.parentRuleText || parentRuleText;
         parsed.previousRuleText = parsed.previousRuleText || previousRuleText;
+        if (reminderTexts.length) {
+            parsed.reminderTexts = reminderTexts.slice();
+            parsed.reminderText = reminderTexts.join(' ');
+            parsed.reminderProvenance = 'oracle_parenthetical_reminder';
+        }
 
         // The sub-parsers capture restrictions from the text BEFORE the noun ("destroy target
         // [artifact] creature"), so a qualifier that trails the noun - "destroy target creature
@@ -8404,6 +8575,7 @@ function parseMTGEffect(oracleText, cardContext = null) {
         // Example: Boros Signet pays {1} to add {R}{W}; output is two mana, but the net increase
         // is one. Both values are retained so color-fixing and gross output remain visible.
         if (parsed.action === 'add_mana') {
+            if (entryState) parsed.entryState = { ...entryState };
             finalizeManaAbilityEffect(parsed, cardContext);
             // All generic quantity-based consumers use the same land-adjusted acceleration value.
             // The actual printed output remains in amount/manaNetAmount.
@@ -8425,14 +8597,23 @@ function parseMTGEffect(oracleText, cardContext = null) {
         // ability. Add that derived card-advantage node to the source card's mechanical graph so
         // retrieval/scoring can match repeatable draw engines, rather than relying on prose alone.
         if (parsed.clueDrawEngine && parsed.tokenType === 'clue') {
+            const clueAbility = parseClueTokenAbilityFromReminderText(reminderTexts);
+            const clueCost = clueAbility?.costText || '{2}, Sacrifice this token';
+            const clueOutcome = clueAbility?.effectText || 'Draw a card.';
             results.push({
-                raw: 'Clue token ability: Pay {2}, sacrifice a Clue token: draw a card.',
+                raw: 'Clue token ability: ' + clueCost + ': ' + clueOutcome,
                 parentRuleText: parentRuleText,
+                reminderText: parsed.reminderText || '',
+                reminderProvenance: clueAbility ? 'oracle_parenthetical_reminder' : 'keyword_rules_fallback',
                 action: 'draw', object: 'card', from: null, to: 'hand', target: null,
                 restriction: [], quantity: 1, isSecondaryAtom: true,
                 derivedFromTokenAbility: true,
-                activationCost: { type: 'clue_sacrifice_draw', parts: ['pay {2}', 'sacrifice a Clue token'] },
-                repeatabilityContextOverride: 'Clue token ability: Pay {2}, sacrifice a Clue token: draw a card.'
+                resourceUseScope: 'per_token',
+                activationCost: clueAbility?.activationCost || {
+                    type: 'clue_sacrifice_draw', raw: clueCost,
+                    parts: ['pay {2}', 'sacrifice this Clue token'], resourceScope: 'per_token'
+                },
+                repeatabilityContextOverride: 'Each Clue token has a single-use activated draw ability: ' + clueCost + ': ' + clueOutcome
             });
         }
 
@@ -8835,13 +9016,16 @@ function deriveCanonicalFunction(effect) {
         quantity = typeof effect.amount === 'number' ? effect.amount : null;
     } else if (fn === "mana_ability") {
         const manaAdvantage = effect.manaAdvantageAmount !== undefined ? effect.manaAdvantageAmount : effect.manaNetAmount;
-        const manaAdvantagePart = manaAdvantage != null && Number.isFinite(Number(manaAdvantage))
-            ? `${Number(manaAdvantage)} incremental mana`
-            : 'mana production';
+        const actualMana = effect.manaNetAmount ?? effect.manaOutputAmount;
+        const actualManaPart = actualMana != null && Number.isFinite(Number(actualMana))
+            ? `${Number(actualMana)} mana per activation`
+            : 'variable mana production';
+        const baselinePart = Number(effect.manaLandBaseline) > 0 && manaAdvantage != null
+            ? `${Number(manaAdvantage)} above land-drop baseline` : null;
         const colorPart = effect.colors && effect.colors.length > 0 ? effect.colors.join('/') : null;
-        // Canonical magnitude/quantity use mana advantage, not raw output. Raw output and net
-        // output remain separately available in params for evidence and color/output matching.
-        magnitude = [manaAdvantagePart, colorPart].filter(Boolean).join(' ');
+        // Magnitude describes the real output; quantity stays land-drop-adjusted for acceleration
+        // ranking. Both values are preserved in params so the pair scorer can compare each role.
+        magnitude = [actualManaPart, colorPart, baselinePart].filter(Boolean).join(' ');
         quantity = manaAdvantage != null && Number.isFinite(Number(manaAdvantage)) ? Number(manaAdvantage) : null;
     } else if (fn === "gain_life" || fn === "lose_life") {
         magnitude = `${effect.amount} life`;
@@ -8880,6 +9064,7 @@ function deriveCanonicalFunction(effect) {
             manaOutputMode: fn === 'mana_ability' ? (effect.manaOutputMode || effect.manaOutput?.mode || null) : null,
             manaOutputColors: fn === 'mana_ability' ? (effect.manaOutputColors || effect.manaOutput?.colors || []) : [],
             manaOutputColorCount: fn === 'mana_ability' ? (effect.manaOutputColorCount ?? effect.manaOutput?.uniqueColorCount ?? null) : null,
+            entryState: fn === 'mana_ability' ? (effect.entryState || null) : null,
             manaAbilityRulesProfile: effect.manaAbilityRulesProfile || null,
             duration: effect.isStatic === true ? "static" : (effect.isStatic === false ? "temporary" : null),
             controller: effect.controller || null,
@@ -8899,6 +9084,10 @@ function deriveCanonicalFunction(effect) {
             playWindow: effect.playWindow || null,
             clueDrawEngine: Boolean(effect.clueDrawEngine || (String(effect.raw || '').match(/\binvestigate\b/i) && obj === 'token')),
             derivedFromTokenAbility: Boolean(effect.derivedFromTokenAbility),
+            resourceUseScope: effect.resourceUseScope || effect.activationCost?.resourceScope || null,
+            reminderText: effect.reminderText || '',
+            reminderTexts: Array.isArray(effect.reminderTexts) ? effect.reminderTexts : [],
+            reminderProvenance: effect.reminderProvenance || null,
             restriction,
             targetProfile: effect.targetProfile || null,
             quantityProfile: effect.quantityProfile || null,
@@ -8944,12 +9133,15 @@ function canonicalFunctionToText(canonicalFunctions) {
         }
         if (cf.function === 'mana_ability') {
             const advantage = p.manaAdvantageAmount;
-            const outputAdvantage = p.manaOutputAdvantageAmount;
-            const colors = Array.isArray(p.manaOutputColors) ? p.manaOutputColors.join('/') : '';
-            const netText = advantage == null ? 'variable additional mana' : `${advantage} additional mana`;
-            const outputText = outputAdvantage != null && outputAdvantage !== advantage
-                ? ` (gross output advantage ${outputAdvantage})` : '';
-            return `mana source ability: ${netText} after activation costs${outputText}${colors ? `; output colors ${colors}` : ''}; reusable mana production`;
+            const actualAmount = p.manaNetAmount ?? p.manaOutputAmount;
+            const colors = Array.isArray(p.manaOutputColors) ? p.manaOutputColors.join('/').toUpperCase() : '';
+            const amountText = actualAmount == null ? 'variable mana' : `${actualAmount} mana`;
+            const choiceText = p.manaOutputMode === 'choice_single_fixed_color' ? ' of a choice of one output color' : '';
+            const baselineText = Number(p.manaLandBaseline) > 0 && advantage != null
+                ? `; ${advantage} additional mana beyond the ordinary land-drop baseline` : '';
+            const entryText = p.entryState?.entersTapped ? '; enters tapped on entry'
+                : p.entryState?.entersUntapped ? '; enters untapped on entry' : '';
+            return `mana source ability: adds ${amountText}${choiceText} after activation costs${colors ? `; output colors ${colors}` : ''}${baselineText}${entryText}; reusable mana production`;
         }
         if (cf.function === 'zone_change' && p.from === 'hand' && p.to === 'exile') {
             return 'exile a card from hand';
@@ -8964,10 +9156,14 @@ function canonicalFunctionToText(canonicalFunctions) {
         if (cf.function === 'token_creation' && p.tokenType === 'clue') {
             const cadence = p.repeatabilityProfile?.group === 'repeatable_engine' ? 'repeatable Clue token engine'
                 : p.repeatabilityProfile?.group === 'single_use' ? 'one-time Clue token creation' : 'Clue token creation';
-            return `${cadence} from investigate; each created Clue can be activated for {2}, sacrifice that Clue token: draw a card`;
+            return cadence + ' from investigate; each individual Clue can be sacrificed once to activate its draw ability; the card can repeat this by creating additional Clues';
         }
         if (cf.function === 'card_draw' && p.derivedFromTokenAbility) {
-            return 'repeatable activated card draw from a Clue token: pay {2}, sacrifice that Clue token, draw a card';
+            const cost = p.activationCost?.raw || '{2}, Sacrifice this token';
+            const overall = p.repeatabilityProfile?.cardLevelGroup === 'repeatable_engine'
+                ? 'repeatable card advantage across separately created Clues'
+                : 'single-use card draw per Clue token';
+            return overall + ': each Clue token can be sacrificed only once (' + cost + ') to draw one card';
         }
         if (cf.function === 'opponent_ramp') return "put a land onto the battlefield under an opponent's control; this is opponent ramp and grants the opponent a resource, not your own ramp";
         if (cf.function === 'opponent_gift') return "put a permanent onto the battlefield under an opponent's control; this grants the opponent a resource";
@@ -9386,11 +9582,18 @@ function inferEffectRepeatabilityProfile(card, effect, fullText = '') {
         (effect.tokenType === 'clue' || effect.canonical?.params?.tokenType === 'clue') &&
         /\binvestigate\b/i.test(combined) && /\b(?:when|whenever)\b/i.test(combined) &&
         /\bcast\b[\s\S]{0,80}\b(?:instant|sorcery)\b/i.test(combined);
-    // Trail of Evidence's investigate event is repeatable because the player can cast more
-    // instants/sorceries. Keep it separate from the Clue's own repeatable activated draw effect.
+    const perTokenAbility = Boolean(effect.derivedFromTokenAbility &&
+        (effect.resourceUseScope === 'per_token' || effect.canonical?.params?.resourceUseScope === 'per_token'));
+    const fullCardOracle = String(fullText || strategicRoleCardText(card) || '');
+    const cardLevelClueEngine = perTokenAbility && isPermanent &&
+        /\b(?:when|whenever)\b[^.!?;]{0,180}\bcast\b[^.!?;]{0,100}\b(?:instant|sorcery)\b[^.!?;]{0,140}\binvestigate\b/i.test(fullCardOracle);
     const oneTimeSelfSacrifice = isPermanent && consumesSource && /\bsacrifice\s+(?:this(?: creature| artifact| enchantment| permanent| planeswalker| land| card)?|the source|~|[\w'’-]+)\b/i.test(combined) &&
         /\bat the beginning of (?:your|the) end step\b|\bat (?:your|the) end step\b/i.test(combined);
-    if (clueInvestigateTrigger) {
+    if (perTokenAbility) {
+        kind = 'single_use_activation';
+        confidence = 0.98;
+        eventText = 'each Clue token can be sacrificed once for one draw';
+    } else if (clueInvestigateTrigger) {
         kind = 'repeatable_trigger';
         confidence = 0.97;
         eventText = 'you cast an instant or sorcery spell and investigate';
@@ -9453,13 +9656,12 @@ function inferEffectRepeatabilityProfile(card, effect, fullText = '') {
     }
 
     const meta = REPEATABILITY_PROFILE_META[kind] || REPEATABILITY_PROFILE_META.unknown;
+    const cardLevelGroup = perTokenAbility ? (cardLevelClueEngine ? 'repeatable_engine' : meta.group) : meta.group;
     return {
-        kind,
-        group: meta.group,
-        strength: meta.strength,
-        confidence,
-        timingText,
-        eventText,
+        kind, group: meta.group, cardLevelGroup,
+        scope: perTokenAbility ? 'per_token' : 'effect',
+        resourceScope: perTokenAbility ? 'clue_token' : null,
+        strength: meta.strength, confidence, timingText, eventText,
         context: context.slice(0, 240)
     };
 }
@@ -9485,20 +9687,21 @@ function getEffectRepeatabilityProfile(value) {
 }
 
 function repeatabilityProfileSimilarity(profileA, profileB) {
-    if (!profileA || !profileB || !profileA.kind || !profileB.kind || profileA.group === 'unknown' || profileB.group === 'unknown') return 1;
+    if (!profileA || !profileB || !profileA.kind || !profileB.kind) return 1;
+    const groupA = profileA.cardLevelGroup || profileA.group;
+    const groupB = profileB.cardLevelGroup || profileB.group;
+    if (!groupA || !groupB || groupA === 'unknown' || groupB === 'unknown') return 1;
     let score;
-    if (profileA.kind === profileB.kind) score = 1;
-    else if (profileA.group === 'repeatable_engine' && profileB.group === 'repeatable_engine') {
+    if (profileA.kind === profileB.kind && groupA === groupB) score = 1;
+    else if (groupA === 'repeatable_engine' && groupB === 'repeatable_engine') {
         score = (profileA.kind === 'periodic_trigger' || profileB.kind === 'periodic_trigger') ? 0.78 : 0.74;
-    } else if (profileA.group === 'single_use' && profileB.group === 'single_use') {
+    } else if (groupA === 'single_use' && groupB === 'single_use') {
         score = (profileA.kind === 'one_shot' || profileB.kind === 'one_shot') ? 0.78 : 0.70;
-    } else if (profileA.group === 'limited_reuse' && profileB.group === 'single_use' || profileB.group === 'limited_reuse' && profileA.group === 'single_use') {
-        score = 0.66;
-    } else if (profileA.group === 'repeatable_engine' && profileB.group === 'limited_reuse' || profileB.group === 'repeatable_engine' && profileA.group === 'limited_reuse') {
-        score = 0.46;
-    } else if (profileA.group === 'repeatable_engine' && profileB.group === 'single_use' || profileB.group === 'repeatable_engine' && profileA.group === 'single_use') {
-        const oneShot = (profileA.kind === 'one_shot' || profileB.kind === 'one_shot');
-        const entryOnly = (profileA.kind === 'entry_trigger' || profileB.kind === 'entry_trigger' || profileA.kind === 'self_event' || profileB.kind === 'self_event');
+    } else if (groupA === 'limited_reuse' && groupB === 'single_use' || groupB === 'limited_reuse' && groupA === 'single_use') score = 0.66;
+    else if (groupA === 'repeatable_engine' && groupB === 'limited_reuse' || groupB === 'repeatable_engine' && groupA === 'limited_reuse') score = 0.46;
+    else if (groupA === 'repeatable_engine' && groupB === 'single_use' || groupB === 'repeatable_engine' && groupA === 'single_use') {
+        const oneShot = profileA.kind === 'one_shot' || profileB.kind === 'one_shot';
+        const entryOnly = profileA.kind === 'entry_trigger' || profileB.kind === 'entry_trigger' || profileA.kind === 'self_event' || profileB.kind === 'self_event';
         score = oneShot ? 0.10 : (entryOnly ? 0.20 : 0.16);
     } else score = 0.55;
     const confidence = Math.min(Number(profileA.confidence ?? 1), Number(profileB.confidence ?? 1));
@@ -9571,19 +9774,13 @@ function getDirectCardAcquisitionCadence(card, parsedEffects = []) {
     const effects = Array.isArray(parsedEffects) ? parsedEffects : [];
     const directDrawEffects = effects.filter(isDirectCardDrawOutcome);
     const profiles = directDrawEffects.map(effect => getEffectRepeatabilityProfile(effect)).filter(Boolean);
-    const repeatable = profiles.some(profile => profile.group === 'repeatable_engine');
-    const singleUse = profiles.length > 0 && profiles.every(profile => profile.group === 'single_use');
-    const entryOnly = profiles.length > 0 && profiles.every(profile =>
+    const cardLevelGroups = profiles.map(profile => profile.cardLevelGroup || profile.group);
+    const repeatable = cardLevelGroups.some(group => group === 'repeatable_engine');
+    const singleUse = profiles.length > 0 && cardLevelGroups.every(group => group === 'single_use');
+    const entryOnly = singleUse && profiles.every(profile =>
         profile.kind === 'entry_trigger' || profile.kind === 'delayed_trigger' || profile.kind === 'one_shot' || profile.kind === 'self_event' || profile.kind === 'single_use_activation'
     );
-    return {
-        hasAcquisition: directDrawEffects.length > 0,
-        repeatable,
-        singleUse,
-        entryOnly,
-        profiles,
-        cardName: String(card?.name || '')
-    };
+    return { hasAcquisition: directDrawEffects.length > 0, repeatable, singleUse, entryOnly, profiles, cardName: String(card?.name || '') };
 }
 
 function calculateCardAcquisitionCadenceMismatch(parsedA = [], parsedB = []) {
@@ -9695,7 +9892,8 @@ function inferStrategicRoleProfileUncached(card, parsedEffects = [], intentText 
     const recurringAcquisition = directDraw || handAcquisition || topCardAcquisition;
     const acquisitionText = /\bdraw(?:s)?\s+(?:a|one|two|three|four|five|\d+|x)\s+cards?\b|\b(?:put|puts|return|returns)\b[^.;]{0,100}\b(?:card|cards|it|them)\b[^.;]{0,60}\b(?:into|to) your hand\b|\b(?:reveal|exile)\s+the top card\b/i;
     const acquisitionIsRepeatable = (parsedEffects || []).some(e => {
-        if (getEffectRepeatabilityProfile(e)?.group !== 'repeatable_engine') return false;
+        const profile = getEffectRepeatabilityProfile(e);
+        if ((profile?.cardLevelGroup || profile?.group) !== 'repeatable_engine') return false;
         // Many draw analogues are represented as several atoms from one ability:
         // "reveal the top card ... and put it into your hand" or "exile the top card ...
         // put it into your hand". The action atom can contain only "reveal"/"exile";
@@ -9716,7 +9914,7 @@ function inferStrategicRoleProfileUncached(card, parsedEffects = [], intentText 
         e.canonical.params?.tokenType === 'clue' && getEffectRepeatabilityProfile(e)?.group === 'repeatable_engine');
     const repeatableClueDraw = repeatableClueToken && (parsedEffects || []).some(e =>
         e?.canonical?.function === 'card_draw' && e.canonical.params?.derivedFromTokenAbility &&
-        getEffectRepeatabilityProfile(e)?.kind === 'repeatable_activation');
+        getEffectRepeatabilityProfile(e)?.cardLevelGroup === 'repeatable_engine');
     // A trigger elsewhere on a card must not turn its unrelated one-shot draw into an engine.
     // Resource costs alone are not evidence of repeatability, except for this explicit Clue link.
     if ((recurringAcquisition && acquisitionIsRepeatable) || repeatableClueDraw) {
@@ -10246,15 +10444,20 @@ if (fnA === 'cast_timing_permission' && fnB === 'cast_timing_permission') {
     parts.push(fieldSimilarity(8, cfA.params?.timingPermission, cfB.params?.timingPermission));
 }
 
+let manaProfileSimilarity = null;
 if (fnA === 'mana_ability' && fnB === 'mana_ability') {
     const ma = cfA.params || {}, mb = cfB.params || {};
-    // Compare acceleration beyond the normal land-drop baseline, not raw land output.
-    const netA = ma.manaAdvantageAmount !== undefined ? ma.manaAdvantageAmount : ma.manaNetAmount;
-    const netB = mb.manaAdvantageAmount !== undefined ? mb.manaAdvantageAmount : mb.manaNetAmount;
-    const outputA = ma.manaOutputAdvantageAmount !== undefined ? ma.manaOutputAdvantageAmount : ma.manaOutputAmount;
-    const outputB = mb.manaOutputAdvantageAmount !== undefined ? mb.manaOutputAdvantageAmount : mb.manaOutputAmount;
+    // Actual net/gross output distinguishes one mana from two. The land-adjusted amount remains
+    // a separate acceleration signal so a two-mana land can still resemble a one-mana rock.
+    const netA = ma.manaNetAmount !== undefined ? ma.manaNetAmount : ma.manaAdvantageAmount;
+    const netB = mb.manaNetAmount !== undefined ? mb.manaNetAmount : mb.manaAdvantageAmount;
+    const outputA = ma.manaOutputAmount !== undefined ? ma.manaOutputAmount : ma.manaOutputAdvantageAmount;
+    const outputB = mb.manaOutputAmount !== undefined ? mb.manaOutputAmount : mb.manaOutputAdvantageAmount;
+    const advantageA = ma.manaAdvantageAmount !== undefined ? ma.manaAdvantageAmount : ma.manaNetAmount;
+    const advantageB = mb.manaAdvantageAmount !== undefined ? mb.manaAdvantageAmount : mb.manaNetAmount;
     const netSim = manaNumericSimilarity(netA, netB);
     const outputSim = manaNumericSimilarity(outputA, outputB);
+    const advantageSim = manaNumericSimilarity(advantageA, advantageB);
     const colorSim = manaColorProfileSimilarity({
         mode: ma.manaOutputMode,
         colors: ma.manaOutputColors || []
@@ -10263,10 +10466,12 @@ if (fnA === 'mana_ability' && fnB === 'mana_ability') {
         colors: mb.manaOutputColors || []
     });
     const activationSim = manaActivationSimilarity(ma.activationCost, mb.activationCost);
-    if (netSim != null) parts.push({ weight: 12, value: netSim });
-    if (outputSim != null) parts.push({ weight: 5, value: outputSim });
-    if (colorSim != null) parts.push({ weight: 8, value: colorSim });
-    if (activationSim != null) parts.push({ weight: 5, value: activationSim });
+    manaProfileSimilarity = calculateManaAbilityProfileSimilarity(ma, mb);
+    if (netSim != null) parts.push({ weight: 9, value: netSim });
+    if (outputSim != null) parts.push({ weight: 4, value: outputSim });
+    if (advantageSim != null) parts.push({ weight: 10, value: advantageSim });
+    if (colorSim != null) parts.push({ weight: 12, value: colorSim });
+    if (activationSim != null) parts.push({ weight: 9, value: activationSim });
     const rulesA = cfA.params?.manaAbilityRulesProfile || effA.manaAbilityRulesProfile || null;
     const rulesB = cfB.params?.manaAbilityRulesProfile || effB.manaAbilityRulesProfile || null;
     if (rulesA || rulesB) parts.push({ weight: 8, value: rulesA && rulesB ? (rulesA.isRulesManaAbility === rulesB.isRulesManaAbility ? 1 : 0.12) : 0.55 });
@@ -10298,6 +10503,7 @@ const structuralEvidence = normalizedFieldScore(parts);
 // on its own. When no structural field is available, retain only a conservative floor.
 const fieldFactor = parts.some(Boolean) ? (0.52 + 0.48 * structuralEvidence) : 0.52;
 let score = coreAlignment * fieldFactor;
+if (manaProfileSimilarity != null) score *= 0.52 + 0.48 * manaProfileSimilarity;
 score *= (1 - Math.min(0.45, scoreContradictions(effA, effB) / 100));
     return score;
 }
@@ -15927,6 +16133,68 @@ function runManaSearchMechanicalRegressionSuite({ log = true } = {}) {
         results.push({ id: 'mechanic-family-contrast-regressions', pass: false, error: error?.message || String(error) });
     }
 
+    // Parenthesized rules wrappers must preserve the rule contents and produce the same
+    // mana-choice profile as the unparenthesized Oracle form.
+    try {
+        const bogOracle = 'Geothermal Bog enters the battlefield tapped.\\n({T}: Add {B} or {R}.)';
+        const plainBogOracle = 'Geothermal Bog enters the battlefield tapped.\\n{T}: Add {B} or {R}.';
+        const bogContext = { name: 'Geothermal Bog', type_line: 'Land — Swamp Mountain', oracle_text: bogOracle };
+        const plainBogContext = { ...bogContext, oracle_text: plainBogOracle };
+        const solRingContext = { name: 'Sol Ring', type_line: 'Artifact', oracle_text: '{T}: Add {C}{C}.' };
+        const getManaEffect = (text, context) => parseMTGEffect(text, context).find(effect => effect?.action === 'add_mana') || null;
+        const bog = getManaEffect(bogOracle, bogContext);
+        const plainBog = getManaEffect(plainBogOracle, plainBogContext);
+        const solRing = getManaEffect(solRingContext.oracle_text, solRingContext);
+        const simultaneous = getManaEffect('{T}: Add {B}{R}.', { type_line: 'Land — Swamp Mountain' });
+        const bogParams = bog?.canonical?.params || {};
+        const plainBogParams = plainBog?.canonical?.params || {};
+        const solParams = solRing?.canonical?.params || {};
+        const bogSolScore = bog && solRing ? computeDirectionalMechanicalEffectPairSimilarity(bog, solRing) : null;
+        const bogProfileEquivalent = bog && plainBog &&
+            bogParams.manaOutputAmount === plainBogParams.manaOutputAmount &&
+            bogParams.manaOutputMode === plainBogParams.manaOutputMode &&
+            JSON.stringify(bogParams.manaOutputColors) === JSON.stringify(plainBogParams.manaOutputColors) &&
+            JSON.stringify(bogParams.activationCost?.parts) === JSON.stringify(plainBogParams.activationCost?.parts);
+        results.push({
+            id: 'parenthesized-and-plain-bog-rules-have-the-same-one-mana-choice-profile',
+            pass: bogProfileEquivalent &&
+                bogParams.manaOutputAmount === 1 &&
+                bogParams.manaOutputMode === 'choice_single_fixed_color' &&
+                ['b', 'r'].every(color => (bogParams.manaOutputColors || []).includes(color)) &&
+                bogParams.activationCost?.parts?.includes('tap') &&
+                !bogParams.activationCost?.parts?.includes('entry_tapped'),
+            parenthesized: bogParams,
+            unparenthesized: plainBogParams
+        });
+        results.push({
+            id: 'simultaneous-colored-symbols-remain-two-mana-not-a-one-mana-choice',
+            pass: simultaneous?.manaOutputAmount === 2 &&
+                simultaneous?.manaOutputMode === 'fixed_multi_color' &&
+                simultaneous?.manaOutput?.isChoice === false,
+            output: simultaneous?.manaOutput || null
+        });
+        results.push({
+            id: 'enters-tapped-is-entry-state-not-part-of-tap-activation-cost',
+            pass: bog?.entryState?.entersTapped === true &&
+                bog?.entryState?.timing === 'entry_only' &&
+                JSON.stringify(bogParams.activationCost?.parts) === JSON.stringify(['tap']) &&
+                manaActivationSimilarity(bogParams.activationCost, solParams.activationCost) === 1,
+            entryState: bog?.entryState || null,
+            activationCost: bogParams.activationCost || null
+        });
+        results.push({
+            id: 'geothermal-bog-and-sol-ring-share-mana-ability-but-not-near-identical-profiles',
+            pass: Number.isFinite(bogSolScore) && bogSolScore > 0.25 && bogSolScore < 0.90 &&
+                bogParams.manaNetAmount === 1 && solParams.manaNetAmount === 2 &&
+                solParams.manaOutputMode === 'fixed_colorless',
+            score: bogSolScore,
+            bog: { amount: bogParams.manaOutputAmount, mode: bogParams.manaOutputMode, colors: bogParams.manaOutputColors },
+            solRing: { amount: solParams.manaOutputAmount, mode: solParams.manaOutputMode, colors: solParams.manaOutputColors }
+        });
+    } catch (error) {
+        results.push({ id: 'mana-choice-and-parenthesis-regressions', pass: false, error: error?.message || String(error) });
+    }
+
     // A draw-step reference is phase/timing text, not card draw. At the same time, a real draw
     // action elsewhere on the card must remain scoreable even if its text also names the draw step.
     try {
@@ -16072,23 +16340,33 @@ function runManaSearchMasteryEdgeCaseRegressionSuite() {
     const ingeniousActual = parse('If {W}{U} was paid, draw three cards, then an opponent creates two Treasure tokens.');
     const ingeniousActualTreasure = ingeniousActual.find(effect => effect.canonical.function === 'token_creation' && effect.canonical.params.tokenType === 'treasure');
     check('Ingenious Mastery opponent Treasure tokens retain opponent recipient in canonical fields', Boolean(ingeniousActualTreasure) && ingeniousActualTreasure.canonical.params.recipientScope === 'opponent' && ingeniousActualTreasure.canonical.params.isOpponentBenefit, JSON.stringify(ingeniousActualTreasure?.canonical?.params || null));
-    const trail = { name: 'Trail of Evidence', type_line: 'Enchantment', oracle_text: 'Whenever you cast an instant or sorcery spell, investigate.' };
-    const trailEffects = annotateEffectRepeatability(trail, parseMTGEffect(trail.oracle_text), trail.oracle_text);
-    const trailClue = trailEffects.find(effect => effect.canonical?.function === 'token_creation' && effect.canonical.params.tokenType === 'clue');
+    const trailOracle = "Whenever you cast an instant or sorcery spell, investigate. (Create a Clue token. It's an artifact with \"{2}, Sacrifice this token: Draw a card.\")";
+    const trail = { name: 'Trail of Evidence', type_line: 'Enchantment', oracle_text: trailOracle };
+    const trailRuleGroups = splitOracleRulesPreservingReminderText(trailOracle);
+    const trailEffects = annotateEffectRepeatability(trail, parseMTGEffect(trailOracle, trail), trailOracle);
+    const trailClueNodes = trailEffects.filter(effect => effect.canonical?.function === 'token_creation' && effect.canonical.params.tokenType === 'clue');
+    const trailDrawNodes = trailEffects.filter(effect => effect.canonical?.function === 'card_draw' && effect.canonical.params.derivedFromTokenAbility);
+    const trailClue = trailClueNodes[0] || null;
     const trailProfile = getEffectRepeatabilityProfile(trailClue);
-    check('Trail of Evidence investigate is a repeatable Clue token engine', Boolean(trailClue) && trailProfile?.group === 'repeatable_engine' && ['repeatable_trigger','periodic_trigger'].includes(trailProfile?.kind), JSON.stringify({canonical:trailClue?.canonical,profile:trailProfile}));
-    check('Trail of Evidence Clue engine is eligible to be the primary mechanic', Boolean(trailClue?.isPrimary) && trailClue.importance >= 0.9, JSON.stringify({primary:trailClue?.isPrimary,importance:trailClue?.importance}));
-    const trailDraw = trailEffects.find(effect => effect.canonical?.function === 'card_draw' && effect.canonical.params.derivedFromTokenAbility);
-    check('Trail of Evidence exposes the Clue token activated draw as a graph effect', Boolean(trailDraw) && getEffectRepeatabilityProfile(trailDraw)?.kind === 'repeatable_activation', JSON.stringify({canonical:trailDraw?.canonical,profile:getEffectRepeatabilityProfile(trailDraw)}));
-    check('Trail of Evidence canonical Clue engine explains repeatable card draw', /repeatable Clue token engine/i.test(canonicalText(trailEffects.map(effect => effect.canonical).filter(Boolean))) && /repeatable activated card draw from a Clue token/i.test(canonicalText(trailEffects.map(effect => effect.canonical).filter(Boolean))), canonicalText(trailEffects.map(effect => effect.canonical).filter(Boolean)));
-    check('Trail of Evidence has no contradictory one-shot profile on investigate/Clue nodes', trailEffects.filter(effect => effect.canonical?.function === 'token_creation' && effect.canonical.params.tokenType === 'clue').every(effect => getEffectRepeatabilityProfile(effect)?.group === 'repeatable_engine') && trailEffects.filter(effect => effect.canonical?.params?.derivedFromTokenAbility).every(effect => getEffectRepeatabilityProfile(effect)?.kind === 'repeatable_activation'), JSON.stringify(trailEffects.map(effect => ({raw:effect.raw,fn:effect.canonical?.function,profile:getEffectRepeatabilityProfile(effect)}))));
+    check('Trail reminder remains attached to investigate rule', trailRuleGroups.length === 1 && trailRuleGroups[0].text === 'Whenever you cast an instant or sorcery spell, investigate.' && trailRuleGroups[0].reminderTexts.some(text => /Create a Clue token/i.test(text) && /Sacrifice this token: Draw a card/i.test(text)), JSON.stringify(trailRuleGroups));
+    check('Trail reminder creates no duplicate Clue or draw effects', trailClueNodes.length === 1 && trailDrawNodes.length === 1 && !trailEffects.some(effect => effect.canonical?.function === 'card_draw' && !effect.canonical.params?.derivedFromTokenAbility && /Clue/i.test(String(effect.raw || effect.parentRuleText || ''))), JSON.stringify(trailEffects.map(effect => ({raw:effect.raw,fn:effect.canonical?.function,tokenType:effect.canonical?.params?.tokenType,derived:effect.canonical?.params?.derivedFromTokenAbility}))));
+    check('Trail investigate trigger is repeatable at card level', Boolean(trailClue) && trailProfile?.group === 'repeatable_engine' && ['repeatable_trigger','periodic_trigger'].includes(trailProfile?.kind), JSON.stringify({canonical:trailClue?.canonical,profile:trailProfile}));
+    check('Trail Clue engine remains eligible as primary mechanic', Boolean(trailClue?.isPrimary) && trailClue.importance >= 0.9, JSON.stringify({primary:trailClue?.isPrimary,importance:trailClue?.importance}));
+    const trailDraw = trailDrawNodes[0] || null;
+    const trailDrawProfile = getEffectRepeatabilityProfile(trailDraw);
+    check('Each Clue draw activation is single-use per token', Boolean(trailDraw) && trailDrawProfile?.kind === 'single_use_activation' && trailDrawProfile?.group === 'single_use' && trailDrawProfile?.scope === 'per_token' && trailDraw?.activationCost?.parts?.includes('sacrifice this Clue token'), JSON.stringify({canonical:trailDraw?.canonical,activationCost:trailDraw?.activationCost,profile:trailDrawProfile}));
+    check('Trail card draw repeats through newly generated Clues', trailDrawProfile?.cardLevelGroup === 'repeatable_engine' && getDirectCardAcquisitionCadence(trail, trailEffects).repeatable && !getDirectCardAcquisitionCadence(trail, trailEffects).singleUse, JSON.stringify({profile:trailDrawProfile,acquisition:getDirectCardAcquisitionCadence(trail,trailEffects)}));
+    check('Trail canonical text explains both cadence scopes', /repeatable Clue token engine/i.test(canonicalText(trailEffects.map(effect => effect.canonical).filter(Boolean))) && /repeatable card advantage across separately created Clues/i.test(canonicalText(trailEffects.map(effect => effect.canonical).filter(Boolean))) && /sacrificed only once/i.test(canonicalText(trailEffects.map(effect => effect.canonical).filter(Boolean))), canonicalText(trailEffects.map(effect => effect.canonical).filter(Boolean)));
+    check('Trail draw preserves reminder source and actual {2} cost', trailDraw?.reminderProvenance === 'oracle_parenthetical_reminder' && /Sacrifice this token: Draw a card/i.test(String(trailDraw?.reminderText || '')) && /\{2\}/.test(String(trailDraw?.activationCost?.raw || '')), JSON.stringify({reminderText:trailDraw?.reminderText,provenance:trailDraw?.reminderProvenance,activationCost:trailDraw?.activationCost}));
     const trailIntentModel = buildSearchIntentPresentationModel(trail, []);
-    check('Trail of Evidence Live Search Model shows repeatable investigate and repeatable Clue draw', trailIntentModel.effectViews.length >= 2 && trailIntentModel.effectViews.every(view => view.cadence.group === 'repeatable_engine') && trailIntentModel.effectViews.some(view => /Repeatable triggered ability/.test(view.cadence.label)) && trailIntentModel.effectViews.some(view => /Repeatable activated ability/.test(view.cadence.label)), JSON.stringify(trailIntentModel.effectViews.map(view => ({label:view.label,cadence:view.cadence}))));
-    check('Trail of Evidence is recognized as both a repeatable token engine and card-advantage engine', trailIntentModel.roleViews.some(role => /repeatable token engine/i.test(role.role)) && trailIntentModel.roleViews.some(role => /card-advantage engine/i.test(role.role)), JSON.stringify(trailIntentModel.roleViews));
-    const trailRetrievalQueries = buildFunctionalRetrievalQueries(trail, trailEffects, '-name:\"Trail of Evidence\"', 4).map(item => item.query).join(' ').toLowerCase();
-    const trailRoleQuery = String(buildRoleFocusedRetrievalQuery(trail, trailEffects, '-name:\"Trail of Evidence\"') || '').toLowerCase();
-    check('Trail of Evidence functional retrieval explicitly queries investigate', /o:\"investigate\"/.test(trailRetrievalQueries) || /o:\"investigate\"/.test(trailRoleQuery), JSON.stringify({queries:trailRetrievalQueries,role:trailRoleQuery}));
-    check('Trail of Evidence repeatable Clue draw affects shared strategic scoring roles', trailIntentModel.roleViews.some(role => /card-advantage engine/i.test(role.role)) && trailIntentModel.roleViews.some(role => /repeatable token engine/i.test(role.role)), JSON.stringify(trailIntentModel.roleViews));
+    const trailClueView = trailIntentModel.effectViews.find(view => view.fn === 'token_creation' && view.effect.canonical?.params?.tokenType === 'clue');
+    const trailDrawView = trailIntentModel.effectViews.find(view => view.effect.canonical?.params?.derivedFromTokenAbility);
+    check('Trail Live Search explains trigger and per-token draw cadence', trailClueView?.cadence.group === 'repeatable_engine' && /Repeatable triggered ability/.test(trailClueView.cadence.label) && trailDrawView?.cadence.group === 'repeatable_engine' && trailDrawView.cadence.scope === 'per_token' && /Single-use per Clue token/.test(trailDrawView.cadence.label) && /repeatable across generated Clues/i.test(trailDrawView.cadence.label), JSON.stringify(trailIntentModel.effectViews.map(view => ({label:view.label,cadence:view.cadence}))));
+    check('Trail roles include token and card-advantage engines', trailIntentModel.roleViews.some(role => /repeatable token engine/i.test(role.role)) && trailIntentModel.roleViews.some(role => /card-advantage engine/i.test(role.role)), JSON.stringify(trailIntentModel.roleViews));
+    const trailRetrievalQueries = buildFunctionalRetrievalQueries(trail, trailEffects, '-name:"Trail of Evidence"', 4).map(item => item.query).join(' ').toLowerCase();
+    const trailRoleQuery = String(buildRoleFocusedRetrievalQuery(trail, trailEffects, '-name:"Trail of Evidence"') || '').toLowerCase();
+    check('Trail functional retrieval explicitly queries investigate', /o:"investigate"/.test(trailRetrievalQueries) || /o:"investigate"/.test(trailRoleQuery), JSON.stringify({queries:trailRetrievalQueries,role:trailRoleQuery}));
+    check('Trail repeatable draw remains in shared strategic roles', trailIntentModel.roleViews.some(role => /card-advantage engine/i.test(role.role)) && trailIntentModel.roleViews.some(role => /repeatable token engine/i.test(role.role)), JSON.stringify(trailIntentModel.roleViews));
 
     const moonshaker = { name: 'Moonshaker Cavalry', type_line: 'Creature — Horse Spirit', oracle_text: 'When Moonshaker Cavalry enters the battlefield, creatures you control get +X/+X and gain flying until end of turn, where X is the number of creatures you control.' };
     const moonEffects = annotateEffectRepeatability(moonshaker, parseMTGEffect(moonshaker.oracle_text), moonshaker.oracle_text);
@@ -27809,6 +28087,17 @@ function searchIntentCadenceDescription(effect) {
     if (!profile || profile.group === 'unknown' || !profile.kind) return { label: 'Repeatability unclear', group: 'unknown', detail: '' };
     const rawContext = String(effect?.contextClause || effect?.parentClauseRaw || effect?.raw || '');
     const trigger = effect?.triggerProfile || effect?.canonical?.params?.triggerProfile || {};
+    if (profile.scope === 'per_token') {
+        const cardLevelRepeatable = profile.cardLevelGroup === 'repeatable_engine';
+        return {
+            label: cardLevelRepeatable ? 'Single-use per Clue token; repeatable across generated Clues' : 'Single-use per Clue token',
+            group: profile.cardLevelGroup || profile.group,
+            scope: 'per_token',
+            detail: cardLevelRepeatable
+                ? 'Each Clue can be sacrificed only once for one draw. The card can repeat its draw engine by creating more Clues whenever its investigate trigger occurs.'
+                : 'Each Clue can be sacrificed only once for one draw; this token ability does not reuse the same Clue.'
+        };
+    }
     if (profile.kind === 'periodic_trigger') {
         const timing = profile.timingText || trigger.timingText || '';
         return { label: 'Recurring turn trigger', group: profile.group, detail: timing ? `repeats ${timing}` : 'repeats in a recurring turn window' };

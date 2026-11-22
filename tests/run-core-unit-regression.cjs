@@ -333,6 +333,7 @@ test('a two-mana land and a one-mana rock receive equivalent mechanical scores',
     'manaNumericSimilarity',
     'manaColorProfileSimilarity',
     'manaActivationSimilarity',
+    'calculateManaAbilityProfileSimilarity',
     'computeDirectionalMechanicalEffectPairSimilarity'
   ];
   const blocks = helperNames.map(name => extractFunction(name)).join('\n');
@@ -367,10 +368,12 @@ test('a two-mana land and a one-mana rock receive equivalent mechanical scores',
   const doubleLand = manaEffect(2, 1, 2, 1);
   const oneManaRock = manaEffect(1, 1, 1, 1);
   const ordinaryLand = manaEffect(1, 0, 1, 0);
-  assert.equal(sandbox.score(doubleLand, oneManaRock), 1,
-    'a land producing two mana should match a one-mana rock after baseline adjustment');
-  assert.ok(sandbox.score(ordinaryLand, oneManaRock) < 1,
-    'an ordinary one-mana land should not be treated as extra mana acceleration');
+  const doubleLandRockScore = sandbox.score(doubleLand, oneManaRock);
+  const ordinaryLandRockScore = sandbox.score(ordinaryLand, oneManaRock);
+  assert.ok(doubleLandRockScore >= 0.80 && doubleLandRockScore < 1,
+    'a two-mana land remains closely related to a one-mana rock without erasing its actual two-mana output');
+  assert.ok(ordinaryLandRockScore < doubleLandRockScore,
+    'the land-drop baseline should still make a two-mana land more rock-like than a normal one-mana land');
 });
 
 test('mana scorer and Related Search consume the land-adjusted mana fields', () => {
@@ -380,9 +383,115 @@ test('mana scorer and Related Search consume the land-adjusted mana fields', () 
   const scorer = app.slice(scorerStart, scorerEnd);
   assert.match(scorer, /ma\.manaAdvantageAmount/);
   assert.match(scorer, /ma\.manaOutputAdvantageAmount/);
+  assert.match(scorer, /calculateManaAbilityProfileSimilarity\(ma, mb\)/);
+  assert.match(scorer, /manaProfileSimilarity != null\) score \*= 0\.52 \+ 0\.48 \* manaProfileSimilarity/);
   assert.match(app, /manaAdvantageAmount !== undefined[\s\S]{0,160}manaNetAmount/);
   assert.match(app, /manaOutputAdvantageAmount !== undefined[\s\S]{0,160}manaOutputAmount/);
   assert.match(app, /manaSourceTypeSupportRatio/);
+});
+
+
+test('parenthesized rule normalization strips only enclosing formatting and preserves reminder contents', () => {
+  const normalize = extractFunction('normalizeParenthesizedOracleRuleFormatting');
+  const sandbox = {};
+  vm.runInNewContext(`${normalize}
+    this.results = [
+      normalizeParenthesizedOracleRuleFormatting('({T}: Add {B} or {R}.)'),
+      normalizeParenthesizedOracleRuleFormatting("Flying (This creature can't be blocked except by two or more creatures.)"),
+      normalizeParenthesizedOracleRuleFormatting('(This reminder text still describes an ability.)')
+    ];
+  `, sandbox);
+  assert.equal(sandbox.results[0], '{T}: Add {B} or {R}.');
+  assert.equal(sandbox.results[1], "Flying (This creature can't be blocked except by two or more creatures.)");
+  assert.equal(sandbox.results[2], 'This reminder text still describes an ability.');
+});
+
+test('Oracle rule scanner retains reminder provenance without parsing reminder sentences, while preserving parenthesized activated abilities', () => {
+  const helperNames = [
+    'normalizeParenthesizedOracleRuleFormatting',
+    'splitActivationCost',
+    'isParenthesizedOracleAbilityRule',
+    'splitOracleRulesPreservingReminderText'
+  ];
+  const blocks = helperNames.map(name => extractFunction(name)).join('\n');
+  const fullTrailOracle = "Whenever you cast an instant or sorcery spell, investigate. (Create a Clue token. It's an artifact with \"{2}, Sacrifice this token: Draw a card.\")";
+  const sandbox = {};
+  const runner = blocks + '\nthis.trail = splitOracleRulesPreservingReminderText(' + JSON.stringify(fullTrailOracle) + ');' +
+    '\nthis.mana = splitOracleRulesPreservingReminderText(\'({T}: Add {B} or {R}.)\');';
+  vm.runInNewContext(runner, sandbox);
+  assert.equal(sandbox.trail.length, 1, 'Clue reminder sentences must not become standalone card rules');
+  assert.equal(sandbox.trail[0].text, 'Whenever you cast an instant or sorcery spell, investigate.');
+  assert.equal(sandbox.trail[0].reminderTexts.length, 1);
+  assert.match(sandbox.trail[0].reminderTexts[0], /Create a Clue token/i);
+  assert.match(sandbox.trail[0].reminderTexts[0], /Sacrifice this token: Draw a card/i);
+  assert.equal(sandbox.mana.length, 1, 'an actual parenthesized mana activation remains a parseable rule');
+  assert.equal(sandbox.mana[0].isParenthesizedAbility, true);
+  assert.match(sandbox.mana[0].text, /^\{T\}: Add \{B\} or \{R\}\.$/);
+});
+
+test('mana output recognizes one-of color choices but not simultaneous colored mana symbols', () => {
+  const analyze = extractFunction('analyzeManaOutput');
+  const sandbox = {};
+  vm.runInNewContext(`${analyze}
+    this.choice = analyzeManaOutput('Add {B} or {R}.', 2);
+    this.oxfordChoice = analyzeManaOutput('Add {W}, {U}, or {B}.', 3);
+    this.simultaneous = analyzeManaOutput('Add {B}{R}.', 2);
+  `, sandbox);
+  assert.equal(sandbox.choice.amount, 1);
+  assert.equal(sandbox.choice.mode, 'choice_single_fixed_color');
+  assert.deepEqual(Array.from(sandbox.choice.colors), ['b', 'r']);
+  assert.equal(sandbox.oxfordChoice.amount, 1);
+  assert.equal(sandbox.oxfordChoice.mode, 'choice_single_fixed_color');
+  assert.equal(sandbox.simultaneous.amount, 2);
+  assert.equal(sandbox.simultaneous.mode, 'fixed_multi_color');
+});
+
+test('mana activation similarity compares tap and other activation-cost parts', () => {
+  const numeric = extractFunction('manaNumericSimilarity');
+  const activation = extractFunction('manaActivationSimilarity');
+  const sandbox = {};
+  vm.runInNewContext(`${numeric}
+    ${activation}
+    this.sameTap = manaActivationSimilarity(
+      { manaMin: 0, manaMax: 0, parts: ['tap'] },
+      { manaMin: 0, manaMax: 0, parts: ['tap'] }
+    );
+    this.tapVsNoCost = manaActivationSimilarity(
+      { manaMin: 0, manaMax: 0, parts: ['tap'] },
+      null
+    );
+  `, sandbox);
+  assert.equal(sandbox.sameTap, 1);
+  assert.ok(sandbox.tapVsNoCost < 0.5, `tap cost should differ from no activation cost, got ${sandbox.tapVsNoCost}`);
+});
+
+test('mana profile similarity weighs actual output, land baseline, color options, and activation cost', () => {
+  const names = ['manaNumericSimilarity', 'manaColorProfileSimilarity', 'manaActivationSimilarity', 'calculateManaAbilityProfileSimilarity'];
+  const blocks = names.map(name => extractFunction(name)).join('\n');
+  const sandbox = {};
+  vm.runInNewContext(`${blocks}
+    const tap = { manaMin: 0, manaMax: 0, parts: ['tap'] };
+    const bog = {
+      manaNetAmount: 1, manaOutputAmount: 1, manaAdvantageAmount: 0, manaOutputAdvantageAmount: 0,
+      manaOutputMode: 'choice_single_fixed_color', manaOutputColors: ['b', 'r'], activationCost: tap
+    };
+    const solRing = {
+      manaNetAmount: 2, manaOutputAmount: 2, manaAdvantageAmount: 2, manaOutputAdvantageAmount: 2,
+      manaOutputMode: 'fixed_colorless', manaOutputColors: ['c'], activationCost: tap
+    };
+    const twoManaLand = {
+      manaNetAmount: 2, manaOutputAmount: 2, manaAdvantageAmount: 1, manaOutputAdvantageAmount: 1,
+      manaOutputMode: 'fixed_colorless', manaOutputColors: ['c'], activationCost: tap
+    };
+    const oneManaRock = {
+      manaNetAmount: 1, manaOutputAmount: 1, manaAdvantageAmount: 1, manaOutputAdvantageAmount: 1,
+      manaOutputMode: 'fixed_colorless', manaOutputColors: ['c'], activationCost: tap
+    };
+    this.bogVsSol = calculateManaAbilityProfileSimilarity(bog, solRing);
+    this.doubleLandVsRock = calculateManaAbilityProfileSimilarity(twoManaLand, oneManaRock);
+  `, sandbox);
+  assert.ok(sandbox.bogVsSol < 0.5, `one colored mana choice should differ from two colorless mana, got ${sandbox.bogVsSol}`);
+  assert.ok(sandbox.doubleLandVsRock > 0.8, `two-mana land should remain related to one-mana rock after baseline adjustment, got ${sandbox.doubleLandVsRock}`);
 });
 
 const failed = cases.filter(c => !c.pass);
