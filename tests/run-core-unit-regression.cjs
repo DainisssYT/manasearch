@@ -292,6 +292,99 @@ test('semantic worker query envelopes are unwrapped into arrays without breaking
   assert.deepEqual(Array.from(sandbox.results[3]), []);
 });
 
+test("mana source scoring discounts a land's normal one-mana land-drop baseline", () => {
+  const helper = extractFunction('getManaAdvantageAmount');
+  const finalizer = extractFunction('finalizeManaAbilityEffect');
+  const sandbox = {};
+  vm.runInNewContext(`${helper}\n${finalizer}\nthis.finalize = finalizeManaAbilityEffect; this.measure = getManaAdvantageAmount;`, sandbox);
+  const makeEffect = amount => ({
+    action: 'add_mana',
+    amount,
+    manaOutput: { amount, mode: 'fixed_colorless', colors: ['c'], uniqueColorCount: 1 },
+    activationCost: { manaMin: 0, manaMax: 0, manaExact: true }
+  });
+  const doubleLand = sandbox.finalize(makeEffect(2), { type_line: 'Land — Desert' });
+  const basicLand = sandbox.finalize(makeEffect(1), { type_line: 'Basic Land — Island' });
+  const oneManaRock = sandbox.finalize(makeEffect(1), { type_line: 'Artifact' });
+  const threeManaLand = sandbox.finalize(makeEffect(3), { type_line: 'Land' });
+  const manaCostLand = sandbox.finalize({
+    ...makeEffect(2),
+    activationCost: { manaMin: 1, manaMax: 1, manaExact: true }
+  }, { type_line: 'Land' });
+
+  assert.equal(doubleLand.manaNetAmount, 2, 'raw net mana must be retained');
+  assert.equal(doubleLand.manaAdvantageAmount, 1, 'a two-mana land is one mana above the ordinary land baseline');
+  assert.equal(doubleLand.manaOutputAdvantageAmount, 1);
+  assert.equal(oneManaRock.manaAdvantageAmount, 1, 'a one-mana nonland source contributes its full output');
+  assert.equal(oneManaRock.manaOutputAdvantageAmount, 1);
+  assert.equal(doubleLand.manaAdvantageAmount, oneManaRock.manaAdvantageAmount,
+    'the land and mana rock should have identical normalized mana contributions');
+  assert.equal(basicLand.manaAdvantageAmount, 0, 'a normal one-mana land is baseline, not ramp');
+  assert.equal(threeManaLand.manaAdvantageAmount, 2);
+  assert.equal(manaCostLand.manaAdvantageAmount, 0, 'activation mana costs are subtracted before the land baseline');
+  assert.equal(sandbox.measure(null, 'Land'), null, 'unknown output must remain unknown');
+});
+
+test('a two-mana land and a one-mana rock receive equivalent mechanical scores', () => {
+  const helperNames = [
+    'fieldSimilarity',
+    'normalizedFieldScore',
+    'scoreContradictions',
+    'manaNumericSimilarity',
+    'manaColorProfileSimilarity',
+    'manaActivationSimilarity',
+    'computeDirectionalMechanicalEffectPairSimilarity'
+  ];
+  const blocks = helperNames.map(name => extractFunction(name)).join('\n');
+  const sandbox = {};
+  vm.runInNewContext(`
+    const ACTION_TAXONOMY = { add_mana: { family: 'mana' } };
+    function getFunctionAffinity(a, b) { return a === b ? 1 : 0; }
+    function compareGameStateConditionProfiles(a, b) { return (!a && !b) ? 1 : (a && b ? 1 : 0.62); }
+    function getEffectRepeatabilityProfile(effect) { return effect.repeatabilityProfile || null; }
+    function repeatabilityProfileSimilarity() { return 1; }
+    ${blocks}
+    this.score = computeDirectionalMechanicalEffectPairSimilarity;
+  `, sandbox);
+  const manaEffect = (rawNet, advantage, rawOutput, outputAdvantage) => ({
+    action: 'add_mana',
+    quantity: advantage,
+    restriction: [],
+    canonical: {
+      function: 'mana_ability',
+      outcome: 'mana_added',
+      params: {
+        manaNetAmount: rawNet,
+        manaOutputAmount: rawOutput,
+        manaAdvantageAmount: advantage,
+        manaOutputAdvantageAmount: outputAdvantage,
+        manaOutputMode: 'fixed_colorless',
+        manaOutputColors: ['c'],
+        activationCost: { manaMin: 0, manaMax: 0 }
+      }
+    }
+  });
+  const doubleLand = manaEffect(2, 1, 2, 1);
+  const oneManaRock = manaEffect(1, 1, 1, 1);
+  const ordinaryLand = manaEffect(1, 0, 1, 0);
+  assert.equal(sandbox.score(doubleLand, oneManaRock), 1,
+    'a land producing two mana should match a one-mana rock after baseline adjustment');
+  assert.ok(sandbox.score(ordinaryLand, oneManaRock) < 1,
+    'an ordinary one-mana land should not be treated as extra mana acceleration');
+});
+
+test('mana scorer and Related Search consume the land-adjusted mana fields', () => {
+  const scorerStart = app.indexOf('function computeDirectionalMechanicalEffectPairSimilarity(');
+  const scorerEnd = app.indexOf('\nfunction getDirectionalMechanicalEffectPairSimilarity(', scorerStart);
+  assert.ok(scorerStart >= 0 && scorerEnd > scorerStart);
+  const scorer = app.slice(scorerStart, scorerEnd);
+  assert.match(scorer, /ma\.manaAdvantageAmount/);
+  assert.match(scorer, /ma\.manaOutputAdvantageAmount/);
+  assert.match(app, /manaAdvantageAmount !== undefined[\s\S]{0,160}manaNetAmount/);
+  assert.match(app, /manaOutputAdvantageAmount !== undefined[\s\S]{0,160}manaOutputAmount/);
+  assert.match(app, /manaSourceTypeSupportRatio/);
+});
+
 const failed = cases.filter(c => !c.pass);
 for (const c of cases) console.log(`${c.pass ? 'PASS' : 'FAIL'} ${c.name}${c.error ? ` — ${c.error}` : ''}`);
 console.log(`\nCore mechanical unit checks: ${cases.length - failed.length}/${cases.length} passed.`);
