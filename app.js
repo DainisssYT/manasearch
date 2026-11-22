@@ -1,6 +1,6 @@
 /* ManaSearch build 20261122-1837 */
 // ManaSearch deployment build marker. Bump this whenever app.js changes so cached-module issues are easy to diagnose.
-const MANASEARCH_APP_BUILD = '20261122-1836';
+const MANASEARCH_APP_BUILD = '20261122-1837';
 console.info(`[ManaSearch] app.js build ${MANASEARCH_APP_BUILD}`);
 
 // The source-query and static-index builders share one representation so both sides
@@ -8454,7 +8454,7 @@ function parseMTGEffect(oracleText, cardContext = null) {
     const parentRuleTexts = [];
     const previousRuleTexts = [];
     const reminderTextsByClause = [];
-    let mostRecentLandSearch = '';
+    let mostRecentLandSearch = '';    let mostRecentLandSearch = '';
     let mostRecentLandSearchIndex = -100;
     for (let ruleGroupIndex = 0; ruleGroupIndex < ruleGroups.length; ruleGroupIndex++) {
         const ruleGroupText = ruleGroups[ruleGroupIndex];
@@ -9693,13 +9693,15 @@ function repeatabilityProfileSimilarity(profileA, profileB) {
     if (!groupA || !groupB || groupA === 'unknown' || groupB === 'unknown') return 1;
     let score;
     if (profileA.kind === profileB.kind && groupA === groupB) score = 1;
-    else if (groupA === 'repeatable_engine' && groupB === 'repeatable_engine') score = 0.74;
-    else if (groupA === 'single_use' && groupB === 'single_use') score = 0.70;
-    else if (groupA === 'limited_reuse' && groupB === 'single_use' || groupB === 'limited_reuse' && groupA === 'single_use') score = 0.66;
+    else if (groupA === 'repeatable_engine' && groupB === 'repeatable_engine') {
+        score = (profileA.kind === 'periodic_trigger' || profileB.kind === 'periodic_trigger') ? 0.78 : 0.74;
+    } else if (groupA === 'single_use' && groupB === 'single_use') {
+        score = (profileA.kind === 'one_shot' || profileB.kind === 'one_shot') ? 0.78 : 0.70;
+    } else if (groupA === 'limited_reuse' && groupB === 'single_use' || groupB === 'limited_reuse' && groupA === 'single_use') score = 0.66;
     else if (groupA === 'repeatable_engine' && groupB === 'limited_reuse' || groupB === 'repeatable_engine' && groupA === 'limited_reuse') score = 0.46;
     else if (groupA === 'repeatable_engine' && groupB === 'single_use' || groupB === 'repeatable_engine' && groupA === 'single_use') {
         const oneShot = profileA.kind === 'one_shot' || profileB.kind === 'one_shot';
-        const entryOnly = ['entry_trigger','self_event'].includes(profileA.kind) || ['entry_trigger','self_event'].includes(profileB.kind);
+        const entryOnly = profileA.kind === 'entry_trigger' || profileB.kind === 'entry_trigger' || profileA.kind === 'self_event' || profileB.kind === 'self_event';
         score = oneShot ? 0.10 : (entryOnly ? 0.20 : 0.16);
     } else score = 0.55;
     const confidence = Math.min(Number(profileA.confidence ?? 1), Number(profileB.confidence ?? 1));
