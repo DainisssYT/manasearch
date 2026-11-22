@@ -1,6 +1,6 @@
-/* ManaSearch build 20261122-165 */
+/* ManaSearch build 20261122-1834 */
 // ManaSearch deployment build marker. Bump this whenever app.js changes so cached-module issues are easy to diagnose.
-const MANASEARCH_APP_BUILD = '20261122-165';
+const MANASEARCH_APP_BUILD = '20261122-1834';
 console.info(`[ManaSearch] app.js build ${MANASEARCH_APP_BUILD}`);
 
 // The source-query and static-index builders share one representation so both sides
@@ -6280,11 +6280,25 @@ function analyzeManaOutput(text, amount) {
         isChoice: mode === 'choice_single_fixed_color'
     };
 }
-function finalizeManaAbilityEffect(effect) {
+function getManaAdvantageAmount(amount, typeLine = '') {
+    // A normal land drop already supplies one mana per turn. Count only a land's output
+    // above that baseline; nonland sources contribute their full net mana production.
+    // Null/unknown is deliberately not coerced to zero.
+    if (amount === null || amount === undefined || amount === '' || !Number.isFinite(Number(amount))) return null;
+    const baseline = /\bland\b/i.test(String(typeLine || '')) ? 1 : 0;
+    return Math.max(0, Number(amount) - baseline);
+}
+
+function finalizeManaAbilityEffect(effect, cardContext = null) {
     if (!effect || effect.action !== 'add_mana') return effect;
 
     const output = effect.manaOutput || analyzeManaOutput(effect.raw || '', effect.amount);
     const cost = effect.activationCost || null;
+    const cardTypeLine = [
+        String(cardContext?.type_line || ''),
+        ...(Array.isArray(cardContext?.card_faces) ? cardContext.card_faces.map(face => String(face?.type_line || '')) : [])
+    ].join(' ');
+    const manaLandBaseline = /\bland\b/i.test(cardTypeLine) ? 1 : 0;
     let netAmount = null;
     let netMin = null;
     let netMax = null;
@@ -6298,11 +6312,20 @@ function finalizeManaAbilityEffect(effect) {
         if (netMin != null && netMin === netMax) netAmount = netMin;
     }
 
+    const manaAdvantageAmount = getManaAdvantageAmount(netAmount, cardTypeLine);
+    const manaAdvantageMin = getManaAdvantageAmount(netMin, cardTypeLine);
+    const manaAdvantageMax = getManaAdvantageAmount(netMax, cardTypeLine);
+    const manaOutputAdvantageAmount = getManaAdvantageAmount(output.amount, cardTypeLine);
     effect.manaOutput = {
         ...output,
         netAmount,
         netMin,
         netMax,
+        manaLandBaseline,
+        manaAdvantageAmount,
+        manaAdvantageMin,
+        manaAdvantageMax,
+        outputAdvantageAmount: manaOutputAdvantageAmount,
         activationManaMin: Number.isFinite(Number(cost?.manaMin)) ? Number(cost.manaMin) : 0,
         activationManaMax: cost?.manaMax == null ? null : (Number.isFinite(Number(cost.manaMax)) ? Number(cost.manaMax) : null),
         activationManaExact: Boolean(cost?.manaExact)
@@ -6311,6 +6334,11 @@ function finalizeManaAbilityEffect(effect) {
     effect.manaNetAmount = netAmount;
     effect.manaNetMin = netMin;
     effect.manaNetMax = netMax;
+    effect.manaLandBaseline = manaLandBaseline;
+    effect.manaAdvantageAmount = manaAdvantageAmount;
+    effect.manaAdvantageMin = manaAdvantageMin;
+    effect.manaAdvantageMax = manaAdvantageMax;
+    effect.manaOutputAdvantageAmount = manaOutputAdvantageAmount;
     effect.manaOutputMode = output.mode;
     effect.manaOutputColors = output.colors;
     effect.manaOutputColorCount = output.uniqueColorCount;
@@ -8376,7 +8404,10 @@ function parseMTGEffect(oracleText, cardContext = null) {
         // Example: Boros Signet pays {1} to add {R}{W}; output is two mana, but the net increase
         // is one. Both values are retained so color-fixing and gross output remain visible.
         if (parsed.action === 'add_mana') {
-            finalizeManaAbilityEffect(parsed);
+            finalizeManaAbilityEffect(parsed, cardContext);
+            // All generic quantity-based consumers use the same land-adjusted acceleration value.
+            // The actual printed output remains in amount/manaNetAmount.
+            parsed.quantity = parsed.manaAdvantageAmount;
             parsed.manaAbilityRulesProfile = classifyManaAbilityRules(`${costText || ''} ${clause}`, effectText);
         }
 
@@ -8803,14 +8834,15 @@ function deriveCanonicalFunction(effect) {
         magnitude = `${effect.amount} damage`;
         quantity = typeof effect.amount === 'number' ? effect.amount : null;
     } else if (fn === "mana_ability") {
-        const netPart = effect.manaNetAmount != null && Number.isFinite(Number(effect.manaNetAmount)) ? ` net ${effect.manaNetAmount}` : '';
+        const manaAdvantage = effect.manaAdvantageAmount !== undefined ? effect.manaAdvantageAmount : effect.manaNetAmount;
+        const manaAdvantagePart = manaAdvantage != null && Number.isFinite(Number(manaAdvantage))
+            ? `${Number(manaAdvantage)} incremental mana`
+            : 'mana production';
         const colorPart = effect.colors && effect.colors.length > 0 ? effect.colors.join('/') : null;
-        magnitude = [effect.amount, colorPart, 'mana', netPart].filter(Boolean).join(' ');
-        // Quantity is the actual net mana increase when the activation cost is known. Gross
-        // production is preserved as manaOutputAmount for a separate, lower-weight comparison.
-        quantity = effect.manaNetAmount != null && Number.isFinite(Number(effect.manaNetAmount))
-            ? Number(effect.manaNetAmount)
-            : (typeof effect.amount === 'number' ? effect.amount : null);
+        // Canonical magnitude/quantity use mana advantage, not raw output. Raw output and net
+        // output remain separately available in params for evidence and color/output matching.
+        magnitude = [manaAdvantagePart, colorPart].filter(Boolean).join(' ');
+        quantity = manaAdvantage != null && Number.isFinite(Number(manaAdvantage)) ? Number(manaAdvantage) : null;
     } else if (fn === "gain_life" || fn === "lose_life") {
         magnitude = `${effect.amount} life`;
         quantity = typeof effect.amount === 'number' ? effect.amount : null;
@@ -8840,6 +8872,11 @@ function deriveCanonicalFunction(effect) {
             manaNetAmount: fn === 'mana_ability' && effect.manaNetAmount != null && Number.isFinite(Number(effect.manaNetAmount)) ? Number(effect.manaNetAmount) : null,
             manaNetMin: fn === 'mana_ability' && effect.manaNetMin != null && Number.isFinite(Number(effect.manaNetMin)) ? Number(effect.manaNetMin) : null,
             manaNetMax: fn === 'mana_ability' && effect.manaNetMax != null && Number.isFinite(Number(effect.manaNetMax)) ? Number(effect.manaNetMax) : null,
+            manaLandBaseline: fn === 'mana_ability' && Number.isFinite(Number(effect.manaLandBaseline)) ? Number(effect.manaLandBaseline) : null,
+            manaAdvantageAmount: fn === 'mana_ability' && effect.manaAdvantageAmount != null && Number.isFinite(Number(effect.manaAdvantageAmount)) ? Number(effect.manaAdvantageAmount) : null,
+            manaAdvantageMin: fn === 'mana_ability' && effect.manaAdvantageMin != null && Number.isFinite(Number(effect.manaAdvantageMin)) ? Number(effect.manaAdvantageMin) : null,
+            manaAdvantageMax: fn === 'mana_ability' && effect.manaAdvantageMax != null && Number.isFinite(Number(effect.manaAdvantageMax)) ? Number(effect.manaAdvantageMax) : null,
+            manaOutputAdvantageAmount: fn === 'mana_ability' && effect.manaOutputAdvantageAmount != null && Number.isFinite(Number(effect.manaOutputAdvantageAmount)) ? Number(effect.manaOutputAdvantageAmount) : null,
             manaOutputMode: fn === 'mana_ability' ? (effect.manaOutputMode || effect.manaOutput?.mode || null) : null,
             manaOutputColors: fn === 'mana_ability' ? (effect.manaOutputColors || effect.manaOutput?.colors || []) : [],
             manaOutputColorCount: fn === 'mana_ability' ? (effect.manaOutputColorCount ?? effect.manaOutput?.uniqueColorCount ?? null) : null,
@@ -8904,6 +8941,15 @@ function canonicalFunctionToText(canonicalFunctions) {
             const buffs = p.magnitude || '+X/+X';
             const keywords = (p.grantedKeywords || []).join(', ');
             return `combat anthem/finisher: creatures you control get ${buffs}, where X is the number of creatures you control${keywords ? `, and gain ${keywords}` : ''}${p.duration === 'temporary' ? ' until end of turn' : ''}`;
+        }
+        if (cf.function === 'mana_ability') {
+            const advantage = p.manaAdvantageAmount;
+            const outputAdvantage = p.manaOutputAdvantageAmount;
+            const colors = Array.isArray(p.manaOutputColors) ? p.manaOutputColors.join('/') : '';
+            const netText = advantage == null ? 'variable additional mana' : `${advantage} additional mana`;
+            const outputText = outputAdvantage != null && outputAdvantage !== advantage
+                ? ` (gross output advantage ${outputAdvantage})` : '';
+            return `mana source ability: ${netText} after activation costs${outputText}${colors ? `; output colors ${colors}` : ''}; reusable mana production`;
         }
         if (cf.function === 'zone_change' && p.from === 'hand' && p.to === 'exile') {
             return 'exile a card from hand';
@@ -9566,9 +9612,16 @@ function strategicRoleMaxNumber(parsedEffects, fn) {
     for (const e of (parsedEffects || [])) {
         if (!e.canonical || e.canonical.function !== fn) continue;
         if (fn === 'mana_ability') {
-            if (e.manaNetAmount != null && Number.isFinite(Number(e.manaNetAmount))) max = Math.max(max, Number(e.manaNetAmount));
-            else if (e.canonical.params?.manaNetAmount != null && Number.isFinite(Number(e.canonical.params.manaNetAmount))) max = Math.max(max, Number(e.canonical.params.manaNetAmount));
-            else if (typeof e.quantity === 'number') max = Math.max(max, e.quantity);
+            const adjusted = e.manaAdvantageAmount !== undefined ? e.manaAdvantageAmount : e.canonical.params?.manaAdvantageAmount;
+            if (adjusted !== undefined) {
+                if (adjusted != null && Number.isFinite(Number(adjusted))) max = Math.max(max, Number(adjusted));
+            } else if (e.manaNetAmount != null && Number.isFinite(Number(e.manaNetAmount))) {
+                max = Math.max(max, Number(e.manaNetAmount));
+            } else if (e.canonical.params?.manaNetAmount != null && Number.isFinite(Number(e.canonical.params.manaNetAmount))) {
+                max = Math.max(max, Number(e.canonical.params.manaNetAmount));
+            } else if (typeof e.quantity === 'number') {
+                max = Math.max(max, e.quantity);
+            }
             continue;
         }
         if (typeof e.quantity === 'number') max = Math.max(max, e.quantity);
@@ -9608,17 +9661,17 @@ function inferStrategicRoleProfileUncached(card, parsedEffects = [], intentText 
         /\bpay\b|\{t\}|\b:\s*(?:add|draw|return|exile|search|create)/i.test(text);
     const permanent = /\b(?:creature|artifact|enchantment|planeswalker|land|battle)\b/.test(typeLine);
 
-    // Fast mana: require an explicit mana-producing ability plus either >1 mana per activation,
-    // or a clearly early/efficient nonland permanent. A generic "add one mana" land is not enough.
+    // Fast mana is measured relative to the ordinary land-drop baseline. A land producing
+    // two mana contributes one extra mana; a nonland rock producing one mana also contributes one.
+    // A basic one-mana land contributes no acceleration and must not receive this role.
     const maxMana = strategicRoleMaxNumber(parsedEffects, 'mana_ability');
     if (functions.has('mana_ability')) {
-        // Use net mana, not the number of output symbols. A signet that spends {1} to add two
-        // mana is a net +1 mana source, even though its Oracle text contains two output symbols.
-        const lowCostPermanent = permanent && Number.isFinite(card?.cmc) && card.cmc <= 2;
+        const isLand = /\bland\b/.test(typeLine);
+        const lowCostNonlandPermanent = permanent && !isLand && Number.isFinite(card?.cmc) && card.cmc <= 2;
         if (maxMana >= 2) {
-            strategicRoleAdd(roles, 'fast_mana', 0.82, ['reusable mana production', 'multiple net mana per activation'], lowCostPermanent ? 0.05 : 0);
-        } else if (lowCostPermanent && activated) {
-            strategicRoleAdd(roles, 'fast_mana', 0.64, ['early permanent mana source', 'activated mana ability']);
+            strategicRoleAdd(roles, 'fast_mana', 0.82, ['reusable mana production', 'multiple incremental mana per activation'], lowCostNonlandPermanent ? 0.05 : 0);
+        } else if ((lowCostNonlandPermanent || isLand) && maxMana >= 1 && activated) {
+            strategicRoleAdd(roles, 'fast_mana', 0.64, ['early permanent mana source', 'incremental activated mana ability']);
         }
     }
 
@@ -10195,8 +10248,13 @@ if (fnA === 'cast_timing_permission' && fnB === 'cast_timing_permission') {
 
 if (fnA === 'mana_ability' && fnB === 'mana_ability') {
     const ma = cfA.params || {}, mb = cfB.params || {};
-    const netSim = manaNumericSimilarity(ma.manaNetAmount, mb.manaNetAmount);
-    const outputSim = manaNumericSimilarity(ma.manaOutputAmount, mb.manaOutputAmount);
+    // Compare acceleration beyond the normal land-drop baseline, not raw land output.
+    const netA = ma.manaAdvantageAmount !== undefined ? ma.manaAdvantageAmount : ma.manaNetAmount;
+    const netB = mb.manaAdvantageAmount !== undefined ? mb.manaAdvantageAmount : mb.manaNetAmount;
+    const outputA = ma.manaOutputAdvantageAmount !== undefined ? ma.manaOutputAdvantageAmount : ma.manaOutputAmount;
+    const outputB = mb.manaOutputAdvantageAmount !== undefined ? mb.manaOutputAdvantageAmount : mb.manaOutputAmount;
+    const netSim = manaNumericSimilarity(netA, netB);
+    const outputSim = manaNumericSimilarity(outputA, outputB);
     const colorSim = manaColorProfileSimilarity({
         mode: ma.manaOutputMode,
         colors: ma.manaOutputColors || []
@@ -11626,8 +11684,12 @@ function calculateAggregateQuantitySimilarity(parsedSource, parsedCandidate, cov
     let total = 0, weight = 0;
     for (const [i, j, pair] of coverageProfile.matches) {
         const a = parsedSource?.[i], b = parsedCandidate?.[j];
-        const qa = a?.quantity ?? a?.amount ?? a?.canonical?.params?.quantity ?? null;
-        const qb = b?.quantity ?? b?.amount ?? b?.canonical?.params?.quantity ?? null;
+        const qa = a?.canonical?.function === 'mana_ability'
+            ? (a.canonical.params?.manaAdvantageAmount !== undefined ? a.canonical.params.manaAdvantageAmount : (a?.quantity ?? a?.amount ?? a?.canonical?.params?.quantity ?? null))
+            : (a?.quantity ?? a?.amount ?? a?.canonical?.params?.quantity ?? null);
+        const qb = b?.canonical?.function === 'mana_ability'
+            ? (b.canonical.params?.manaAdvantageAmount !== undefined ? b.canonical.params.manaAdvantageAmount : (b?.quantity ?? b?.amount ?? b?.canonical?.params?.quantity ?? null))
+            : (b?.quantity ?? b?.amount ?? b?.canonical?.params?.quantity ?? null);
         if (qa == null || qb == null || !Number.isFinite(Number(qa)) || !Number.isFinite(Number(qb))) continue;
         const av = Number(qa), bv = Number(qb);
         const similarity = Math.max(0, 1 - Math.abs(av - bv) / Math.max(Math.abs(av), Math.abs(bv), 1));
@@ -11988,7 +12050,7 @@ function comparePolarity(a = {}, b = {}) {
 function buildUniversalFunctionalText(card = null, text = '', parsedEffects = null) {
     const oracle = String(text || card?.oracle_text || (card?.card_faces ? card.card_faces.map(f => f.oracle_text || '').join(' ') : '') || '').trim();
     let parsed = parsedEffects;
-    try { parsed = Array.isArray(parsed) ? parsed : parseMTGEffect(oracle); } catch (_) { parsed = []; }
+    try { parsed = Array.isArray(parsed) ? parsed : parseMTGEffect(oracle, card); } catch (_) { parsed = []; }
     const profile = buildUniversalMechanicProfile(card, oracle, parsed);
     const parts = [];
     const canonical = getCachedCanonicalFunctionText(parsed);
@@ -20782,14 +20844,19 @@ function buildRelatedIntentProfile(cards = [], selectedCards = []) {
 
             const cfParams = entry.canonical?.params || {};
             const q = entry.functionName === 'mana_ability'
-                ? (cfParams.manaNetAmount ?? cfParams.quantity ?? entry.effect?.manaNetAmount ?? entry.effect?.quantity ?? null)
+                ? (cfParams.manaAdvantageAmount !== undefined
+                    ? cfParams.manaAdvantageAmount
+                    : (cfParams.manaNetAmount ?? cfParams.quantity ?? entry.effect?.manaNetAmount ?? entry.effect?.quantity ?? null))
                 : (cfParams.quantity ?? entry.effect?.quantity ?? entry.effect?.amount ?? null);
-            if (Number.isFinite(Number(q))) {
+            const outputValue = entry.functionName === 'mana_ability'
+                ? (cfParams.manaOutputAdvantageAmount !== undefined ? cfParams.manaOutputAdvantageAmount : cfParams.manaOutputAmount)
+                : null;
+            if (q != null && Number.isFinite(Number(q))) {
                 stat.paramSamples.push({
                     value: Number(q),
                     weight: supportWeight,
                     cardName: ref.card.name,
-                    outputValue: entry.functionName === 'mana_ability' && cfParams.manaOutputAmount != null && Number.isFinite(Number(cfParams.manaOutputAmount)) ? Number(cfParams.manaOutputAmount) : null
+                    outputValue: outputValue != null && Number.isFinite(Number(outputValue)) ? Number(outputValue) : null
                 });
             }
         }
@@ -20862,11 +20929,11 @@ function buildRelatedIntentProfile(cards = [], selectedCards = []) {
     const dominantRole = Array.from(roleStats.values()).sort((a, b) => b.weight - a.weight)[0] || null;
     if (dominantRole) dominantRole.supportRatio = Math.min(1, dominantRole.weight / totalRefWeight);
 
-    const artifactSupportWeight = refs.reduce((sum, ref) => {
+    const manaSourceTypeSupportWeight = refs.reduce((sum, ref) => {
         const typeLine = String(ref.card?.type_line || '').toLowerCase();
-        return sum + (/\bartifact\b/.test(typeLine) && !/\bland\b/.test(typeLine) ? ref.weight : 0);
+        return sum + (/\b(?:artifact|land)\b/.test(typeLine) ? ref.weight : 0);
     }, 0);
-    const artifactSupportRatio = Math.min(1, artifactSupportWeight / totalRefWeight);
+    const manaSourceTypeSupportRatio = Math.min(1, manaSourceTypeSupportWeight / totalRefWeight);
 
     // Parameter confidence is deliberately multiplied by function support. Five cards agreeing
     // on "mana_ability" but only two providing a numeric amount should not create a hard amount
@@ -20890,7 +20957,7 @@ function buildRelatedIntentProfile(cards = [], selectedCards = []) {
         numericConfidence,
         numericParameterStrength: parameterStrength,
         dominantRole,
-        artifactSupportRatio,
+        manaSourceTypeSupportRatio,
         manaOutputTarget,
         manaOutputConfidence,
         confidence: consensusConfidence,
@@ -20906,8 +20973,12 @@ function getRelatedCandidateFunctionRecords(parsedEffects = [], functionName = n
         out.push({
             effect,
             canonical: cf,
-            quantity: cf.function === 'mana_ability' && cf.params?.manaNetAmount != null && Number.isFinite(Number(cf.params.manaNetAmount))
-                ? Number(cf.params.manaNetAmount)
+            quantity: cf.function === 'mana_ability'
+                ? (cf.params?.manaAdvantageAmount !== undefined
+                    ? (cf.params.manaAdvantageAmount != null && Number.isFinite(Number(cf.params.manaAdvantageAmount)) ? Number(cf.params.manaAdvantageAmount) : null)
+                    : (cf.params?.manaNetAmount != null && Number.isFinite(Number(cf.params.manaNetAmount))
+                        ? Number(cf.params.manaNetAmount)
+                        : (cf.params?.quantity != null && Number.isFinite(Number(cf.params.quantity)) ? Number(cf.params.quantity) : null)))
                 : (cf.params?.quantity != null && Number.isFinite(Number(cf.params.quantity))
                     ? Number(cf.params.quantity)
                     : (effect.quantity != null && Number.isFinite(Number(effect.quantity)) ? Number(effect.quantity) : (effect.amount != null && Number.isFinite(Number(effect.amount)) ? Number(effect.amount) : null)))
@@ -20945,7 +21016,8 @@ function calculateRelatedConsensusFit(profile, parsedCandidate, card = null) {
     let manaOutputFit = 0;
     if (profile.dominantFunction === 'mana_ability' && candidateFunctions.length && profile.manaOutputTarget != null) {
         for (const record of candidateFunctions) {
-            const rawOutput = record.canonical?.params?.manaOutputAmount;
+            const params = record.canonical?.params || {};
+            const rawOutput = params.manaOutputAdvantageAmount !== undefined ? params.manaOutputAdvantageAmount : params.manaOutputAmount;
             const output = Number(rawOutput);
             if (rawOutput != null && Number.isFinite(output)) manaOutputFit = Math.max(manaOutputFit, manaNumericSimilarity(profile.manaOutputTarget, output) || 0);
         }
@@ -20965,13 +21037,13 @@ function calculateRelatedConsensusFit(profile, parsedCandidate, card = null) {
     // they remain stable as the profile gains more evidence fields.
     const rawFunctionWeight = 0.42 + profile.functionSupportRatio * 0.12;
     const rawParameterWeight = profile.numericTarget != null ? (0.38 + profile.numericParameterStrength * 0.16) : 0.14;
-    const rawRoleWeight = 0.10 + (profile.artifactSupportRatio >= 0.60 ? 0.05 : 0);
+    const rawRoleWeight = 0.10 + (profile.manaSourceTypeSupportRatio >= 0.60 ? 0.05 : 0);
     const rawTotal = rawFunctionWeight + rawParameterWeight + rawRoleWeight || 1;
     const functionWeight = rawFunctionWeight / rawTotal;
     const parameterWeight = rawParameterWeight / rawTotal;
     const roleWeight = rawRoleWeight / rawTotal;
-    const artifactFit = profile.artifactSupportRatio >= 0.60
-        ? (/\bartifact\b/.test(String(card?.type_line || '').toLowerCase()) ? 1 : 0.55)
+    const artifactFit = profile.manaSourceTypeSupportRatio >= 0.60
+        ? (/\b(?:artifact|land)\b/.test(String(card?.type_line || '').toLowerCase()) ? 1 : 0.55)
         : 0.5;
     const roleCombined = roleWeight <= 0 ? 0 : (roleFit * 0.72 + artifactFit * 0.28);
     let parameterCombined = quantityFit;
@@ -20997,7 +21069,7 @@ function buildRelatedConsensusIntentText(profile) {
         const net = profile.numericTarget;
         const output = profile.manaOutputTarget != null ? profile.manaOutputTarget : net;
         const outputPhrase = output === net ? `${output}` : `${output} output`;
-        return `artifact mana rock with ${net} net mana per activation and ${outputPhrase} mana output fast mana reusable mana production color fixing`;
+        return `mana source with ${net} incremental net mana contribution per activation and ${outputPhrase} incremental mana output fast mana reusable mana production color fixing`;
     }
     const dominantFunctionRecord = profile.functions?.find(x => x.functionName === fn);
     if (dominantFunctionRecord?.paramSamples?.length) {
@@ -25514,7 +25586,7 @@ async function scoreCardBatch({
         ? sourceParsedEffectsOverride
         : (sourceTextToParse === (sourceCard.oracle_text || (sourceCard.card_faces ? sourceCard.card_faces.map(f => f.oracle_text).join(' ') : ''))
             ? getCachedParsedEffects(sourceCard, sourceTextToParse)
-            : parseMTGEffect(sourceTextToParse));
+            : parseMTGEffect(sourceTextToParse, sourceCard));
     annotateEffectRepeatability(sourceCard, parsedSourceCard, sourceTextToParse);
     const sourceMechanicProfile = getCachedMechanicalProfile(sourceCard, sourceTextToParse, parsedSourceCard);
     const sourceMechanicalGraph = getCachedMechanicalEffectGraph(sourceCard, sourceTextToParse, parsedSourceCard);
