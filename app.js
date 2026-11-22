@@ -1,6 +1,6 @@
-/* ManaSearch build 20261122-1835 */
+/* ManaSearch build 20261122-1836 */
 // ManaSearch deployment build marker. Bump this whenever app.js changes so cached-module issues are easy to diagnose.
-const MANASEARCH_APP_BUILD = '20261122-1835';
+const MANASEARCH_APP_BUILD = '20261122-1836';
 console.info(`[ManaSearch] app.js build ${MANASEARCH_APP_BUILD}`);
 
 // The source-query and static-index builders share one representation so both sides
@@ -6151,6 +6151,101 @@ function normalizeParenthesizedOracleRuleFormatting(ruleText) {
     return normalized;
 }
 
+
+function isParenthesizedOracleAbilityRule(ruleText) {
+    const candidate = String(ruleText || '').trim();
+    if (!candidate || /["“”]/.test(candidate)) return false;
+    const split = splitActivationCost(candidate);
+    if (!split.costText) return false;
+    return /^(?:add|draw|create|put|return|exile|search|destroy|tap|untap|gain|deal|discard|mill|counter|scry|surveil|proliferate|transform|fight|attach|detach|regenerate)\b/i.test(split.effectText);
+}
+
+function splitOracleRulesPreservingReminderText(oracleText) {
+    const text = String(oracleText || '').replace(/\r\n?/g, '\n');
+    const groups = [];
+    let current = '', currentReminders = [], quote = null;
+    const flush = () => {
+        const rule = current.trim();
+        if (rule) groups.push({ text: rule, reminderTexts: currentReminders.slice(), isParenthesizedAbility: false });
+        else if (currentReminders.length && groups.length) groups[groups.length - 1].reminderTexts.push(...currentReminders);
+        current = ''; currentReminders = [];
+    };
+    const attachReminder = value => {
+        const reminder = String(value || '').trim();
+        if (!reminder) return;
+        if (current.trim()) currentReminders.push(reminder);
+        else if (groups.length) groups[groups.length - 1].reminderTexts.push(reminder);
+        else currentReminders.push(reminder);
+    };
+    const readParenthetical = start => {
+        let depth = 1, innerQuote = null;
+        for (let i = start + 1; i < text.length; i++) {
+            const ch = text[i];
+            if (innerQuote) {
+                if ((innerQuote === '"' && ch === '"') || (innerQuote === '“' && ch === '”')) innerQuote = null;
+                continue;
+            }
+            if (ch === '"' || ch === '“') { innerQuote = ch; continue; }
+            if (ch === '(') depth++;
+            else if (ch === ')') { if (--depth === 0) return { text: text.slice(start + 1, i), endIndex: i }; }
+        }
+        return null;
+    };
+    for (let i = 0; i < text.length; i++) {
+        const ch = text[i];
+        if (quote) {
+            current += ch;
+            if ((quote === '"' && ch === '"') || (quote === '“' && ch === '”')) quote = null;
+            continue;
+        }
+        if (ch === '"' || ch === '“') { quote = ch; current += ch; continue; }
+        if (ch === '(') {
+            const block = readParenthetical(i);
+            if (block) {
+                if (isParenthesizedOracleAbilityRule(block.text)) {
+                    flush();
+                    const ability = normalizeParenthesizedOracleRuleFormatting(block.text);
+                    if (ability) groups.push({ text: ability, reminderTexts: [], isParenthesizedAbility: true });
+                } else attachReminder(block.text);
+                i = block.endIndex;
+                continue;
+            }
+        }
+        if (ch === '\n') { flush(); continue; }
+        if (/[.!?;]/.test(ch)) {
+            current += ch; flush();
+            while (i + 1 < text.length && (text[i + 1] === ' ' || text[i + 1] === '\t')) i++;
+            continue;
+        }
+        current += ch;
+    }
+    flush();
+    return groups;
+}
+
+function parseClueTokenAbilityFromReminderText(reminderTexts) {
+    const reminder = (Array.isArray(reminderTexts) ? reminderTexts : [reminderTexts]).filter(Boolean).join(' ');
+    const quotePattern = /"([^"]+)"|“([^”]+)”/g;
+    for (const match of reminder.matchAll(quotePattern)) {
+        const ability = String(match[1] || match[2] || '').trim();
+        const split = splitActivationCost(ability);
+        if (!split.costText || !/\bdraw\s+(?:a|one)\s+card\b/i.test(split.effectText)) continue;
+        if (!/\bsacrifice\s+(?:this\s+(?:token|artifact)|a\s+clue\s+token)\b/i.test(split.costText)) continue;
+        const payment = classifyActivationCost(split.costText);
+        const symbols = split.costText.match(/\{[^}]+\}/g) || [];
+        const payable = symbols.filter(symbol => !/^\{t\}$/i.test(symbol));
+        const parts = [];
+        if (payable.length) parts.push('pay ' + payable.join(''));
+        parts.push('sacrifice this Clue token');
+        return {
+            text: ability, costText: split.costText, effectText: split.effectText,
+            activationCost: { ...payment, type: 'clue_sacrifice_draw', parts, resourceScope: 'per_token' },
+            resourceScope: 'per_token'
+        };
+    }
+    return null;
+}
+
 function parseManaEntryState(oracleText) {
     const text = String(oracleText || '').replace(/[’]/g, "'");
     const entersTapped = /\benters(?:\s+the battlefield)?\s+tapped\b/i.test(text);
@@ -8352,10 +8447,13 @@ function parseMTGEffect(oracleText, cardContext = null) {
     // Keep the printed rule/sentence that owns each split clause. Splitting on "then" is useful
     // for extracting separate actions, but those actions still share semantic context: for example,
     // "look at the top card of that player's library, then exile it" is library access, not removal.
-    const ruleGroups = String(oracleText)
-        .split(/\n+|(?<=[.!?;])\s+/)
-        .map(s => normalizeParenthesizedOracleRuleFormatting(s))
-        .filter(Boolean);
+    const parsedRuleGroups = splitOracleRulesPreservingReminderText(oracleText);
+    const ruleGroups = parsedRuleGroups.map(group => group.text).filter(Boolean);
+    const reminderTextsByRuleGroup = parsedRuleGroups.map(group => group.reminderTexts || []);
+    const clauses = [];
+    const parentRuleTexts = [];
+    const previousRuleTexts = [];
+    const reminderTextsByClause = [];
     const clauses = [];
     const parentRuleTexts = [];
     const previousRuleTexts = [];
@@ -8373,6 +8471,7 @@ function parseMTGEffect(oracleText, cardContext = null) {
             clauses.push(ruleClause);
             parentRuleTexts.push(ruleGroupText);
             previousRuleTexts.push(relatedLandSearchContext);
+            reminderTextsByClause.push(reminderTextsByRuleGroup[ruleGroupIndex] || []);
         }
         if (isSearchForLandGroup) {
             mostRecentLandSearch = ruleGroupText;
@@ -8395,6 +8494,7 @@ function parseMTGEffect(oracleText, cardContext = null) {
         const rawClause = clauses[clauseIndex];
         const parentRuleText = parentRuleTexts[clauseIndex] || rawClause;
         const previousRuleText = previousRuleTexts[clauseIndex] || '';
+        const reminderTexts = reminderTextsByClause[clauseIndex] || [];
         const modalHeaderMatch = rawClause.match(modalHeaderRegex);
         if (modalHeaderMatch) {
             modeGroupCounter++;
@@ -8438,6 +8538,11 @@ function parseMTGEffect(oracleText, cardContext = null) {
         parsed.raw = parsed.raw || clause;
         parsed.parentRuleText = parsed.parentRuleText || parentRuleText;
         parsed.previousRuleText = parsed.previousRuleText || previousRuleText;
+        if (reminderTexts.length) {
+            parsed.reminderTexts = reminderTexts.slice();
+            parsed.reminderText = reminderTexts.join(' ');
+            parsed.reminderProvenance = 'oracle_parenthetical_reminder';
+        }
 
         // The sub-parsers capture restrictions from the text BEFORE the noun ("destroy target
         // [artifact] creature"), so a qualifier that trails the noun - "destroy target creature
@@ -8495,14 +8600,23 @@ function parseMTGEffect(oracleText, cardContext = null) {
         // ability. Add that derived card-advantage node to the source card's mechanical graph so
         // retrieval/scoring can match repeatable draw engines, rather than relying on prose alone.
         if (parsed.clueDrawEngine && parsed.tokenType === 'clue') {
+            const clueAbility = parseClueTokenAbilityFromReminderText(reminderTexts);
+            const clueCost = clueAbility?.costText || '{2}, Sacrifice this token';
+            const clueOutcome = clueAbility?.effectText || 'Draw a card.';
             results.push({
-                raw: 'Clue token ability: Pay {2}, sacrifice a Clue token: draw a card.',
+                raw: 'Clue token ability: ' + clueCost + ': ' + clueOutcome,
                 parentRuleText: parentRuleText,
+                reminderText: parsed.reminderText || '',
+                reminderProvenance: clueAbility ? 'oracle_parenthetical_reminder' : 'keyword_rules_fallback',
                 action: 'draw', object: 'card', from: null, to: 'hand', target: null,
                 restriction: [], quantity: 1, isSecondaryAtom: true,
                 derivedFromTokenAbility: true,
-                activationCost: { type: 'clue_sacrifice_draw', parts: ['pay {2}', 'sacrifice a Clue token'] },
-                repeatabilityContextOverride: 'Clue token ability: Pay {2}, sacrifice a Clue token: draw a card.'
+                resourceUseScope: 'per_token',
+                activationCost: clueAbility?.activationCost || {
+                    type: 'clue_sacrifice_draw', raw: clueCost,
+                    parts: ['pay {2}', 'sacrifice this Clue token'], resourceScope: 'per_token'
+                },
+                repeatabilityContextOverride: 'Each Clue token has a single-use activated draw ability: ' + clueCost + ': ' + clueOutcome
             });
         }
 
@@ -8973,6 +9087,10 @@ function deriveCanonicalFunction(effect) {
             playWindow: effect.playWindow || null,
             clueDrawEngine: Boolean(effect.clueDrawEngine || (String(effect.raw || '').match(/\binvestigate\b/i) && obj === 'token')),
             derivedFromTokenAbility: Boolean(effect.derivedFromTokenAbility),
+            resourceUseScope: effect.resourceUseScope || effect.activationCost?.resourceScope || null,
+            reminderText: effect.reminderText || '',
+            reminderTexts: Array.isArray(effect.reminderTexts) ? effect.reminderTexts : [],
+            reminderProvenance: effect.reminderProvenance || null,
             restriction,
             targetProfile: effect.targetProfile || null,
             quantityProfile: effect.quantityProfile || null,
@@ -9041,10 +9159,14 @@ function canonicalFunctionToText(canonicalFunctions) {
         if (cf.function === 'token_creation' && p.tokenType === 'clue') {
             const cadence = p.repeatabilityProfile?.group === 'repeatable_engine' ? 'repeatable Clue token engine'
                 : p.repeatabilityProfile?.group === 'single_use' ? 'one-time Clue token creation' : 'Clue token creation';
-            return `${cadence} from investigate; each created Clue can be activated for {2}, sacrifice that Clue token: draw a card`;
+            return cadence + ' from investigate; each individual Clue can be sacrificed once to activate its draw ability; the card can repeat this by creating additional Clues';
         }
         if (cf.function === 'card_draw' && p.derivedFromTokenAbility) {
-            return 'repeatable activated card draw from a Clue token: pay {2}, sacrifice that Clue token, draw a card';
+            const cost = p.activationCost?.raw || '{2}, Sacrifice this token';
+            const overall = p.repeatabilityProfile?.cardLevelGroup === 'repeatable_engine'
+                ? 'repeatable card advantage across separately created Clues'
+                : 'single-use card draw per Clue token';
+            return overall + ': each Clue token can be sacrificed only once (' + cost + ') to draw one card';
         }
         if (cf.function === 'opponent_ramp') return "put a land onto the battlefield under an opponent's control; this is opponent ramp and grants the opponent a resource, not your own ramp";
         if (cf.function === 'opponent_gift') return "put a permanent onto the battlefield under an opponent's control; this grants the opponent a resource";
@@ -9463,11 +9585,18 @@ function inferEffectRepeatabilityProfile(card, effect, fullText = '') {
         (effect.tokenType === 'clue' || effect.canonical?.params?.tokenType === 'clue') &&
         /\binvestigate\b/i.test(combined) && /\b(?:when|whenever)\b/i.test(combined) &&
         /\bcast\b[\s\S]{0,80}\b(?:instant|sorcery)\b/i.test(combined);
-    // Trail of Evidence's investigate event is repeatable because the player can cast more
-    // instants/sorceries. Keep it separate from the Clue's own repeatable activated draw effect.
+    const perTokenAbility = Boolean(effect.derivedFromTokenAbility &&
+        (effect.resourceUseScope === 'per_token' || effect.canonical?.params?.resourceUseScope === 'per_token'));
+    const fullCardOracle = String(fullText || strategicRoleCardText(card) || '');
+    const cardLevelClueEngine = perTokenAbility && isPermanent &&
+        /\b(?:when|whenever)\b[^.!?;]{0,180}\bcast\b[^.!?;]{0,100}\b(?:instant|sorcery)\b[^.!?;]{0,140}\binvestigate\b/i.test(fullCardOracle);
     const oneTimeSelfSacrifice = isPermanent && consumesSource && /\bsacrifice\s+(?:this(?: creature| artifact| enchantment| permanent| planeswalker| land| card)?|the source|~|[\w'’-]+)\b/i.test(combined) &&
         /\bat the beginning of (?:your|the) end step\b|\bat (?:your|the) end step\b/i.test(combined);
-    if (clueInvestigateTrigger) {
+    if (perTokenAbility) {
+        kind = 'single_use_activation';
+        confidence = 0.98;
+        eventText = 'each Clue token can be sacrificed once for one draw';
+    } else if (clueInvestigateTrigger) {
         kind = 'repeatable_trigger';
         confidence = 0.97;
         eventText = 'you cast an instant or sorcery spell and investigate';
@@ -9530,13 +9659,12 @@ function inferEffectRepeatabilityProfile(card, effect, fullText = '') {
     }
 
     const meta = REPEATABILITY_PROFILE_META[kind] || REPEATABILITY_PROFILE_META.unknown;
+    const cardLevelGroup = perTokenAbility ? (cardLevelClueEngine ? 'repeatable_engine' : meta.group) : meta.group;
     return {
-        kind,
-        group: meta.group,
-        strength: meta.strength,
-        confidence,
-        timingText,
-        eventText,
+        kind, group: meta.group, cardLevelGroup,
+        scope: perTokenAbility ? 'per_token' : 'effect',
+        resourceScope: perTokenAbility ? 'clue_token' : null,
+        strength: meta.strength, confidence, timingText, eventText,
         context: context.slice(0, 240)
     };
 }
@@ -9562,20 +9690,19 @@ function getEffectRepeatabilityProfile(value) {
 }
 
 function repeatabilityProfileSimilarity(profileA, profileB) {
-    if (!profileA || !profileB || !profileA.kind || !profileB.kind || profileA.group === 'unknown' || profileB.group === 'unknown') return 1;
+    if (!profileA || !profileB || !profileA.kind || !profileB.kind) return 1;
+    const groupA = profileA.cardLevelGroup || profileA.group;
+    const groupB = profileB.cardLevelGroup || profileB.group;
+    if (!groupA || !groupB || groupA === 'unknown' || groupB === 'unknown') return 1;
     let score;
-    if (profileA.kind === profileB.kind) score = 1;
-    else if (profileA.group === 'repeatable_engine' && profileB.group === 'repeatable_engine') {
-        score = (profileA.kind === 'periodic_trigger' || profileB.kind === 'periodic_trigger') ? 0.78 : 0.74;
-    } else if (profileA.group === 'single_use' && profileB.group === 'single_use') {
-        score = (profileA.kind === 'one_shot' || profileB.kind === 'one_shot') ? 0.78 : 0.70;
-    } else if (profileA.group === 'limited_reuse' && profileB.group === 'single_use' || profileB.group === 'limited_reuse' && profileA.group === 'single_use') {
-        score = 0.66;
-    } else if (profileA.group === 'repeatable_engine' && profileB.group === 'limited_reuse' || profileB.group === 'repeatable_engine' && profileA.group === 'limited_reuse') {
-        score = 0.46;
-    } else if (profileA.group === 'repeatable_engine' && profileB.group === 'single_use' || profileB.group === 'repeatable_engine' && profileA.group === 'single_use') {
-        const oneShot = (profileA.kind === 'one_shot' || profileB.kind === 'one_shot');
-        const entryOnly = (profileA.kind === 'entry_trigger' || profileB.kind === 'entry_trigger' || profileA.kind === 'self_event' || profileB.kind === 'self_event');
+    if (profileA.kind === profileB.kind && groupA === groupB) score = 1;
+    else if (groupA === 'repeatable_engine' && groupB === 'repeatable_engine') score = 0.74;
+    else if (groupA === 'single_use' && groupB === 'single_use') score = 0.70;
+    else if (groupA === 'limited_reuse' && groupB === 'single_use' || groupB === 'limited_reuse' && groupA === 'single_use') score = 0.66;
+    else if (groupA === 'repeatable_engine' && groupB === 'limited_reuse' || groupB === 'repeatable_engine' && groupA === 'limited_reuse') score = 0.46;
+    else if (groupA === 'repeatable_engine' && groupB === 'single_use' || groupB === 'repeatable_engine' && groupA === 'single_use') {
+        const oneShot = profileA.kind === 'one_shot' || profileB.kind === 'one_shot';
+        const entryOnly = ['entry_trigger','self_event'].includes(profileA.kind) || ['entry_trigger','self_event'].includes(profileB.kind);
         score = oneShot ? 0.10 : (entryOnly ? 0.20 : 0.16);
     } else score = 0.55;
     const confidence = Math.min(Number(profileA.confidence ?? 1), Number(profileB.confidence ?? 1));
@@ -9648,19 +9775,13 @@ function getDirectCardAcquisitionCadence(card, parsedEffects = []) {
     const effects = Array.isArray(parsedEffects) ? parsedEffects : [];
     const directDrawEffects = effects.filter(isDirectCardDrawOutcome);
     const profiles = directDrawEffects.map(effect => getEffectRepeatabilityProfile(effect)).filter(Boolean);
-    const repeatable = profiles.some(profile => profile.group === 'repeatable_engine');
-    const singleUse = profiles.length > 0 && profiles.every(profile => profile.group === 'single_use');
-    const entryOnly = profiles.length > 0 && profiles.every(profile =>
+    const cardLevelGroups = profiles.map(profile => profile.cardLevelGroup || profile.group);
+    const repeatable = cardLevelGroups.some(group => group === 'repeatable_engine');
+    const singleUse = profiles.length > 0 && cardLevelGroups.every(group => group === 'single_use');
+    const entryOnly = singleUse && profiles.every(profile =>
         profile.kind === 'entry_trigger' || profile.kind === 'delayed_trigger' || profile.kind === 'one_shot' || profile.kind === 'self_event' || profile.kind === 'single_use_activation'
     );
-    return {
-        hasAcquisition: directDrawEffects.length > 0,
-        repeatable,
-        singleUse,
-        entryOnly,
-        profiles,
-        cardName: String(card?.name || '')
-    };
+    return { hasAcquisition: directDrawEffects.length > 0, repeatable, singleUse, entryOnly, profiles, cardName: String(card?.name || '') };
 }
 
 function calculateCardAcquisitionCadenceMismatch(parsedA = [], parsedB = []) {
@@ -9772,7 +9893,8 @@ function inferStrategicRoleProfileUncached(card, parsedEffects = [], intentText 
     const recurringAcquisition = directDraw || handAcquisition || topCardAcquisition;
     const acquisitionText = /\bdraw(?:s)?\s+(?:a|one|two|three|four|five|\d+|x)\s+cards?\b|\b(?:put|puts|return|returns)\b[^.;]{0,100}\b(?:card|cards|it|them)\b[^.;]{0,60}\b(?:into|to) your hand\b|\b(?:reveal|exile)\s+the top card\b/i;
     const acquisitionIsRepeatable = (parsedEffects || []).some(e => {
-        if (getEffectRepeatabilityProfile(e)?.group !== 'repeatable_engine') return false;
+        const profile = getEffectRepeatabilityProfile(e);
+        if ((profile?.cardLevelGroup || profile?.group) !== 'repeatable_engine') return false;
         // Many draw analogues are represented as several atoms from one ability:
         // "reveal the top card ... and put it into your hand" or "exile the top card ...
         // put it into your hand". The action atom can contain only "reveal"/"exile";
@@ -9793,7 +9915,7 @@ function inferStrategicRoleProfileUncached(card, parsedEffects = [], intentText 
         e.canonical.params?.tokenType === 'clue' && getEffectRepeatabilityProfile(e)?.group === 'repeatable_engine');
     const repeatableClueDraw = repeatableClueToken && (parsedEffects || []).some(e =>
         e?.canonical?.function === 'card_draw' && e.canonical.params?.derivedFromTokenAbility &&
-        getEffectRepeatabilityProfile(e)?.kind === 'repeatable_activation');
+        getEffectRepeatabilityProfile(e)?.cardLevelGroup === 'repeatable_engine');
     // A trigger elsewhere on a card must not turn its unrelated one-shot draw into an engine.
     // Resource costs alone are not evidence of repeatability, except for this explicit Clue link.
     if ((recurringAcquisition && acquisitionIsRepeatable) || repeatableClueDraw) {
@@ -16219,23 +16341,33 @@ function runManaSearchMasteryEdgeCaseRegressionSuite() {
     const ingeniousActual = parse('If {W}{U} was paid, draw three cards, then an opponent creates two Treasure tokens.');
     const ingeniousActualTreasure = ingeniousActual.find(effect => effect.canonical.function === 'token_creation' && effect.canonical.params.tokenType === 'treasure');
     check('Ingenious Mastery opponent Treasure tokens retain opponent recipient in canonical fields', Boolean(ingeniousActualTreasure) && ingeniousActualTreasure.canonical.params.recipientScope === 'opponent' && ingeniousActualTreasure.canonical.params.isOpponentBenefit, JSON.stringify(ingeniousActualTreasure?.canonical?.params || null));
-    const trail = { name: 'Trail of Evidence', type_line: 'Enchantment', oracle_text: 'Whenever you cast an instant or sorcery spell, investigate.' };
-    const trailEffects = annotateEffectRepeatability(trail, parseMTGEffect(trail.oracle_text), trail.oracle_text);
-    const trailClue = trailEffects.find(effect => effect.canonical?.function === 'token_creation' && effect.canonical.params.tokenType === 'clue');
+    const trailOracle = "Whenever you cast an instant or sorcery spell, investigate. (Create a Clue token. It's an artifact with \"{2}, Sacrifice this token: Draw a card.\")";
+    const trail = { name: 'Trail of Evidence', type_line: 'Enchantment', oracle_text: trailOracle };
+    const trailRuleGroups = splitOracleRulesPreservingReminderText(trailOracle);
+    const trailEffects = annotateEffectRepeatability(trail, parseMTGEffect(trailOracle, trail), trailOracle);
+    const trailClueNodes = trailEffects.filter(effect => effect.canonical?.function === 'token_creation' && effect.canonical.params.tokenType === 'clue');
+    const trailDrawNodes = trailEffects.filter(effect => effect.canonical?.function === 'card_draw' && effect.canonical.params.derivedFromTokenAbility);
+    const trailClue = trailClueNodes[0] || null;
     const trailProfile = getEffectRepeatabilityProfile(trailClue);
-    check('Trail of Evidence investigate is a repeatable Clue token engine', Boolean(trailClue) && trailProfile?.group === 'repeatable_engine' && ['repeatable_trigger','periodic_trigger'].includes(trailProfile?.kind), JSON.stringify({canonical:trailClue?.canonical,profile:trailProfile}));
-    check('Trail of Evidence Clue engine is eligible to be the primary mechanic', Boolean(trailClue?.isPrimary) && trailClue.importance >= 0.9, JSON.stringify({primary:trailClue?.isPrimary,importance:trailClue?.importance}));
-    const trailDraw = trailEffects.find(effect => effect.canonical?.function === 'card_draw' && effect.canonical.params.derivedFromTokenAbility);
-    check('Trail of Evidence exposes the Clue token activated draw as a graph effect', Boolean(trailDraw) && getEffectRepeatabilityProfile(trailDraw)?.kind === 'repeatable_activation', JSON.stringify({canonical:trailDraw?.canonical,profile:getEffectRepeatabilityProfile(trailDraw)}));
-    check('Trail of Evidence canonical Clue engine explains repeatable card draw', /repeatable Clue token engine/i.test(canonicalText(trailEffects.map(effect => effect.canonical).filter(Boolean))) && /repeatable activated card draw from a Clue token/i.test(canonicalText(trailEffects.map(effect => effect.canonical).filter(Boolean))), canonicalText(trailEffects.map(effect => effect.canonical).filter(Boolean)));
-    check('Trail of Evidence has no contradictory one-shot profile on investigate/Clue nodes', trailEffects.filter(effect => effect.canonical?.function === 'token_creation' && effect.canonical.params.tokenType === 'clue').every(effect => getEffectRepeatabilityProfile(effect)?.group === 'repeatable_engine') && trailEffects.filter(effect => effect.canonical?.params?.derivedFromTokenAbility).every(effect => getEffectRepeatabilityProfile(effect)?.kind === 'repeatable_activation'), JSON.stringify(trailEffects.map(effect => ({raw:effect.raw,fn:effect.canonical?.function,profile:getEffectRepeatabilityProfile(effect)}))));
+    check('Trail reminder remains attached to investigate rule', trailRuleGroups.length === 1 && trailRuleGroups[0].text === 'Whenever you cast an instant or sorcery spell, investigate.' && trailRuleGroups[0].reminderTexts.some(text => /Create a Clue token/i.test(text) && /Sacrifice this token: Draw a card/i.test(text)), JSON.stringify(trailRuleGroups));
+    check('Trail reminder creates no duplicate Clue or draw effects', trailClueNodes.length === 1 && trailDrawNodes.length === 1 && !trailEffects.some(effect => effect.canonical?.function === 'card_draw' && !effect.canonical.params?.derivedFromTokenAbility && /Clue/i.test(String(effect.raw || effect.parentRuleText || ''))), JSON.stringify(trailEffects.map(effect => ({raw:effect.raw,fn:effect.canonical?.function,tokenType:effect.canonical?.params?.tokenType,derived:effect.canonical?.params?.derivedFromTokenAbility}))));
+    check('Trail investigate trigger is repeatable at card level', Boolean(trailClue) && trailProfile?.group === 'repeatable_engine' && ['repeatable_trigger','periodic_trigger'].includes(trailProfile?.kind), JSON.stringify({canonical:trailClue?.canonical,profile:trailProfile}));
+    check('Trail Clue engine remains eligible as primary mechanic', Boolean(trailClue?.isPrimary) && trailClue.importance >= 0.9, JSON.stringify({primary:trailClue?.isPrimary,importance:trailClue?.importance}));
+    const trailDraw = trailDrawNodes[0] || null;
+    const trailDrawProfile = getEffectRepeatabilityProfile(trailDraw);
+    check('Each Clue draw activation is single-use per token', Boolean(trailDraw) && trailDrawProfile?.kind === 'single_use_activation' && trailDrawProfile?.group === 'single_use' && trailDrawProfile?.scope === 'per_token' && trailDraw?.activationCost?.parts?.includes('sacrifice this Clue token'), JSON.stringify({canonical:trailDraw?.canonical,activationCost:trailDraw?.activationCost,profile:trailDrawProfile}));
+    check('Trail card draw repeats through newly generated Clues', trailDrawProfile?.cardLevelGroup === 'repeatable_engine' && getDirectCardAcquisitionCadence(trail, trailEffects).repeatable && !getDirectCardAcquisitionCadence(trail, trailEffects).singleUse, JSON.stringify({profile:trailDrawProfile,acquisition:getDirectCardAcquisitionCadence(trail,trailEffects)}));
+    check('Trail canonical text explains both cadence scopes', /repeatable Clue token engine/i.test(canonicalText(trailEffects.map(effect => effect.canonical).filter(Boolean))) && /repeatable card advantage across separately created Clues/i.test(canonicalText(trailEffects.map(effect => effect.canonical).filter(Boolean))) && /sacrificed only once/i.test(canonicalText(trailEffects.map(effect => effect.canonical).filter(Boolean))), canonicalText(trailEffects.map(effect => effect.canonical).filter(Boolean)));
+    check('Trail draw preserves reminder source and actual {2} cost', trailDraw?.reminderProvenance === 'oracle_parenthetical_reminder' && /Sacrifice this token: Draw a card/i.test(String(trailDraw?.reminderText || '')) && /\{2\}/.test(String(trailDraw?.activationCost?.raw || '')), JSON.stringify({reminderText:trailDraw?.reminderText,provenance:trailDraw?.reminderProvenance,activationCost:trailDraw?.activationCost}));
     const trailIntentModel = buildSearchIntentPresentationModel(trail, []);
-    check('Trail of Evidence Live Search Model shows repeatable investigate and repeatable Clue draw', trailIntentModel.effectViews.length >= 2 && trailIntentModel.effectViews.every(view => view.cadence.group === 'repeatable_engine') && trailIntentModel.effectViews.some(view => /Repeatable triggered ability/.test(view.cadence.label)) && trailIntentModel.effectViews.some(view => /Repeatable activated ability/.test(view.cadence.label)), JSON.stringify(trailIntentModel.effectViews.map(view => ({label:view.label,cadence:view.cadence}))));
-    check('Trail of Evidence is recognized as both a repeatable token engine and card-advantage engine', trailIntentModel.roleViews.some(role => /repeatable token engine/i.test(role.role)) && trailIntentModel.roleViews.some(role => /card-advantage engine/i.test(role.role)), JSON.stringify(trailIntentModel.roleViews));
-    const trailRetrievalQueries = buildFunctionalRetrievalQueries(trail, trailEffects, '-name:\"Trail of Evidence\"', 4).map(item => item.query).join(' ').toLowerCase();
-    const trailRoleQuery = String(buildRoleFocusedRetrievalQuery(trail, trailEffects, '-name:\"Trail of Evidence\"') || '').toLowerCase();
-    check('Trail of Evidence functional retrieval explicitly queries investigate', /o:\"investigate\"/.test(trailRetrievalQueries) || /o:\"investigate\"/.test(trailRoleQuery), JSON.stringify({queries:trailRetrievalQueries,role:trailRoleQuery}));
-    check('Trail of Evidence repeatable Clue draw affects shared strategic scoring roles', trailIntentModel.roleViews.some(role => /card-advantage engine/i.test(role.role)) && trailIntentModel.roleViews.some(role => /repeatable token engine/i.test(role.role)), JSON.stringify(trailIntentModel.roleViews));
+    const trailClueView = trailIntentModel.effectViews.find(view => view.fn === 'token_creation' && view.effect.canonical?.params?.tokenType === 'clue');
+    const trailDrawView = trailIntentModel.effectViews.find(view => view.effect.canonical?.params?.derivedFromTokenAbility);
+    check('Trail Live Search explains trigger and per-token draw cadence', trailClueView?.cadence.group === 'repeatable_engine' && /Repeatable triggered ability/.test(trailClueView.cadence.label) && trailDrawView?.cadence.group === 'repeatable_engine' && trailDrawView.cadence.scope === 'per_token' && /Single-use per Clue token/.test(trailDrawView.cadence.label) && /repeatable across generated Clues/i.test(trailDrawView.cadence.label), JSON.stringify(trailIntentModel.effectViews.map(view => ({label:view.label,cadence:view.cadence}))));
+    check('Trail roles include token and card-advantage engines', trailIntentModel.roleViews.some(role => /repeatable token engine/i.test(role.role)) && trailIntentModel.roleViews.some(role => /card-advantage engine/i.test(role.role)), JSON.stringify(trailIntentModel.roleViews));
+    const trailRetrievalQueries = buildFunctionalRetrievalQueries(trail, trailEffects, '-name:"Trail of Evidence"', 4).map(item => item.query).join(' ').toLowerCase();
+    const trailRoleQuery = String(buildRoleFocusedRetrievalQuery(trail, trailEffects, '-name:"Trail of Evidence"') || '').toLowerCase();
+    check('Trail functional retrieval explicitly queries investigate', /o:"investigate"/.test(trailRetrievalQueries) || /o:"investigate"/.test(trailRoleQuery), JSON.stringify({queries:trailRetrievalQueries,role:trailRoleQuery}));
+    check('Trail repeatable draw remains in shared strategic roles', trailIntentModel.roleViews.some(role => /card-advantage engine/i.test(role.role)) && trailIntentModel.roleViews.some(role => /repeatable token engine/i.test(role.role)), JSON.stringify(trailIntentModel.roleViews));
 
     const moonshaker = { name: 'Moonshaker Cavalry', type_line: 'Creature — Horse Spirit', oracle_text: 'When Moonshaker Cavalry enters the battlefield, creatures you control get +X/+X and gain flying until end of turn, where X is the number of creatures you control.' };
     const moonEffects = annotateEffectRepeatability(moonshaker, parseMTGEffect(moonshaker.oracle_text), moonshaker.oracle_text);
@@ -27956,6 +28088,17 @@ function searchIntentCadenceDescription(effect) {
     if (!profile || profile.group === 'unknown' || !profile.kind) return { label: 'Repeatability unclear', group: 'unknown', detail: '' };
     const rawContext = String(effect?.contextClause || effect?.parentClauseRaw || effect?.raw || '');
     const trigger = effect?.triggerProfile || effect?.canonical?.params?.triggerProfile || {};
+    if (profile.scope === 'per_token') {
+        const cardLevelRepeatable = profile.cardLevelGroup === 'repeatable_engine';
+        return {
+            label: cardLevelRepeatable ? 'Single-use per Clue token; repeatable across generated Clues' : 'Single-use per Clue token',
+            group: profile.cardLevelGroup || profile.group,
+            scope: 'per_token',
+            detail: cardLevelRepeatable
+                ? 'Each Clue can be sacrificed only once for one draw. The card can repeat its draw engine by creating more Clues whenever its investigate trigger occurs.'
+                : 'Each Clue can be sacrificed only once for one draw; this token ability does not reuse the same Clue.'
+        };
+    }
     if (profile.kind === 'periodic_trigger') {
         const timing = profile.timingText || trigger.timingText || '';
         return { label: 'Recurring turn trigger', group: profile.group, detail: timing ? `repeats ${timing}` : 'repeats in a recurring turn window' };
