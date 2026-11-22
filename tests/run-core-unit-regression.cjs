@@ -406,6 +406,29 @@ test('parenthesized rule normalization strips only enclosing formatting and pres
   assert.equal(sandbox.results[2], 'This reminder text still describes an ability.');
 });
 
+test('Oracle rule scanner retains reminder provenance without parsing reminder sentences, while preserving parenthesized activated abilities', () => {
+  const helperNames = [
+    'normalizeParenthesizedOracleRuleFormatting',
+    'splitActivationCost',
+    'isParenthesizedOracleAbilityRule',
+    'splitOracleRulesPreservingReminderText'
+  ];
+  const blocks = helperNames.map(name => extractFunction(name)).join('\n');
+  const fullTrailOracle = "Whenever you cast an instant or sorcery spell, investigate. (Create a Clue token. It's an artifact with \"{2}, Sacrifice this token: Draw a card.\")";
+  const sandbox = {};
+  const runner = blocks + '\nthis.trail = splitOracleRulesPreservingReminderText(' + JSON.stringify(fullTrailOracle) + ');' +
+    '\nthis.mana = splitOracleRulesPreservingReminderText(\'({T}: Add {B} or {R}.)\');';
+  vm.runInNewContext(runner, sandbox);
+  assert.equal(sandbox.trail.length, 1, 'Clue reminder sentences must not become standalone card rules');
+  assert.equal(sandbox.trail[0].text, 'Whenever you cast an instant or sorcery spell, investigate.');
+  assert.equal(sandbox.trail[0].reminderTexts.length, 1);
+  assert.match(sandbox.trail[0].reminderTexts[0], /Create a Clue token/i);
+  assert.match(sandbox.trail[0].reminderTexts[0], /Sacrifice this token: Draw a card/i);
+  assert.equal(sandbox.mana.length, 1, 'an actual parenthesized mana activation remains a parseable rule');
+  assert.equal(sandbox.mana[0].isParenthesizedAbility, true);
+  assert.match(sandbox.mana[0].text, /^\{T\}: Add \{B\} or \{R\}\.$/);
+});
+
 test('mana output recognizes one-of color choices but not simultaneous colored mana symbols', () => {
   const analyze = extractFunction('analyzeManaOutput');
   const sandbox = {};
