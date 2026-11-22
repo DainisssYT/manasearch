@@ -1,4 +1,4 @@
-/* ManaSearch build 20261122-1836 */
+/* ManaSearch build 20261122-1837 */
 // ManaSearch deployment build marker. Bump this whenever app.js changes so cached-module issues are easy to diagnose.
 const MANASEARCH_APP_BUILD = '20261122-1836';
 console.info(`[ManaSearch] app.js build ${MANASEARCH_APP_BUILD}`);
@@ -8454,9 +8454,6 @@ function parseMTGEffect(oracleText, cardContext = null) {
     const parentRuleTexts = [];
     const previousRuleTexts = [];
     const reminderTextsByClause = [];
-    const clauses = [];
-    const parentRuleTexts = [];
-    const previousRuleTexts = [];
     let mostRecentLandSearch = '';
     let mostRecentLandSearchIndex = -100;
     for (let ruleGroupIndex = 0; ruleGroupIndex < ruleGroups.length; ruleGroupIndex++) {
