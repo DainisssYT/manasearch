@@ -444,7 +444,7 @@ test('mana activation similarity compares tap and other activation-cost parts', 
 
 test('mana profile similarity weighs actual output, land baseline, color options, and activation cost', () => {
   const names = ['manaNumericSimilarity', 'manaColorProfileSimilarity', 'manaActivationSimilarity', 'calculateManaAbilityProfileSimilarity'];
-  const blocks = names.map(name => extractFunction(name)).join('\\n');
+  const blocks = names.map(name => extractFunction(name)).join('\n');
   const sandbox = {};
   vm.runInNewContext(`${blocks}
     const tap = { manaMin: 0, manaMax: 0, parts: ['tap'] };
