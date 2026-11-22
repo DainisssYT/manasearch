@@ -1,6 +1,6 @@
-/* ManaSearch build 20261122-1834 */
+/* ManaSearch build 20261122-1835 */
 // ManaSearch deployment build marker. Bump this whenever app.js changes so cached-module issues are easy to diagnose.
-const MANASEARCH_APP_BUILD = '20261122-1834';
+const MANASEARCH_APP_BUILD = '20261122-1835';
 console.info(`[ManaSearch] app.js build ${MANASEARCH_APP_BUILD}`);
 
 // The source-query and static-index builders share one representation so both sides
@@ -6128,6 +6128,37 @@ function extractMTGRestrictions(text) {
  * @param {string} clauseText
  * @returns {{costText: string|null, effectText: string}}
  */
+function normalizeParenthesizedOracleRuleFormatting(ruleText) {
+    let normalized = String(ruleText || '').trim();
+    while (normalized.startsWith('(') && normalized.endsWith(')')) {
+        let depth = 0;
+        let outerClose = -1;
+        for (let i = 0; i < normalized.length; i++) {
+            const char = normalized[i];
+            if (char === '(') depth++;
+            else if (char === ')') {
+                depth--;
+                if (depth === 0) {
+                    outerClose = i;
+                    break;
+                }
+                if (depth < 0) break;
+            }
+        }
+        if (depth !== 0 || outerClose !== normalized.length - 1) break;
+        normalized = normalized.slice(1, -1).trim();
+    }
+    return normalized;
+}
+
+function parseManaEntryState(oracleText) {
+    const text = String(oracleText || '').replace(/[’]/g, "'");
+    const entersTapped = /\benters(?:\s+the battlefield)?\s+tapped\b/i.test(text);
+    const entersUntapped = /\benters(?:\s+the battlefield)?\s+untapped\b/i.test(text);
+    if (!entersTapped && !entersUntapped) return null;
+    return { entersTapped, entersUntapped, timing: 'entry_only' };
+}
+
 function splitActivationCost(clauseText) {
     const match = clauseText.match(/^\s*([^:]{1,60}):\s*(.+)$/s);
     if (!match) return { costText: null, effectText: clauseText };
@@ -6238,12 +6269,16 @@ function analyzeManaOutput(text, amount) {
     // A list such as "Add {W}, {U}, or {B}" describes ONE mana with a choice of color,
     // not three mana. Detect the common one-symbol choice form explicitly. The previous parser
     // counted all symbols and therefore treated every Obelisk-style filter as a three-mana rock.
-    const afterAdd = lower.match(/\badd\s+(.+?)(?:\s+to\s+(?:your|the)\s+mana\s+pool)?\s*\.?$/i)?.[1] || '';
+    const afterAddRaw = lower.match(/\badd\s+(.+?)(?:\s+to\s+(?:your|the)\s+mana\s+pool)?\s*$/i)?.[1] || '';
+    const afterAdd = afterAddRaw
+        .replace(/^[\s(]+|[\s)]+$/g, '')
+        .replace(/[.!?;]+$/g, '')
+        .trim();
+    const choiceParts = afterAdd.split(/\s*(?:,|\bor\b)\s*/i).map(part => part.trim()).filter(Boolean);
     const choiceSymbols = afterAdd.match(/\{(?:[wubrgcs])\}/gi) || [];
-    const isSimpleSingleManaChoice = /\bor\b/.test(afterAdd)
-        && choiceSymbols.length >= 2
-        && /^[\s,{}wubrgcsor]+$/i.test(afterAdd)
-        && choiceSymbols.every(() => true);
+    const isSimpleSingleManaChoice = /\bor\b/i.test(afterAdd)
+        && choiceParts.length >= 2
+        && choiceParts.every(part => /^\{[wubrgcs]\}$/i.test(part));
 
     let mode = 'unknown';
     let semanticAmount = amount != null && Number.isFinite(Number(amount)) ? Number(amount) : null;
@@ -6387,6 +6422,7 @@ function manaColorProfileSimilarity(a, b) {
     if ((modeA === 'choice_single_fixed_color' && modeB === 'any_one') || (modeB === 'choice_single_fixed_color' && modeA === 'any_one')) return 0.90;
     if ((modeA === 'choice_single_fixed_color' && modeB === 'fixed_single_color') || (modeB === 'choice_single_fixed_color' && modeA === 'fixed_single_color')) return 0.82;
     if ((modeA === 'choice_single_fixed_color' && modeB === 'fixed_multi_color') || (modeB === 'choice_single_fixed_color' && modeA === 'fixed_multi_color')) return 0.20;
+    if ((modeA === 'choice_single_fixed_color' && modeB === 'fixed_colorless') || (modeB === 'choice_single_fixed_color' && modeA === 'fixed_colorless')) return 0.05;
     if (modeA === 'fixed_colorless' && modeB === 'any_one') return 0.62;
     if (modeB === 'fixed_colorless' && modeA === 'any_one') return 0.62;
     if (modeA === 'fixed_single_color' && modeB === 'any_one') return 0.70;
@@ -6398,16 +6434,47 @@ function manaColorProfileSimilarity(a, b) {
     return 0.25;
 }
 function manaActivationSimilarity(a, b) {
-    if (!a || !b) return null;
-    const amin = Number.isFinite(Number(a.manaMin)) ? Number(a.manaMin) : 0;
-    const bmin = Number.isFinite(Number(b.manaMin)) ? Number(b.manaMin) : 0;
-    const amax = a.manaMax == null ? null : Number(a.manaMax);
-    const bmax = b.manaMax == null ? null : Number(b.manaMax);
-    if (amax == null || bmax == null) return 0.55;
+    const costA = a || { manaMin: 0, manaMax: 0, parts: [] };
+    const costB = b || { manaMin: 0, manaMax: 0, parts: [] };
+    const amin = Number.isFinite(Number(costA.manaMin)) ? Number(costA.manaMin) : 0;
+    const bmin = Number.isFinite(Number(costB.manaMin)) ? Number(costB.manaMin) : 0;
+    const amax = costA.manaMax == null ? null : Number(costA.manaMax);
+    const bmax = costB.manaMax == null ? null : Number(costB.manaMax);
     const minSim = manaNumericSimilarity(amin, bmin);
-    const maxSim = manaNumericSimilarity(amax, bmax);
-    return minSim == null || maxSim == null ? 0.55 : (0.55 * minSim + 0.45 * maxSim);
+    const maxSim = amax == null || bmax == null ? 0.55 : manaNumericSimilarity(amax, bmax);
+    const manaCostSim = minSim == null || maxSim == null ? 0.55 : (0.55 * minSim + 0.45 * maxSim);
+    const partsA = new Set((Array.isArray(costA.parts) ? costA.parts : []).map(part => String(part).toLowerCase()));
+    const partsB = new Set((Array.isArray(costB.parts) ? costB.parts : []).map(part => String(part).toLowerCase()));
+    const union = new Set([...partsA, ...partsB]);
+    const intersection = [...partsA].filter(part => partsB.has(part)).length;
+    const activationPartsSim = union.size ? intersection / union.size : 1;
+    return 0.35 * manaCostSim + 0.65 * activationPartsSim;
 }
+
+function calculateManaAbilityProfileSimilarity(a, b) {
+    if (!a || !b) return null;
+    const netA = a.manaNetAmount != null ? a.manaNetAmount : a.manaAdvantageAmount;
+    const netB = b.manaNetAmount != null ? b.manaNetAmount : b.manaAdvantageAmount;
+    const outputA = a.manaOutputAmount != null ? a.manaOutputAmount : a.manaOutputAdvantageAmount;
+    const outputB = b.manaOutputAmount != null ? b.manaOutputAmount : b.manaOutputAdvantageAmount;
+    const advantageA = a.manaAdvantageAmount != null ? a.manaAdvantageAmount : a.manaNetAmount;
+    const advantageB = b.manaAdvantageAmount != null ? b.manaAdvantageAmount : b.manaNetAmount;
+    const dimensions = [
+        { weight: 0.25, value: manaNumericSimilarity(netA, netB) },
+        { weight: 0.08, value: manaNumericSimilarity(outputA, outputB) },
+        { weight: 0.30, value: manaNumericSimilarity(advantageA, advantageB) },
+        { weight: 0.23, value: manaColorProfileSimilarity(
+            { mode: a.manaOutputMode, colors: a.manaOutputColors || [] },
+            { mode: b.manaOutputMode, colors: b.manaOutputColors || [] }
+        ) },
+        { weight: 0.14, value: manaActivationSimilarity(a.activationCost, b.activationCost) }
+    ].filter(dimension => dimension.value != null);
+    const totalWeight = dimensions.reduce((sum, dimension) => sum + dimension.weight, 0);
+    return totalWeight
+        ? dimensions.reduce((sum, dimension) => sum + dimension.value * dimension.weight, 0) / totalWeight
+        : null;
+}
+
 
 /**
  * Extracts conditions, payment/activation costs, and secondary ("additional") effects that
@@ -8276,6 +8343,8 @@ function parseGameStateConditionProfile(value) {
 function parseMTGEffect(oracleText, cardContext = null) {
     if (!oracleText) return [];
 
+    const entryState = parseManaEntryState([String(oracleText), String(cardContext?.oracle_text || '')].filter(Boolean).join('\n'));
+
     // Split on sentences, semicolons, bullet points, and rule keywords. Newlines are always a
     // hard boundary (not just when preceded by sentence punctuation) - otherwise a modal header
     // ending in an em dash ("Choose one —") never separates from its first bullet line, since
@@ -8285,7 +8354,7 @@ function parseMTGEffect(oracleText, cardContext = null) {
     // "look at the top card of that player's library, then exile it" is library access, not removal.
     const ruleGroups = String(oracleText)
         .split(/\n+|(?<=[.!?;])\s+/)
-        .map(s => s.trim())
+        .map(s => normalizeParenthesizedOracleRuleFormatting(s))
         .filter(Boolean);
     const clauses = [];
     const parentRuleTexts = [];
@@ -8404,6 +8473,7 @@ function parseMTGEffect(oracleText, cardContext = null) {
         // Example: Boros Signet pays {1} to add {R}{W}; output is two mana, but the net increase
         // is one. Both values are retained so color-fixing and gross output remain visible.
         if (parsed.action === 'add_mana') {
+            if (entryState) parsed.entryState = { ...entryState };
             finalizeManaAbilityEffect(parsed, cardContext);
             // All generic quantity-based consumers use the same land-adjusted acceleration value.
             // The actual printed output remains in amount/manaNetAmount.
@@ -8835,13 +8905,16 @@ function deriveCanonicalFunction(effect) {
         quantity = typeof effect.amount === 'number' ? effect.amount : null;
     } else if (fn === "mana_ability") {
         const manaAdvantage = effect.manaAdvantageAmount !== undefined ? effect.manaAdvantageAmount : effect.manaNetAmount;
-        const manaAdvantagePart = manaAdvantage != null && Number.isFinite(Number(manaAdvantage))
-            ? `${Number(manaAdvantage)} incremental mana`
-            : 'mana production';
+        const actualMana = effect.manaNetAmount ?? effect.manaOutputAmount;
+        const actualManaPart = actualMana != null && Number.isFinite(Number(actualMana))
+            ? `${Number(actualMana)} mana per activation`
+            : 'variable mana production';
+        const baselinePart = Number(effect.manaLandBaseline) > 0 && manaAdvantage != null
+            ? `${Number(manaAdvantage)} above land-drop baseline` : null;
         const colorPart = effect.colors && effect.colors.length > 0 ? effect.colors.join('/') : null;
-        // Canonical magnitude/quantity use mana advantage, not raw output. Raw output and net
-        // output remain separately available in params for evidence and color/output matching.
-        magnitude = [manaAdvantagePart, colorPart].filter(Boolean).join(' ');
+        // Magnitude describes the real output; quantity stays land-drop-adjusted for acceleration
+        // ranking. Both values are preserved in params so the pair scorer can compare each role.
+        magnitude = [actualManaPart, colorPart, baselinePart].filter(Boolean).join(' ');
         quantity = manaAdvantage != null && Number.isFinite(Number(manaAdvantage)) ? Number(manaAdvantage) : null;
     } else if (fn === "gain_life" || fn === "lose_life") {
         magnitude = `${effect.amount} life`;
@@ -8880,6 +8953,7 @@ function deriveCanonicalFunction(effect) {
             manaOutputMode: fn === 'mana_ability' ? (effect.manaOutputMode || effect.manaOutput?.mode || null) : null,
             manaOutputColors: fn === 'mana_ability' ? (effect.manaOutputColors || effect.manaOutput?.colors || []) : [],
             manaOutputColorCount: fn === 'mana_ability' ? (effect.manaOutputColorCount ?? effect.manaOutput?.uniqueColorCount ?? null) : null,
+            entryState: fn === 'mana_ability' ? (effect.entryState || null) : null,
             manaAbilityRulesProfile: effect.manaAbilityRulesProfile || null,
             duration: effect.isStatic === true ? "static" : (effect.isStatic === false ? "temporary" : null),
             controller: effect.controller || null,
@@ -8944,12 +9018,15 @@ function canonicalFunctionToText(canonicalFunctions) {
         }
         if (cf.function === 'mana_ability') {
             const advantage = p.manaAdvantageAmount;
-            const outputAdvantage = p.manaOutputAdvantageAmount;
-            const colors = Array.isArray(p.manaOutputColors) ? p.manaOutputColors.join('/') : '';
-            const netText = advantage == null ? 'variable additional mana' : `${advantage} additional mana`;
-            const outputText = outputAdvantage != null && outputAdvantage !== advantage
-                ? ` (gross output advantage ${outputAdvantage})` : '';
-            return `mana source ability: ${netText} after activation costs${outputText}${colors ? `; output colors ${colors}` : ''}; reusable mana production`;
+            const actualAmount = p.manaNetAmount ?? p.manaOutputAmount;
+            const colors = Array.isArray(p.manaOutputColors) ? p.manaOutputColors.join('/').toUpperCase() : '';
+            const amountText = actualAmount == null ? 'variable mana' : `${actualAmount} mana`;
+            const choiceText = p.manaOutputMode === 'choice_single_fixed_color' ? ' of a choice of one output color' : '';
+            const baselineText = Number(p.manaLandBaseline) > 0 && advantage != null
+                ? `; ${advantage} additional mana beyond the ordinary land-drop baseline` : '';
+            const entryText = p.entryState?.entersTapped ? '; enters tapped on entry'
+                : p.entryState?.entersUntapped ? '; enters untapped on entry' : '';
+            return `mana source ability: adds ${amountText}${choiceText} after activation costs${colors ? `; output colors ${colors}` : ''}${baselineText}${entryText}; reusable mana production`;
         }
         if (cf.function === 'zone_change' && p.from === 'hand' && p.to === 'exile') {
             return 'exile a card from hand';
@@ -10246,15 +10323,20 @@ if (fnA === 'cast_timing_permission' && fnB === 'cast_timing_permission') {
     parts.push(fieldSimilarity(8, cfA.params?.timingPermission, cfB.params?.timingPermission));
 }
 
+let manaProfileSimilarity = null;
 if (fnA === 'mana_ability' && fnB === 'mana_ability') {
     const ma = cfA.params || {}, mb = cfB.params || {};
-    // Compare acceleration beyond the normal land-drop baseline, not raw land output.
-    const netA = ma.manaAdvantageAmount !== undefined ? ma.manaAdvantageAmount : ma.manaNetAmount;
-    const netB = mb.manaAdvantageAmount !== undefined ? mb.manaAdvantageAmount : mb.manaNetAmount;
-    const outputA = ma.manaOutputAdvantageAmount !== undefined ? ma.manaOutputAdvantageAmount : ma.manaOutputAmount;
-    const outputB = mb.manaOutputAdvantageAmount !== undefined ? mb.manaOutputAdvantageAmount : mb.manaOutputAmount;
+    // Actual net/gross output distinguishes one mana from two. The land-adjusted amount remains
+    // a separate acceleration signal so a two-mana land can still resemble a one-mana rock.
+    const netA = ma.manaNetAmount !== undefined ? ma.manaNetAmount : ma.manaAdvantageAmount;
+    const netB = mb.manaNetAmount !== undefined ? mb.manaNetAmount : mb.manaAdvantageAmount;
+    const outputA = ma.manaOutputAmount !== undefined ? ma.manaOutputAmount : ma.manaOutputAdvantageAmount;
+    const outputB = mb.manaOutputAmount !== undefined ? mb.manaOutputAmount : mb.manaOutputAdvantageAmount;
+    const advantageA = ma.manaAdvantageAmount !== undefined ? ma.manaAdvantageAmount : ma.manaNetAmount;
+    const advantageB = mb.manaAdvantageAmount !== undefined ? mb.manaAdvantageAmount : mb.manaNetAmount;
     const netSim = manaNumericSimilarity(netA, netB);
     const outputSim = manaNumericSimilarity(outputA, outputB);
+    const advantageSim = manaNumericSimilarity(advantageA, advantageB);
     const colorSim = manaColorProfileSimilarity({
         mode: ma.manaOutputMode,
         colors: ma.manaOutputColors || []
@@ -10263,10 +10345,12 @@ if (fnA === 'mana_ability' && fnB === 'mana_ability') {
         colors: mb.manaOutputColors || []
     });
     const activationSim = manaActivationSimilarity(ma.activationCost, mb.activationCost);
-    if (netSim != null) parts.push({ weight: 12, value: netSim });
-    if (outputSim != null) parts.push({ weight: 5, value: outputSim });
-    if (colorSim != null) parts.push({ weight: 8, value: colorSim });
-    if (activationSim != null) parts.push({ weight: 5, value: activationSim });
+    manaProfileSimilarity = calculateManaAbilityProfileSimilarity(ma, mb);
+    if (netSim != null) parts.push({ weight: 9, value: netSim });
+    if (outputSim != null) parts.push({ weight: 4, value: outputSim });
+    if (advantageSim != null) parts.push({ weight: 10, value: advantageSim });
+    if (colorSim != null) parts.push({ weight: 12, value: colorSim });
+    if (activationSim != null) parts.push({ weight: 9, value: activationSim });
     const rulesA = cfA.params?.manaAbilityRulesProfile || effA.manaAbilityRulesProfile || null;
     const rulesB = cfB.params?.manaAbilityRulesProfile || effB.manaAbilityRulesProfile || null;
     if (rulesA || rulesB) parts.push({ weight: 8, value: rulesA && rulesB ? (rulesA.isRulesManaAbility === rulesB.isRulesManaAbility ? 1 : 0.12) : 0.55 });
@@ -10298,6 +10382,7 @@ const structuralEvidence = normalizedFieldScore(parts);
 // on its own. When no structural field is available, retain only a conservative floor.
 const fieldFactor = parts.some(Boolean) ? (0.52 + 0.48 * structuralEvidence) : 0.52;
 let score = coreAlignment * fieldFactor;
+if (manaProfileSimilarity != null) score *= 0.52 + 0.48 * manaProfileSimilarity;
 score *= (1 - Math.min(0.45, scoreContradictions(effA, effB) / 100));
     return score;
 }
@@ -15925,6 +16010,68 @@ function runManaSearchMechanicalRegressionSuite({ log = true } = {}) {
         });
     } catch (error) {
         results.push({ id: 'mechanic-family-contrast-regressions', pass: false, error: error?.message || String(error) });
+    }
+
+    // Parenthesized rules wrappers must preserve the rule contents and produce the same
+    // mana-choice profile as the unparenthesized Oracle form.
+    try {
+        const bogOracle = 'Geothermal Bog enters the battlefield tapped.\\n({T}: Add {B} or {R}.)';
+        const plainBogOracle = 'Geothermal Bog enters the battlefield tapped.\\n{T}: Add {B} or {R}.';
+        const bogContext = { name: 'Geothermal Bog', type_line: 'Land — Swamp Mountain', oracle_text: bogOracle };
+        const plainBogContext = { ...bogContext, oracle_text: plainBogOracle };
+        const solRingContext = { name: 'Sol Ring', type_line: 'Artifact', oracle_text: '{T}: Add {C}{C}.' };
+        const getManaEffect = (text, context) => parseMTGEffect(text, context).find(effect => effect?.action === 'add_mana') || null;
+        const bog = getManaEffect(bogOracle, bogContext);
+        const plainBog = getManaEffect(plainBogOracle, plainBogContext);
+        const solRing = getManaEffect(solRingContext.oracle_text, solRingContext);
+        const simultaneous = getManaEffect('{T}: Add {B}{R}.', { type_line: 'Land — Swamp Mountain' });
+        const bogParams = bog?.canonical?.params || {};
+        const plainBogParams = plainBog?.canonical?.params || {};
+        const solParams = solRing?.canonical?.params || {};
+        const bogSolScore = bog && solRing ? computeDirectionalMechanicalEffectPairSimilarity(bog, solRing) : null;
+        const bogProfileEquivalent = bog && plainBog &&
+            bogParams.manaOutputAmount === plainBogParams.manaOutputAmount &&
+            bogParams.manaOutputMode === plainBogParams.manaOutputMode &&
+            JSON.stringify(bogParams.manaOutputColors) === JSON.stringify(plainBogParams.manaOutputColors) &&
+            JSON.stringify(bogParams.activationCost?.parts) === JSON.stringify(plainBogParams.activationCost?.parts);
+        results.push({
+            id: 'parenthesized-and-plain-bog-rules-have-the-same-one-mana-choice-profile',
+            pass: bogProfileEquivalent &&
+                bogParams.manaOutputAmount === 1 &&
+                bogParams.manaOutputMode === 'choice_single_fixed_color' &&
+                ['b', 'r'].every(color => (bogParams.manaOutputColors || []).includes(color)) &&
+                bogParams.activationCost?.parts?.includes('tap') &&
+                !bogParams.activationCost?.parts?.includes('entry_tapped'),
+            parenthesized: bogParams,
+            unparenthesized: plainBogParams
+        });
+        results.push({
+            id: 'simultaneous-colored-symbols-remain-two-mana-not-a-one-mana-choice',
+            pass: simultaneous?.manaOutputAmount === 2 &&
+                simultaneous?.manaOutputMode === 'fixed_multi_color' &&
+                simultaneous?.manaOutput?.isChoice === false,
+            output: simultaneous?.manaOutput || null
+        });
+        results.push({
+            id: 'enters-tapped-is-entry-state-not-part-of-tap-activation-cost',
+            pass: bog?.entryState?.entersTapped === true &&
+                bog?.entryState?.timing === 'entry_only' &&
+                JSON.stringify(bogParams.activationCost?.parts) === JSON.stringify(['tap']) &&
+                manaActivationSimilarity(bogParams.activationCost, solParams.activationCost) === 1,
+            entryState: bog?.entryState || null,
+            activationCost: bogParams.activationCost || null
+        });
+        results.push({
+            id: 'geothermal-bog-and-sol-ring-share-mana-ability-but-not-near-identical-profiles',
+            pass: Number.isFinite(bogSolScore) && bogSolScore > 0.25 && bogSolScore < 0.90 &&
+                bogParams.manaNetAmount === 1 && solParams.manaNetAmount === 2 &&
+                solParams.manaOutputMode === 'fixed_colorless',
+            score: bogSolScore,
+            bog: { amount: bogParams.manaOutputAmount, mode: bogParams.manaOutputMode, colors: bogParams.manaOutputColors },
+            solRing: { amount: solParams.manaOutputAmount, mode: solParams.manaOutputMode, colors: solParams.manaOutputColors }
+        });
+    } catch (error) {
+        results.push({ id: 'mana-choice-and-parenthesis-regressions', pass: false, error: error?.message || String(error) });
     }
 
     // A draw-step reference is phase/timing text, not card draw. At the same time, a real draw
