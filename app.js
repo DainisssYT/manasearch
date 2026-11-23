@@ -1,6 +1,6 @@
-/* ManaSearch build 20261122-1840 */
+/* ManaSearch build 20261123-1800 */
 // ManaSearch deployment build marker. Bump this whenever app.js changes so cached-module issues are easy to diagnose.
-const MANASEARCH_APP_BUILD = '20261122-1840';
+const MANASEARCH_APP_BUILD = '20261123-1800';
 console.info(`[ManaSearch] app.js build ${MANASEARCH_APP_BUILD}`);
 
 // The source-query and static-index builders share one representation so both sides
@@ -614,7 +614,8 @@ const DEFAULT_DISPLAY_PREFERENCES = Object.freeze({
     showEdhrecButton: true,
     showSearchIntent: false,
     highlightDefaultMode: 'variable',
-    searchIntentDetail: 'short'
+    searchIntentDetail: 'short',
+    numericConstraintControls: 'touch'
 });
 let displayPreferences = { ...DEFAULT_DISPLAY_PREFERENCES };
 
@@ -697,7 +698,8 @@ function loadDisplayPreferences() {
         // Optional Search intent explanation is off by default, including for users with older saved preferences.
         showSearchIntent: stored?.showSearchIntent === true,
         highlightDefaultMode: ['variable', 'exact', 'context', 'avoid'].includes(stored?.highlightDefaultMode) ? stored.highlightDefaultMode : DEFAULT_DISPLAY_PREFERENCES.highlightDefaultMode,
-        searchIntentDetail: stored?.searchIntentDetail === 'detailed' ? 'detailed' : DEFAULT_DISPLAY_PREFERENCES.searchIntentDetail
+        searchIntentDetail: stored?.searchIntentDetail === 'detailed' ? 'detailed' : DEFAULT_DISPLAY_PREFERENCES.searchIntentDetail,
+        numericConstraintControls: ['touch', 'compact'].includes(stored?.numericConstraintControls) ? stored.numericConstraintControls : DEFAULT_DISPLAY_PREFERENCES.numericConstraintControls
     };
     return displayPreferences;
 }
@@ -963,6 +965,12 @@ function applyPresentationPreferences() {
     document.body.classList.toggle('compact-results', displayPreferences.resultDensity === 'compact');
     document.body.classList.toggle('reduce-motion', Boolean(displayPreferences.reduceMotion));
     document.body.classList.toggle('hide-stream-progress', displayPreferences.showStreamProgress === false);
+    document.body.dataset.numericConstraintControls = displayPreferences.numericConstraintControls === 'compact' ? 'compact' : 'touch';
+    document.querySelectorAll('.source-comparison-native-select').forEach(select => {
+        const compact = document.body.dataset.numericConstraintControls === 'compact';
+        select.tabIndex = compact ? 0 : -1;
+        select.setAttribute('aria-hidden', compact ? 'false' : 'true');
+    });
 }
 
 
@@ -2858,7 +2866,7 @@ function validateBenchmarkSuiteConfiguration() {
     const warnings = [];
     const requiredSelectors = [
         'card-search-input', 'filter-type', 'filter-format', 'filter-rarity', 'filter-identity',
-        'filter-colors', 'filter-cmc', 'filter-power', 'filter-toughness', 'filter-extra-oracle'
+        'filter-colors', 'filter-cmc', 'filter-power', 'filter-toughness', 'filter-price', 'filter-extra-oracle'
     ];
     if (typeof document !== 'undefined') {
         requiredSelectors.forEach(id => {
@@ -3836,6 +3844,7 @@ async function runLocalBenchmarkInApp() {
         colorsField.value = testCase.constraints.colors || '';
         colorsField.dispatchEvent(new Event('input'));
         document.getElementById('filter-cmc').value = testCase.constraints.cmc || '';
+        document.getElementById('filter-price').value = '';
         document.getElementById('filter-power').value = testCase.constraints.power || '';
         document.getElementById('filter-toughness').value = testCase.constraints.toughness || '';
         const benchmarkExtraOracle = document.getElementById('filter-extra-oracle');
@@ -17071,7 +17080,8 @@ const DEFAULT_CONSTRAINT_MODES = Object.freeze({
     rarity: 'prefer',
     cmc: 'prefer',
     power: 'prefer',
-    toughness: 'prefer'
+    toughness: 'prefer',
+    price: 'prefer'
 });
 
 function normalizeConstraintList(value) {
@@ -17127,6 +17137,7 @@ function readConstraintFilters() {
         identity: (document.getElementById('filter-identity')?.value || '').trim(),
         colors: (document.getElementById('filter-colors')?.value || '').trim(),
         cmc: (document.getElementById('filter-cmc')?.value || '').trim(),
+        price: (document.getElementById('filter-price')?.value || '').trim(),
         power: (document.getElementById('filter-power')?.value || '').trim(),
         toughness: (document.getElementById('filter-toughness')?.value || '').trim(),
         set: (document.getElementById('filter-set')?.value || '').trim(),
@@ -17240,7 +17251,7 @@ function hasActiveConstraintFilters(filters) {
         (filters.types || []).length || (filters.supertypes || []).length ||
         (filters.subtypes || []).length || (filters.keywords || []).length ||
         filters.format || filters.rarity || filters.identity || filters.colors ||
-        filters.cmc || filters.power || filters.toughness || filters.set || filters.extraOracle
+        filters.cmc || filters.power || filters.toughness || filters.price || filters.set || filters.extraOracle
     );
 }
 
@@ -17288,6 +17299,7 @@ function buildLocalConstraintParts(filters) {
     addNumericModeQuery('cmc', 'cmc');
     addNumericModeQuery('power', 'pow');
     addNumericModeQuery('toughness', 'tou');
+    addNumericModeQuery('price', 'usd');
     if (filters?.set) {
         const setMode = getConstraintMode(filters, 'set');
         if (setMode === 'hard') parts.push(`e:${escapeLocalQueryValue(filters.set)}`);
@@ -17442,6 +17454,9 @@ function explainFilterFailures(card, filters, broadFallbackFilters) {
     checkNumericConstraint('cmc', card.cmc);
     checkNumericConstraint('power', getComparableCardField(card, 'power'));
     checkNumericConstraint('toughness', getComparableCardField(card, 'toughness'));
+    const rawUsdPrice = card?.prices?.usd;
+    const usdPrice = rawUsdPrice === null || rawUsdPrice === undefined || rawUsdPrice === '' ? undefined : Number(rawUsdPrice);
+    checkNumericConstraint('price', Number.isFinite(usdPrice) ? usdPrice : undefined);
     if (filters.set) {
         const setMatches = String(card.set || '').toLowerCase() === String(filters.set).toLowerCase();
         const setMode = getConstraintMode(filters, 'set');
@@ -17528,6 +17543,9 @@ function matchesActiveFilters(card, filters, broadFallbackFilters) {
     if (!passesNumericConstraintMode('cmc', card.cmc)) return false;
     if (!passesNumericConstraintMode('power', getComparableCardField(card, 'power'))) return false;
     if (!passesNumericConstraintMode('toughness', getComparableCardField(card, 'toughness'))) return false;
+    const rawUsdPrice = card?.prices?.usd;
+    const usdPrice = rawUsdPrice === null || rawUsdPrice === undefined || rawUsdPrice === '' ? undefined : Number(rawUsdPrice);
+    if (!passesNumericConstraintMode('price', Number.isFinite(usdPrice) ? usdPrice : undefined)) return false;
 
     if (filters.set) {
         const setMatches = String(card.set || '').toLowerCase() === String(filters.set).toLowerCase();
@@ -17605,6 +17623,12 @@ function calculateConstraintPreferenceBonus(card, filters) {
     if (modes.cmc === 'prefer' && filters.cmc) {
         const parsed = parseComparisonFilter(filters.cmc);
         checks.push(Boolean(parsed && matchesComparisonFilter(card.cmc, parsed)));
+    }
+    if (modes.price === 'prefer' && filters.price) {
+        const parsed = parseComparisonFilter(filters.price);
+        const rawPrice = card?.prices?.usd;
+        const price = rawPrice === null || rawPrice === undefined || rawPrice === '' ? undefined : Number(rawPrice);
+        checks.push(Boolean(parsed && matchesComparisonFilter(Number.isFinite(price) ? price : undefined, parsed)));
     }
     if (!checks.length) return 0;
     // Preferences never exclude results. Each satisfied preference contributes a small bounded
@@ -21602,8 +21626,10 @@ function initApp() {
         if (preferenceShowSearchIntent) preferenceShowSearchIntent.checked = displayPreferences.showSearchIntent === true;
         const preferenceHighlightDefaultMode = document.getElementById('preference-highlight-default-mode');
         const preferenceSearchIntentDetail = document.getElementById('preference-search-intent-detail');
+        const preferenceNumericConstraintControls = document.getElementById('preference-numeric-constraint-controls');
         if (preferenceHighlightDefaultMode) preferenceHighlightDefaultMode.value = displayPreferences.highlightDefaultMode || 'variable';
         if (preferenceSearchIntentDetail) preferenceSearchIntentDetail.value = displayPreferences.searchIntentDetail || 'short';
+        if (preferenceNumericConstraintControls) preferenceNumericConstraintControls.value = displayPreferences.numericConstraintControls || 'touch';
         if (preferenceTheme) preferenceTheme.value = (displayPreferences.theme === 'light' || displayPreferences.theme === 'dark') ? displayPreferences.theme : 'dark';
         if (preferenceDensity) preferenceDensity.value = displayPreferences.resultDensity || 'comfortable';
         if (preferenceReduceMotion) preferenceReduceMotion.checked = Boolean(displayPreferences.reduceMotion);
@@ -21623,8 +21649,10 @@ function initApp() {
         displayPreferences.showSearchIntent = preferenceShowSearchIntent?.checked === true;
         const preferenceHighlightDefaultMode = document.getElementById('preference-highlight-default-mode');
         const preferenceSearchIntentDetail = document.getElementById('preference-search-intent-detail');
+        const preferenceNumericConstraintControls = document.getElementById('preference-numeric-constraint-controls');
         displayPreferences.highlightDefaultMode = ['variable', 'exact', 'context', 'avoid'].includes(preferenceHighlightDefaultMode?.value) ? preferenceHighlightDefaultMode.value : 'variable';
         displayPreferences.searchIntentDetail = ['short', 'detailed'].includes(preferenceSearchIntentDetail?.value) ? preferenceSearchIntentDetail.value : 'short';
+        displayPreferences.numericConstraintControls = ['touch', 'compact'].includes(preferenceNumericConstraintControls?.value) ? preferenceNumericConstraintControls.value : DEFAULT_DISPLAY_PREFERENCES.numericConstraintControls;
         displayPreferences.theme = ['dark', 'light'].includes(preferenceTheme?.value) ? preferenceTheme.value : DEFAULT_DISPLAY_PREFERENCES.theme;
         displayPreferences.resultDensity = ['comfortable', 'compact'].includes(preferenceDensity?.value) ? preferenceDensity.value : DEFAULT_DISPLAY_PREFERENCES.resultDensity;
         displayPreferences.reduceMotion = Boolean(preferenceReduceMotion?.checked);
@@ -22078,20 +22106,7 @@ function initApp() {
 
     function updateCardConstraintsBadge() {
         const filters = readConstraintFilters();
-        let activeCount = 0;
-        activeCount += (filters.types || []).length;
-        activeCount += (filters.supertypes || []).length;
-        activeCount += (filters.subtypes || []).length;
-        activeCount += (filters.keywords || []).length;
-        if (filters.format) activeCount++;
-        if (filters.rarity) activeCount++;
-        if (filters.identity) activeCount++;
-        if (filters.colors) activeCount++;
-        if (filters.cmc !== '') activeCount++;
-        if (filters.power !== '') activeCount++;
-        if (filters.toughness !== '') activeCount++;
-        if (filters.set) activeCount++;
-        if (filters.extraOracle) activeCount++;
+        const activeCount = (filters.keywords || []).length + (filters.extraOracle ? 1 : 0);
         if (activeCount === 0) {
             cardConstraintsBadge.textContent = 'Any';
             cardConstraintsBadge.style.backgroundColor = 'var(--bg-primary)';
@@ -22119,7 +22134,7 @@ function initApp() {
     }
     const clearAllConstraintsBtn = document.getElementById('clear-all-constraints-btn');
     if (clearAllConstraintsBtn) clearAllConstraintsBtn.addEventListener('click', () => {
-        const ids = ['filter-type', 'filter-supertype', 'filter-subtype', 'filter-keyword', 'filter-format', 'filter-rarity', 'filter-identity', 'filter-colors', 'filter-cmc', 'filter-power', 'filter-toughness', 'filter-set', 'filter-extra-oracle'];
+        const ids = ['filter-type', 'filter-supertype', 'filter-subtype', 'filter-keyword', 'filter-format', 'filter-rarity', 'filter-identity', 'filter-colors', 'filter-cmc', 'filter-power', 'filter-toughness', 'filter-price', 'filter-set', 'filter-extra-oracle'];
         for (const id of ids) {
             const el = document.getElementById(id);
             if (!el) continue;
@@ -22147,7 +22162,7 @@ function initApp() {
         });
     }
 
-    ['filter-type', 'filter-supertype', 'filter-subtype', 'filter-keyword', 'filter-format', 'filter-rarity', 'filter-identity', 'filter-colors', 'filter-cmc', 'filter-power', 'filter-toughness', 'filter-set', 'filter-extra-oracle'].forEach(id => {
+    ['filter-type', 'filter-supertype', 'filter-subtype', 'filter-keyword', 'filter-format', 'filter-rarity', 'filter-identity', 'filter-colors', 'filter-cmc', 'filter-power', 'filter-toughness', 'filter-price', 'filter-set', 'filter-extra-oracle'].forEach(id => {
         const el = document.getElementById(id);
         if (el) {
             el.addEventListener('input', updateCardConstraintsBadge);
@@ -23272,7 +23287,7 @@ function installFeatureHelpPopovers() {
     // Main workspace controls: hover on desktop, open their related modal normally when tapped.
     setHelp(document.getElementById('toggle-search-methods-btn'), 'Search Methods', examples.methods.description, 'methods', examples.methods.howTo);
     setHelp(document.getElementById('toggle-order-btn'), 'Order Results', examples.order.description, 'order', examples.order.howTo);
-    setHelp(document.getElementById('toggle-card-constraints-btn'), 'More card filters', examples.constraints.description, 'constraints', examples.constraints.howTo);
+    setHelp(document.getElementById('toggle-card-constraints-btn'), 'Keyword filters', examples.constraints.description, 'constraints', examples.constraints.howTo);
     setHelp(document.getElementById('source-card-add-btn'), 'Choose a source card', 'Choose the card whose mechanics or text you want to search from.', 'highlight', 'After choosing a card, select an important phrase in its type line or rules text.');
     setHelp(document.getElementById('find-similar-btn'), 'Find Similar Cards', 'Starts the search using the selected source card, highlights, retrieval settings, and constraints.', 'highlight', 'Choose a source card, optionally highlight an important phrase, then press Find Similar Cards.');
     setHelp(document.getElementById('autofill-source-constraints-btn'), 'Fill Empty From Source', 'Copies reliable properties from the selected source card into empty constraint fields only.', 'constraints', 'Review the filled fields; they become hard filters.');
@@ -23293,7 +23308,7 @@ function installFeatureHelpPopovers() {
     };
     addActionHelpMarker(document.getElementById('toggle-search-methods-btn'), 'Search Methods', examples.methods.description, 'methods', examples.methods.howTo);
     addActionHelpMarker(document.getElementById('toggle-order-btn'), 'Order Results', examples.order.description, 'order', examples.order.howTo);
-    addActionHelpMarker(document.getElementById('toggle-card-constraints-btn'), 'More card filters', examples.constraints.description, 'constraints', examples.constraints.howTo);
+    addActionHelpMarker(document.getElementById('toggle-card-constraints-btn'), 'Keyword filters', examples.constraints.description, 'constraints', examples.constraints.howTo);
     addActionHelpMarker(document.getElementById('source-card-add-btn'), 'Choose a source card', 'Choose the card whose mechanics or text you want to search from.', 'highlight', 'After choosing a card, select an important phrase in its type line or rules text.');
     addActionHelpMarker(document.getElementById('find-similar-btn'), 'Find Similar Cards', 'Starts the search using the selected source card, highlights, retrieval settings, and constraints.', 'highlight', 'Choose a source card, optionally highlight an important phrase, then press Find Similar Cards.');
 
@@ -25231,6 +25246,12 @@ function syncSourceCardMetadataDisplays(card = currentSourceCard, typeLine = get
         setCodeDisplay.textContent = setCode ? setCode.toUpperCase() : 'None';
         setCodeDisplay.title = String(card?.set_name || '').trim();
     }
+    const legalityConstraintDisplay = document.getElementById('source-card-legality-constraint');
+    if (legalityConstraintDisplay) {
+        const selectedFormat = String(document.getElementById('filter-format')?.value || '').trim();
+        const formatOption = [...(document.getElementById('source-format-input')?.options || [])].find(option => option.value === selectedFormat);
+        legalityConstraintDisplay.textContent = formatOption?.textContent || 'Any format';
+    }
 
     const face = card?.card_faces?.[currentSourceCardFaceIndex] || card?.card_faces?.[0] || null;
     const isCreature = parsed.types.some(type => type.toLowerCase() === 'creature');
@@ -25491,11 +25512,41 @@ function initSourceMetadataEditors() {
         }
     });
     bindEditor({
+        buttonId: 'edit-source-price-btn', editorId: 'source-price-editor', inputId: 'source-price-input',
+        applyId: 'apply-source-price-btn', cancelId: 'cancel-source-price-btn', allowBlank: true,
+        onOpen: () => {
+            const filterValue = byId('filter-price')?.value || '';
+            const parsed = typeof parseComparisonFilter === 'function' ? parseComparisonFilter(filterValue) : null;
+            const comparison = byId('source-price-comparison');
+            if (comparison) { comparison.value = parsed?.operator || 'none'; comparison.dispatchEvent(new Event('change', { bubbles: true })); }
+            const input = byId('source-price-input');
+            const sourcePrice = currentSourceCard?.prices?.usd;
+            if (input) input.value = parsed ? String(parsed.value) : (sourcePrice !== null && sourcePrice !== undefined && sourcePrice !== '' && Number.isFinite(Number(sourcePrice)) ? String(sourcePrice) : '');
+        },
+        readValue: () => {
+            const value = currentSourceCard?.prices?.usd;
+            return value !== null && value !== undefined && value !== '' && Number.isFinite(Number(value)) ? String(value) : '';
+        },
+        saveValue: raw => {
+            const comparator = byId('source-price-comparison')?.value || 'none';
+            if (comparator === 'none') return setConstraintField('filter-price', '');
+            const number = Number(String(raw ?? '').trim());
+            if (!Number.isFinite(number) || number < 0 || number > 999999) {
+                byId('source-price-input')?.setAttribute('aria-invalid', 'true');
+                byId('source-price-input')?.focus();
+                return false;
+            }
+            byId('source-price-input')?.removeAttribute('aria-invalid');
+            return setConstraintField('filter-price', `${comparator}${number}`);
+        }
+    });
+    bindEditor({
         buttonId: 'edit-source-legality-constraint-btn', editorId: 'source-legality-editor', inputId: 'source-format-input',
         applyId: 'apply-source-format-btn', cancelId: 'cancel-source-format-btn',
         readValue: () => String(byId('filter-format')?.value || ''),
         saveValue: raw => setConstraintField('filter-format', String(raw || '').toLowerCase())
     });
+    byId('filter-format')?.addEventListener('change', () => syncSourceCardMetadataDisplays());
     bindEditor({
         buttonId: 'edit-source-set-code-btn', editorId: 'source-set-code-editor', inputId: 'source-set-code-input',
         applyId: 'apply-source-set-code-btn', cancelId: 'cancel-source-set-code-btn',
@@ -25751,7 +25802,8 @@ function displaySourceCard(card) {
     if (sourceCardPrice) {
         const usd = card?.prices?.usd;
         const eur = card?.prices?.eur;
-        sourceCardPrice.textContent = [usd ? `$${usd}` : null, eur ? `€${eur}` : null].filter(Boolean).join(' / ') || 'Unavailable';
+        sourceCardPrice.textContent = [usd !== null && usd !== undefined && usd !== '' ? `$${usd}` : null, eur !== null && eur !== undefined && eur !== '' ? `€${eur}` : null].filter(Boolean).join(' / ') || 'Unavailable';
+        sourceCardPrice.dataset.usd = usd === null || usd === undefined ? '' : String(usd);
     }
     if (sourceCardType) reapplyTypeLineHighlights();
     renderHighlightChips();

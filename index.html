@@ -5,7 +5,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>ManaSearch</title>
-    <link rel="stylesheet" href="style.css?v=20261122-1840">
+    <link rel="stylesheet" href="style.css?v=20261123-1800">
     <link rel="stylesheet" href="search-inspector.css?v=20261119-140">
 </head>
 <body>
@@ -130,7 +130,7 @@
                                 <div class="source-card-meta-row">
                                     <p class="source-card-meta-static"><strong>Mana Cost:</strong> <span id="source-card-mana"></span></p>
                                     <div class="source-meta-field source-meta-field-mana-value">
-                                        <p class="source-card-meta-line"><strong>Mana Value:</strong> <span id="source-card-mana-value">0</span> <button type="button" id="edit-source-mana-value-btn" class="source-type-edit-btn" aria-expanded="false" aria-controls="source-mana-value-editor">Edit</button></p>
+                                        <p class="source-card-meta-line"><button type="button" id="edit-source-mana-value-btn" class="source-meta-value-button" aria-expanded="false" aria-controls="source-mana-value-editor"><strong>Mana Value:</strong> <span id="source-card-mana-value">0</span></button></p>
                                         <div id="source-mana-value-editor" class="source-meta-editor hidden">
                                             <label for="source-mana-value-input">Edit mana value</label>
                                             <input id="source-mana-value-input" type="number" min="0" max="999" step="any" inputmode="decimal" required aria-label="Source card mana value">
@@ -146,12 +146,36 @@
                                         </div>
                                     </div>
                                 </div>
+                                <div class="source-card-meta-row source-card-stats-row" aria-label="Creature power and toughness">
+                                    <div class="source-meta-field">
+                                        <p class="source-card-meta-line"><button type="button" id="edit-source-power-btn" class="source-meta-value-button" aria-expanded="false" aria-controls="source-power-editor"><strong>Power:</strong> <span id="source-card-power">—</span></button></p>
+                                        <div id="source-power-editor" class="source-meta-editor hidden">
+                                            <label for="source-power-input">Power comparison value</label><input id="source-power-input" type="number" min="-999" max="999" step="any" inputmode="decimal" aria-label="Power comparison value">
+                                            <label class="source-meta-editor-secondary-label">Find cards with power</label>
+                                            <div class="source-comparison-radio-group" role="radiogroup" aria-label="Power comparison" data-comparison-radios-for="source-power-comparison"><label class="source-comparison-radio" title="No comparison"><input type="radio" name="source-power-comparison-radio" value="none" aria-label="No comparison" checked><span aria-hidden="true">—</span></label><label class="source-comparison-radio" title="Less than"><input type="radio" name="source-power-comparison-radio" value="&lt;" aria-label="Less than"><span aria-hidden="true">&lt;</span></label><label class="source-comparison-radio" title="Equal to"><input type="radio" name="source-power-comparison-radio" value="=" aria-label="Equal to"><span aria-hidden="true">=</span></label><label class="source-comparison-radio" title="Greater than"><input type="radio" name="source-power-comparison-radio" value="&gt;" aria-label="Greater than"><span aria-hidden="true">&gt;</span></label><label class="source-comparison-radio" title="Less than or equal to"><input type="radio" name="source-power-comparison-radio" value="&lt;=" aria-label="Less than or equal to"><span aria-hidden="true">≤</span></label><label class="source-comparison-radio" title="Greater than or equal to"><input type="radio" name="source-power-comparison-radio" value="&gt;=" aria-label="Greater than or equal to"><span aria-hidden="true">≥</span></label><label class="source-comparison-radio" title="Not equal to"><input type="radio" name="source-power-comparison-radio" value="!=" aria-label="Not equal to"><span aria-hidden="true">≠</span></label></div>
+                                            <select id="source-power-comparison" class="source-comparison-native-select" aria-label="Power comparison" tabindex="-1" aria-hidden="true"><option value="none">Don't filter by power</option><option value="&lt;">Less than</option><option value="=">Equal to</option><option value="&gt;">More than</option><option value="&lt;=">Less than or equal to</option><option value="&gt;=">More than or equal to</option><option value="!=">Not equal to</option></select>
+                                            <label for="source-power-mode" class="source-meta-editor-secondary-label">Apply this constraint as</label><select id="source-power-mode" data-constraint-mode="power" aria-label="Power constraint mode"><option value="hard">Hard filter</option><option value="prefer" selected>Prefer</option><option value="exclude">Not include</option></select>
+                                            <p id="source-power-help" class="source-type-help">Choose a comparison symbol and mode. Variable power such as * cannot be used as a numeric value.</p><div class="source-type-editor-actions"><button type="button" id="apply-source-power-btn">Apply</button><button type="button" id="cancel-source-power-btn" class="secondary-preference-btn">Cancel</button></div>
+                                        </div>
+                                    </div>
+                                    <div class="source-meta-field">
+                                        <p class="source-card-meta-line"><button type="button" id="edit-source-toughness-btn" class="source-meta-value-button" aria-expanded="false" aria-controls="source-toughness-editor"><strong>Toughness:</strong> <span id="source-card-toughness">—</span></button></p>
+                                        <div id="source-toughness-editor" class="source-meta-editor hidden">
+                                            <label for="source-toughness-input">Toughness comparison value</label><input id="source-toughness-input" type="number" min="-999" max="999" step="any" inputmode="decimal" aria-label="Toughness comparison value">
+                                            <label class="source-meta-editor-secondary-label">Find cards with toughness</label>
+                                            <div class="source-comparison-radio-group" role="radiogroup" aria-label="Toughness comparison" data-comparison-radios-for="source-toughness-comparison"><label class="source-comparison-radio" title="No comparison"><input type="radio" name="source-toughness-comparison-radio" value="none" aria-label="No comparison" checked><span aria-hidden="true">—</span></label><label class="source-comparison-radio" title="Less than"><input type="radio" name="source-toughness-comparison-radio" value="&lt;" aria-label="Less than"><span aria-hidden="true">&lt;</span></label><label class="source-comparison-radio" title="Equal to"><input type="radio" name="source-toughness-comparison-radio" value="=" aria-label="Equal to"><span aria-hidden="true">=</span></label><label class="source-comparison-radio" title="Greater than"><input type="radio" name="source-toughness-comparison-radio" value="&gt;" aria-label="Greater than"><span aria-hidden="true">&gt;</span></label><label class="source-comparison-radio" title="Less than or equal to"><input type="radio" name="source-toughness-comparison-radio" value="&lt;=" aria-label="Less than or equal to"><span aria-hidden="true">≤</span></label><label class="source-comparison-radio" title="Greater than or equal to"><input type="radio" name="source-toughness-comparison-radio" value="&gt;=" aria-label="Greater than or equal to"><span aria-hidden="true">≥</span></label><label class="source-comparison-radio" title="Not equal to"><input type="radio" name="source-toughness-comparison-radio" value="!=" aria-label="Not equal to"><span aria-hidden="true">≠</span></label></div>
+                                            <select id="source-toughness-comparison" class="source-comparison-native-select" aria-label="Toughness comparison" tabindex="-1" aria-hidden="true"><option value="none">Don't filter by toughness</option><option value="&lt;">Less than</option><option value="=">Equal to</option><option value="&gt;">More than</option><option value="&lt;=">Less than or equal to</option><option value="&gt;=">More than or equal to</option><option value="!=">Not equal to</option></select>
+                                            <label for="source-toughness-mode" class="source-meta-editor-secondary-label">Apply this constraint as</label><select id="source-toughness-mode" data-constraint-mode="toughness" aria-label="Toughness constraint mode"><option value="hard">Hard filter</option><option value="prefer" selected>Prefer</option><option value="exclude">Not include</option></select>
+                                            <p id="source-toughness-help" class="source-type-help">Choose a comparison symbol and mode. Variable toughness such as * cannot be used as a numeric value.</p><div class="source-type-editor-actions"><button type="button" id="apply-source-toughness-btn">Apply</button><button type="button" id="cancel-source-toughness-btn" class="secondary-preference-btn">Cancel</button></div>
+                                        </div>
+                                    </div>
+                                </div>
                                 <details class="source-advanced-card-details">
-                                    <summary><strong>More card attributes</strong><span>Type · rarity · stats · set · legality</span></summary>
+                                    <summary><strong>More card attributes</strong><span>Type · rarity · set · legality · price</span></summary>
                                     <div class="source-advanced-card-details-body">
                                 <div class="source-card-meta-row source-card-type-components-row">
                                     <div class="source-meta-field">
-                                        <p class="source-card-meta-line"><strong>Supertype:</strong> <span id="source-card-supertype">None</span> <button type="button" id="edit-source-supertype-btn" class="source-type-edit-btn" aria-expanded="false" aria-controls="source-supertype-editor">Edit</button></p>
+                                        <p class="source-card-meta-line"><button type="button" id="edit-source-supertype-btn" class="source-meta-value-button" aria-expanded="false" aria-controls="source-supertype-editor"><strong>Supertype:</strong> <span id="source-card-supertype">None</span></button></p>
                                         <div id="source-supertype-editor" class="source-meta-editor hidden">
                                             <label for="source-supertype-input">Edit supertype</label>
                                             <input id="source-supertype-input" type="text" autocomplete="off" spellcheck="true" aria-describedby="source-supertype-help" placeholder="e.g. Legendary, Snow (blank for none)" aria-label="Source card supertype">
@@ -163,11 +187,11 @@
                                         </div>
                                     </div>
                                     <div class="source-meta-field source-meta-field-type">
-                                        <p class="source-card-meta-line source-type-row"><strong>Type:</strong> <span id="source-card-type" class="selectable-text type-line-selectable" title="Select a card type to highlight it"></span> <button type="button" id="edit-source-type-btn" class="source-type-edit-btn" aria-expanded="false" aria-controls="source-type-editor">Edit</button></p>
+                                        <p class="source-card-meta-line source-type-row"><button type="button" id="edit-source-type-btn" class="source-meta-value-button" aria-expanded="false" aria-controls="source-type-editor"><strong>Type:</strong> <span id="source-card-type" class="selectable-text type-line-selectable" title="Select a card type to highlight it"></span></button></p>
                                         <div id="source-type-editor" class="source-type-editor hidden"><label for="source-type-input">Edit card type</label><input id="source-type-input" type="text" autocomplete="off" spellcheck="true" aria-describedby="source-type-help" placeholder="e.g. Creature, Artifact, Enchantment"><div id="source-type-suggestions" class="source-type-suggestions hidden" role="listbox" aria-label="Suggested MTG types"></div><label for="source-type-mode" class="source-meta-editor-secondary-label">Use card type as a search constraint</label><select id="source-type-mode" data-constraint-mode="types" aria-label="Type constraint mode"><option value="hard">Hard filter</option><option value="prefer" selected>Prefer</option><option value="exclude">Not include</option></select><p id="source-type-help" class="source-type-help">Edit card types only. Supertypes and subtypes are kept in their own fields. Hard filter requires these card types; Prefer ranks matches higher; Not include excludes matches.</p><div class="source-type-editor-actions"><button type="button" id="apply-source-type-btn">Apply card types</button><button type="button" id="cancel-source-type-btn" class="secondary-preference-btn">Cancel</button></div></div>
                                     </div>
                                     <div class="source-meta-field">
-                                        <p class="source-card-meta-line"><strong>Subtype:</strong> <span id="source-card-subtype">None</span> <button type="button" id="edit-source-subtype-btn" class="source-type-edit-btn" aria-expanded="false" aria-controls="source-subtype-editor">Edit</button></p>
+                                        <p class="source-card-meta-line"><button type="button" id="edit-source-subtype-btn" class="source-meta-value-button" aria-expanded="false" aria-controls="source-subtype-editor"><strong>Subtype:</strong> <span id="source-card-subtype">None</span></button></p>
                                         <div id="source-subtype-editor" class="source-meta-editor hidden">
                                             <label for="source-subtype-input">Edit subtype</label>
                                             <input id="source-subtype-input" type="text" autocomplete="off" spellcheck="true" aria-describedby="source-subtype-help" placeholder="e.g. Elf Druid (blank for none)" aria-label="Source card subtype">
@@ -181,7 +205,7 @@
                                 </div>
                                 <div class="source-card-meta-row source-card-rarity-row">
                                     <div class="source-meta-field">
-                                        <p class="source-card-meta-line"><strong>Rarity:</strong> <span id="source-card-rarity">None</span> <button type="button" id="edit-source-rarity-btn" class="source-type-edit-btn" aria-expanded="false" aria-controls="source-rarity-editor">Edit</button></p>
+                                        <p class="source-card-meta-line"><button type="button" id="edit-source-rarity-btn" class="source-meta-value-button" aria-expanded="false" aria-controls="source-rarity-editor"><strong>Rarity:</strong> <span id="source-card-rarity">None</span></button></p>
                                         <div id="source-rarity-editor" class="source-meta-editor hidden">
                                             <label for="source-rarity-input">Card rarity</label>
                                             <select id="source-rarity-input" aria-label="Source card rarity"><option value="common">Common</option><option value="uncommon">Uncommon</option><option value="rare">Rare</option><option value="mythic">Mythic</option><option value="special">Special</option><option value="bonus">Bonus</option></select>
@@ -194,7 +218,7 @@
                                 </div>
                                 <div class="source-card-meta-row source-card-extra-meta-row">
                                     <div class="source-meta-field">
-                                        <p class="source-card-meta-line"><strong>Format Legality:</strong> <button type="button" id="source-card-legality-btn" class="source-type-edit-btn source-meta-action-btn" aria-haspopup="dialog">View</button> <button type="button" id="edit-source-legality-constraint-btn" class="source-type-edit-btn source-meta-action-btn" aria-expanded="false" aria-controls="source-legality-editor">Edit</button></p>
+                                        <p class="source-card-meta-line"><button type="button" id="edit-source-legality-constraint-btn" class="source-meta-value-button" aria-expanded="false" aria-controls="source-legality-editor"><strong>Format legality constraint:</strong> <span id="source-card-legality-constraint">Any format</span></button></p>
                                         <div id="source-legality-editor" class="source-meta-editor hidden">
                                             <label for="source-format-input">Find cards legal in this format</label>
                                             <select id="source-format-input" aria-label="Format legality search constraint">
@@ -206,7 +230,7 @@
                                         </div>
                                     </div>
                                     <div class="source-meta-field">
-                                        <p class="source-card-meta-line"><strong>Set Code:</strong> <span id="source-card-set-code">None</span> <button type="button" id="edit-source-set-code-btn" class="source-type-edit-btn source-meta-action-btn" aria-expanded="false" aria-controls="source-set-code-editor">Edit</button></p>
+                                        <p class="source-card-meta-line"><button type="button" id="edit-source-set-code-btn" class="source-meta-value-button" aria-expanded="false" aria-controls="source-set-code-editor"><strong>Set Code:</strong> <span id="source-card-set-code">None</span></button></p>
                                         <div id="source-set-code-editor" class="source-meta-editor hidden">
                                             <label for="source-set-code-input">Find cards from set code</label>
                                             <input id="source-set-code-input" type="text" maxlength="8" autocapitalize="characters" autocomplete="off" spellcheck="false" placeholder="e.g. lea, khm" aria-label="Set code search constraint">
@@ -217,40 +241,23 @@
                                         </div>
                                     </div>
                                 </div>
-                                <div id="source-card-stats-row" class="source-card-meta-row source-card-stats-row hidden" aria-label="Creature power and toughness">
+                                <div class="source-card-meta-row source-card-extra-meta-row">
                                     <div class="source-meta-field">
-                                        <p class="source-card-meta-line"><strong>Power:</strong> <span id="source-card-power">—</span> <button type="button" id="edit-source-power-btn" class="source-type-edit-btn source-meta-action-btn" aria-expanded="false" aria-controls="source-power-editor">Edit</button></p>
-                                        <div id="source-power-editor" class="source-meta-editor hidden">
-                                            <label for="source-power-input">Power value</label>
-                                            <input id="source-power-input" type="number" min="-999" max="999" step="any" inputmode="decimal" aria-label="Power comparison value">
-                                            <label class="source-meta-editor-secondary-label">Find cards with power</label>
-                                            <div class="source-comparison-radio-group" role="radiogroup" aria-label="Power comparison" data-comparison-radios-for="source-power-comparison"><label class="source-comparison-radio" title="No comparison"><input type="radio" name="source-power-comparison-radio" value="none" aria-label="No comparison" checked><span aria-hidden="true">—</span></label><label class="source-comparison-radio" title="Less than"><input type="radio" name="source-power-comparison-radio" value="&lt;" aria-label="Less than"><span aria-hidden="true">&lt;</span></label><label class="source-comparison-radio" title="Equal to"><input type="radio" name="source-power-comparison-radio" value="=" aria-label="Equal to"><span aria-hidden="true">=</span></label><label class="source-comparison-radio" title="Greater than"><input type="radio" name="source-power-comparison-radio" value="&gt;" aria-label="Greater than"><span aria-hidden="true">&gt;</span></label><label class="source-comparison-radio" title="Less than or equal to"><input type="radio" name="source-power-comparison-radio" value="&lt;=" aria-label="Less than or equal to"><span aria-hidden="true">≤</span></label><label class="source-comparison-radio" title="Greater than or equal to"><input type="radio" name="source-power-comparison-radio" value="&gt;=" aria-label="Greater than or equal to"><span aria-hidden="true">≥</span></label><label class="source-comparison-radio" title="Not equal to"><input type="radio" name="source-power-comparison-radio" value="!=" aria-label="Not equal to"><span aria-hidden="true">≠</span></label></div>
-                                            <select id="source-power-comparison" class="source-comparison-native-select" aria-label="Power comparison" tabindex="-1" aria-hidden="true"><option value="none">Don't filter by power</option><option value="&lt;">Less than</option><option value="=">Equal to</option><option value="&gt;">More than</option><option value="&lt;=">Less than or equal to</option><option value="&gt;=">More than or equal to</option><option value="!=">Not equal to</option></select>
-                                            <label for="source-power-mode" class="source-meta-editor-secondary-label">Apply this constraint as</label>
-                                            <select id="source-power-mode" data-constraint-mode="power" aria-label="Power constraint mode"><option value="hard">Hard filter</option><option value="prefer" selected>Prefer</option><option value="exclude">Not include</option></select>
-                                            <p id="source-power-help" class="source-type-help">Choose a comparison symbol and mode. Variable power such as * cannot be used as a numeric value.</p>
-                                            <div class="source-type-editor-actions"><button type="button" id="apply-source-power-btn">Apply</button><button type="button" id="cancel-source-power-btn" class="secondary-preference-btn">Cancel</button></div>
-                                        </div>
-                                    </div>
-                                    <div class="source-meta-field">
-                                        <p class="source-card-meta-line"><strong>Toughness:</strong> <span id="source-card-toughness">—</span> <button type="button" id="edit-source-toughness-btn" class="source-type-edit-btn source-meta-action-btn" aria-expanded="false" aria-controls="source-toughness-editor">Edit</button></p>
-                                        <div id="source-toughness-editor" class="source-meta-editor hidden">
-                                            <label for="source-toughness-input">Toughness value</label>
-                                            <input id="source-toughness-input" type="number" min="-999" max="999" step="any" inputmode="decimal" aria-label="Toughness comparison value">
-                                            <label class="source-meta-editor-secondary-label">Find cards with toughness</label>
-                                            <div class="source-comparison-radio-group" role="radiogroup" aria-label="Toughness comparison" data-comparison-radios-for="source-toughness-comparison"><label class="source-comparison-radio" title="No comparison"><input type="radio" name="source-toughness-comparison-radio" value="none" aria-label="No comparison" checked><span aria-hidden="true">—</span></label><label class="source-comparison-radio" title="Less than"><input type="radio" name="source-toughness-comparison-radio" value="&lt;" aria-label="Less than"><span aria-hidden="true">&lt;</span></label><label class="source-comparison-radio" title="Equal to"><input type="radio" name="source-toughness-comparison-radio" value="=" aria-label="Equal to"><span aria-hidden="true">=</span></label><label class="source-comparison-radio" title="Greater than"><input type="radio" name="source-toughness-comparison-radio" value="&gt;" aria-label="Greater than"><span aria-hidden="true">&gt;</span></label><label class="source-comparison-radio" title="Less than or equal to"><input type="radio" name="source-toughness-comparison-radio" value="&lt;=" aria-label="Less than or equal to"><span aria-hidden="true">≤</span></label><label class="source-comparison-radio" title="Greater than or equal to"><input type="radio" name="source-toughness-comparison-radio" value="&gt;=" aria-label="Greater than or equal to"><span aria-hidden="true">≥</span></label><label class="source-comparison-radio" title="Not equal to"><input type="radio" name="source-toughness-comparison-radio" value="!=" aria-label="Not equal to"><span aria-hidden="true">≠</span></label></div>
-                                            <select id="source-toughness-comparison" class="source-comparison-native-select" aria-label="Toughness comparison" tabindex="-1" aria-hidden="true"><option value="none">Don't filter by toughness</option><option value="&lt;">Less than</option><option value="=">Equal to</option><option value="&gt;">More than</option><option value="&lt;=">Less than or equal to</option><option value="&gt;=">More than or equal to</option><option value="!=">Not equal to</option></select>
-                                            <label for="source-toughness-mode" class="source-meta-editor-secondary-label">Apply this constraint as</label>
-                                            <select id="source-toughness-mode" data-constraint-mode="toughness" aria-label="Toughness constraint mode"><option value="hard">Hard filter</option><option value="prefer" selected>Prefer</option><option value="exclude">Not include</option></select>
-                                            <p id="source-toughness-help" class="source-type-help">Choose a comparison symbol and mode. Variable toughness such as * cannot be used as a numeric value.</p>
-                                            <div class="source-type-editor-actions"><button type="button" id="apply-source-toughness-btn">Apply</button><button type="button" id="cancel-source-toughness-btn" class="secondary-preference-btn">Cancel</button></div>
+                                        <p class="source-card-meta-line"><button type="button" id="edit-source-price-btn" class="source-meta-value-button" aria-expanded="false" aria-controls="source-price-editor"><strong>Price (USD):</strong> <span id="source-card-price">Unavailable</span></button></p>
+                                        <div id="source-price-editor" class="source-meta-editor hidden">
+                                            <label for="source-price-input">Find cards with a non-foil USD price</label><input id="source-price-input" type="number" min="0" max="999999" step="0.01" inputmode="decimal" aria-label="Price comparison value in US dollars">
+                                            <label class="source-meta-editor-secondary-label">Price comparison</label>
+                                            <div class="source-comparison-radio-group" role="radiogroup" aria-label="Price comparison" data-comparison-radios-for="source-price-comparison"><label class="source-comparison-radio" title="No comparison"><input type="radio" name="source-price-comparison-radio" value="none" aria-label="No comparison" checked><span aria-hidden="true">—</span></label><label class="source-comparison-radio" title="Less than"><input type="radio" name="source-price-comparison-radio" value="&lt;" aria-label="Less than"><span aria-hidden="true">&lt;</span></label><label class="source-comparison-radio" title="Equal to"><input type="radio" name="source-price-comparison-radio" value="=" aria-label="Equal to"><span aria-hidden="true">=</span></label><label class="source-comparison-radio" title="Greater than"><input type="radio" name="source-price-comparison-radio" value="&gt;" aria-label="Greater than"><span aria-hidden="true">&gt;</span></label><label class="source-comparison-radio" title="Less than or equal to"><input type="radio" name="source-price-comparison-radio" value="&lt;=" aria-label="Less than or equal to"><span aria-hidden="true">≤</span></label><label class="source-comparison-radio" title="Greater than or equal to"><input type="radio" name="source-price-comparison-radio" value="&gt;=" aria-label="Greater than or equal to"><span aria-hidden="true">≥</span></label><label class="source-comparison-radio" title="Not equal to"><input type="radio" name="source-price-comparison-radio" value="!=" aria-label="Not equal to"><span aria-hidden="true">≠</span></label></div>
+                                            <select id="source-price-comparison" class="source-comparison-native-select" aria-label="Price comparison" tabindex="-1" aria-hidden="true"><option value="none">Don't filter by price</option><option value="&lt;">Less than</option><option value="=">Equal to</option><option value="&gt;">More than</option><option value="&lt;=">Less than or equal to</option><option value="&gt;=">More than or equal to</option><option value="!=">Not equal to</option></select>
+                                            <label for="source-price-mode" class="source-meta-editor-secondary-label">Apply this constraint as</label><select id="source-price-mode" data-constraint-mode="price" aria-label="Price constraint mode"><option value="hard">Hard filter</option><option value="prefer" selected>Prefer</option><option value="exclude">Not include</option></select>
+                                            <p class="source-type-help">Prices use the card's non-foil USD price. Cards without a listed price cannot match this constraint.</p><div class="source-type-editor-actions"><button type="button" id="apply-source-price-btn">Apply</button><button type="button" id="cancel-source-price-btn" class="secondary-preference-btn">Cancel</button></div>
                                         </div>
                                     </div>
                                 </div>
-                                <p class="source-card-meta-line source-card-price-row"><strong>Price:</strong> <span id="source-card-price">Unavailable</span></p>
                                     </div>
                                 </details>
                             </div>
+                            <p class="source-card-meta-line source-card-legality-view-row"><strong>Legal formats:</strong> <button type="button" id="source-card-legality-btn" class="source-meta-value-button" aria-haspopup="dialog">View formats</button></p>
                             <section class="source-quick-constraints" aria-labelledby="source-quick-constraints-title">
                                 <div class="source-quick-constraints-heading"><strong id="source-quick-constraints-title">Card filters</strong><span>Optional limits for this search</span></div>
                                 <div class="source-quick-constraint-row">
@@ -267,8 +274,8 @@
                                     </div>
                                     <label class="source-quick-mode-label" for="constraint-mode-colors">Apply as</label><select id="constraint-mode-colors" class="source-quick-mode" data-constraint-mode="colors"><option value="hard">Hard filter</option><option value="prefer">Prefer in ranking</option></select>
                                 </div>
-                                <button type="button" id="toggle-card-constraints-btn" class="source-more-constraints-btn" data-feature-tip="Set additional card attributes and format legality for this search." data-feature-preview="Type · Color · Format · Mana Value">
-                                    More card filters <span id="card-constraints-badge" class="badge">Any</span> ▾
+                                <button type="button" id="toggle-card-constraints-btn" class="source-more-constraints-btn" data-feature-tip="Set keyword and Oracle text filters for this search." data-feature-preview="Keyword abilities · Oracle wording">
+                                    Keywords &amp; Oracle filters <span id="card-constraints-badge" class="badge">Any</span> ▾
                                 </button>
                             </section>
                         </div>
@@ -418,7 +425,7 @@
             </section>
         </div>
     </main>
-    <input type="hidden" id="filter-extra-oracle" value="">
+    <input type="hidden" id="filter-price" value="">
 
     <!-- 1. SEARCH METHODS MODAL PANEL -->
     <div id="search-methods-modal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="search-methods-title">
@@ -669,11 +676,11 @@
     <div id="card-constraints-modal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="card-constraints-title">
         <div class="modal-card">
             <div class="modal-header">
-                <h3 id="card-constraints-title">Card Constraints</h3>
+            <h3 id="card-constraints-title">Keyword Filters</h3>
                 <button type="button" id="close-card-constraints-modal" class="close-btn" aria-label="Close card constraints">&times;</button>
             </div>
             <div class="modal-body">
-                <p class="modal-intro">Hard filters exclude non-matching cards; ranking preferences keep them eligible but favor matches. Choose the behavior for each active constraint.</p>
+                <p class="modal-intro">Use this panel for keyword abilities and Oracle wording. Card attributes and numeric limits are edited directly on the source card.</p>
                 <p class="constraint-autofill-help">Fill Empty From Source fills blank fields from the source card. Review the filters before searching; use Clear All Constraints to remove them.</p>
                 <div class="filters-grid">
                     <div class="filter-group filter-group-wide">
@@ -742,6 +749,10 @@
                             </div>
                         </div>
                         <input type="hidden" id="filter-keyword" value="">
+                    </div>
+                    <div class="filter-group filter-group-wide">
+                        <label for="filter-extra-oracle">Oracle text contains</label>
+                        <input type="text" id="filter-extra-oracle" placeholder="e.g. create a Treasure token" autocomplete="off">
                     </div>
                     <div class="filter-group">
                         <label for="filter-format">Format Legality</label>
@@ -980,6 +991,19 @@
 
                 <div class="preference-setting">
                     <div class="preference-setting-copy">
+                        <label for="preference-numeric-constraint-controls"><strong>Numeric constraint controls</strong></label>
+                        <span>Choose larger tap targets or a compact menu for mana value, power, toughness, and price comparisons.</span>
+                    </div>
+                    <div class="preference-control">
+                        <select id="preference-numeric-constraint-controls" class="preference-select" aria-label="Numeric constraint controls">
+                            <option value="touch">Large touch buttons</option>
+                            <option value="compact">Compact dropdown</option>
+                        </select>
+                    </div>
+                </div>
+
+                <div class="preference-setting">
+                    <div class="preference-setting-copy">
                         <label for="preference-result-density"><strong>Result card density</strong></label>
                         <span>Compact reduces spacing and information padding when you want to scan more cards quickly.</span>
                     </div>
@@ -1134,7 +1158,7 @@
     </script>
     <script src="pako.min.js?v=20261122-1840"></script>
     <script src="search-inspector.js?v=20261119-167"></script>
-    <script type="module" src="app.js?v=20261122-1840"></script>
+    <script type="module" src="app.js?v=20261123-1800"></script>
     <style id="minigames-inline-styles">
 /* v119 — self-contained Guess the Source minigame UI and aligned header launcher. */
 .minigames-launch-btn {
