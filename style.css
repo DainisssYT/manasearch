@@ -7394,6 +7394,30 @@ body.light-theme .card-actions .edhrec-link-btn:hover {
 #source-card-loaded .source-meta-field-type {
     flex: 1 1 220px;
 }
+#source-card-loaded .source-meta-value-button {
+    display: inline-flex;
+    align-items: baseline;
+    gap: 4px;
+    min-height: 30px;
+    max-width: 100%;
+    padding: 2px 3px;
+    border: 0;
+    border-radius: 4px;
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+}
+#source-card-loaded .source-meta-value-button:hover,
+#source-card-loaded .source-meta-value-button:focus-visible {
+    outline: 0;
+    background: color-mix(in srgb, var(--accent-color, #8b5cf6) 12%, transparent);
+    text-decoration: underline dotted;
+    text-underline-offset: 3px;
+}
+#source-card-loaded .source-card-stats-row { margin: 2px 0 5px; }
+#source-card-loaded .source-card-legality-view-row { margin: 2px 0 5px; }
 #source-card-loaded .source-type-row {
     flex-wrap: wrap;
 }
@@ -7718,10 +7742,29 @@ body.light-theme .card-actions .edhrec-link-btn:hover {
     outline-offset: 3px;
 }
 .source-comparison-radio:hover span { border-color: var(--accent-color, #8b5cf6); }
+body[data-numeric-constraint-controls="touch"] .source-comparison-radio span {
+    width: 42px;
+    height: 42px;
+    font-size: 15px;
+}
+body[data-numeric-constraint-controls="compact"] .source-comparison-radio-group { display: none !important; }
+body[data-numeric-constraint-controls="compact"] .source-comparison-native-select { display: block !important; }
+#card-constraints-modal .filters-grid > .filter-group:has(#filter-type),
+#card-constraints-modal .filters-grid > .filter-group:has(#filter-supertype),
+#card-constraints-modal .filters-grid > .filter-group:has(#filter-subtype),
+#card-constraints-modal .filters-grid > .filter-group:has(#filter-format),
+#card-constraints-modal .filters-grid > .filter-group:has(#filter-rarity),
+#card-constraints-modal .filters-grid > .filter-group:has(#filter-identity),
+#card-constraints-modal .filters-grid > .filter-group:has(#filter-colors),
+#card-constraints-modal .filters-grid > .filter-group:has(#filter-cmc),
+#card-constraints-modal .filters-grid > .filter-group:has(#filter-set),
+#card-constraints-modal .filters-grid > .filter-group:has(#filter-power),
+#card-constraints-modal .filters-grid > .filter-group:has(#filter-toughness) { display: none !important; }
 #source-rarity-editor > select[data-constraint-mode],
 #source-mana-value-editor > select[data-constraint-mode],
 #source-power-editor > select[data-constraint-mode],
-#source-toughness-editor > select[data-constraint-mode] {
+#source-toughness-editor > select[data-constraint-mode],
+#source-price-editor > select[data-constraint-mode] {
     width: 100%;
     min-width: 0;
     margin: 5px 0 8px;
