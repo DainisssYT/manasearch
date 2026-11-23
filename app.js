@@ -1,6 +1,6 @@
-/* ManaSearch build 20261123-1800 */
+/* ManaSearch build 20261123-1900 */
 // ManaSearch deployment build marker. Bump this whenever app.js changes so cached-module issues are easy to diagnose.
-const MANASEARCH_APP_BUILD = '20261123-1800';
+const MANASEARCH_APP_BUILD = '20261123-1900';
 console.info(`[ManaSearch] app.js build ${MANASEARCH_APP_BUILD}`);
 
 // The source-query and static-index builders share one representation so both sides
@@ -17150,7 +17150,7 @@ function readConstraintFilters() {
  * Fill only currently empty constraint fields from the selected source card. This is an explicit
  * user action rather than an automatic side effect of choosing a source; each field keeps its
  * selected Hard filter / Prefer / Not include mode.
- * Set/rarity/format/oracle filters are intentionally excluded because they are deck/context choices
+ * Keyword/set/rarity/format/oracle filters are intentionally excluded because they are deck/context choices
  * rather than card characteristics that should usually transfer to similar cards.
  */
 function autofillEmptyConstraintsFromSource(source = currentSourceCard) {
@@ -17198,9 +17198,6 @@ function autofillEmptyConstraintsFromSource(source = currentSourceCard) {
     // (e.g. Time Lord) and avoids guessing where a multiword subtype ends and another begins.
     const subtypePhrase = String(typeParts.subtypes || '').trim().replace(/\s+/g, ' ');
     if (subtypePhrase) setList('filter-subtype', [subtypePhrase], 'subtypes');
-
-    const keywords = Array.isArray(source.keywords) ? source.keywords : [];
-    setList('filter-keyword', keywords, 'keywords');
 
     const identity = Array.isArray(source.color_identity)
         ? source.color_identity.map(color => String(color).toLowerCase()).filter(color => 'wubrg'.includes(color)).sort().join('')
@@ -22098,13 +22095,11 @@ function initApp() {
     });
 
     // --- CARD CONSTRAINTS MODAL LOGIC ---
-    const toggleCardConstraintsBtn = document.getElementById('toggle-card-constraints-btn');
     const cardConstraintsModal = document.getElementById('card-constraints-modal');
-    const closeCardConstraintsBtn = document.getElementById('close-card-constraints-modal');
-    const saveCardConstraintsBtn = document.getElementById('save-card-constraints-btn');
     const cardConstraintsBadge = document.getElementById('card-constraints-badge');
 
     function updateCardConstraintsBadge() {
+        if (!cardConstraintsBadge) return;
         const filters = readConstraintFilters();
         const activeCount = (filters.keywords || []).length + (filters.extraOracle ? 1 : 0);
         if (activeCount === 0) {
@@ -22152,15 +22147,6 @@ function initApp() {
         if (autofillStatus) { autofillStatus.textContent = ''; autofillStatus.classList.add('hidden'); }
         updateCardConstraintsBadge();
     });
-
-    if (toggleCardConstraintsBtn) toggleCardConstraintsBtn.addEventListener('click', () => cardConstraintsModal.classList.remove('hidden'));
-    if (closeCardConstraintsBtn) closeCardConstraintsBtn.addEventListener('click', () => cardConstraintsModal.classList.add('hidden'));
-    if (saveCardConstraintsBtn) {
-        saveCardConstraintsBtn.addEventListener('click', () => {
-            updateCardConstraintsBadge();
-            cardConstraintsModal.classList.add('hidden');
-        });
-    }
 
     ['filter-type', 'filter-supertype', 'filter-subtype', 'filter-keyword', 'filter-format', 'filter-rarity', 'filter-identity', 'filter-colors', 'filter-cmc', 'filter-power', 'filter-toughness', 'filter-price', 'filter-set', 'filter-extra-oracle'].forEach(id => {
         const el = document.getElementById(id);
@@ -22733,7 +22719,7 @@ function installManaSearchUsabilityPolish() {
     // Limit generic modal behavior to the application's actual feature dialogs. The onboarding
     // tour and card-preview overlays also use dialog semantics, but have their own lifecycle and
     // must not steal Escape, focus, or backdrop events from a settings dialog.
-    const dialogSelector = '#source-card-picker-modal, #search-methods-modal, #order-modal, #card-constraints-modal, #preferences-modal, #selected-related-modal, #compare-modal, #format-legality-modal';
+    const dialogSelector = '#source-card-picker-modal, #search-methods-modal, #order-modal, #preferences-modal, #selected-related-modal, #compare-modal, #format-legality-modal';
     const activeDialogs = () => Array.from(document.querySelectorAll(dialogSelector)).filter(dialog => {
         let node = dialog;
         while (node && node !== document.documentElement) {
@@ -22750,7 +22736,6 @@ function installManaSearchUsabilityPolish() {
             'source-card-picker-modal': '#close-source-card-picker',
             'search-methods-modal': '#close-methods-modal',
             'order-modal': '#close-order-modal',
-            'card-constraints-modal': '#close-card-constraints-modal',
             'preferences-modal': '#close-preferences-modal',
             'selected-related-modal': '#selected-related-modal-close',
             'compare-modal': '#close-modal',
@@ -23287,7 +23272,6 @@ function installFeatureHelpPopovers() {
     // Main workspace controls: hover on desktop, open their related modal normally when tapped.
     setHelp(document.getElementById('toggle-search-methods-btn'), 'Search Methods', examples.methods.description, 'methods', examples.methods.howTo);
     setHelp(document.getElementById('toggle-order-btn'), 'Order Results', examples.order.description, 'order', examples.order.howTo);
-    setHelp(document.getElementById('toggle-card-constraints-btn'), 'Keyword filters', examples.constraints.description, 'constraints', examples.constraints.howTo);
     setHelp(document.getElementById('source-card-add-btn'), 'Choose a source card', 'Choose the card whose mechanics or text you want to search from.', 'highlight', 'After choosing a card, select an important phrase in its type line or rules text.');
     setHelp(document.getElementById('find-similar-btn'), 'Find Similar Cards', 'Starts the search using the selected source card, highlights, retrieval settings, and constraints.', 'highlight', 'Choose a source card, optionally highlight an important phrase, then press Find Similar Cards.');
     setHelp(document.getElementById('autofill-source-constraints-btn'), 'Fill Empty From Source', 'Copies reliable properties from the selected source card into empty constraint fields only.', 'constraints', 'Review the filled fields; they become hard filters.');
@@ -23308,7 +23292,6 @@ function installFeatureHelpPopovers() {
     };
     addActionHelpMarker(document.getElementById('toggle-search-methods-btn'), 'Search Methods', examples.methods.description, 'methods', examples.methods.howTo);
     addActionHelpMarker(document.getElementById('toggle-order-btn'), 'Order Results', examples.order.description, 'order', examples.order.howTo);
-    addActionHelpMarker(document.getElementById('toggle-card-constraints-btn'), 'Keyword filters', examples.constraints.description, 'constraints', examples.constraints.howTo);
     addActionHelpMarker(document.getElementById('source-card-add-btn'), 'Choose a source card', 'Choose the card whose mechanics or text you want to search from.', 'highlight', 'After choosing a card, select an important phrase in its type line or rules text.');
     addActionHelpMarker(document.getElementById('find-similar-btn'), 'Find Similar Cards', 'Starts the search using the selected source card, highlights, retrieval settings, and constraints.', 'highlight', 'Choose a source card, optionally highlight an important phrase, then press Find Similar Cards.');
 
@@ -23326,7 +23309,6 @@ function installFeatureHelpPopovers() {
     // Each major modal title and each setting name gets a compact, visual explanation.
     setHelp(document.getElementById('search-methods-title'), 'Search Methods', examples.methods.description, 'methods', examples.methods.howTo, true);
     setHelp(document.getElementById('order-title'), 'Order Results', examples.order.description, 'order', examples.order.howTo, true);
-    setHelp(document.getElementById('card-constraints-title'), 'Constraints', examples.constraints.description, 'constraints', examples.constraints.howTo, true);
 
     document.querySelectorAll('#search-methods-modal .method-text strong, #order-modal .method-text strong').forEach(nameNode => {
         const name = nameNode.textContent.trim();
@@ -23349,27 +23331,6 @@ function installFeatureHelpPopovers() {
         setHelp(node, node.textContent.trim(), node.textContent.includes('Features')
             ? 'Optional ordering features change how the ranked list is presented. They do not replace the selected primary ranking.'
             : 'Choose one primary score or property to decide which candidates appear first.', 'order', 'Pick a primary ranking first, then optionally enable Matrix Sweep or Diverse Spread. ', true);
-    });
-
-    document.querySelectorAll('#card-constraints-modal .filters-grid > .filter-group > label').forEach(label => {
-        const raw = label.childNodes.length ? Array.from(label.childNodes).filter(n => n.nodeType === Node.TEXT_NODE).map(n => n.textContent).join(' ').trim() : label.textContent.trim();
-        const name = raw || label.textContent.trim().split(/\s+/).slice(0, 3).join(' ');
-        const config = methodHelp[name] || [
-            `Filters candidates by ${name.toLowerCase()}. Active constraints are hard requirements, not ranking hints.`,
-            'constraints',
-            'Only set this field when you are willing to exclude cards that do not match it.'
-        ];
-        setHelp(label, name, config[0], config[1], config[2]);
-        // A separate tap target works on phones without making the form label itself awkward to use.
-        const marker = el('button', 'mana-feature-help-marker', '?');
-        marker.type = 'button';
-        marker.setAttribute('aria-label', `How to use ${name}`);
-        marker.dataset.featureTitle = name;
-        marker.dataset.featureTip = config[0];
-        marker.dataset.featureExample = config[1];
-        marker.dataset.featureHowto = config[2];
-        marker.classList.add('mana-feature-help-interactive');
-        label.insertAdjacentElement('afterend', marker);
     });
 
     const addInlineHelpMarker = (target, title, description, example, howTo) => {
@@ -23603,19 +23564,13 @@ function installManaSearchOnboarding() {
             hint: 'Mechanical emphasizes similar game actions; Semantic emphasizes related meaning.'
         },
         {
-            title: '6. Keep Constraints broad at first',
-            text: 'Constraints are hard filters: every active constraint must be satisfied. For your first search, leave them broad unless you already know you need a particular color, type, mana value, or format.',
-            example: 'constraints', target: '#toggle-card-constraints-btn', fallback: '#filter-section',
-            hint: 'If too few cards appear, clear constraints before weakening a useful highlight.'
-        },
-        {
-            title: '7. Run your first search',
+            title: '6. Run your first search',
             text: 'You have chosen a source card and refined the text signal. Start the actual search now; the tour will wait while ManaSearch retrieves and ranks candidates, then return with your results.',
             example: 'search', target: '#find-similar-btn', fallback: '#filter-section',
             hint: 'The button runs the same full search pipeline as the main Find Similar Cards button.'
         },
         {
-            title: 'Your first search is ready',
+            title: '7. Your first search is ready',
             text: 'Your search has finished. Browse the results, open Compare to understand differences, favorite useful cards, or adjust highlights and search again.',
             example: 'results', target: '#results-section', fallback: '#find-similar-btn',
             hint: 'You can replay the Guided tour from the header any time.'

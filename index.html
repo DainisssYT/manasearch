@@ -5,7 +5,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>ManaSearch</title>
-    <link rel="stylesheet" href="style.css?v=20261123-1800">
+    <link rel="stylesheet" href="style.css?v=20261123-1900">
     <link rel="stylesheet" href="search-inspector.css?v=20261119-140">
 </head>
 <body>
@@ -274,9 +274,11 @@
                                     </div>
                                     <label class="source-quick-mode-label" for="constraint-mode-colors">Apply as</label><select id="constraint-mode-colors" class="source-quick-mode" data-constraint-mode="colors"><option value="hard">Hard filter</option><option value="prefer">Prefer in ranking</option></select>
                                 </div>
-                                <button type="button" id="toggle-card-constraints-btn" class="source-more-constraints-btn" data-feature-tip="Set keyword and Oracle text filters for this search." data-feature-preview="Keyword abilities · Oracle wording">
-                                    Keywords &amp; Oracle filters <span id="card-constraints-badge" class="badge">Any</span> ▾
-                                </button>
+                                <div class="source-constraint-utility-actions" aria-label="Constraint actions">
+                                    <button type="button" id="autofill-source-constraints-btn" class="secondary-preference-btn" disabled data-feature-tip="Fill only empty constraint fields using properties of the selected source card." data-feature-preview="Type · Subtype · Colors · Mana value · Stats · Rarity · Set">Fill Empty From Source</button>
+                                    <button type="button" id="clear-all-constraints-btn" class="secondary-preference-btn">Clear All Constraints</button>
+                                    <p id="constraint-autofill-status" class="constraint-autofill-status hidden" role="status" aria-live="polite"></p>
+                                </div>
                             </section>
                         </div>
                         
@@ -672,15 +674,15 @@
         </div>
     </div>
 
-    <!-- CARD ATTRIBUTE CONSTRAINTS MODAL PANEL -->
-    <div id="card-constraints-modal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="card-constraints-title">
+    <!-- Hidden constraint state used by source-card editors and benchmark fixtures. -->
+    <div id="card-constraints-modal" class="hidden" aria-hidden="true">
         <div class="modal-card">
             <div class="modal-header">
-            <h3 id="card-constraints-title">Keyword Filters</h3>
+                <h3 id="card-constraints-title">Search Constraints</h3>
                 <button type="button" id="close-card-constraints-modal" class="close-btn" aria-label="Close card constraints">&times;</button>
             </div>
             <div class="modal-body">
-                <p class="modal-intro">Use this panel for keyword abilities and Oracle wording. Card attributes and numeric limits are edited directly on the source card.</p>
+                <p class="modal-intro">Constraint values are managed in the source card panel.</p>
                 <p class="constraint-autofill-help">Fill Empty From Source fills blank fields from the source card. Review the filters before searching; use Clear All Constraints to remove them.</p>
                 <div class="filters-grid">
                     <div class="filter-group filter-group-wide">
@@ -837,10 +839,7 @@
                     </div>
                 </div>
             </div>
-            <p id="constraint-autofill-status" class="constraint-autofill-status hidden" role="status" aria-live="polite"></p>
             <div class="modal-footer constraints-modal-footer">
-                <button type="button" id="autofill-source-constraints-btn" class="secondary-preference-btn" disabled data-feature-tip="Fill only empty constraint fields using properties of the selected source card." data-feature-preview="Type · Subtype · Keywords · Colors · Mana value · Stats · Rarity · Set">Fill Empty From Source</button>
-                <button type="button" id="clear-all-constraints-btn" class="secondary-preference-btn">Clear All Constraints</button>
                 <button type="button" id="save-card-constraints-btn">Done</button>
             </div>
         </div>
@@ -1156,9 +1155,9 @@
             dialog.addEventListener('click', event => { if (event.target === dialog && dialog.open) dialog.close(); });
         })();
     </script>
-    <script src="pako.min.js?v=20261123-1800"></script>
+    <script src="pako.min.js?v=20261123-1900"></script>
     <script src="search-inspector.js?v=20261119-167"></script>
-    <script type="module" src="app.js?v=20261123-1800"></script>
+    <script type="module" src="app.js?v=20261123-1900"></script>
     <style id="minigames-inline-styles">
 /* v119 — self-contained Guess the Source minigame UI and aligned header launcher. */
 .minigames-launch-btn {
