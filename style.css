@@ -6054,9 +6054,6 @@ button:focus-visible { outline: 2px solid var(--accent-color); outline-offset: 2
 #search-methods-modal .method-card .method-text strong,
 #order-modal .method-card .method-text strong { display: inline-block; width: fit-content; }
 #order-modal .order-panel-section-heading h4 { cursor: help; }
-#card-constraints-modal .filter-group { position: relative; }
-#card-constraints-modal .filter-group > label { padding-right: 27px; }
-#card-constraints-modal .filter-group > label + .mana-feature-help-marker { position: absolute; top: 0; right: 0; margin: 0; z-index: 2; }
 .mana-feature-help-popover[data-pinned="false"] .mana-feature-help-close { display: none; }
 .contextual-help-intro { margin-top: 0; }
 .mana-inline-help-marker {
@@ -7170,24 +7167,7 @@ body.light-theme .card-actions .edhrec-link-btn:hover {
     gap: 4px;
     padding: 9px;
 }
-#source-card-loaded .source-more-constraints-btn {
-    justify-self: start;
-    min-height: 34px;
-    padding: 6px 10px;
-    border: 1px solid var(--border-color);
-    border-radius: 8px;
-    background: var(--bg-primary);
-    color: var(--text-main);
-    font-size: 12px;
-    font-weight: 650;
-}
-#source-card-loaded .source-more-constraints-btn:hover:not(:disabled) {
-    border-color: var(--accent-color);
-    background: var(--bg-accent);
-}
-#source-card-loaded .source-more-constraints-btn .badge { margin-left: 5px; }
 @media (max-width: 700px) {
-    #source-card-loaded .source-more-constraints-btn { width: 100%; }
     #source-card-loaded .source-advanced-card-details > summary { padding: 10px; }
 }
 
@@ -7469,6 +7449,14 @@ body.light-theme .card-actions .edhrec-link-btn:hover {
 }
 #source-card-loaded .source-quick-constraints-heading,
 #source-card-loaded .source-quick-constraints-footnote { display: none !important; }
+#source-card-loaded .source-constraint-utility-actions {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 7px;
+    margin-top: 8px;
+}
+#source-card-loaded .source-constraint-utility-actions .constraint-autofill-status { flex-basis: 100%; margin: 0; }
 @media (max-width: 980px) {
     #source-card-loaded > .card-inspector {
         grid-template-columns: minmax(175px, 31%) minmax(0, 1fr) !important;
@@ -7749,17 +7737,6 @@ body[data-numeric-constraint-controls="touch"] .source-comparison-radio span {
 }
 body[data-numeric-constraint-controls="compact"] .source-comparison-radio-group { display: none !important; }
 body[data-numeric-constraint-controls="compact"] .source-comparison-native-select { display: block !important; }
-#card-constraints-modal .filters-grid > .filter-group:has(#filter-type),
-#card-constraints-modal .filters-grid > .filter-group:has(#filter-supertype),
-#card-constraints-modal .filters-grid > .filter-group:has(#filter-subtype),
-#card-constraints-modal .filters-grid > .filter-group:has(#filter-format),
-#card-constraints-modal .filters-grid > .filter-group:has(#filter-rarity),
-#card-constraints-modal .filters-grid > .filter-group:has(#filter-identity),
-#card-constraints-modal .filters-grid > .filter-group:has(#filter-colors),
-#card-constraints-modal .filters-grid > .filter-group:has(#filter-cmc),
-#card-constraints-modal .filters-grid > .filter-group:has(#filter-set),
-#card-constraints-modal .filters-grid > .filter-group:has(#filter-power),
-#card-constraints-modal .filters-grid > .filter-group:has(#filter-toughness) { display: none !important; }
 #source-rarity-editor > select[data-constraint-mode],
 #source-mana-value-editor > select[data-constraint-mode],
 #source-power-editor > select[data-constraint-mode],
