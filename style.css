@@ -5943,11 +5943,37 @@ button:focus-visible { outline: 2px solid var(--accent-color); outline-offset: 2
 /* v47: removable Recent Searches entries and source-aware constraint autofill. */
 #history-list .history-entry,
 #favorites-list .favorite-entry {
+    position: relative;
     display: flex;
     align-items: center;
     gap: 6px;
     padding: 3px 4px;
     min-width: 0;
+}
+.sidebar-card-hover-preview {
+    position: absolute;
+    z-index: 10030;
+    left: calc(100% + 8px);
+    top: 50%;
+    width: clamp(120px, 14vw, 190px);
+    max-height: min(62vh, 360px);
+    aspect-ratio: 63 / 88;
+    object-fit: contain;
+    transform: translateY(-50%) scale(.97);
+    opacity: 0;
+    pointer-events: none;
+    border: 1px solid var(--border-color);
+    border-radius: 9px;
+    background: var(--bg-primary);
+    box-shadow: 0 12px 36px rgba(0,0,0,.55);
+    transition: opacity .18s ease, transform .18s ease;
+}
+#history-list .history-entry:hover .sidebar-card-hover-preview,
+#history-list .history-entry:focus-within .sidebar-card-hover-preview,
+#favorites-list .favorite-entry:hover .sidebar-card-hover-preview,
+#favorites-list .favorite-entry:focus-within .sidebar-card-hover-preview {
+    opacity: 1;
+    transform: translateY(-50%) scale(1);
 }
 .history-card-open {
     display: block;
@@ -6214,6 +6240,7 @@ button:focus-visible { outline: 2px solid var(--accent-color); outline-offset: 2
 .mana-onboarding-back:focus-visible,.mana-onboarding-skip:focus-visible,.mana-onboarding-next:focus-visible,.mana-onboarding-close:focus-visible { outline:2px solid var(--accent-color); outline-offset:2px; }
 /* Elevate and outline one item so the user knows where the current step refers to. */
 .mana-onboarding-spotlight { position:relative !important; z-index:10091 !important; box-shadow:0 0 0 9999px rgba(7,7,11,.76) !important; border-radius:8px; pointer-events:none !important; }
+.mana-onboarding-spotlight.mana-onboarding-allow-interaction { pointer-events:auto !important; }
 @media (max-width:560px) {
     .first-use-help-actions { flex:1 0 100%; justify-content:flex-end; }
     .first-use-help-hint { flex-wrap:wrap; }
@@ -6365,8 +6392,35 @@ body.light-theme .card-match-line.score-band-excellent { color: var(--score-band
 @media (hover: none) and (pointer: coarse) {
   .mana-feature-help-marker, .mana-inline-help-marker { display: inline-flex; }
 }
-.mana-feature-help-popover { opacity: 1; transform: translateY(0); transition: opacity .16s ease, transform .16s ease; }
+.mana-feature-help-popover { opacity: 1; transform: translateY(0); transition: opacity .5s ease, transform .5s ease; }
+.mana-feature-help-popover.is-entering { opacity: 0; transform: translateY(4px); }
 .mana-feature-help-popover.is-closing { opacity: 0; transform: translateY(4px); pointer-events: none; }
+.card-rotate-btn {
+    position: absolute;
+    z-index: 4;
+    top: 8px;
+    left: 8px;
+    width: 34px;
+    height: 34px;
+    padding: 0;
+    border: 1px solid rgba(255,255,255,.35);
+    border-radius: 999px;
+    color: #fff;
+    background: rgba(0,0,0,.72);
+    font-size: 22px;
+    line-height: 1;
+    cursor: pointer;
+}
+.card-rotate-btn:hover, .card-rotate-btn:focus-visible { background: var(--accent-color); }
+.card-rotate-btn[hidden] { display: none !important; }
+.card-art-wrap.is-sideways-rotated > img {
+    width: 140%;
+    height: 71.43%;
+    max-width: none;
+    object-fit: contain;
+    transform: rotate(90deg);
+}
+.card-art-wrap.is-sideways-rotated.is-legacy-flip-rotated > img { transform: rotate(270deg); }
 @media (prefers-reduced-motion: reduce) { .mana-feature-help-popover { transition: none !important; } }
 .related-use-highlights-label { position: relative; z-index: 2; display: inline-flex; align-items: center; gap: 6px; cursor: pointer; pointer-events: auto; }
 .related-use-highlights-label input { position: relative; z-index: 3; pointer-events: auto; cursor: pointer; }
@@ -7435,7 +7489,7 @@ body.light-theme .card-actions .edhrec-link-btn:hover {
 }
 #source-card-loaded .source-card-rarity-row {
     display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-template-columns: minmax(0, max-content) minmax(0, 1fr);
     align-items: start;
     gap: 4px 12px;
 }

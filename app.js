@@ -620,7 +620,7 @@ const DEFAULT_DISPLAY_PREFERENCES = Object.freeze({
 let displayPreferences = { ...DEFAULT_DISPLAY_PREFERENCES };
 
 // EDHREC links are generated from the card's display name rather than a user-supplied URL.
-// Commander-eligible cards use the budget commander edge (matching EDHREC's commander URL pattern);
+// Commander-eligible cards use their regular commander page;
 // other candidates open their individual card page. This remains a normal external link so the
 // browser handles opening a new tab and users can inspect/copy the destination before navigating.
 function slugifyEdhrecCardName(name) {
@@ -650,7 +650,7 @@ function getEdhrecUrlForCard(card) {
         (/\blegendary\b/i.test(typeLine) && /\bcreature\b/i.test(typeLine)) ||
         /\bcan be your commander\b/i.test(oracleText);
     const path = commanderEligible
-        ? `/commanders/${slug}/budget`
+        ? `/commanders/${slug}`
         : `/cards/${slug}`;
     return `https://edhrec.com${path}`;
 }
@@ -23327,7 +23327,7 @@ function installFeatureHelpPopovers() {
         const closingPopover = popover;
         if (closingPopover) {
             closingPopover.classList.add('is-closing');
-            window.setTimeout(() => closingPopover.remove(), 170);
+            window.setTimeout(() => closingPopover.remove(), 500);
         }
         popover = null;
         activeTrigger = null;
@@ -23355,6 +23355,7 @@ function installFeatureHelpPopovers() {
         const howTo = trigger.dataset.featureHowto || defaults.howTo;
 
         popover = el('section', 'mana-feature-help-popover');
+        popover.classList.add('is-entering');
         popover.setAttribute('role', pin ? 'dialog' : 'tooltip');
         popover.setAttribute('aria-label', title);
         popover.dataset.pinned = pin ? 'true' : 'false';
@@ -23382,6 +23383,7 @@ function installFeatureHelpPopovers() {
         trigger.setAttribute('aria-controls', 'mana-feature-help-popover');
         popover.id = 'mana-feature-help-popover';
         positionPopover(trigger);
+        window.requestAnimationFrame(() => popover?.classList.remove('is-entering'));
     };
 
     function positionPopover(trigger) {
@@ -23569,7 +23571,7 @@ function installFeatureHelpPopovers() {
                 if (pendingHoverTarget === target && target.isConnected && !pinned) show(target, false);
                 hoverOpenTimer = 0;
                 pendingHoverTarget = null;
-            }, 3000);
+            }, 2000);
         }
     });
     document.addEventListener('pointerout', event => {
@@ -23667,10 +23669,7 @@ function installManaSearchOnboarding() {
     // Starter cards demonstrate different kinds of search intent. Buttons open the normal picker
     // with the chosen name prefilled, so the user still explicitly selects the source card.
     const starterCards = [
-        { name: 'Phyrexian Arena', reason: 'Recurring card draw', prompt: 'Find cards that generate value over multiple turns.' },
-        { name: 'Sol Ring', reason: 'Fast mana', prompt: 'Find artifacts that produce mana efficiently.' },
-        { name: 'Counterspell', reason: 'Counter a spell', prompt: 'Find other ways to stop a spell from resolving.' },
-        { name: 'Young Pyromancer', reason: 'Repeatable token creation', prompt: 'Find cards that reward casting spells with tokens.' }
+        { name: 'Phyrexian Arena', reason: 'Recurring card draw', prompt: 'Find cards that generate value over multiple turns.' }
     ];
     const steps = [
         {
@@ -23683,13 +23682,13 @@ function installManaSearchOnboarding() {
             title: '1. Choose a card to explore',
             text: 'Pick a card you want alternatives for, or try one of the suggested starting points. The suggested card only fills the search box; you still choose the matching card in the picker.',
             example: 'source', target: '#source-card-add-btn', fallback: '#source-card-section',
-            hint: 'Phyrexian Arena is a good first search for recurring draw; Sol Ring is good for fast mana.'
+            hint: 'Choose Phyrexian Arena, or use “Choose a different card…” to pick any card.'
         },
         {
             title: '2. Highlight a phrase (optional)',
-            text: 'Select a phrase in the type line or Oracle text to focus the search. With no highlight, ManaSearch uses the whole card.',
+            text: 'Try highlighting a short phrase in the type line or Oracle text. ManaSearch will focus on that part; press Next whenever you are ready, even if you skip highlighting.',
             example: 'highlight-exact', target: '#source-card-loaded .oracle-container', fallback: '#source-card-section',
-            hint: 'Press “Select exact phrase” to temporarily reveal the card text. On a phone, long-press and adjust the selection handles.'
+            hint: 'Drag across a phrase on desktop, or press and select the words on a phone. Highlighting is optional.'
         },
         {
             title: '3. Add another highlight (optional)',
@@ -23698,16 +23697,16 @@ function installManaSearchOnboarding() {
             hint: 'You can change a highlight mode from its chip, or continue with your current choices.'
         },
         {
-            title: '4. Choose search Methods',
-            text: 'Methods control how ManaSearch discovers candidates. Standard is a strong first choice; you can enable more methods later if you want a wider candidate pool.',
-            example: 'methods', target: '#toggle-search-methods-btn', fallback: '#filter-section',
-            hint: 'You can use the question-mark help on touch devices or hover a dotted-underlined name on desktop.'
+            title: '4. Set card constraints',
+            text: 'Use Mana Value and the color controls for quick limits. Open More card attributes for Type, rarity, set, legality, and price. Constraints narrow which cards can appear; you can leave them unchanged for this search.',
+            example: 'constraints', target: '#source-card-loaded', fallback: '#source-card-section',
+            hint: 'Try opening a control to see its choices, then continue when you are ready.'
         },
         {
-            title: '5. Choose result Order',
-            text: 'Order changes which candidates appear first, not which cards were retrieved. Overall Match is a good starting point because it balances the scoring signals.',
-            example: 'order', target: '#toggle-order-btn', fallback: '#filter-section',
-            hint: 'Mechanical emphasizes similar game actions; Semantic emphasizes related meaning.'
+            title: '5. Set search and ranking',
+            text: 'Search Methods change how ManaSearch discovers candidates. Order Results decides which candidates appear first. Standard methods and Overall Match are a good starting point; you can adjust either before or after a search.',
+            example: 'methods', target: '#filter-section', fallback: '#toggle-search-methods-btn',
+            hint: 'Methods change the candidate pool; ranking changes only their order.'
         },
         {
             title: '6. Run your first search',
@@ -23716,9 +23715,15 @@ function installManaSearchOnboarding() {
             hint: 'The button runs the same full search pipeline as the main Find Similar Cards button.'
         },
         {
-            title: '7. Your first search is ready',
-            text: 'Your search has finished. Browse the results, open Compare to understand differences, favorite useful cards, or adjust highlights and search again.',
+            title: '7. Explore your results',
+            text: 'Your search has finished. Browse, compare, or favorite useful cards. You can also select one or more promising results and use Search Related Cards to focus the next search around them.',
             example: 'results', target: '#results-section', fallback: '#find-similar-btn',
+            hint: 'Select a result to reveal Search Related Cards. That search uses the selected cards as extra examples.'
+        },
+        {
+            title: '8. Refine with related cards',
+            text: 'Select cards that match the direction you want, then choose Search Related Cards. ManaSearch uses those examples to make the next result set more specific.',
+            example: 'related', target: '#results-section', fallback: '#find-similar-btn',
             hint: 'You can replay the Guided tour from the header any time.'
         }
     ];
@@ -23778,11 +23783,12 @@ function installManaSearchOnboarding() {
         order: '<div class="mana-tour-demo-rank"><span>Mechanical</span><strong>Similar actions</strong></div><div class="mana-tour-demo-rank is-accent"><span>Overall Match</span><strong>Balanced default</strong></div><div class="mana-tour-demo-rank"><span>Semantic</span><strong>Related meaning</strong></div>',
         constraints: '<div class="mana-tour-demo-chips"><span>Type</span><span>Color</span><span>Mana value</span></div><small class="mana-tour-demo-caption">Every active constraint must match.</small>',
         search: '<div class="mana-tour-demo-search">Find Similar Cards <span>→</span></div>',
-        results: '<div class="mana-tour-demo-result"><span>Your search</span><strong class="mana-tour-results-count">Results are ready</strong></div><div class="mana-tour-demo-result is-accent"><span>Next</span><strong>Compare · Favorite · Explore pages</strong></div>'
+        results: '<div class="mana-tour-demo-result"><span>Your search</span><strong class="mana-tour-results-count">Results are ready</strong></div><div class="mana-tour-demo-result is-accent"><span>Next</span><strong>Compare · Favorite · Search Related Cards</strong></div>',
+        related: '<div class="mana-tour-demo-flow"><span>Select useful matches</span><b>→</b><span class="is-accent">Search Related Cards</span></div><small class="mana-tour-demo-caption">Use example cards to steer the next search.</small>'
     };
 
     const removeSpotlight = () => {
-        if (highlighted) highlighted.classList.remove('mana-onboarding-spotlight');
+        if (highlighted) highlighted.classList.remove('mana-onboarding-spotlight', 'mana-onboarding-allow-interaction');
         highlighted = null;
     };
     const persist = status => { try { localStorage.setItem(tourKey, status); } catch (_) {} };
@@ -23983,6 +23989,9 @@ function installManaSearchOnboarding() {
             if (target && !layer.classList.contains('hidden')) {
                 target.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'auto' });
                 target.classList.add('mana-onboarding-spotlight');
+                if (['highlight-exact', 'highlight-mixed', 'constraints', 'search', 'related'].includes(step.example)) {
+                    target.classList.add('mana-onboarding-allow-interaction');
+                }
                 highlighted = target;
             }
             progressText.textContent = currentStep === 0 ? 'Welcome' : `Step ${currentStep} of ${steps.length - 1}`;
@@ -23991,7 +24000,6 @@ function installManaSearchOnboarding() {
             description.textContent = step.text;
             demo.innerHTML = demoMarkup[step.example] || demoMarkup.welcome;
             if (step.example === 'source') demo.appendChild(sourceControls());
-            if (step.example === 'highlight-exact' || step.example === 'highlight-mixed') demo.appendChild(addHighlightControls(step));
             if (step.example === 'search') {
                 const run = makeActionButton('Run my first search', 'mana-tour-action', () => { void startTourSearch(); });
                 run.disabled = !currentSourceCard;
@@ -24004,8 +24012,8 @@ function installManaSearchOnboarding() {
             }
             hintText.textContent = tourMessage || (step.hint || '');
             backButton.disabled = currentStep === 0 || waitingForSearch;
-            nextButton.textContent = currentStep === steps.length - 1 ? 'Finish tour' : currentStep === 0 ? 'Start tour' : currentStep === 7 ? 'Run search below' : 'Next';
-            nextButton.disabled = currentStep === 7;
+            nextButton.textContent = currentStep === steps.length - 1 ? 'Finish tour' : currentStep === 0 ? 'Start tour' : currentStep === 6 ? 'Waiting for search' : 'Next';
+            nextButton.disabled = currentStep === 6 || waitingForSearch;
             dialog.classList.toggle('is-top', Boolean(target && target.getBoundingClientRect().top > window.innerHeight * 0.52));
             dialog.scrollTop = 0;
         };
@@ -24047,21 +24055,15 @@ function installManaSearchOnboarding() {
                 renderStep(); return;
             }
             if (currentStep === 2) {
-                if (!hasExactAnchor()) {
-                    waitingForHighlight = '';
-                    currentStep = 4;
-                    tourMessage = 'No highlight selected. ManaSearch will use the whole source card.';
-                    renderStep(); return;
-                }
-                currentStep = 3; tourMessage = ''; renderStep(); return;
+                currentStep = 3;
+                tourMessage = hasExactAnchor() ? 'Great. You can keep that phrase, add another, or continue with the whole card.' : 'No highlight selected. ManaSearch will use the whole source card.';
+                renderStep(); return;
             }
             if (currentStep === 3) {
                 currentStep = 4;
-                tourMessage = hasMixedHighlightModes() ? '' : 'You can search with the highlights as they are.';
+                tourMessage = hasMixedHighlightModes() ? 'Your Exact and Flexible highlights are ready.' : 'Your current highlights are ready; adding a second or changing its mode is optional.';
                 renderStep(); return;
             }
-            if (currentStep === 6) { currentStep = 7; tourMessage = ''; renderStep(); return; }
-            if (currentStep === 7) { void startTourSearch(); return; }
             if (currentStep >= steps.length - 1) { closeTour?.('completed'); return; }
             currentStep++; tourMessage = ''; renderStep();
         });
@@ -24153,7 +24155,7 @@ function installManaSearchOnboarding() {
     window.addEventListener('manasearch:search-finished', event => {
         if (!waitingForSearch || !layer) return;
         waitingForSearch = false;
-        currentStep = 8;
+        currentStep = 7;
         const count = Number(event.detail?.resultCount) || 0;
         tourMessage = count
             ? `Your search finished with ${count.toLocaleString()} results. The cards below are ready to explore.`
@@ -24162,6 +24164,10 @@ function installManaSearchOnboarding() {
     });
 
     document.addEventListener('click', event => {
+        if (currentStep === 6 && event.target?.closest?.('#find-similar-btn') && layer && !layer.classList.contains('hidden')) {
+            waitingForSearch = true;
+            hideTourForRealAction();
+        }
         const launcher = event.target?.closest?.('#start-onboarding-tour-btn, #replay-onboarding-tour-btn');
         if (!launcher) return;
         event.preventDefault();
@@ -24406,6 +24412,17 @@ function renderSidebarLists() {
             open.textContent = name;
             open.title = `Load ${name} as the source card`;
             open.addEventListener('click', () => loadSourceCard(name, preview));
+            const imageUrl = getCardImageUrl(preview);
+            if (imageUrl) {
+                const image = document.createElement('img');
+                image.className = 'sidebar-card-hover-preview';
+                image.src = imageUrl;
+                image.alt = `${name} card image`;
+                image.loading = 'lazy';
+                image.decoding = 'async';
+                image.setAttribute('aria-hidden', 'true');
+                li.appendChild(image);
+            }
 
             const remove = document.createElement('button');
             remove.type = 'button';
@@ -24439,6 +24456,17 @@ function renderSidebarLists() {
             open.title = `Load ${name} as the source card`;
             open.addEventListener('click', () => loadSourceCard(name, preview));
             li.appendChild(open);
+            const imageUrl = getCardImageUrl(preview);
+            if (imageUrl) {
+                const image = document.createElement('img');
+                image.className = 'sidebar-card-hover-preview';
+                image.src = imageUrl;
+                image.alt = `${name} card image`;
+                image.loading = 'lazy';
+                image.decoding = 'async';
+                image.setAttribute('aria-hidden', 'true');
+                li.appendChild(image);
+            }
             favoritesList.appendChild(li);
         });
     }
@@ -32191,6 +32219,7 @@ function renderResults(cards, internalOptions = {}) {
         if (img) {
             const previousDesired = img.dataset.cardImageSrc || '';
             if (previousDesired !== desiredSrc || !img.getAttribute('src')) {
+                if (previousDesired && previousDesired !== desiredSrc) artWrap?.classList.remove('is-sideways-rotated');
                 prepareResultImage(img, desiredSrc);
                 if (previousDesired && previousDesired !== desiredSrc && img.getAttribute('src') !== RESULT_IMAGE_PLACEHOLDER) {
                     // A result node can be reused for a different printing/face during progressive
@@ -32218,6 +32247,17 @@ function renderResults(cards, internalOptions = {}) {
                 flipBtn.title = `Flip to ${nextFace.name || 'other face'}`;
                 flipBtn.setAttribute('aria-label', `Flip ${card.name} to ${nextFace.name || 'the other face'}`);
             }
+        }
+
+        const rotateBtn = cardElement.querySelector('.card-rotate-btn');
+        if (rotateBtn) {
+            const layout = String(card.layout || '').toLowerCase();
+            const sideways = Boolean(img && img.naturalWidth > img.naturalHeight)
+                || ['planar', 'scheme', 'vanguard'].includes(layout);
+            rotateBtn.hidden = !sideways;
+            if (!sideways) artWrap?.classList.remove('is-sideways-rotated');
+            rotateBtn.setAttribute('aria-label', `Rotate ${card.name} ${artWrap?.classList.contains('is-sideways-rotated') ? 'back to its original view' : 'to read it upright'}`);
+            rotateBtn.title = artWrap?.classList.contains('is-sideways-rotated') ? 'Rotate card back' : 'Rotate card to read it upright';
         }
 
         const title = cardElement.querySelector('.card-item-title');
@@ -32329,6 +32369,16 @@ function renderResults(cards, internalOptions = {}) {
         img.loading = 'lazy';
         img.decoding = 'async';
         img.src = RESULT_IMAGE_PLACEHOLDER;
+        img.addEventListener('load', () => {
+            const layout = String(img.closest('.card-item')?._resultCardData?.layout || '').toLowerCase();
+            const sideways = img.naturalWidth > img.naturalHeight || ['planar', 'scheme', 'vanguard'].includes(layout);
+            artWrap.classList.toggle('has-sideways-card', sideways);
+            const rotate = artWrap.querySelector('.card-rotate-btn');
+            if (rotate) {
+                rotate.hidden = !sideways;
+                if (!sideways) artWrap.classList.remove('is-sideways-rotated');
+            }
+        });
         artWrap.appendChild(img);
         const banStamp = document.createElement('div');
         banStamp.className = 'card-banned-stamp';
@@ -32355,6 +32405,26 @@ function renderResults(cards, internalOptions = {}) {
             if (cardEl) void flipResultCardFace(cardEl, flipBtn);
         });
         artWrap.appendChild(flipBtn);
+        const rotateBtn = document.createElement('button');
+        rotateBtn.type = 'button';
+        rotateBtn.className = 'card-rotate-btn';
+        rotateBtn.textContent = '↻';
+        rotateBtn.title = 'Rotate card to read it upright';
+        rotateBtn.setAttribute('aria-label', `Rotate ${card.name} to read it upright`);
+        rotateBtn.dataset.featureTip = 'Rotate a sideways card image to make its text easier to read.';
+        rotateBtn.dataset.featurePreview = 'Landscape card ⇄ upright reading view';
+        rotateBtn.hidden = true;
+        rotateBtn.addEventListener('click', event => {
+            event.preventDefault();
+            event.stopPropagation();
+            const wrap = rotateBtn.closest('.card-art-wrap');
+            if (!wrap) return;
+            const rotated = wrap.classList.toggle('is-sideways-rotated');
+            rotateBtn.title = rotated ? 'Rotate card back' : 'Rotate card to read it upright';
+            const name = rotateBtn.closest('.card-item')?._resultCardData?.name || card.name || 'card';
+            rotateBtn.setAttribute('aria-label', `Rotate ${name} ${rotated ? 'back to its original view' : 'to read it upright'}`);
+        });
+        artWrap.appendChild(rotateBtn);
 
         const info = document.createElement('div');
         info.className = 'card-item-info';
