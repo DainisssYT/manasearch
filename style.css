@@ -5994,6 +5994,20 @@ button:focus-visible { outline: 2px solid var(--accent-color); outline-offset: 2
     background: var(--bg-accent);
     outline-color: var(--accent-color);
 }
+.sidebar-card-hover-preview {
+    position: fixed;
+    z-index: 2147483000;
+    display: block;
+    max-width: calc(100vw - 16px);
+    max-height: calc(100vh - 16px);
+    object-fit: contain;
+    border: 1px solid var(--border-color);
+    border-radius: 10px;
+    background: var(--bg-primary);
+    box-shadow: 0 14px 38px rgba(0, 0, 0, .72);
+    pointer-events: none;
+}
+.sidebar-card-hover-preview[hidden] { display: none !important; }
 .history-card-remove {
     flex: 0 0 26px;
     width: 26px;

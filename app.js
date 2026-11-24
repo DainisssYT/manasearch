@@ -595,6 +595,7 @@ let activeSearchStreamProgressReporter = null;
 // Local Storage Keys
 const HISTORY_KEY = 'manamatch_history';
 const HISTORY_CARD_PREVIEWS_KEY = 'manamatch_history_card_previews';
+const FAVORITE_CARD_PREVIEWS_KEY = 'manamatch_favorite_card_previews';
 // Explicitly dismissed recent cards stay out of the sidebar and empty-query picker suggestions,
 // but remain searchable by name and are not removed from Favorites or the in-memory cache.
 const HISTORY_DISMISSED_KEY = 'manamatch_history_dismissed';
@@ -23571,7 +23572,7 @@ function installFeatureHelpPopovers() {
                 if (pendingHoverTarget === target && target.isConnected && !pinned) show(target, false);
                 hoverOpenTimer = 0;
                 pendingHoverTarget = null;
-            }, 2000);
+            }, 1000);
         }
     });
     document.addEventListener('pointerout', event => {
@@ -24277,6 +24278,23 @@ function getHistoryCardPreviews() {
     return getStoredArray(HISTORY_CARD_PREVIEWS_KEY).filter(card => card && card.name);
 }
 
+function storeFavoriteCardPreview(card) {
+    const preview = buildHistoryCardPreview(card);
+    if (!preview?.name) return;
+    const key = preview.name.toLowerCase();
+    const previews = getStoredArray(FAVORITE_CARD_PREVIEWS_KEY)
+        .filter(item => String(item?.name || '').toLowerCase() !== key);
+    previews.push(preview);
+    try { localStorage.setItem(FAVORITE_CARD_PREVIEWS_KEY, JSON.stringify(previews)); } catch (_) {}
+}
+
+function removeFavoriteCardPreview(cardName) {
+    const key = String(cardName || '').toLowerCase();
+    const previews = getStoredArray(FAVORITE_CARD_PREVIEWS_KEY)
+        .filter(item => String(item?.name || '').toLowerCase() !== key);
+    try { localStorage.setItem(FAVORITE_CARD_PREVIEWS_KEY, JSON.stringify(previews)); } catch (_) {}
+}
+
 function addToHistory(cardName, card = currentSourceCard) {
     const normalizedName = String(cardName || '').trim();
     if (!normalizedName) return;
@@ -24331,7 +24349,7 @@ function removeRecentSearchCard(cardName) {
     return true;
 }
 
-function setFavoriteState(cardName, shouldFavorite) {
+function setFavoriteState(cardName, shouldFavorite, cardRecord = null) {
     const normalizedName = String(cardName || '').trim();
     if (!normalizedName) return false;
 
@@ -24349,6 +24367,13 @@ function setFavoriteState(cardName, shouldFavorite) {
     } catch (err) {
         console.warn("Favorites could not be saved:", err.message);
         return false;
+    }
+
+    if (shouldFavorite) {
+        const cachedCard = cardRecord || sourceCardCache.get(normalizedName.toLowerCase());
+        if (cachedCard) storeFavoriteCardPreview(cachedCard);
+    } else {
+        removeFavoriteCardPreview(normalizedName);
     }
 
     renderSidebarLists();
@@ -24382,20 +24407,90 @@ function toggleFavoriteCard(card) {
     if (!card?.name) return;
     const favorites = getStoredArray(FAVORITES_KEY);
     const isFavorite = favorites.some(name => String(name).toLowerCase() === String(card.name).toLowerCase());
-    setFavoriteState(card.name, !isFavorite);
+    setFavoriteState(card.name, !isFavorite, card);
 }
 
 function toggleFavorite() {
     if (!currentSourceCard) return;
     const favorites = getStoredArray(FAVORITES_KEY);
     const isFavorite = favorites.some(name => String(name).toLowerCase() === String(currentSourceCard.name).toLowerCase());
-    setFavoriteState(currentSourceCard.name, !isFavorite);
+    setFavoriteState(currentSourceCard.name, !isFavorite, currentSourceCard);
+}
+
+let sidebarCardPreviewImage = null;
+let activeSidebarCardPreviewTarget = null;
+function installSidebarCardHoverPreview() {
+    if (window.__manaSidebarCardHoverPreviewInstalled || typeof document === 'undefined') return;
+    window.__manaSidebarCardHoverPreviewInstalled = true;
+    const image = document.createElement('img');
+    image.className = 'sidebar-card-hover-preview';
+    image.alt = '';
+    image.setAttribute('aria-hidden', 'true');
+    image.hidden = true;
+    document.body.appendChild(image);
+    sidebarCardPreviewImage = image;
+
+    const hide = () => {
+        activeSidebarCardPreviewTarget = null;
+        if (sidebarCardPreviewImage) sidebarCardPreviewImage.hidden = true;
+    };
+    const position = target => {
+        if (!sidebarCardPreviewImage || !target?.isConnected) return;
+        const bounds = target.getBoundingClientRect();
+        const margin = 8;
+        const width = Math.max(1, Math.min(240, window.innerWidth - margin * 2, (window.innerHeight - margin * 2) * 63 / 88));
+        const height = width * 88 / 63;
+        let left = bounds.right + 12;
+        if (left + width > window.innerWidth - margin) left = bounds.left - width - 12;
+        left = Math.max(margin, Math.min(left, window.innerWidth - width - margin));
+        const top = Math.max(margin, Math.min(bounds.top + bounds.height / 2 - height / 2, window.innerHeight - height - margin));
+        sidebarCardPreviewImage.style.width = `${width}px`;
+        sidebarCardPreviewImage.style.height = `${height}px`;
+        sidebarCardPreviewImage.style.left = `${left}px`;
+        sidebarCardPreviewImage.style.top = `${top}px`;
+    };
+    const show = target => {
+        const src = target?.dataset?.cardPreviewSrc;
+        if (!src || !sidebarCardPreviewImage) { hide(); return; }
+        activeSidebarCardPreviewTarget = target;
+        if (sidebarCardPreviewImage.getAttribute('src') !== src) sidebarCardPreviewImage.src = src;
+        position(target);
+        sidebarCardPreviewImage.hidden = false;
+    };
+
+    document.addEventListener('pointerover', event => {
+        if (event.pointerType === 'touch') return;
+        const target = event.target?.closest?.('.history-card-open[data-card-preview-src]');
+        if (target && !target.contains(event.relatedTarget)) show(target);
+    });
+    document.addEventListener('pointerout', event => {
+        const target = event.target?.closest?.('.history-card-open[data-card-preview-src]');
+        if (target === activeSidebarCardPreviewTarget && !(event.relatedTarget && target.contains(event.relatedTarget))) hide();
+    });
+    document.addEventListener('focusin', event => {
+        const target = event.target?.closest?.('.history-card-open[data-card-preview-src]');
+        if (target) show(target);
+    });
+    document.addEventListener('focusout', event => {
+        const target = event.target?.closest?.('.history-card-open[data-card-preview-src]');
+        if (target === activeSidebarCardPreviewTarget && !(event.relatedTarget && target.contains(event.relatedTarget))) hide();
+    });
+    document.addEventListener('scroll', hide, true);
+    document.addEventListener('keydown', event => { if (event.key === 'Escape') hide(); });
+    window.addEventListener('resize', () => activeSidebarCardPreviewTarget && position(activeSidebarCardPreviewTarget));
+    image.addEventListener('error', hide);
 }
 
 function renderSidebarLists() {
+    installSidebarCardHoverPreview();
+    if (activeSidebarCardPreviewTarget && !activeSidebarCardPreviewTarget.isConnected) {
+        activeSidebarCardPreviewTarget = null;
+        if (sidebarCardPreviewImage) sidebarCardPreviewImage.hidden = true;
+    }
     const history = getStoredArray(HISTORY_KEY);
     const favorites = getStoredArray(FAVORITES_KEY);
     const previewByName = new Map(getHistoryCardPreviews().map(card => [String(card.name || '').toLowerCase(), card]));
+    const favoritePreviewByName = new Map(getStoredArray(FAVORITE_CARD_PREVIEWS_KEY).map(card => [String(card?.name || '').toLowerCase(), card]));
 
     if (historyList) {
         historyList.replaceChildren();
@@ -24411,6 +24506,8 @@ function renderSidebarLists() {
             open.className = 'history-card-open';
             open.textContent = name;
             open.title = `Load ${name} as the source card`;
+            const imageUrl = getCardImageUrl(preview);
+            if (imageUrl) open.dataset.cardPreviewSrc = imageUrl;
             open.addEventListener('click', () => loadSourceCard(name, preview));
             const imageUrl = getCardImageUrl(preview);
             if (imageUrl) {
@@ -24446,7 +24543,7 @@ function renderSidebarLists() {
             const li = document.createElement('li');
             li.className = 'favorite-entry';
             const preview = mergeCardRecords(
-                previewByName.get(String(name).toLowerCase()) || null,
+                favoritePreviewByName.get(String(name).toLowerCase()) || previewByName.get(String(name).toLowerCase()) || null,
                 sourceCardCache.get(String(name).toLowerCase()) || null
             );
             const open = document.createElement('button');
@@ -24454,6 +24551,8 @@ function renderSidebarLists() {
             open.className = 'history-card-open';
             open.textContent = name;
             open.title = `Load ${name} as the source card`;
+            const imageUrl = getCardImageUrl(preview);
+            if (imageUrl) open.dataset.cardPreviewSrc = imageUrl;
             open.addEventListener('click', () => loadSourceCard(name, preview));
             li.appendChild(open);
             const imageUrl = getCardImageUrl(preview);
