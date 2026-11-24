@@ -5,7 +5,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>ManaSearch</title>
-    <link rel="stylesheet" href="style.css?v=20261123-1900">
+    <link rel="stylesheet" href="style.css?v=20261124-1806">
     <link rel="stylesheet" href="search-inspector.css?v=20261119-140">
 </head>
 <body>
@@ -383,7 +383,7 @@
                 <button type="button" id="find-similar-btn" class="primary-search-btn" disabled data-feature-tip="Search for cards with similar mechanics, function, and context." data-feature-preview="Source card + highlights + constraints → ranked matches">Find Similar Cards</button>
                 <div id="static-search-status" class="static-search-status" role="status" aria-live="polite">
                     <span id="static-search-status-spinner" class="static-search-status-spinner" aria-hidden="true"></span>
-                    <span id="static-search-status-text" class="static-search-status-text">Loading the local card catalog… Find Similar Cards will unlock as soon as cards.bin is ready. Semantic search is prepared in the background.</span>
+                    <span id="static-search-status-text" class="static-search-status-text">ManaSearch is warming up. The local card catalog is loading, and the semantic search engine is preparing in the background. Find Similar Cards will unlock when card data is ready.</span>
                     <button type="button" id="static-search-retry-btn" class="static-search-retry-btn hidden">Retry</button>
                 </div>
             </section>
@@ -438,7 +438,7 @@
             </div>
             <div class="modal-body">
                 <p class="modal-intro contextual-help-intro">On a phone, tap an option card outside its checkbox to learn what it does. Tap the checkbox to turn it on. On desktop, hover an underlined name.</p>
-                <div class="methods-list">
+                <div class="methods-list" id="search-method-options">
                     <label class="method-card">
                         <input type="checkbox" id="broad-search">
                         <div class="method-text">
@@ -503,24 +503,30 @@
                             <small>Best for: tribal cards, build-arounds, combo pieces, and cards that support the source rather than copy it.</small>
                         </div>
                     </label>
-                    <div class="method-setting-row search-depth-control">
-                        <div class="search-depth-label">
-                            <label for="filter-depth-percent"><strong>Search Depth</strong></label>
-                            <span class="search-depth-summary">How much of the available card pool is explored before results are finalized.</span>
+                    <details class="method-advanced-settings">
+                        <summary><strong>Search Depth</strong><span id="search-depth-summary">Advanced · full search pool</span></summary>
+                        <div class="method-advanced-settings-body">
+                            <div class="method-setting-row search-depth-control">
+                                <div class="search-depth-label">
+                                    <label for="filter-depth-percent"><strong>Search Depth</strong></label>
+                                    <span class="search-depth-summary">How much of the available card pool is explored before results are finalized.</span>
+                                </div>
+                                <div class="search-depth-input-wrap">
+                                    <input type="number" id="filter-depth-percent" placeholder="100" min="1" max="100" step="1" value="100" inputmode="numeric" aria-describedby="search-depth-help">
+                                    <span class="percent-suffix" aria-hidden="true">%</span>
+                                </div>
+                            </div>
+                            <div id="search-depth-help" class="search-depth-scale" aria-label="Search depth guidance">
+                                <div><strong>1%</strong><span>Fastest results</span></div>
+                                <div><strong>25%</strong><span>Fast, partial coverage</span></div>
+                                <div><strong>50%</strong><span>Balanced speed and coverage</span></div>
+                                <div><strong>75%</strong><span>Thorough results</span></div>
+                                <div><strong>100%</strong><span>Complete available retrieval</span></div>
+                            </div>
                         </div>
-                        <div class="search-depth-input-wrap">
-                            <input type="number" id="filter-depth-percent" placeholder="100" min="1" max="100" step="1" value="100" inputmode="numeric" aria-describedby="search-depth-help">
-                            <span class="percent-suffix" aria-hidden="true">%</span>
-                        </div>
-                    </div>
-                    <div id="search-depth-help" class="search-depth-scale" aria-label="Search depth guidance">
-                        <div><strong>1%</strong><span>Fastest results</span></div>
-                        <div><strong>25%</strong><span>Fast, partial coverage</span></div>
-                        <div><strong>50%</strong><span>Balanced speed and coverage</span></div>
-                        <div><strong>75%</strong><span>Thorough results</span></div>
-                        <div><strong>100%</strong><span>Complete available retrieval</span></div>
-                    </div>
+                    </details>
                 </div>
+                <button type="button" id="toggle-extra-methods-btn" class="option-list-toggle" aria-expanded="false" aria-controls="search-method-options">Show all search methods</button>
             </div>
             <div class="modal-footer">
                 <button type="button" id="save-methods-btn">Done</button>
@@ -543,7 +549,7 @@
                         <h4 id="order-ranking-heading">Ranking</h4>
                         <span>Pick one primary ranking.</span>
                     </div>
-                    <div class="methods-list order-list">
+                    <div class="methods-list order-list" id="order-ranking-options">
                         <label class="method-card order-card">
                             <input type="radio" name="order-choice" value="overall" checked>
                             <div class="method-text">
@@ -641,13 +647,15 @@
                             </div>
                         </label>
                     </div>
+                    <button type="button" id="toggle-extra-order-btn" class="option-list-toggle" aria-expanded="false" aria-controls="order-ranking-options">Show all ranking options</button>
                 </section>
 
                 <section class="order-panel-section" aria-labelledby="order-features-heading">
-                    <div class="order-panel-section-heading">
-                        <h4 id="order-features-heading">Ordering Features</h4>
-                        <span>These can be combined with any ranking above.</span>
-                    </div>
+                    <details class="order-advanced-features">
+                    <summary class="order-panel-section-heading">
+                        <h4 id="order-features-heading">Advanced ranking features</h4>
+                        <span id="order-features-summary">Optional ways to reshape the result list.</span>
+                    </summary>
                     <div class="methods-list order-feature-list">
                         <label class="method-card order-feature-card">
                             <input type="checkbox" id="order-feature-matrix">
@@ -666,6 +674,7 @@
                             </div>
                         </label>
                     </div>
+                    </details>
                 </section>
             </div>
             <div class="modal-footer">
@@ -741,21 +750,8 @@
                         </div>
                         <input type="hidden" id="filter-subtype" value="">
                     </div>
-                    <div class="filter-group filter-group-wide">
-                        <label>Keywords <span class="filter-help">Add one or more keyword abilities</span></label>
-                        <div class="constraint-editor" data-source="filter-keyword">
-                            <div id="filter-keyword-chips" class="constraint-chips"></div>
-                            <div class="constraint-input-row">
-                                <input type="text" id="filter-keyword-entry" placeholder="e.g. flash" autocomplete="off" aria-label="Add keyword">
-                                <button type="button" class="constraint-add-btn" data-target="filter-keyword">Add</button>
-                            </div>
-                        </div>
-                        <input type="hidden" id="filter-keyword" value="">
-                    </div>
-                    <div class="filter-group filter-group-wide">
-                        <label for="filter-extra-oracle">Oracle text contains</label>
-                        <input type="text" id="filter-extra-oracle" placeholder="e.g. create a Treasure token" autocomplete="off">
-                    </div>
+                    <input type="hidden" id="filter-keyword" value="">
+                    <input type="hidden" id="filter-extra-oracle" value="">
                     <div class="filter-group">
                         <label for="filter-format">Format Legality</label>
                         <select id="filter-format">
@@ -1155,9 +1151,9 @@
             dialog.addEventListener('click', event => { if (event.target === dialog && dialog.open) dialog.close(); });
         })();
     </script>
-    <script src="pako.min.js?v=20261123-1900"></script>
+    <script src="pako.min.js?v=20261124-1806"></script>
     <script src="search-inspector.js?v=20261119-167"></script>
-    <script type="module" src="app.js?v=20261123-1900"></script>
+    <script type="module" src="app.js?v=20261124-1806"></script>
     <style id="minigames-inline-styles">
 /* v119 — self-contained Guess the Source minigame UI and aligned header launcher. */
 .minigames-launch-btn {

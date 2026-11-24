@@ -1940,6 +1940,86 @@ section {
     cursor: pointer;
 }
 
+.option-list-toggle {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 38px;
+    margin-top: 10px;
+    padding: 8px 12px;
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    color: var(--accent-color);
+    background: var(--bg-primary);
+    font: inherit;
+    font-size: 12px;
+    font-weight: 700;
+    cursor: pointer;
+}
+.option-list-toggle:hover { border-color: var(--accent-color); }
+.option-list-toggle[hidden], .method-card[hidden] { display: none !important; }
+.method-advanced-settings {
+    margin-top: 2px;
+    padding-top: 10px;
+    border-top: 1px solid var(--border-color);
+}
+.method-advanced-settings > summary,
+.order-advanced-features > summary {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 7px 2px;
+    color: var(--text-main);
+    cursor: pointer;
+    list-style: none;
+}
+.method-advanced-settings > summary::-webkit-details-marker,
+.order-advanced-features > summary::-webkit-details-marker { display: none; }
+.method-advanced-settings > summary::after,
+.order-advanced-features > summary::after {
+    content: '+';
+    flex: 0 0 auto;
+    width: 24px;
+    height: 24px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border: 1px solid var(--border-color);
+    border-radius: 50%;
+    color: var(--accent-color);
+    font-weight: 800;
+}
+.method-advanced-settings[open] > summary::after,
+.order-advanced-features[open] > summary::after { content: '−'; }
+.method-advanced-settings > summary strong,
+.order-advanced-features > summary h4 { margin: 0; font-size: 12px; }
+.method-advanced-settings > summary span,
+.order-advanced-features > summary span { color: var(--text-muted); font-size: 11px; text-align: right; }
+.method-advanced-settings-body { display: grid; gap: 10px; margin-top: 8px; }
+.order-advanced-features { padding-top: 4px; }
+.order-advanced-features > summary { border-top: 1px solid var(--border-color); padding-top: 13px; }
+.order-advanced-features[open] .order-feature-list { margin-top: 8px; }
+.method-card.has-option-badge { position: relative; padding-right: 126px; }
+.option-recommendation-badge {
+    position: absolute;
+    top: 9px;
+    right: 10px;
+    display: inline-flex !important;
+    align-items: center;
+    width: auto !important;
+    max-width: 116px;
+    padding: 3px 7px;
+    border: 1px solid color-mix(in srgb, var(--accent-color) 50%, var(--border-color));
+    border-radius: 999px;
+    color: var(--accent-color) !important;
+    background: var(--bg-primary);
+    font-size: 10px !important;
+    font-weight: 750;
+    line-height: 1.2;
+    white-space: nowrap;
+}
+
 .method-card input[type="checkbox"] {
     margin-top: 4px;
     width: 18px;
@@ -7353,6 +7433,13 @@ body.light-theme .card-actions .edhrec-link-btn:hover {
     gap: 4px 14px;
     min-width: 0;
 }
+#source-card-loaded .source-card-rarity-row {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    align-items: start;
+    gap: 4px 12px;
+}
+#source-card-loaded .source-card-rarity-row > .source-meta-field { min-width: 0; }
 #source-card-loaded .source-card-meta-static,
 #source-card-loaded .source-card-meta-line {
     display: inline-flex;

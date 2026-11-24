@@ -1,6 +1,6 @@
-/* ManaSearch build 20261123-1900 */
+/* ManaSearch build 20261124-1806 */
 // ManaSearch deployment build marker. Bump this whenever app.js changes so cached-module issues are easy to diagnose.
-const MANASEARCH_APP_BUILD = '20261123-1900';
+const MANASEARCH_APP_BUILD = '20261124-1806';
 console.info(`[ManaSearch] app.js build ${MANASEARCH_APP_BUILD}`);
 
 // The source-query and static-index builders share one representation so both sides
@@ -18079,7 +18079,7 @@ function updateStaticSearchStatus(message = null) {
     staticSearchStatus.classList.remove('is-loading', 'is-ready', 'is-error');
 
     if (!staticSearchResourcesReady() && loading) {
-        staticSearchStatusText.textContent = message || 'Loading the local card catalog… Find Similar Cards will unlock as soon as cards.bin is ready. Semantic search is prepared in the background.';
+        staticSearchStatusText.textContent = message || 'ManaSearch is warming up. The local card catalog is loading, and the semantic search engine is preparing in the background. Find Similar Cards will unlock when card data is ready.';
         staticSearchStatus.classList.add('is-loading');
         if (staticSearchStatusSpinner) staticSearchStatusSpinner.classList.remove('hidden');
         if (staticSearchRetryBtn) staticSearchRetryBtn.classList.add('hidden');
@@ -18100,7 +18100,7 @@ function updateStaticSearchStatus(message = null) {
         if (staticSearchStatusSpinner) staticSearchStatusSpinner.classList.add('hidden');
         if (staticSearchRetryBtn) staticSearchRetryBtn.classList.add('hidden');
     } else if (staticSearchResourcesReady()) {
-        staticSearchStatusText.textContent = message || 'Card data is ready — you can search now. The semantic index is still loading in the background.';
+        staticSearchStatusText.textContent = message || 'Card data is ready — you can search now. ManaSearch is still warming up its semantic search engine in the background.';
         staticSearchStatus.classList.add('is-ready');
         if (staticSearchStatusSpinner) staticSearchStatusSpinner.classList.add('hidden');
         if (staticSearchRetryBtn) staticSearchRetryBtn.classList.add('hidden');
@@ -21753,6 +21753,14 @@ function initApp() {
         depthControl.addEventListener('keydown', event => {
             if (event.key === 'Enter') commitSearchDepthValue();
         });
+        const searchDepthSummary = document.getElementById('search-depth-summary');
+        const updateSearchDepthSummary = () => {
+            const value = Math.max(1, Math.min(MAX_SEARCH_DEPTH_PERCENT, Math.round(parseFloat(depthControl.value) || DEFAULT_SEARCH_DEPTH_PERCENT)));
+            if (searchDepthSummary) searchDepthSummary.textContent = value === 100 ? 'Advanced · full search pool' : `Advanced · ${value}% of pool`;
+        };
+        depthControl.addEventListener('change', updateSearchDepthSummary);
+        depthControl.addEventListener('blur', updateSearchDepthSummary);
+        updateSearchDepthSummary();
     }
 
     relatedCardsBar = document.getElementById('related-cards-bar');
@@ -21770,6 +21778,101 @@ function initApp() {
     const closeMethodsBtn = document.getElementById('close-methods-modal');
     const saveMethodsBtn = document.getElementById('save-methods-btn');
     const methodsBadge = document.getElementById('selected-methods-badge');
+    const methodOptions = [
+        ['broad-search', 'broad'], ['divergent-search', 'divergent'], ['wording-search', 'wording'],
+        ['functional-search', 'functional'], ['target-search', 'target'], ['role-search', 'role'],
+        ['alternate-search', 'alternate'], ['synergy-search', 'synergy']
+    ];
+    const optionUsageKey = 'manaSearchOptionUsage:v1';
+    const readOptionUsage = () => {
+        try {
+            const saved = JSON.parse(localStorage.getItem(optionUsageKey) || '{}');
+            return saved && typeof saved === 'object' ? saved : {};
+        } catch (_) { return {}; }
+    };
+    const countOptionUse = (group, option) => {
+        const usage = readOptionUsage();
+        const key = `${group}:${option}`;
+        usage[key] = (Number(usage[key]) || 0) + 1;
+        try { localStorage.setItem(optionUsageKey, JSON.stringify(usage)); } catch (_) {}
+    };
+    const getSearchRecommendations = () => {
+        const live = window.ManaSearchDebug?.getLiveIntent?.();
+        const source = live?.sourceCard || currentSourceCard;
+        const highlights = live?.highlights || manualHighlights || [];
+        if (!source) return ['functional', 'wording'];
+        const hasFocus = highlights.some(item => String(item?.text || '').trim());
+        const oracle = String(source.oracle_text || source.card_faces?.map(face => face.oracle_text || '').join(' ') || '');
+        if (hasFocus) return ['wording', 'functional'];
+        if (/\b(whenever|at the beginning of|at the end of|each time|whenever you|whenever a)\b/i.test(oracle)) return ['synergy', 'functional'];
+        if (/\b(creature|planeswalker|artifact|enchantment|land)\b/i.test(source.type_line || '')) return ['role', 'functional'];
+        return ['functional', 'wording'];
+    };
+    const getRankingRecommendations = () => {
+        const live = window.ManaSearchDebug?.getLiveIntent?.();
+        const highlights = live?.highlights || manualHighlights || [];
+        const hasExactFocus = highlights.some(item => String(item?.text || '').trim() && item?.mode !== 'variable');
+        const source = live?.sourceCard || currentSourceCard;
+        const context = live?.intent?.targetText || source?.oracle_text || '';
+        const second = hasExactFocus ? 'exactness'
+            : /\b(whenever|at the beginning of|draw|search your library|destroy|counter target)\b/i.test(context) ? 'mechanical' : 'functional';
+        return ['overall', second];
+    };
+    const rankByUsage = (items, group) => {
+        const usage = readOptionUsage();
+        return [...items].sort((a, b) => (Number(usage[`${group}:${b}`]) || 0) - (Number(usage[`${group}:${a}`]) || 0));
+    };
+    let methodsExpanded = false;
+    let rankingsExpanded = false;
+    const setOptionBadge = (card, text) => {
+        const details = card?.querySelector('.method-text');
+        if (!details) return;
+        let badge = details.querySelector('.option-recommendation-badge');
+        if (!text) { badge?.remove(); card.classList.remove('has-option-badge'); return; }
+        if (!badge) { badge = document.createElement('span'); badge.className = 'option-recommendation-badge'; details.appendChild(badge); }
+        badge.textContent = text;
+        card.classList.add('has-option-badge');
+    };
+    const renderPriorityOptions = (list, cards, recommended, group, expanded, toggle, labels) => {
+        if (!list || !toggle || !cards.length) return;
+        const rec = recommended.filter(key => cards.some(card => card.dataset.optionKey === key)).slice(0, 2);
+        const available = cards.map(card => card.dataset.optionKey).filter(key => !rec.includes(key));
+        const used = rankByUsage(available, group).find(key => (Number(readOptionUsage()[`${group}:${key}`]) || 0) > 0);
+        const third = used || available[0];
+        const orderedKeys = [...rec, ...(third ? [third] : []), ...available.filter(key => key !== third)];
+        const byKey = new Map(cards.map(card => [card.dataset.optionKey, card]));
+        const trailingContent = Array.from(list.children).find(node => !node.matches('.method-card')) || null;
+        orderedKeys.forEach(key => list.insertBefore(byKey.get(key), trailingContent));
+        orderedKeys.forEach((key, index) => {
+            const card = byKey.get(key);
+            card.hidden = !expanded && index >= 3;
+            card.classList.toggle('is-priority-option', index < 3);
+            const badge = rec.includes(key) ? 'Recommended' : key === used ? 'Most used by you' : '';
+            setOptionBadge(card, badge);
+        });
+        toggle.hidden = cards.length <= 3;
+        toggle.setAttribute('aria-expanded', String(expanded));
+        toggle.textContent = expanded ? `Show fewer ${labels}` : `Show all ${labels}`;
+    };
+    const renderMethodOptions = () => {
+        const list = searchMethodsModal?.querySelector('.methods-list');
+        const cards = methodOptions.map(([id, key]) => {
+            const input = document.getElementById(id);
+            const card = input?.closest('.method-card');
+            if (card) card.dataset.optionKey = key;
+            return card;
+        }).filter(Boolean);
+        renderPriorityOptions(list, cards, getSearchRecommendations(), 'method', methodsExpanded, document.getElementById('toggle-extra-methods-btn'), 'search methods');
+    };
+    const renderRankingOptions = () => {
+        const list = orderModal?.querySelector('.order-list');
+        const cards = orderRadios.map(radio => {
+            const card = radio.closest('.method-card');
+            if (card) card.dataset.optionKey = radio.value;
+            return card;
+        }).filter(Boolean);
+        renderPriorityOptions(list, cards, getRankingRecommendations(), 'ranking', rankingsExpanded, document.getElementById('toggle-extra-order-btn'), 'ranking options');
+    };
 
     function updateMethodsBadge() {
         const selected = [];
@@ -21796,10 +21899,20 @@ function initApp() {
         }
     }
 
-    if (toggleMethodsBtn) toggleMethodsBtn.addEventListener('click', () => searchMethodsModal.classList.remove('hidden'));
+    if (toggleMethodsBtn) toggleMethodsBtn.addEventListener('click', () => {
+        renderMethodOptions();
+        searchMethodsModal.classList.remove('hidden');
+    });
+    document.getElementById('toggle-extra-methods-btn')?.addEventListener('click', event => {
+        methodsExpanded = !methodsExpanded;
+        renderMethodOptions();
+        event.currentTarget.setAttribute('aria-expanded', String(methodsExpanded));
+    });
     if (closeMethodsBtn) closeMethodsBtn.addEventListener('click', () => searchMethodsModal.classList.add('hidden'));
     if (saveMethodsBtn) saveMethodsBtn.addEventListener('click', () => {
+        methodOptions.forEach(([id, key]) => { if (document.getElementById(id)?.checked) countOptionUse('method', key); });
         updateMethodsBadge();
+        renderMethodOptions();
         searchMethodsModal.classList.add('hidden');
     });
 
@@ -21812,6 +21925,14 @@ function initApp() {
     const orderRadios = Array.from(document.querySelectorAll('input[name="order-choice"]'));
     const orderMatrixFeature = document.getElementById('order-feature-matrix');
     const orderDiverseFeature = document.getElementById('order-feature-diverse');
+    const orderFeaturesSummary = document.getElementById('order-features-summary');
+    const updateOrderFeaturesSummary = () => {
+        if (!orderFeaturesSummary) return;
+        const enabled = [];
+        if (activeOrderFeatureFlags.matrix) enabled.push('Matrix Sweep');
+        if (activeOrderFeatureFlags.diverse) enabled.push('Diverse Spread');
+        orderFeaturesSummary.textContent = enabled.length ? `${enabled.join(' · ')} active` : 'Optional ways to reshape the result list';
+    };
 
     const orderLabels = {
         overall: 'Overall Match',
@@ -21857,7 +21978,14 @@ function initApp() {
 
     if (toggleOrderBtn) toggleOrderBtn.addEventListener('click', () => {
         syncOrderModalSelection();
+        updateOrderFeaturesSummary();
+        renderRankingOptions();
         orderModal?.classList.remove('hidden');
+    });
+    document.getElementById('toggle-extra-order-btn')?.addEventListener('click', event => {
+        rankingsExpanded = !rankingsExpanded;
+        renderRankingOptions();
+        event.currentTarget.setAttribute('aria-expanded', String(rankingsExpanded));
     });
     if (closeOrderBtn) closeOrderBtn.addEventListener('click', () => {
         syncOrderModalSelection();
@@ -21865,6 +21993,7 @@ function initApp() {
     });
     if (saveOrderBtn) saveOrderBtn.addEventListener('click', () => {
         const selected = orderRadios.find(radio => radio.checked)?.value || 'overall';
+        countOptionUse('ranking', selected);
         activeOrderFeatureFlags.matrix = Boolean(orderMatrixFeature?.checked);
         activeOrderFeatureFlags.diverse = Boolean(orderDiverseFeature?.checked);
         if (['price', 'manaValue', 'manaValueDesc'].includes(selected)) {
@@ -21881,12 +22010,29 @@ function initApp() {
             void reorderResults();
         }
         updateOrderBadge();
+        updateOrderFeaturesSummary();
+        renderRankingOptions();
         orderModal?.classList.add('hidden');
     });
     orderRadios.forEach(radio => radio.addEventListener('change', () => {
         // The actual ranking/features are committed with Done, matching the Search Methods panel.
     }));
     updateOrderBadge();
+    updateOrderFeaturesSummary();
+    renderMethodOptions();
+    renderRankingOptions();
+    const priceField = document.getElementById('edit-source-price-btn')?.closest('.source-meta-field');
+    const rarityRow = document.querySelector('.source-card-rarity-row');
+    if (priceField && rarityRow && !rarityRow.contains(priceField)) {
+        const oldRow = priceField.closest('.source-card-meta-row');
+        rarityRow.appendChild(priceField);
+        if (oldRow && !oldRow.querySelector('.source-meta-field')) oldRow.remove();
+    }
+    window.addEventListener('manasearch:source-selected', renderMethodOptions);
+    window.addEventListener('manasearch:source-highlights-changed', () => {
+        renderMethodOptions();
+        renderRankingOptions();
+    });
 
     ['broad-search', 'divergent-search', 'wording-search', 'functional-search', 'target-search', 'role-search', 'alternate-search', 'synergy-search'].forEach(id => {
         const el = document.getElementById(id);
@@ -23529,9 +23675,9 @@ function installManaSearchOnboarding() {
     const steps = [
         {
             title: 'Welcome to ManaSearch',
-            text: 'Let’s complete a real search together. You will choose a card, focus on one useful part of its Oracle text, and run a search so you finish the tour with results.',
+            text: 'Let’s find cards related to one you like. Choose a source card, optionally highlight an ability, and run a search.',
             example: 'welcome', target: null,
-            hint: 'This tour is interactive. It pauses when you need to use the real card picker or highlight text.'
+            hint: 'This tour is optional. You can search with the whole card or focus on a phrase.'
         },
         {
             title: '1. Choose a card to explore',
@@ -23540,16 +23686,16 @@ function installManaSearchOnboarding() {
             hint: 'Phyrexian Arena is a good first search for recurring draw; Sol Ring is good for fast mana.'
         },
         {
-            title: '2. Highlight a short Exact anchor',
-            text: 'Select a meaningful fragment of the card’s Oracle text—not the whole sentence. Keep a distinctive trigger or condition Exact, such as “At the beginning of your upkeep”.',
+            title: '2. Highlight a phrase (optional)',
+            text: 'Select a phrase in the type line or Oracle text to focus the search. With no highlight, ManaSearch uses the whole card.',
             example: 'highlight-exact', target: '#source-card-loaded .oracle-container', fallback: '#source-card-section',
             hint: 'Press “Select exact phrase” to temporarily reveal the card text. On a phone, long-press and adjust the selection handles.'
         },
         {
-            title: '3. Add a Flexible fragment too',
-            text: 'Select a second, separate phrase from the same effect—for example “draw a card”. Keep the trigger/anchor Exact, then change the second highlight from “= Exact” to “≈ Flexible”. This keeps the search focused while allowing equivalent wording.',
+            title: '3. Add another highlight (optional)',
+            text: 'You can add another separate phrase and make it Flexible to allow equivalent wording. You can also continue with one highlight or none.',
             example: 'highlight-mixed', target: '#highlight-chips-list', fallback: '#source-card-loaded .oracle-container',
-            hint: 'Avoid making the entire sentence Flexible: that loses the narrow anchor. Use a short Exact anchor plus a short Flexible effect phrase.'
+            hint: 'You can change a highlight mode from its chip, or continue with your current choices.'
         },
         {
             title: '4. Choose search Methods',
@@ -23608,7 +23754,7 @@ function installManaSearchOnboarding() {
         waitingForHighlight = '';
         waitingForMixedMode = false;
         currentStep = 4;
-        tourMessage = 'No problem. You can search without highlights, but a short Exact anchor plus a Flexible effect phrase often narrows results better.';
+        tourMessage = 'No problem. ManaSearch will use the whole source card for this search.';
         renderStep?.();
     };
     const getVisibleTarget = step => {
@@ -23624,7 +23770,7 @@ function installManaSearchOnboarding() {
         return isVisible(target) ? target : null;
     };
     const demoMarkup = {
-        welcome: '<div class="mana-tour-demo-flow"><span>Choose a card</span><b>→</b><span>Mix Exact + Flexible</span><b>→</b><span>Search results</span></div>',
+        welcome: '<div class="mana-tour-demo-flow"><span>Choose a card</span><b>→</b><span>Optional highlight</span><b>→</b><span>Search results</span></div>',
         source: '<div class="mana-tour-demo-caption">Choose a starter idea, then select the card from the normal picker.</div>',
         'highlight-exact': '<div class="mana-tour-demo-rules">At the beginning of your upkeep, <mark>draw a card</mark> and lose 1 life.</div><small class="mana-tour-demo-caption">Example: keep “At the beginning of your upkeep” Exact as the anchor.</small>',
         'highlight-mixed': '<div class="mana-tour-demo-rules"><mark class="tour-mark-exact">At the beginning of your upkeep</mark>, <mark class="tour-mark-flexible">draw a card</mark> and lose 1 life.</div><small class="mana-tour-demo-caption">Exact anchor + Flexible effect phrase. Select separate fragments, not the whole sentence as Flexible.</small>',
@@ -23707,7 +23853,7 @@ function installManaSearchOnboarding() {
         if (hint) hint.classList.add('hidden');
         currentStep = 0;
         waitingForSource = waitingForSearch = waitingForMixedMode = false;
-        tourSourceChosen = false;
+        tourSourceChosen = Boolean(currentSourceCard);
         window.__manaSearchTourSelectingSource = false;
         waitingForHighlight = '';
         secondHighlightAdded = false;
@@ -23901,12 +24047,18 @@ function installManaSearchOnboarding() {
                 renderStep(); return;
             }
             if (currentStep === 2) {
-                if (!hasExactAnchor()) { tourMessage = 'First select a short phrase in Oracle Text and keep it Exact. Don’t select the whole sentence.'; renderStep(); return; }
+                if (!hasExactAnchor()) {
+                    waitingForHighlight = '';
+                    currentStep = 4;
+                    tourMessage = 'No highlight selected. ManaSearch will use the whole source card.';
+                    renderStep(); return;
+                }
                 currentStep = 3; tourMessage = ''; renderStep(); return;
             }
             if (currentStep === 3) {
-                if (!hasMixedHighlightModes()) { tourMessage = 'For a tighter search, keep one short phrase Exact and make a second, non-overlapping phrase Flexible. You can also continue with Exact only.'; renderStep(); return; }
-                currentStep = 4; tourMessage = ''; renderStep(); return;
+                currentStep = 4;
+                tourMessage = hasMixedHighlightModes() ? '' : 'You can search with the highlights as they are.';
+                renderStep(); return;
             }
             if (currentStep === 6) { currentStep = 7; tourMessage = ''; renderStep(); return; }
             if (currentStep === 7) { void startTourSearch(); return; }
