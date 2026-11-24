@@ -24509,17 +24509,6 @@ function renderSidebarLists() {
             const imageUrl = getCardImageUrl(preview);
             if (imageUrl) open.dataset.cardPreviewSrc = imageUrl;
             open.addEventListener('click', () => loadSourceCard(name, preview));
-            const imageUrl = getCardImageUrl(preview);
-            if (imageUrl) {
-                const image = document.createElement('img');
-                image.className = 'sidebar-card-hover-preview';
-                image.src = imageUrl;
-                image.alt = `${name} card image`;
-                image.loading = 'lazy';
-                image.decoding = 'async';
-                image.setAttribute('aria-hidden', 'true');
-                li.appendChild(image);
-            }
 
             const remove = document.createElement('button');
             remove.type = 'button';
@@ -24555,17 +24544,6 @@ function renderSidebarLists() {
             if (imageUrl) open.dataset.cardPreviewSrc = imageUrl;
             open.addEventListener('click', () => loadSourceCard(name, preview));
             li.appendChild(open);
-            const imageUrl = getCardImageUrl(preview);
-            if (imageUrl) {
-                const image = document.createElement('img');
-                image.className = 'sidebar-card-hover-preview';
-                image.src = imageUrl;
-                image.alt = `${name} card image`;
-                image.loading = 'lazy';
-                image.decoding = 'async';
-                image.setAttribute('aria-hidden', 'true');
-                li.appendChild(image);
-            }
             favoritesList.appendChild(li);
         });
     }
