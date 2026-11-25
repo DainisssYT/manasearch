@@ -24465,6 +24465,7 @@ function installSidebarCardHoverPreview() {
     });
     document.addEventListener('pointerout', event => {
         const target = event.target?.closest?.('.history-card-open[data-card-preview-src]');
+        if (!target) return;
         if (target === activeSidebarCardPreviewTarget && !(event.relatedTarget && target.contains(event.relatedTarget))) hide();
     });
     document.addEventListener('focusin', event => {
@@ -24473,6 +24474,7 @@ function installSidebarCardHoverPreview() {
     });
     document.addEventListener('focusout', event => {
         const target = event.target?.closest?.('.history-card-open[data-card-preview-src]');
+        if (!target) return;
         if (target === activeSidebarCardPreviewTarget && !(event.relatedTarget && target.contains(event.relatedTarget))) hide();
     });
     document.addEventListener('scroll', hide, true);
