@@ -5950,31 +5950,6 @@ button:focus-visible { outline: 2px solid var(--accent-color); outline-offset: 2
     padding: 3px 4px;
     min-width: 0;
 }
-.sidebar-card-hover-preview {
-    position: absolute;
-    z-index: 10030;
-    left: calc(100% + 8px);
-    top: 50%;
-    width: clamp(120px, 14vw, 190px);
-    max-height: min(62vh, 360px);
-    aspect-ratio: 63 / 88;
-    object-fit: contain;
-    transform: translateY(-50%) scale(.97);
-    opacity: 0;
-    pointer-events: none;
-    border: 1px solid var(--border-color);
-    border-radius: 9px;
-    background: var(--bg-primary);
-    box-shadow: 0 12px 36px rgba(0,0,0,.55);
-    transition: opacity .18s ease, transform .18s ease;
-}
-#history-list .history-entry:hover .sidebar-card-hover-preview,
-#history-list .history-entry:focus-within .sidebar-card-hover-preview,
-#favorites-list .favorite-entry:hover .sidebar-card-hover-preview,
-#favorites-list .favorite-entry:focus-within .sidebar-card-hover-preview {
-    opacity: 1;
-    transform: translateY(-50%) scale(1);
-}
 .history-card-open {
     display: block;
     flex: 1 1 auto;

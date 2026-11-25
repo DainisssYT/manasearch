@@ -24450,8 +24450,29 @@ function installSidebarCardHoverPreview() {
         sidebarCardPreviewImage.style.top = `${top}px`;
     };
     const show = target => {
-        const src = target?.dataset?.cardPreviewSrc;
-        if (!src || !sidebarCardPreviewImage) { hide(); return; }
+        if (!target || !sidebarCardPreviewImage) { hide(); return; }
+        activeSidebarCardPreviewTarget = target;
+        const cardName = target.dataset.cardPreviewName || target.textContent.trim();
+        const cachedCard = sourceCardCache.get(String(cardName).toLowerCase()) || getStaticCardByName(cardName);
+        const src = target.dataset.cardPreviewSrc || getCardImageUrl(cachedCard);
+        if (!src) {
+            if (!target.dataset.cardPreviewLoading) {
+                target.dataset.cardPreviewLoading = 'true';
+                void loadStaticCardCorpus().then(corpus => {
+                    delete target.dataset.cardPreviewLoading;
+                    if (!target.isConnected || !corpus) return;
+                    const card = corpus.byName?.get(normalizeCardNameForIdentity(cardName)) || null;
+                    const recoveredUrl = getCardImageUrl(card);
+                    if (!recoveredUrl) return;
+                    if (target.closest('#favorites-list')) storeFavoriteCardPreview(card);
+                    target.dataset.cardPreviewSrc = recoveredUrl;
+                    if (target === activeSidebarCardPreviewTarget) show(target);
+                }).catch(() => { delete target.dataset.cardPreviewLoading; });
+            }
+            sidebarCardPreviewImage.hidden = true;
+            return;
+        }
+        target.dataset.cardPreviewSrc = src;
         activeSidebarCardPreviewTarget = target;
         if (sidebarCardPreviewImage.getAttribute('src') !== src) sidebarCardPreviewImage.src = src;
         position(target);
@@ -24460,19 +24481,21 @@ function installSidebarCardHoverPreview() {
 
     document.addEventListener('pointerover', event => {
         if (event.pointerType === 'touch') return;
-        const target = event.target?.closest?.('.history-card-open[data-card-preview-src]');
+        const target = event.target?.closest?.('.history-card-open[data-card-preview-name]');
         if (target && !target.contains(event.relatedTarget)) show(target);
     });
     document.addEventListener('pointerout', event => {
-        const target = event.target?.closest?.('.history-card-open[data-card-preview-src]');
+        const target = event.target?.closest?.('.history-card-open[data-card-preview-name]');
+        if (!target) return;
         if (target === activeSidebarCardPreviewTarget && !(event.relatedTarget && target.contains(event.relatedTarget))) hide();
     });
     document.addEventListener('focusin', event => {
-        const target = event.target?.closest?.('.history-card-open[data-card-preview-src]');
+        const target = event.target?.closest?.('.history-card-open[data-card-preview-name]');
         if (target) show(target);
     });
     document.addEventListener('focusout', event => {
-        const target = event.target?.closest?.('.history-card-open[data-card-preview-src]');
+        const target = event.target?.closest?.('.history-card-open[data-card-preview-name]');
+        if (!target) return;
         if (target === activeSidebarCardPreviewTarget && !(event.relatedTarget && target.contains(event.relatedTarget))) hide();
     });
     document.addEventListener('scroll', hide, true);
@@ -24506,6 +24529,7 @@ function renderSidebarLists() {
             open.className = 'history-card-open';
             open.textContent = name;
             open.title = `Load ${name} as the source card`;
+            open.dataset.cardPreviewName = name;
             const imageUrl = getCardImageUrl(preview);
             if (imageUrl) open.dataset.cardPreviewSrc = imageUrl;
             open.addEventListener('click', () => loadSourceCard(name, preview));
@@ -24540,6 +24564,7 @@ function renderSidebarLists() {
             open.className = 'history-card-open';
             open.textContent = name;
             open.title = `Load ${name} as the source card`;
+            open.dataset.cardPreviewName = name;
             const imageUrl = getCardImageUrl(preview);
             if (imageUrl) open.dataset.cardPreviewSrc = imageUrl;
             open.addEventListener('click', () => loadSourceCard(name, preview));
